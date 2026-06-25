@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+
+# web frontend
+node_modules/
+dist/
+web/scene.json
+web/scene.json.tmp
+
+.DS_Store

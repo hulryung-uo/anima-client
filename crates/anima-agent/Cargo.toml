@@ -1,0 +1,14 @@
+[package]
+name = "anima-agent"
+version = "0.0.0"
+edition = "2021"
+description = "Autonomous AI brains for anima — they consume Observation and emit Action over the anima-core contract."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anima-core = { path = "../anima-core" }
+anima-net = { path = "../anima-net" }
+
+[[bin]]
+name = "anima-agent"
+path = "src/main.rs"

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>anima-client — Phase 2 renderer</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; background: #0b0d10; color: #d6dae0;
+        font: 13px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+        display: flex; gap: 16px; padding: 16px; align-items: flex-start;
+      }
+      #map { border: 1px solid #222; border-radius: 6px; overflow: hidden; }
+      #hud { width: 300px; }
+      h1 { font-size: 14px; margin: 0 0 10px; color: #8ab4f8; letter-spacing: .04em; }
+      .row { display: flex; justify-content: space-between; margin: 2px 0; }
+      .bar { height: 9px; border-radius: 4px; background: #1b1f24; margin: 3px 0 8px; overflow: hidden; }
+      .bar > span { display: block; height: 100%; }
+      .hp > span { background: #e5484d; } .mana > span { background: #4f8cf7; } .stam > span { background: #46a758; }
+      .k { color: #6b7280; }
+      #journal { margin-top: 12px; border-top: 1px solid #222; padding-top: 8px; }
+      #journal div { margin: 2px 0; color: #b6bcc6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      #status { margin-top: 10px; color: #6b7280; font-size: 11px; }
+      .legend { margin-top: 10px; font-size: 11px; color: #6b7280; }
+      .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin: 0 4px -1px 8px; }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <div id="hud">
+      <h1>ANIMA · BRITANNIA</h1>
+      <div class="row"><span id="pname">—</span><span class="k" id="ppos"></span></div>
+      <div class="k">HP</div><div class="bar hp"><span id="hp"></span></div>
+      <div class="k">Mana</div><div class="bar mana"><span id="mana"></span></div>
+      <div class="k">Stamina</div><div class="bar stam"><span id="stam"></span></div>
+      <div class="row"><span class="k">STR/DEX/INT</span><span id="stats">—</span></div>
+      <div class="row"><span class="k">Gold</span><span id="gold">—</span></div>
+      <div class="legend">
+        real UO terrain · blocked = reddened
+        <span class="sw" style="background:#fff;border-radius:50%"></span>you
+        <span class="sw" style="background:#e5484d;border-radius:50%"></span>mob
+        <span class="sw" style="background:#e2b340"></span>item
+      </div>
+      <div id="journal"></div>
+      <div id="status">connecting…</div>
+      <div id="diag" class="legend" style="margin-top:6px; color:#6b7280"></div>
+      <div class="legend" style="margin-top:10px">
+        <b>controls:</b> WASD/arrows move · Q/E/Z/C diagonals · T or Enter to talk
+      </div>
+    </div>
+    <script src="vendor/pixi.min.js"></script>
+    <script src="main.js"></script>
+  </body>
+</html>

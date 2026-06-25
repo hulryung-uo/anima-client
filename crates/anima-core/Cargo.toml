@@ -1,0 +1,15 @@
+[package]
+name = "anima-core"
+version = "0.0.0"
+edition = "2021"
+description = "Headless Ultima Online game core: protocol, world model, asset IO, pathfinding. No rendering/UI/audio. Shared by AI agents and the human client."
+license = "MIT OR Apache-2.0"
+
+[lib]
+# rlib: used by native consumers (Tauri desktop backend, AI agents).
+# cdylib added later for WASM (browser) and C-FFI as needed.
+crate-type = ["rlib"]
+
+[dependencies]
+# Intentionally zero external deps for now — std only — so the core stays
+# small, builds offline, and compiles cleanly to WASM later.

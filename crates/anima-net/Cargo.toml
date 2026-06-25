@@ -1,0 +1,20 @@
+[package]
+name = "anima-net"
+version = "0.0.0"
+edition = "2021"
+description = "Native TCP driver for anima-core's sans-IO protocol. Connects to a UO server and drives the login handshake."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anima-core = { path = "../anima-core" }
+anima-assets = { path = "../anima-assets" }
+serde_json = "1"
+tiny_http = "0.12"
+
+[[bin]]
+name = "anima-login"
+path = "src/main.rs"
+
+[[bin]]
+name = "anima-agent"
+path = "src/bin/agent.rs"

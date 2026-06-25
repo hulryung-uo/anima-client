@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/anima-core", "crates/anima-net", "crates/anima-assets", "crates/anima-wasm", "crates/anima-agent"]
+
+# Future members (added as they come online):
+#   crates/anima-desktop   — Tauri native shell (direct TCP, reads local UO data)
+#   crates/anima-agent     — headless AI driver(s) built on anima-core
+# The web frontend (TypeScript + PixiJS) lives outside the Cargo workspace,
+# under web/, and consumes anima-core compiled to WASM.
+
+[profile.release]
+opt-level = 3
+lto = "thin"

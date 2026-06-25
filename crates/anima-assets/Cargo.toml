@@ -1,0 +1,11 @@
+[package]
+name = "anima-assets"
+version = "0.0.0"
+edition = "2021"
+description = "UO client data-file readers (.mul/.uop): map, statics, tiledata. Provides terrain/walkability for pathfinding."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anima-core = { path = "../anima-core" }
+flate2 = "1"
+png = "0.17"
