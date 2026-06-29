@@ -146,22 +146,48 @@ function loadSfx(id) {
   sfxBuffers.set(id, p);
   return p;
 }
-function playBuffer(b) {
+// Max tile distance a sound carries; at/over this it's silent (ClassicUO-like).
+const SFX_MAX_DIST = 22;
+const SFX_PAN_RANGE = 16;   // iso screen-x spread that maps to a hard L/R pan
+// Play a decoded buffer, attenuated + panned by the sound's world position (x,y).
+// A sound at (0,0) or with no player is treated as non-positional (center, full).
+function playBuffer(b, x, y) {
   if (!audioCtx || !b || activeSfx.size >= MAX_CONCURRENT_SFX) return;
+  const p = scene && scene.player;
+  let vol = 1, pan = 0;
+  const positional = !!(p && (x || y));
+  if (positional) {
+    const dx = (x | 0) - (p.x | 0), dy = (y | 0) - (p.y | 0);
+    const dist = Math.max(Math.abs(dx), Math.abs(dy));       // chebyshev tiles
+    vol = 1 - dist / SFX_MAX_DIST;
+    if (vol <= 0.02) return;                                  // out of earshot
+    vol = vol * vol;                                          // perceptual falloff
+    // iso screen-x ∝ (dx − dy): left of the avatar pans left, right pans right.
+    pan = Math.max(-1, Math.min(1, (dx - dy) / SFX_PAN_RANGE));
+  }
   const src = audioCtx.createBufferSource();
   src.buffer = b;
-  src.connect(sfxGain);
+  let out = src;
+  if (positional && audioCtx.createStereoPanner) {
+    const pn = audioCtx.createStereoPanner(); pn.pan.value = pan;
+    out.connect(pn); out = pn;
+  }
+  if (positional) {
+    const g = audioCtx.createGain(); g.gain.value = vol;
+    out.connect(g); out = g;
+  }
+  out.connect(sfxGain);
   activeSfx.add(src);
   src.onended = () => activeSfx.delete(src);
   try { src.start(); } catch (_) { activeSfx.delete(src); }
 }
-function playSfx(id) {
+function playSfx(id, x, y) {
   const ctx = ensureAudioCtx();
   if (!ctx) return;
   if (ctx.state === "suspended") ctx.resume().catch(() => {});
   const c = sfxBuffers.get(id);
-  if (c instanceof AudioBuffer) { playBuffer(c); return; }  // cached → instant
-  loadSfx(id).then((b) => { if (b) playBuffer(b); });        // first time → decode then play
+  if (c instanceof AudioBuffer) { playBuffer(c, x, y); return; }  // cached → instant
+  loadSfx(id).then((b) => { if (b) playBuffer(b, x, y); });        // first time → decode then play
 }
 // Apply the current audio settings to the live audio nodes/elements.
 function applyAudioSettings() {
@@ -179,7 +205,7 @@ function playSounds(s) {
     if (seq <= lastSoundSeq) continue;
     lastSoundSeq = seq;
     if (audioMuted || !settings.sfx) continue;
-    playSfx(ev.id | 0);
+    playSfx(ev.id | 0, ev.x | 0, ev.y | 0);
   }
 }
 // Sound push channel: the server streams each sound the instant it fires (SSE) so a
@@ -195,7 +221,7 @@ function connectSoundStream() {
     if (seq <= lastSoundSeq) return;
     lastSoundSeq = seq;
     if (audioMuted || !settings.sfx) return;
-    playSfx(ev.id | 0);
+    playSfx(ev.id | 0, ev.x | 0, ev.y | 0);
   };
 }
 
@@ -2330,7 +2356,7 @@ function setStatus(t) { set("status", t); }
 const EQUIP_SLOTS = {
   1: "Right Hand", 2: "Left Hand", 3: "Shoes", 4: "Pants", 5: "Shirt", 6: "Head",
   7: "Gloves", 8: "Ring", 9: "Talisman", 10: "Neck", 11: "Hair", 12: "Waist",
-  13: "Torso", 14: "Bracelet", 16: "Beard", 17: "Tunic", 18: "Earrings", 19: "Arms",
+  13: "Torso", 14: "Bracelet", 15: "Face", 16: "Beard", 17: "Tunic", 18: "Earrings", 19: "Arms",
   20: "Cloak", 21: "Backpack", 22: "Robe", 23: "OuterLegs", 24: "InnerLegs",
 };
 const BACKPACK_LAYER = 21;
@@ -3039,8 +3065,10 @@ function refreshPaperdoll() {
     h += "</div>";
   }
   h += '<div id="pd-equip">';
-  // Worn gear only (hair/beard handled above).
-  const worn = equip.filter((e) => e.layer !== 11 && e.layer !== 16);
+  // Worn gear only. Hair (11) / beard (16) are shown in Appearance above; the Face
+  // layer (15) is the character's virtual face (a server pseudo-item with no real
+  // item art → it rendered as the "UNUSED" placeholder), not wearable gear — skip it.
+  const worn = equip.filter((e) => e.layer !== 11 && e.layer !== 16 && e.layer !== 15);
   if (!worn.length) h += '<div class="cont-empty">(nothing equipped)</div>';
   for (const e of worn) {
     const serial = e.serial >>> 0;
@@ -3053,8 +3081,11 @@ function refreshPaperdoll() {
     // Backpack: our own → open it; another mobile's → SNOOP (a crime, warned).
     const isBp = e.layer === BACKPACK_LAYER;
     const attr = isBp ? (isSelf ? ' data-bp="1"' : ' data-snoop="1"') : "";
+    // Tint the icon by the item's dye hue (server recolors the tile via ?hue=), so a
+    // dyed robe/cloak/etc. shows its real colour in the list instead of base art.
+    const hueQ = (e.hue | 0) ? `?hue=${e.hue | 0}` : "";
     h += `<div class="eq-row${isBp ? " bp" : ""}"${attr}>`
-      + `<img class="eq-icon" src="art/static/${e.g}.png" alt="" draggable="${isSelf}"`
+      + `<img class="eq-icon" src="art/static/${e.g}.png${hueQ}" alt="" draggable="${isSelf}"`
       + ` data-serial="${e.serial >>> 0}" data-g="${e.g}" data-amount="1"`
       + ` data-layer="${e.layer}" data-hue="${e.hue | 0}"`
       + ` onerror="this.style.visibility='hidden'">`

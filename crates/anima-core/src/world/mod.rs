@@ -277,7 +277,7 @@ pub struct World {
     /// Recent sound-effect events (0x54), each `(seq, sound_id)`, newest last,
     /// capped to the most recent few. The renderer plays only events with a
     /// `seq` it hasn't played yet (like the journal's `seq`).
-    pub recent_sounds: Vec<(u64, u16)>,
+    pub recent_sounds: Vec<(u64, u16, u16, u16)>,
     /// Monotonic counter assigning each sound event a unique `seq`.
     pub sound_seq: u64,
     /// Recent damage events (0x0B), each `(seq, serial, amount)`, newest last,
@@ -447,9 +447,9 @@ impl World {
 
     /// Record a sound-effect event (0x54). Assigns the next monotonic `seq` and
     /// keeps only the most recent [`MAX_RECENT_SOUNDS`].
-    pub fn push_sound(&mut self, sound_id: u16) {
+    pub fn push_sound(&mut self, sound_id: u16, x: u16, y: u16) {
         self.sound_seq += 1;
-        self.recent_sounds.push((self.sound_seq, sound_id));
+        self.recent_sounds.push((self.sound_seq, sound_id, x, y));
         let overflow = self.recent_sounds.len().saturating_sub(MAX_RECENT_SOUNDS);
         if overflow > 0 {
             self.recent_sounds.drain(0..overflow);

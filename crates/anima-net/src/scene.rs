@@ -1241,7 +1241,7 @@ pub fn build_scene(
         .world
         .recent_sounds
         .iter()
-        .map(|&(seq, id)| json!({ "seq": seq, "id": id }))
+        .map(|&(seq, id, x, y)| json!({ "seq": seq, "id": id, "x": x, "y": y }))
         .collect();
     let sounds = serde_json::to_string(&sounds).unwrap_or_else(|_| "[]".into());
     // Recent damage events (0x0B): `serial` took `amt` HP. The client floats a

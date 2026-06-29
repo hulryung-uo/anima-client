@@ -491,12 +491,16 @@ fn graphic_effect(world: &mut World, frame: &[u8], hued: bool) -> PResult<()> {
 }
 
 /// 0x54 PlaySoundEffect — `[id][mode:u8][soundID:u16][volume:u16][x:u16][y:u16][z:u16]`
-/// (12 bytes). We only need the sound id; the renderer plays it.
+/// (12 bytes). The (x, y) is where the sound originates — the renderer uses it to
+/// attenuate volume + pan by distance from the player (ClassicUO-style).
 fn play_sound(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     r.skip(1)?; // mode (0 = one-shot, 1 = repeating)
     let sound_id = r.u16()?;
-    world.push_sound(sound_id);
+    r.skip(2)?; // volume (server-side; we compute our own from distance)
+    let x = r.u16()?;
+    let y = r.u16()?;
+    world.push_sound(sound_id, x, y);
     Ok(())
 }
 
@@ -1646,7 +1650,7 @@ mod tests {
         let mut p = PacketWriter::new();
         p.u8(0x54).u8(0).u16(0x0145).u16(0).u16(100).u16(200).u16(0);
         assert!(apply_packet(&mut w, &p.into_vec()));
-        assert_eq!(w.recent_sounds.last(), Some(&(1, 0x0145)));
+        assert_eq!(w.recent_sounds.last(), Some(&(1, 0x0145, 100, 200)));
         assert_eq!(w.sound_seq, 1);
     }
 

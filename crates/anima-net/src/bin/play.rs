@@ -473,11 +473,12 @@ fn main() {
             // wait). Damage/effects still ride the scene poll — only sound is pushed.
             let prev_sound = last_event_seqs.0;
             if session.world.sound_seq > prev_sound {
-                for &(seq, id) in &session.world.recent_sounds {
+                for &(seq, id, x, y) in &session.world.recent_sounds {
                     if seq > prev_sound {
                         sse_broadcast(
                             &sse_hub,
-                            format!("data: {{\"seq\":{seq},\"id\":{id}}}\n\n").as_bytes(),
+                            format!("data: {{\"seq\":{seq},\"id\":{id},\"x\":{x},\"y\":{y}}}\n\n")
+                                .as_bytes(),
                         );
                     }
                 }
