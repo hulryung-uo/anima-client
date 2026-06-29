@@ -7,4 +7,9 @@ dist/
 web/scene.json
 web/scene.json.tmp
 
+# stray CDP/debug helper scripts (local only)
+/capchk.js
+/rod.js
+/tap.js
+
 .DS_Store

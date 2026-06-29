@@ -46,7 +46,7 @@ fn skill_json(s: &SkillView) -> Value {
 fn journal_json(j: &JournalEntry) -> Value {
     json!({
         "serial": j.serial, "name": j.name, "text": j.text,
-        "msg_type": j.msg_type, "hue": j.hue,
+        "msg_type": j.msg_type, "hue": j.hue, "cliloc": j.cliloc,
     })
 }
 
@@ -65,6 +65,52 @@ pub fn observation_to_json(obs: &Observation) -> Value {
     })
 }
 
+/// Parse a vendor transaction's `items` array into `(serial, amount)` pairs.
+/// Accepts either `[{"serial": .., "amount": ..}, ..]` or `[[serial, amount], ..]`.
+fn shop_items_from_json(v: &Value) -> Vec<(u32, u16)> {
+    let Some(arr) = v.get("items").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|e| {
+            if let Some(o) = e.as_object() {
+                let serial = o.get("serial").and_then(Value::as_u64)? as u32;
+                let amount = o.get("amount").and_then(Value::as_u64).unwrap_or(1) as u16;
+                Some((serial, amount))
+            } else if let Some(pair) = e.as_array() {
+                let serial = pair.first().and_then(Value::as_u64)? as u32;
+                let amount = pair.get(1).and_then(Value::as_u64).unwrap_or(1) as u16;
+                Some((serial, amount))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Parse a gump response's `entries` array into `(entryId, text)` pairs. Accepts
+/// either `[{"id": .., "text": ".."}, ..]` or `[[id, "text"], ..]`.
+fn gump_entries_from_json(v: &Value) -> Vec<(u16, String)> {
+    let Some(arr) = v.get("entries").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|e| {
+            if let Some(o) = e.as_object() {
+                let id = o.get("id").and_then(Value::as_u64)? as u16;
+                let text = o.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+                Some((id, text))
+            } else if let Some(pair) = e.as_array() {
+                let id = pair.first().and_then(Value::as_u64)? as u16;
+                let text = pair.get(1).and_then(Value::as_str).unwrap_or("").to_string();
+                Some((id, text))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Parse an [`Action`] from its JSON form (externally tagged by `"type"`).
 pub fn action_from_json(v: &Value) -> Result<Action, String> {
     let t = v.get("type").and_then(Value::as_str).ok_or("action missing 'type'")?;
@@ -79,14 +125,30 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
             text: v.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
         }),
         "Attack" => Ok(Action::Attack { serial: req_u32("serial")? }),
+        "AutoAttack" => Ok(Action::AutoAttack),
+        "AttackLast" => Ok(Action::AttackLast),
         "Use" => Ok(Action::Use { serial: req_u32("serial")? }),
         "Click" => Ok(Action::Click { serial: req_u32("serial")? }),
         "PickUp" => Ok(Action::PickUp {
             serial: req_u32("serial")?,
             amount: v.get("amount").and_then(Value::as_u64).unwrap_or(1) as u16,
         }),
+        "Drop" => Ok(Action::Drop {
+            serial: req_u32("serial")?,
+            x: v.get("x").and_then(Value::as_u64).unwrap_or(0) as u16,
+            y: v.get("y").and_then(Value::as_u64).unwrap_or(0) as u16,
+            z: v.get("z").and_then(Value::as_i64).unwrap_or(0) as i16,
+            container: u32f("container").unwrap_or(0xFFFF_FFFF),
+        }),
+        "Equip" => Ok(Action::Equip {
+            serial: req_u32("serial")?,
+            layer: v.get("layer").and_then(Value::as_u64).unwrap_or(0) as u8,
+        }),
         "WarMode" => Ok(Action::WarMode {
             on: v.get("on").and_then(Value::as_bool).unwrap_or(false),
+        }),
+        "CastSpell" => Ok(Action::CastSpell {
+            spell: v.get("spell").and_then(Value::as_u64).unwrap_or(0) as u16,
         }),
         "TargetObject" => Ok(Action::TargetObject { serial: req_u32("serial")? }),
         "TargetGround" => Ok(Action::TargetGround {
@@ -94,6 +156,49 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
             y: v.get("y").and_then(Value::as_u64).unwrap_or(0) as u16,
             z: v.get("z").and_then(Value::as_i64).unwrap_or(0) as i16,
             graphic: v.get("graphic").and_then(Value::as_u64).unwrap_or(0) as u16,
+        }),
+        "BuyItems" => Ok(Action::BuyItems {
+            vendor: req_u32("vendor")?,
+            items: shop_items_from_json(v),
+        }),
+        "SellItems" => Ok(Action::SellItems {
+            vendor: req_u32("vendor")?,
+            items: shop_items_from_json(v),
+        }),
+        "BookRequest" => Ok(Action::BookRequest {
+            serial: req_u32("serial")?,
+            pages: v.get("pages").and_then(Value::as_u64).unwrap_or(0) as u16,
+        }),
+        "UseAbility" => Ok(Action::UseAbility {
+            ability: v.get("ability").and_then(Value::as_u64).unwrap_or(0) as u8,
+        }),
+        "SkillLock" => Ok(Action::SkillLock {
+            skill: v.get("skill").and_then(Value::as_u64).unwrap_or(0) as u16,
+            lock: v.get("lock").and_then(Value::as_u64).unwrap_or(0) as u8,
+        }),
+        "UseSkill" => Ok(Action::UseSkill {
+            skill: v.get("skill").and_then(Value::as_u64).unwrap_or(0) as u16,
+        }),
+        "OplRequest" => Ok(Action::OplRequest { serial: req_u32("serial")? }),
+        "PartyInvite" => Ok(Action::PartyInvite),
+        "PartyLeave" => Ok(Action::PartyLeave),
+        "PartyAccept" => Ok(Action::PartyAccept { leader: req_u32("leader")? }),
+        "PartyDecline" => Ok(Action::PartyDecline { leader: req_u32("leader")? }),
+        "PopupRequest" => Ok(Action::PopupRequest { serial: req_u32("serial")? }),
+        "PopupSelect" => Ok(Action::PopupSelect {
+            serial: req_u32("serial")?,
+            index: v.get("index").and_then(Value::as_u64).unwrap_or(0) as u16,
+        }),
+        "GumpResponse" => Ok(Action::GumpResponse {
+            serial: req_u32("serial")?,
+            gump_id: req_u32("gump_id")?,
+            button: u32f("button").unwrap_or(0),
+            switches: v
+                .get("switches")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|s| s.as_u64().map(|n| n as u32)).collect())
+                .unwrap_or_default(),
+            entries: gump_entries_from_json(v),
         }),
         other => Err(format!("unknown action type: {other}")),
     }

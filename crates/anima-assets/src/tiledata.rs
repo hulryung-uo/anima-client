@@ -14,6 +14,16 @@ pub mod flags {
     pub const SURFACE: u64 = 0x0000_0200;
     pub const BRIDGE: u64 = 0x0000_0400;
     pub const WET: u64 = 0x0000_0008;
+    /// ClassicUO `TileFlag.Container` — the item is a container (chest/bag/corpse);
+    /// double-clicking it opens a loot/content window (doors etc. are NOT this).
+    pub const CONTAINER: u64 = 0x0020_0000;
+    /// ClassicUO `TileFlag.LightSource` (Game/Data/TileFlag.cs) — the item emits
+    /// light (torches, lamps, braziers, candles). Used for per-object night glow.
+    pub const LIGHT_SOURCE: u64 = 0x0080_0000;
+    /// ClassicUO `TileFlag.Animation` (Game/Data/TileFlag.cs) — the static cycles
+    /// through frames from `animdata.mul` (flames, fountains, water wheels, magic
+    /// flames, …). Used to drive animated-statics frame swapping in the renderer.
+    pub const ANIMATION: u64 = 0x0100_0000;
 }
 
 const LAND_ENTRY: usize = 30;
@@ -42,14 +52,27 @@ impl TileData {
         ])
     }
 
+    fn land_off(&self, graphic: u16) -> usize {
+        let g = (graphic & 0x3FFF) as usize;
+        (g / 32) * LAND_GROUP + 4 + (g % 32) * LAND_ENTRY
+    }
+
     /// Flags for a land tile graphic (0..0x4000).
     pub fn land_flags(&self, graphic: u16) -> u64 {
-        let g = (graphic & 0x3FFF) as usize;
-        let group = g / 32;
-        let within = g % 32;
-        let off = group * LAND_GROUP + 4 + within * LAND_ENTRY;
+        let off = self.land_off(graphic);
         if off + 8 <= self.data.len() {
             self.u64_at(off)
+        } else {
+            0
+        }
+    }
+
+    /// Texmap id for a land tile graphic (the seamless texture used when the
+    /// tile is stretched/sloped). 0 = none. Lies right after the 8-byte flags.
+    pub fn land_tex_id(&self, graphic: u16) -> u16 {
+        let off = self.land_off(graphic) + 8;
+        if off + 2 <= self.data.len() {
+            u16::from_le_bytes([self.data[off], self.data[off + 1]])
         } else {
             0
         }
@@ -72,6 +95,46 @@ impl TileData {
         self.item_entry_off(graphic)
             .map(|off| self.u64_at(off))
             .unwrap_or(0)
+    }
+
+    /// Equipment animation id (`AnimID`) for a static/item graphic. Worn
+    /// equipment (clothes/hair/beard) is drawn by animating this id as if it
+    /// were a body in the same `anim.mul` index space. 0 = none.
+    ///
+    /// In the 41-byte HS item record `animID` is a u16 at offset +14
+    /// (flags u64=8, weight u8, quality u8, unk u16, unk1 u8, quantity u8).
+    pub fn item_anim(&self, graphic: u16) -> u16 {
+        self.item_entry_off(graphic)
+            .map(|off| u16::from_le_bytes([self.data[off + 14], self.data[off + 15]]))
+            .unwrap_or(0)
+    }
+
+    /// Worn `Layer` for an equippable item graphic. In the HS item record the
+    /// `quality` byte at offset +9 doubles as the equipment layer (ClassicUO maps
+    /// `Quality` → `Layer`). 0 = not normally wearable.
+    pub fn item_layer(&self, graphic: u16) -> u8 {
+        self.item_entry_off(graphic)
+            .map(|off| self.data[off + 9])
+            .unwrap_or(0)
+    }
+
+    /// Does a static/item graphic emit light (ClassicUO `TileFlag.LightSource`)?
+    /// True for torches, lamps, braziers, candles, etc.
+    pub fn item_is_light(&self, graphic: u16) -> bool {
+        self.item_flags(graphic) & flags::LIGHT_SOURCE != 0
+    }
+
+    /// Is the item a container (chest/bag/corpse)? Double-clicking opens its
+    /// contents window — used so doors/other items don't spawn an empty window.
+    pub fn item_is_container(&self, graphic: u16) -> bool {
+        self.item_flags(graphic) & flags::CONTAINER != 0
+    }
+
+    /// Does a static/item graphic cycle through frames (ClassicUO
+    /// `TileFlag.Animation`)? True for flames, fountains, water wheels, magic
+    /// flames, etc.; the frame sequence comes from `animdata.mul`.
+    pub fn item_is_animated(&self, graphic: u16) -> bool {
+        self.item_flags(graphic) & flags::ANIMATION != 0
     }
 
     /// Height of a static/item graphic (used for Z stacking/walkability).

@@ -28,6 +28,9 @@ dependencies = [
 [[package]]
 name = "anima-core"
 version = "0.0.0"
+dependencies = [
+ "miniz_oxide",
+]
 
 [[package]]
 name = "anima-net"

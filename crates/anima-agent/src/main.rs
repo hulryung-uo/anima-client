@@ -48,16 +48,49 @@ fn main() {
             .iter()
             .map(|a| match a {
                 Action::Walk { dir, run } => format!("walk(d{dir}{})", if *run { ",run" } else { "" }),
+                Action::WalkTo { x, y } => format!("walkto({x},{y})"),
                 Action::Say { text } => format!("say({text:?})"),
+                Action::PartySay { text } => format!("party({text:?})"),
                 Action::PickUp { serial, .. } => format!("pickup(0x{serial:08X})"),
+                Action::Drop { serial, x, y, z, container } => {
+                    format!("drop(0x{serial:08X}→{x},{y},{z}@0x{container:08X})")
+                }
+                Action::Equip { serial, layer } => format!("equip(0x{serial:08X}@L{layer})"),
                 Action::Attack { serial } => format!("attack(0x{serial:08X})"),
+                Action::AutoAttack => "autoattack".into(),
+                Action::AttackLast => "attacklast".into(),
                 Action::Use { serial } => format!("use(0x{serial:08X})"),
                 Action::Click { serial } => format!("click(0x{serial:08X})"),
                 Action::WarMode { on } => format!("war({on})"),
+                Action::CastSpell { spell } => format!("cast({spell})"),
                 Action::TargetObject { serial } => format!("target(0x{serial:08X})"),
                 Action::TargetGround { x, y, z, graphic } => {
                     format!("targetXY({x},{y},{z},0x{graphic:04X})")
                 }
+                Action::BuyItems { vendor, items } => {
+                    format!("buy(0x{vendor:08X}×{})", items.len())
+                }
+                Action::SellItems { vendor, items } => {
+                    format!("sell(0x{vendor:08X}×{})", items.len())
+                }
+                Action::GumpResponse { serial, button, .. } => {
+                    format!("gump(0x{serial:08X} btn={button})")
+                }
+                Action::PopupRequest { serial } => format!("popupreq(0x{serial:08X})"),
+                Action::PopupSelect { serial, index } => {
+                    format!("popupsel(0x{serial:08X} i={index})")
+                }
+                Action::BookRequest { serial, pages } => {
+                    format!("bookreq(0x{serial:08X}×{pages})")
+                }
+                Action::UseAbility { ability } => format!("ability({ability})"),
+                Action::SkillLock { skill, lock } => format!("skilllock({skill}={lock})"),
+                Action::UseSkill { skill } => format!("useskill({skill})"),
+                Action::OplRequest { serial } => format!("oplreq(0x{serial:08X})"),
+                Action::PartyInvite => "partyinvite".into(),
+                Action::PartyAccept { leader } => format!("partyaccept(0x{leader:08X})"),
+                Action::PartyDecline { leader } => format!("partydecline(0x{leader:08X})"),
+                Action::PartyLeave => "partyleave".into(),
             })
             .collect();
         println!(

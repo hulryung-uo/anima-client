@@ -168,6 +168,7 @@ mod tests {
             text: "hello there".into(),
             msg_type: 0,
             hue: 0,
+            cliloc: 0,
         });
         let acts = b.decide(&o);
         assert!(acts.iter().any(|a| matches!(a, Action::Say { text } if text.contains("Hastin"))));

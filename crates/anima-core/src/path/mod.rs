@@ -218,6 +218,31 @@ mod tests {
     }
 
     #[test]
+    fn straight_open_path_cardinal() {
+        // Open grid: a pure-east goal is reached in the minimal 5 steps (Chebyshev
+        // distance), ending exactly on the target tile.
+        let mut g = Grid {
+            w: 10,
+            h: 10,
+            blocked: Default::default(),
+        };
+        let path = find_path(&mut g, (1, 1, 0), (6, 1), 10_000).unwrap();
+        assert_eq!(path.len(), 5);
+        assert_eq!((path.last().unwrap().x, path.last().unwrap().y), (6, 1));
+    }
+
+    #[test]
+    fn same_tile_is_empty_path() {
+        // Clicking your own tile: a valid, already-arrived route (empty steps).
+        let mut g = Grid {
+            w: 10,
+            h: 10,
+            blocked: Default::default(),
+        };
+        assert_eq!(find_path(&mut g, (3, 3, 0), (3, 3), 10_000), Some(Vec::new()));
+    }
+
+    #[test]
     fn unreachable_returns_none() {
         // Fully enclose the goal.
         let blocked = [(4, 4), (4, 5), (4, 6), (5, 4), (5, 6), (6, 4), (6, 5), (6, 6)]

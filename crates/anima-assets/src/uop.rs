@@ -71,6 +71,7 @@ pub fn uop_hash(s: &str) -> u64 {
 struct Entry {
     offset: usize,
     compressed_size: usize,
+    decompressed_size: usize,
     compression: i16,
 }
 
@@ -124,6 +125,7 @@ impl UopReader {
                 let offset = le64(pos) as usize;
                 let header_len = le32(pos + 8) as usize;
                 let compressed = le32(pos + 12) as usize;
+                let decompressed = le32(pos + 16) as usize;
                 let file_hash = u64::from_le_bytes([
                     data[pos + 20], data[pos + 21], data[pos + 22], data[pos + 23], data[pos + 24],
                     data[pos + 25], data[pos + 26], data[pos + 27],
@@ -139,6 +141,7 @@ impl UopReader {
                     Entry {
                         offset: offset + header_len,
                         compressed_size: compressed,
+                        decompressed_size: decompressed,
                         compression,
                     },
                 );
@@ -178,5 +181,48 @@ impl UopReader {
     pub fn by_art(&self, index: usize) -> Option<Vec<u8>> {
         let path = format!("build/artlegacymul/{index:08}.tga");
         self.by_hash(uop_hash(&path))
+    }
+
+    /// Decompressed bytes for a sound entry (`build/soundlegacymul/{:08}.dat`).
+    /// `index` = the sound id used by the 0x54 PlaySoundEffect packet.
+    pub fn by_sound(&self, index: usize) -> Option<Vec<u8>> {
+        let path = format!("build/soundlegacymul/{index:08}.dat");
+        self.by_hash(uop_hash(&path))
+    }
+
+    /// Gump entry (`build/gumpartlegacymul/{:08}.tga`). Gump UOP entries carry an
+    /// 8-byte "extra" (width:i32, height:i32) ahead of the payload (ClassicUO opens
+    /// this file with `hasExtra=true`). Returns `(decompressed payload, width, height)`
+    /// where the payload is the row-lookup table + RLE pixel runs.
+    pub fn by_gump(&self, index: usize) -> Option<(Vec<u8>, u32, u32)> {
+        let path = format!("build/gumpartlegacymul/{index:08}.tga");
+        let e = self.entries.get(&uop_hash(&path))?;
+        let d = &self.data;
+        if e.offset + 8 > d.len() {
+            return None;
+        }
+        let le32 = |o: usize| u32::from_le_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]);
+        let mut w = le32(e.offset);
+        let mut h = le32(e.offset + 4);
+        let end = (e.offset + 8 + e.compressed_size).min(d.len());
+        let payload = &d[e.offset + 8..end];
+        let mut out = if e.compression == 1 {
+            let mut out = Vec::with_capacity(e.decompressed_size);
+            ZlibDecoder::new(payload).read_to_end(&mut out).ok()?;
+            out
+        } else {
+            payload.to_vec()
+        };
+        // Fallback: some entries store width/height as the first two u32 of the
+        // (decompressed) payload instead of the extra field.
+        if (w == 0 || h == 0 || w > 4096 || h > 4096) && out.len() >= 8 {
+            w = u32::from_le_bytes([out[0], out[1], out[2], out[3]]);
+            h = u32::from_le_bytes([out[4], out[5], out[6], out[7]]);
+            out.drain(0..8);
+        }
+        if w == 0 || h == 0 || w > 4096 || h > 4096 {
+            return None;
+        }
+        Some((out, w, h))
     }
 }

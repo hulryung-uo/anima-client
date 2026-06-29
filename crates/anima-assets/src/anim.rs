@@ -16,11 +16,13 @@ use std::sync::Mutex;
 
 use crate::art::Image;
 
-/// People animation groups (35 groups × 5 dirs = 175 entries/body).
+/// People animation groups (35 groups × 5 dirs = 175 entries/body): Stand=4.
 pub const PEOPLE_WALK: u8 = 0;
 pub const PEOPLE_STAND: u8 = 4;
-/// Monster groups (22 groups × 5 dirs = 110 entries/body).
-pub const MONSTER_STAND: u8 = 2;
+/// Animal groups (13 groups × 5 = 65 entries/body): Walk=0, Run=1, Stand=2.
+pub const ANIMAL_STAND: u8 = 2;
+/// Monster/"high" groups (22 groups × 5 = 110 entries/body): Walk=0, Stand=1.
+pub const MONSTER_STAND: u8 = 1;
 
 pub struct Anim {
     idx: Vec<u8>,
@@ -36,17 +38,22 @@ impl Anim {
         })
     }
 
-    /// Bodies that use the high/people group layout (175 entries).
-    fn is_people(body: u16) -> bool {
-        matches!(body, 400 | 401 | 402 | 403 | 605 | 606 | 666 | 667 | 694 | 695)
-    }
-
-    /// idx block for (body, group, animDir 0..4).
+    /// idx block for (body, group, animDir 0..4). The legacy `anim.mul` is laid
+    /// out in three contiguous sections by body range, EACH WITH A DIFFERENT
+    /// GROUP COUNT (ClassicUO `AnimationsLoader` legacy formula):
+    ///   body  <200 → monster: 22 groups × 5 = 110/body, base = body*110
+    ///   200..<400 → animal:  13 groups × 5 =  65/body, base = 22000+(b-200)*65
+    ///   ≥400      → people:  35 groups × 5 = 175/body, base = 35000+(b-400)*175
+    /// Using the wrong section/group is why e.g. an animal's "stand" (group 2)
+    /// looked like an attack pose when requested as the people stand (group 4).
     fn block(body: u16, group: u8, dir: u8) -> usize {
-        let base = if Self::is_people(body) {
-            ((body as i64 - 400) * 175 + 35000) as usize
+        let b = body as usize;
+        let base = if b < 200 {
+            b * 110
+        } else if b < 400 {
+            22000 + (b - 200) * 65
         } else {
-            body as usize * 110
+            35000 + (b - 400) * 175
         };
         base + group as usize * 5 + dir as usize
     }
@@ -64,12 +71,25 @@ impl Anim {
         Some((pos, size))
     }
 
-    /// The default standing group for a body.
-    pub fn stand_group(body: u16) -> u8 {
-        if Self::is_people(body) {
-            PEOPLE_STAND
+    /// Animation type by body range: 0 = monster (high), 1 = animal (low),
+    /// 2 = people. Determines which group numbers mean walk/run/stand.
+    pub fn anim_type(body: u16) -> u8 {
+        if body < 200 {
+            0
+        } else if body < 400 {
+            1
         } else {
-            MONSTER_STAND
+            2
+        }
+    }
+
+    /// The default standing group for a body (varies by type: monster 1, animal
+    /// 2, people 4).
+    pub fn stand_group(body: u16) -> u8 {
+        match Self::anim_type(body) {
+            0 => MONSTER_STAND,
+            1 => ANIMAL_STAND,
+            _ => PEOPLE_STAND,
         }
     }
 
@@ -87,11 +107,50 @@ impl Anim {
         Some(u32::from_le_bytes(b) as usize)
     }
 
+    /// Draw-center `(cx, cy)` for every frame of (body, group, dir) — the cheap
+    /// header-only read (no pixel decode) the renderer needs to *position* each
+    /// part. Mirror-adjusted to match [`Self::frame`]'s already-flipped image.
+    pub fn frame_centers(&self, body: u16, group: u8, dir8: u8) -> Option<Vec<(i16, i16)>> {
+        let (dir, mirror) = map_dir(dir8);
+        let (pos, size) = self.entry(Self::block(body, group, dir))?;
+        if size < 516 {
+            return None;
+        }
+        let buf = {
+            let mut f = self.mul.lock().ok()?;
+            f.seek(SeekFrom::Start(pos as u64)).ok()?;
+            let mut buf = vec![0u8; size as usize];
+            f.read_exact(&mut buf).ok()?;
+            buf
+        };
+        let frame_count = u32le(&buf, 512) as usize;
+        let mut out = Vec::with_capacity(frame_count);
+        for i in 0..frame_count {
+            if 516 + i * 4 + 4 > buf.len() {
+                break;
+            }
+            let foff = u32le(&buf, 516 + i * 4) as usize;
+            let p = 512 + foff;
+            if p + 8 > buf.len() {
+                out.push((0, 0));
+                continue;
+            }
+            let cx = i16le(&buf, p);
+            let cy = i16le(&buf, p + 2);
+            let w = i16le(&buf, p + 4);
+            out.push((if mirror { w - cx } else { cx }, cy));
+        }
+        Some(out)
+    }
+
     /// Decode one frame of (body, group, UO-direction 0..7, frame_idx).
-    /// Returns the RGBA image already horizontally mirrored when the direction
-    /// requires it (so the caller just draws it). `None` if the body/group is
-    /// absent or the frame can't be decoded.
-    pub fn frame(&self, body: u16, group: u8, dir8: u8, frame_idx: usize) -> Option<Image> {
+    /// Returns the RGBA image (already horizontally mirrored when the direction
+    /// requires it) plus the frame's draw-center `(cx, cy)`: ClassicUO draws the
+    /// `width×height` bitmap with its top-left at `(screenX - cx, screenY - height
+    /// - cy)`, so the caller MUST honor the center to align multi-part mobiles
+    /// (body + equipment) and especially a rider onto a mount. `cx` is already
+    /// adjusted for the mirror (`width - cx`). `None` if absent/undecodable.
+    pub fn frame(&self, body: u16, group: u8, dir8: u8, frame_idx: usize) -> Option<(Image, i16, i16)> {
         let (dir, mirror) = map_dir(dir8);
         let (pos, size) = self.entry(Self::block(body, group, dir))?;
 
@@ -176,7 +235,9 @@ impl Anim {
             height: h as u32,
             rgba,
         };
-        Some(if mirror { flip_h(&img) } else { img })
+        // A mirrored image flips X, so the draw-center flips too: cx → width - cx.
+        let cx = if mirror { width as i16 - center_x } else { center_x };
+        Some((if mirror { flip_h(&img) } else { img }, cx, center_y))
     }
 }
 
@@ -232,7 +293,7 @@ mod tests {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let anim = Anim::open(&dir).expect("open anim");
         // Human male (0x190 = 400), standing, facing south (dir 4), frame 0.
-        let img = anim.frame(400, PEOPLE_STAND, 4, 0).expect("human stand frame");
+        let (img, _cx, _cy) = anim.frame(400, PEOPLE_STAND, 4, 0).expect("human stand frame");
         println!("human stand frame: {}x{}", img.width, img.height);
         assert!(img.width > 0 && img.height > 0);
         assert!(!img.is_empty(), "frame should have opaque pixels");

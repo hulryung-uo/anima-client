@@ -188,6 +188,25 @@ pub struct LoginResult {
     pub z: i8,
     pub direction: u8,
     pub body: u16,
+    /// Server advertised the AOS expansion via SupportedFeatures `0xB9`.
+    pub aos: bool,
+}
+
+/// SupportedFeatures `0xB9` AOS expansion bit (ClassicUO `LockedFeatureFlags.AOS`).
+const FEATURE_AOS: u32 = 0x0000_0010;
+
+/// Parse the SupportedFeatures `0xB9` flags. The payload is a big-endian u16 on
+/// pre-6.0.14.2 clients and a u32 on newer ones; we read whatever the frame
+/// carries (id byte + 2 or 4 flag bytes).
+fn parse_supported_features(frame: &[u8]) -> u32 {
+    let body = &frame[1..];
+    if body.len() >= 4 {
+        u32::from_be_bytes([body[0], body[1], body[2], body[3]])
+    } else if body.len() >= 2 {
+        u16::from_be_bytes([body[0], body[1]]) as u32
+    } else {
+        0
+    }
 }
 
 /// Parse the auth key out of ServerRedirect `0x8C`.
@@ -246,6 +265,7 @@ pub fn parse_login_confirm(frame: &[u8]) -> Result<LoginResult, LoginError> {
         z,
         direction,
         body,
+        aos: false, // filled in by the LoginMachine from SupportedFeatures 0xB9
     })
 }
 
@@ -337,6 +357,9 @@ pub struct LoginMachine {
     cfg: LoginConfig,
     state: State,
     auth_key: u32,
+    /// AOS expansion advertised by the server's SupportedFeatures `0xB9`. Drives
+    /// client-side gating of AOS-only UI (e.g. the weapon special-ability bar).
+    aos: bool,
 }
 
 impl LoginMachine {
@@ -349,6 +372,7 @@ impl LoginMachine {
             cfg,
             state: State::AwaitServerList,
             auth_key: 0,
+            aos: false,
         };
         (m, initial)
     }
@@ -370,6 +394,14 @@ impl LoginMachine {
         if id == 0x82 {
             let reason = frame.get(1).copied().unwrap_or(0);
             return Err(LoginError::Denied(reason));
+        }
+
+        // SupportedFeatures `0xB9` (sent during the character-list phase): records
+        // the AOS expansion bit so the world can gate AOS-only UI later. Ignorable
+        // otherwise — fall through to an empty result.
+        if id == 0xB9 {
+            self.aos = parse_supported_features(frame) & FEATURE_AOS != 0;
+            return Ok(vec![]);
         }
 
         match self.state {
@@ -431,7 +463,8 @@ impl LoginMachine {
             }
             State::AwaitLoginConfirm => {
                 if id == 0x1B {
-                    let result = parse_login_confirm(frame)?;
+                    let mut result = parse_login_confirm(frame)?;
+                    result.aos = self.aos;
                     self.state = State::Done;
                     Ok(vec![LoginDirective::Done(result)])
                 } else {
@@ -499,7 +532,8 @@ mod tests {
                 y: 2000,
                 z: -5,
                 direction: 3,
-                body: 400
+                body: 400,
+                aos: false,
             }
         );
     }

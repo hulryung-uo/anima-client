@@ -6,13 +6,29 @@
 //! the [`Terrain`](anima_core::path::Terrain) trait.
 
 pub mod anim;
+pub mod animdata;
 pub mod art;
+pub mod cliloc;
+pub mod gump;
+pub mod hues;
 pub mod map;
+pub mod mounts;
+pub mod radarcol;
+pub mod sound;
+pub mod texmap;
 pub mod tiledata;
 pub mod uop;
 
 pub use anim::Anim;
+pub use animdata::AnimData;
 pub use art::{Art, Image};
+pub use cliloc::Cliloc;
+pub use gump::Gumps;
+pub use hues::{apply_hue, Hues};
+pub use radarcol::RadarCol;
+pub use sound::Sounds;
+pub use texmap::Texmaps;
+pub use tiledata::TileData;
 pub use map::{LandTile, MapData, StaticTile, MAP_HEIGHT, MAP_WIDTH};
 
 use anima_core::path::Terrain;

@@ -15,8 +15,13 @@ pub mod scene;
 
 use anima_core::agent::{Action, Observation};
 use anima_core::net::outgoing::{
-    build_attack, build_double_click, build_pick_up, build_say, build_single_click,
-    build_status_request, build_target_response, build_war_mode,
+    build_attack, build_book_page_request, build_buy, build_cast_spell, build_double_click,
+    build_drop, build_equip, build_gump_response, build_opl_request, build_party_accept,
+    build_party_decline, build_party_invite, build_party_leave, build_party_message,
+    build_pick_up,
+    build_popup_request, build_popup_select, build_say, build_sell, build_single_click,
+    build_skill_lock, build_status_request, build_target_response, build_unicode_say,
+    build_use_ability, build_use_skill, build_war_mode,
 };
 use anima_core::net::{
     apply_packet, build_client_version, FramingError, LoginConfig, LoginDirective, LoginError,
@@ -73,7 +78,11 @@ impl From<std::io::Error> for DriverError {
 }
 
 const CONNECT_READ_TIMEOUT: Duration = Duration::from_secs(20);
-const PUMP_READ_TIMEOUT: Duration = Duration::from_millis(400);
+// Short so the game loop ticks fast (like ClassicUO's per-frame loop): the
+// movement *pacing* gate (run 200ms / walk 400ms) is only as precise as how
+// often the loop checks it. A long read timeout stalls the loop on the socket
+// when no packet is arriving, which throttled running down to walk speed.
+const PUMP_READ_TIMEOUT: Duration = Duration::from_millis(20);
 
 /// A live connection to a UO server: the game-phase socket plus the world state
 /// it feeds.
@@ -123,16 +132,105 @@ impl Session {
             Action::Walk { dir, run } => {
                 self.walk(*dir, *run)?;
             }
-            Action::Say { text } => self.send(&build_say(text, 0, 0x0034, 3))?,
-            Action::Attack { serial } => self.send(&build_attack(*serial))?,
+            // ASCII stays on the classic 0x03 path; anything else (Korean/한글…)
+            // goes out as UNICODE 0xAD so it isn't mangled to '?'.
+            Action::Say { text } => {
+                if text.is_ascii() {
+                    self.send(&build_say(text, 0, 0x0034, 3))?
+                } else {
+                    self.send(&build_unicode_say(text, 0, 0x0034, 3))?
+                }
+            }
+            Action::PartySay { text } => self.send(&build_party_message(text))?,
+            Action::Attack { serial } => {
+                self.world.last_attack = Some(*serial);
+                self.send(&build_attack(*serial))?
+            }
+            // Pick the best target from the world (last target if still a live
+            // in-view hostile, else nearest in-view hostile) and attack it.
+            Action::AutoAttack => {
+                if let Some(serial) = self.world.auto_attack_target() {
+                    self.world.last_attack = Some(serial);
+                    self.send(&build_attack(serial))?;
+                }
+            }
+            // Re-attack the remembered last target (no-op if none yet).
+            Action::AttackLast => {
+                if let Some(serial) = self.world.last_attack {
+                    self.send(&build_attack(serial))?;
+                }
+            }
             Action::Use { serial } => self.send(&build_double_click(*serial))?,
             Action::Click { serial } => self.send(&build_single_click(*serial))?,
             Action::PickUp { serial, amount } => self.send(&build_pick_up(*serial, *amount))?,
+            Action::Drop { serial, x, y, z, container } => {
+                self.send(&build_drop(*serial, *x, *y, *z, *container))?
+            }
+            Action::Equip { serial, layer } => {
+                let mobile = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                self.send(&build_equip(*serial, *layer, mobile))?
+            }
             Action::WarMode { on } => self.send(&build_war_mode(*on))?,
+            Action::CastSpell { spell } => self.send(&build_cast_spell(*spell))?,
             Action::TargetObject { serial } => self.respond_target(Some(*serial), 0, 0, 0, 0)?,
             Action::TargetGround { x, y, z, graphic } => {
                 self.respond_target(None, *x, *y, *z, *graphic)?
             }
+            Action::BuyItems { vendor, items } => self.send(&build_buy(*vendor, items))?,
+            Action::SellItems { vendor, items } => self.send(&build_sell(*vendor, items))?,
+            Action::GumpResponse { serial, gump_id, button, switches, entries } => {
+                self.send(&build_gump_response(*serial, *gump_id, *button, switches, entries))?;
+                // The gump is consumed once we answer it — drop it from the world so
+                // the renderer/brain stop seeing a stale dialog.
+                self.world.close_gump(*serial);
+            }
+            Action::PopupRequest { serial } => self.send(&build_popup_request(*serial))?,
+            Action::PopupSelect { serial, index } => {
+                self.send(&build_popup_select(*serial, *index))?;
+                // The menu is consumed once we pick — clear it locally so the
+                // renderer/brain stop seeing a stale popup.
+                self.world.popup = None;
+            }
+            Action::BookRequest { serial, pages } => {
+                self.send(&build_book_page_request(*serial, *pages))?;
+            }
+            Action::UseAbility { ability } => {
+                let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                self.send(&build_use_ability(serial, *ability))?;
+            }
+            Action::SkillLock { skill, lock } => {
+                self.send(&build_skill_lock(*skill, *lock))?;
+                // Optimistically reflect the new lock locally so the UI updates
+                // immediately (the server also echoes a 0x3A single update).
+                if let Some(s) = self.world.skills.get_mut(skill) {
+                    s.lock = *lock;
+                }
+            }
+            Action::UseSkill { skill } => self.send(&build_use_skill(*skill))?,
+            Action::OplRequest { serial } => self.send(&build_opl_request(&[*serial]))?,
+            Action::PartyInvite => self.send(&build_party_invite())?,
+            Action::PartyAccept { leader } => {
+                // leader 0 = "the pending inviter" (the UI may omit the serial).
+                let leader = if *leader != 0 { *leader } else { self.world.party.pending_invite.unwrap_or(0) };
+                self.send(&build_party_accept(leader))?;
+                // We answered the invite — drop it locally so the prompt clears even
+                // before the server's member-list update lands.
+                self.world.party.pending_invite = None;
+            }
+            Action::PartyDecline { leader } => {
+                let leader = if *leader != 0 { *leader } else { self.world.party.pending_invite.unwrap_or(0) };
+                self.send(&build_party_decline(leader))?;
+                self.world.party.pending_invite = None;
+            }
+            Action::PartyLeave => {
+                let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                self.send(&build_party_leave(serial))?;
+            }
+            // Auto-walk needs the terrain/map to pathfind + pace steps, which the
+            // headless driver doesn't own. The play-server intercepts `WalkTo`
+            // before it reaches here (see its game loop); this arm is a no-op so
+            // a stray `WalkTo` through the generic path is simply ignored.
+            Action::WalkTo { .. } => {}
         }
         Ok(())
     }
@@ -204,6 +302,12 @@ impl Session {
             Some(0x22) if frame.len() >= 2 => {
                 self.confirms += 1;
                 self.walker.on_confirm(&mut self.world, frame[1]);
+                // A bad/out-of-order confirm desynced us → request a Resync
+                // (ClassicUO ConfirmWalk isBadStep → Send_Resync). Walking stays
+                // gated (Walker.walking_failed) until the server replies with a deny.
+                if let Some(pkt) = self.walker.take_resync() {
+                    self.stream.write_all(&pkt)?;
+                }
             }
             // 0x21 DenyWalk: [id][seq][x:u16][y:u16][dir:u8][z:i8]
             Some(0x21) if frame.len() >= 8 => {

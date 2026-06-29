@@ -11,5 +11,11 @@ license = "MIT OR Apache-2.0"
 crate-type = ["rlib"]
 
 [dependencies]
-# Intentionally zero external deps for now — std only — so the core stays
-# small, builds offline, and compiles cleanly to WASM later.
+# Intentionally near-zero external deps — std only — so the core stays small,
+# builds offline, and compiles cleanly to WASM later.
+#
+# Exception: the UO protocol *mandates* zlib for packed gumps (0xDD). `miniz_oxide`
+# is a tiny, pure-Rust, wasm-clean DEFLATE/zlib implementation (no C, no system
+# zlib), so it keeps the "offline + WASM-clean" guarantee while satisfying the
+# protocol. Used only by `net::game` to inflate 0xDD layout/text blocks.
+miniz_oxide = "0.8"
