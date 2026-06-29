@@ -286,6 +286,12 @@ pub struct World {
     pub recent_damage: Vec<(u64, u32, u16)>,
     /// Monotonic counter assigning each damage event a unique `seq`.
     pub damage_seq: u64,
+    /// Recent character-animation events (0x6E): `(seq, serial, action, frame_count,
+    /// forward, delay)`. `serial` should play animation group `action` once (combat
+    /// swings, bows, get-hit, …). The renderer plays each `seq` it hasn't yet.
+    pub recent_anims: Vec<(u64, u32, u16, u16, bool, u8)>,
+    /// Monotonic counter assigning each animation event a unique `seq`.
+    pub anim_seq: u64,
     /// The current background music track id (0x6D), or `None` if stopped.
     pub current_music: Option<u16>,
     /// Overall light level (0x4F): 0 = brightest day, ~0x1F darkest night.
@@ -348,6 +354,7 @@ fn is_hostile_noto(noto: u8) -> bool {
 }
 
 /// How many recent sound events [`World::push_sound`] keeps.
+const MAX_RECENT_ANIMS: usize = 16;
 const MAX_RECENT_SOUNDS: usize = 16;
 /// How many recent damage events [`World::push_damage`] keeps.
 const MAX_RECENT_DAMAGE: usize = 16;
@@ -453,6 +460,19 @@ impl World {
         let overflow = self.recent_sounds.len().saturating_sub(MAX_RECENT_SOUNDS);
         if overflow > 0 {
             self.recent_sounds.drain(0..overflow);
+        }
+    }
+
+    /// Record a character-animation event (0x6E): `serial` should play animation
+    /// `action` once. Assigns the next monotonic `seq`; keeps the most recent
+    /// [`MAX_RECENT_ANIMS`].
+    pub fn push_anim(&mut self, serial: u32, action: u16, frames: u16, forward: bool, delay: u8) {
+        self.anim_seq += 1;
+        self.recent_anims
+            .push((self.anim_seq, serial, action, frames, forward, delay));
+        let overflow = self.recent_anims.len().saturating_sub(MAX_RECENT_ANIMS);
+        if overflow > 0 {
+            self.recent_anims.drain(0..overflow);
         }
     }
 

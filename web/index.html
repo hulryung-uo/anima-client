@@ -290,6 +290,10 @@
         transform: translateX(-50%); font-size: 10px; color: #8a7a55; }
       /* ---- skills window (0x3A) ---- */
       #skills { top: 60px; right: 16px; width: 280px; display: none; }
+      #statusbar { top: 60px; left: 210px; width: 170px; display: none; }
+      #statusbar.on { display: block; }
+      #statusbar .row { margin: 4px 0 1px; }
+      #st-name { color: #ffd98a; font-weight: 600; }
       #skills.on { display: block; }
       #sk-total { font-size: 11px; color: #8ab4f8; margin-bottom: 6px;
         border-bottom: 1px solid #2a2f37; padding-bottom: 6px; }
@@ -505,6 +509,24 @@
       <div class="gump-body">
         <div id="sk-total">Total: —</div>
         <div id="sk-list"></div>
+      </div>
+    </div>
+    <div id="statusbar" class="gump-win">
+      <div class="gump-title" id="st-title">
+        <span id="st-name">—</span>
+        <span class="gump-close" id="st-close">✕</span>
+      </div>
+      <div class="gump-body">
+        <div class="row"><span class="k">HP</span><span id="st-hp-n">—</span></div>
+        <div class="bar hp"><span id="st-hp"></span></div>
+        <div class="row"><span class="k">Mana</span><span id="st-mana-n">—</span></div>
+        <div class="bar mana"><span id="st-mana"></span></div>
+        <div class="row"><span class="k">Stam</span><span id="st-stam-n">—</span></div>
+        <div class="bar stam"><span id="st-stam"></span></div>
+        <div class="row"><span class="k">STR</span><span id="st-str">—</span></div>
+        <div class="row"><span class="k">DEX</span><span id="st-dex">—</span></div>
+        <div class="row"><span class="k">INT</span><span id="st-int">—</span></div>
+        <div class="row"><span class="k">Gold</span><span id="st-gold">—</span></div>
       </div>
     </div>
     <div id="party" class="gump-win">

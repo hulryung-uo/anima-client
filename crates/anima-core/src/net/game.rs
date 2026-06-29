@@ -49,6 +49,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0xC0 => graphic_effect(world, frame, true)?,
         0xC7 => graphic_effect(world, frame, true)?,
         0x54 => play_sound(world, frame)?,
+        0x6E => character_anim(world, frame)?,
         0x6D => play_music(world, frame)?,
         0x72 => war_mode(world, frame)?,
         0x4F => overall_light(world, frame)?,
@@ -501,6 +502,24 @@ fn play_sound(world: &mut World, frame: &[u8]) -> PResult<()> {
     let x = r.u16()?;
     let y = r.u16()?;
     world.push_sound(sound_id, x, y);
+    Ok(())
+}
+
+/// 0x6E CharacterAnimation — `[id][serial:u32][action:u16][frameCount:u16]
+/// [repeatCount:u16][dir:u8][repeat:u8][delay:u8]` (14 bytes). Tells `serial` to
+/// play animation group `action` once (combat swing, bow shot, get-hit, bow/salute
+/// gesture, …). `dir == 0` plays forward. We queue it; the renderer plays the
+/// matching frames then reverts to the idle/walk pose.
+fn character_anim(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let serial = r.u32()?;
+    let action = r.u16()?;
+    let frame_count = r.u16()?;
+    r.skip(2)?; // repeat count (we play once)
+    let dir = r.u8()?; // 0 = forward
+    r.skip(1)?; // repeat flag
+    let delay = r.u8()?;
+    world.push_anim(serial, action, frame_count, dir == 0, delay);
     Ok(())
 }
 

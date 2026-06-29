@@ -41,6 +41,11 @@ let lastJournalSeq = 0;
 // ---- floating combat damage numbers (0x0B) ----
 const damageFloaters = [];     // { id, sprite, born, ttl }
 let lastDamageSeq = 0;         // highest damage event seq we've already floated
+let lastAnimSeq = 0;           // highest character-animation (0x6E) event we've played
+// Map a 0x6E `action` to the animation group for this body. For people (>=400) the
+// action IS the people group (9=1H attack, 12-14=2H, 18/19=bow, 20=get-hit, …); for
+// monsters/animals the action indexes their own group set — pass it through either way.
+const CHAR_ANIM_FRAME_MS = 110; // per-frame time of a one-shot action (≈ClassicUO)
 const DAMAGE_TTL = 1000;       // ms a number lives (rises + fades over this)
 const DAMAGE_RISE = 20;        // px it rises over its life
 
@@ -441,16 +446,24 @@ function imgAlpha(img, x, y) {
   }
   return data.data[(y * w + x) * 4 + 3];
 }
-function dollHitTest(e) {
+// Topmost worn-layer <img> whose opaque pixel sits under the cursor, or null. Used
+// for both the hover tooltip and per-pixel drag (so you grab the item you point at,
+// not just the topmost layer the way native HTML5 drag would).
+function dollImgAt(e) {
   const doll = document.getElementById("pd-doll");
-  if (!doll) return;
+  if (!doll) return null;
   const r = doll.getBoundingClientRect();
   const ix = Math.round(e.clientX - r.left - 40); // layers are shifted +40px (centering)
   const iy = Math.round(e.clientY - r.top);
   const imgs = doll.querySelectorAll("img[data-serial]");
   for (let i = imgs.length - 1; i >= 0; i--) {     // topmost layer first
-    if (imgAlpha(imgs[i], ix, iy) > 20) { showEquipTip(imgs[i]); return; }
+    if (imgAlpha(imgs[i], ix, iy) > 20) return imgs[i];
   }
+  return null;
+}
+function dollHitTest(e) {
+  const img = dollImgAt(e);
+  if (img) { showEquipTip(img); return; }
   if (pdTipEl && pdTipEl.closest && pdTipEl.closest("#pd-doll")) { pdTipEl = null; hideTip(); }
 }
 
@@ -756,6 +769,7 @@ async function poll() {
     diag.sync = performance.now() - ts;
     markDirty(); // a fresh poll may change tiles/entities → redraw once
     ingestSpeech(scene); // float new speech above its speaker
+    ingestAnims(scene); // play new character animations (0x6E: combat swings, bows…)
     ingestDamage(scene); // float new combat damage numbers (0x0B)
     ingestEffects(scene); // spawn new graphical effects (0x70/0xC0/0xC7)
     refreshTip(); // update the hover tooltip if its OPL just arrived/changed
@@ -1033,7 +1047,12 @@ function makeStretchedTile(x, y, z0, z1, z2, z3, tex, square) {
   const aUV = square ? [0, 0, 1, 0, 1, 1, 0, 1] : [0.5, 0, 1, 0.5, 0.5, 1, 0, 0.5];
   const geometry = new PIXI.Geometry({ attributes: { aPosition, aUV }, indexBuffer: [0, 1, 2, 0, 2, 3] });
   const mesh = new PIXI.Mesh({ geometry, texture: tex });
-  mesh.zIndex = depthZ(x, y, z0 - 2, 0);
+  // Sort a sloped tile by its AverageZ (ClassicUO Land.CalculateAverageZ: the mean
+  // of whichever diagonal corner-pair differs less), NOT the top corner — otherwise
+  // a slope whose top corner is high sorts in front of taller statics (e.g. stairs)
+  // that sit behind it and wrongly covers them. (top=z0, right=z1, bottom=z2, left=z3)
+  const avgZ = Math.abs(z0 - z2) <= Math.abs(z3 - z1) ? (z0 + z2) >> 1 : (z3 + z1) >> 1;
+  mesh.zIndex = depthZ(x, y, avgZ - 2, 0);
   return mesh;
 }
 
@@ -1262,7 +1281,7 @@ function renderFrame(dt) {
   // Request a redraw only when something is actually animating: self moving (camera
   // scrolls), a gliding mobile, or floating speech. Idle ⇒ no redraw ⇒ ~0 GPU.
   if (overLayer.children.length) markDirty();
-  else for (const st of anim.values()) if (st.animMoving) { markDirty(); break; }
+  else for (const st of anim.values()) if (st.animMoving || st.act) { markDirty(); break; }
   drawMobs();
   drawOverheads(now);
   drawDamage(now);
@@ -1462,15 +1481,38 @@ function drawMobs() {
     // War-mode combat stance applies to our own avatar (the only mobile whose war
     // state the server tells us); others fall back to the normal idle stand.
     const inWar = isSelf && !!(scene && scene.war);
-    const group = animGroup(moving, running, mounted, bodyAnim, inWar);
-    const frames = framesFor(bodyAnim, group, d);
-    // animPhase is a 0..1 cycle fraction (advanced per ground covered); map it to
-    // the real frame count. Prefetch the whole cycle so frames don't pop in.
-    const frame = moving ? Math.floor((st.animPhase || 0) * frames) % frames : 0;
-    if (moving && bodyAnim && st.prevFrameKey !== `${group}/${d}`) {
-      // Prefetch the cycle once per (group,dir) change, not every frame.
-      for (let f = 0; f < frames; f++) texFor(`anim/${bodyAnim}/${group}/${d}/${f}.png`);
-      st.prevFrameKey = `${group}/${d}`;
+    // A one-shot 0x6E action (combat swing, bow, get-hit) takes over the pose while
+    // it plays, then expires → revert to walk/stand/war. We only retire it once the
+    // group's real frame count has loaded (so a placeholder count can't cut it short).
+    let group, frames, frame;
+    const act = st.act;
+    if (act && !ghost) {
+      framesFor(bodyAnim, act.group, d); // kick the frame-count/centers load
+      const fk = `${bodyAnim}/${act.group}/${d}`;
+      const loaded = frameCount.has(fk) ? Math.max(1, frameCount.get(fk)) : 0;
+      const fi = Math.floor((performance.now() - act.startMs) / act.frameMs);
+      if (loaded > 0 && fi >= loaded) st.act = null; // played every frame → done
+    }
+    if (st.act && !ghost) {
+      group = act.group;
+      frames = framesFor(bodyAnim, group, d);
+      const fi = Math.max(0, Math.min(frames - 1, Math.floor((performance.now() - act.startMs) / act.frameMs)));
+      frame = act.fwd ? fi : (frames - 1 - fi);
+      if (st.prevFrameKey !== `${group}/${d}`) {
+        for (let f = 0; f < frames; f++) texFor(`anim/${bodyAnim}/${group}/${d}/${f}.png`);
+        st.prevFrameKey = `${group}/${d}`;
+      }
+    } else {
+      group = animGroup(moving, running, mounted, bodyAnim, inWar);
+      frames = framesFor(bodyAnim, group, d);
+      // animPhase is a 0..1 cycle fraction (advanced per ground covered); map it to
+      // the real frame count. Prefetch the whole cycle so frames don't pop in.
+      frame = moving ? Math.floor((st.animPhase || 0) * frames) % frames : 0;
+      if (moving && bodyAnim && st.prevFrameKey !== `${group}/${d}`) {
+        // Prefetch the cycle once per (group,dir) change, not every frame.
+        for (let f = 0; f < frames; f++) texFor(`anim/${bodyAnim}/${group}/${d}/${f}.png`);
+        st.prevFrameKey = `${group}/${d}`;
+      }
     }
     const skinHue = ent && ent.hue ? ent.hue : 0;
     // Compose the character from stable PARTS (mount, body, each worn layer). Two
@@ -2070,6 +2112,27 @@ function drawOverheads(now) {
 }
 
 // Float a red (orange when it's us) damage number over each newly-hit entity.
+// Play new character-animation events (0x6E): a transient action (combat swing, bow,
+// get-hit) on a mobile. We stash it on the entity's anim state; drawMobs plays group
+// `act` once over its frames, then reverts to the idle/walk pose.
+function ingestAnims(s) {
+  if (!s || !s.anims) return;
+  const now = performance.now();
+  const pserial = s.player ? (s.player.serial >>> 0) : 0;
+  for (const ev of s.anims) {
+    const seq = ev.seq | 0;
+    if (seq <= lastAnimSeq) continue;
+    lastAnimSeq = seq;
+    const serial = ev.serial >>> 0;
+    const id = serial === pserial ? "self" : "m" + serial;
+    const st = anim.get(id);
+    if (!st) continue;                               // actor not in view
+    st.act = { group: ev.act | 0, fwd: ev.fwd !== false, startMs: now,
+               frameMs: CHAR_ANIM_FRAME_MS + (ev.delay | 0) * 10 };
+    markDirty();
+  }
+}
+
 function ingestDamage(s) {
   if (!s || !s.damage) return;
   const now = performance.now();
@@ -2340,6 +2403,7 @@ function hud(s) {
     j.appendChild(d);
   }
   if (atBottom) j.scrollTop = j.scrollHeight;
+  refreshStatus(s);   // keep the pull-out status bar live (if open)
 }
 function updateDiag() {
   set("diag", `fps ${diag.fps} · poll ${diag.poll.toFixed(0)}ms · sync ${diag.sync.toFixed(1)}ms · sprites ${diag.tiles} · ents ${diag.ents} · worst ${diag.worstFrame.toFixed(0)}ms`);
@@ -2744,6 +2808,33 @@ function toggleSkills() {
   sk.classList.toggle("on", skillsOn);
   if (skillsOn) { sk._sig = null; refreshSkills(); }
 }
+
+// ---- player status bar (UO's pull-out vitals/stats gump) ----
+// A draggable window with the player's name, HP/Mana/Stam bars + numbers, and
+// STR/DEX/INT/Gold. Toggle with the H key or by clicking the HUD name; its dragged
+// position is remembered across sessions (localStorage), so you can "pull it out"
+// and leave it where you like.
+let statusOn = false;
+function toggleStatus() {
+  statusOn = !statusOn;
+  const el = document.getElementById("statusbar");
+  el.classList.toggle("on", statusOn);
+  if (statusOn) { bringToFront(el); refreshStatus(scene); }
+}
+function closeStatus() {
+  statusOn = false;
+  document.getElementById("statusbar").classList.remove("on");
+}
+function refreshStatus(s) {
+  if (!statusOn || !s || !s.player) return;
+  const p = s.player;
+  set("st-name", p.name || "(unnamed)");
+  set("st-hp-n", `${p.hits | 0} / ${p.hitsMax | 0}`); bar("st-hp", p.hits, p.hitsMax);
+  set("st-mana-n", `${p.mana | 0} / ${p.manaMax | 0}`); bar("st-mana", p.mana, p.manaMax);
+  set("st-stam-n", `${p.stam | 0} / ${p.stamMax | 0}`); bar("st-stam", p.stam, p.stamMax);
+  set("st-str", p.str | 0); set("st-dex", p.dex | 0); set("st-int", p.int | 0);
+  set("st-gold", p.gold | 0);
+}
 function closeSkills() {
   skillsOn = false;
   document.getElementById("skills").classList.remove("on");
@@ -3028,14 +3119,22 @@ function refreshPaperdoll() {
   for (const e of equip) if ((e.anim | 0) > 0) byLayer[e.layer] = e;
   let h = `<div id="pd-doll"><img src="gump/${dollBody}.png${skinQ}" alt="" crossorigin="anonymous">`;
   for (const layer of PAPERDOLL_ORDER) {
+    // Layer 15 (Face) is a server pseudo-item — the face is already part of the body
+    // gump and has no paperdoll art, so drawing it 404'd and showed a broken-image
+    // "?" at the doll's top-left. Skip it here too (the equip list already skips it).
+    if (layer === 15) continue;
     const e = byLayer[layer];
     if (!e) continue;
     const hueQ = e.hue ? `?hue=${e.hue}` : "";
-    // Female items may lack a female gump → fall back to the male offset on error.
-    const fb = female ? ` onerror="this.onerror=null;this.src='gump/${e.anim + MALE_GUMP_OFFSET}.png${hueQ}'"` : "";
+    // Hide any item whose paperdoll gump is missing rather than show a broken "?".
+    // Female items may lack a female gump → fall back to the male offset first.
+    const hide = "this.onerror=null;this.style.display='none'";
+    const onerr = female
+      ? `this.onerror=function(){${hide}};this.src='gump/${e.anim + MALE_GUMP_OFFSET}.png${hueQ}'`
+      : hide;
     // Tag each layer so hovering the figure (per-pixel hit-test) can resolve the item.
-    h += `<img src="gump/${e.anim + gOff}.png${hueQ}" alt="" crossorigin="anonymous"`
-      + ` data-serial="${e.serial >>> 0}" data-layer="${e.layer}" data-hue="${e.hue | 0}"${fb}>`;
+    h += `<img src="gump/${e.anim + gOff}.png${hueQ}" alt="" crossorigin="anonymous" draggable="false"`
+      + ` data-serial="${e.serial >>> 0}" data-layer="${e.layer}" data-g="${e.g}" data-hue="${e.hue | 0}" onerror="${onerr}">`;
   }
   h += "</div>";
   // Stats: our own doll shows the full sheet; another mobile shows only what the
@@ -3115,6 +3214,13 @@ let containerCascade = 0;
 const SPELLBOOK_GRAPHICS = new Set([0x0efa, 0x2252, 0x2253, 0x238c, 0x23a0, 0x2d50, 0x2d9d]);
 function isSpellbook(g) { return SPELLBOOK_GRAPHICS.has((g | 0) & 0xffff); }
 
+// Amount-tiered stackables show a bigger pile as the stack grows, like the real UO
+// client: gold coins (0x0EED) become a small pile (0x0EEE) then a big pile (0x0EEF).
+function stackGraphic(g, amount) {
+  if ((g | 0) === 0x0eed) return amount > 5 ? 0x0eef : amount > 1 ? 0x0eee : 0x0eed;
+  return g | 0;
+}
+
 function openContainer(serial) {
   serial = serial >>> 0;
   const existing = containerWins.get(serial);
@@ -3165,7 +3271,7 @@ function refreshContainer(serial) {
     cell.dataset.g = it.g;
     cell.dataset.amount = (it.amount | 0) || 1;
     const img = document.createElement("img");
-    img.className = "cont-icon"; img.src = `art/static/${it.g}.png`;
+    img.className = "cont-icon"; img.src = `art/static/${stackGraphic(it.g, it.amount | 0)}.png`;
     img.draggable = false;                  // let the cell own the drag
     img.onerror = () => { img.style.visibility = "hidden"; };
     cell.appendChild(img);
@@ -3177,7 +3283,11 @@ function refreshContainer(serial) {
     cell.addEventListener("dblclick", () => {
       // A spellbook opens the spell-casting UI, not a container view.
       if (isSpellbook(it.g)) { if (!spellbookOn) toggleSpellbook(); return; }
-      sendInput("use:" + itemSerial); openContainer(itemSerial);
+      sendInput("use:" + itemSerial);
+      // Only open a container window if this item is ACTUALLY a container (`c`).
+      // Otherwise (bandages, potions, food, …) double-click just uses it — opening
+      // an empty container gump for those was the bug.
+      if (it.c) openContainer(itemSerial);
     });
     body.appendChild(cell);
   }
@@ -3783,6 +3893,12 @@ function onEntityPointerDown(serial, e, isItem) {
   }
   if (clickPend && clickPend.serial === serial) {  // second click in time → double-click
     clearTimeout(clickPend.timer); clickPend = null;
+    // War mode: double-clicking another mobile attacks it (ClassicUO behaviour),
+    // instead of "use" (which would open its paperdoll).
+    if (!isItem && scene && scene.war && (serial >>> 0) !== ((scene.player && scene.player.serial) >>> 0)) {
+      sendInput("attack:" + serial);
+      return;
+    }
     sendInput("use:" + serial);
     // Only world items flagged as CONTAINERS (corpses/chests/bags — scene `c:1`)
     // open a loot window; doors/levers/other double-clickables must not spawn an
@@ -3878,7 +3994,7 @@ let mcPending = null;           // combo captured in the editor's key field, pen
 const RESERVED_CODES = new Set([
   ...Object.keys(KEY_DIR),
   "KeyT", "Enter", "NumpadEnter",
-  "KeyM", "KeyB", "KeyP", "KeyI", "KeyK", "KeyL", "KeyN", "KeyO", "KeyY", "KeyG",
+  "KeyM", "KeyB", "KeyP", "KeyI", "KeyK", "KeyL", "KeyN", "KeyO", "KeyY", "KeyG", "KeyH",
   "Escape",
   "Tab", "Space", // war-mode toggle / auto-attack (handled in the game keydown)
 ]);
@@ -3889,6 +4005,7 @@ const OPEN_FNS = {
   skills: () => toggleSkills(),
   minimap: () => toggleMinimap(),
   worldmap: () => toggleWorldmap(),
+  status: () => toggleStatus(),
 };
 
 function loadMacros() {
@@ -3975,7 +4092,7 @@ function mcBuildParam() {
   else if (t === "war")
     p.innerHTML = '<select id="mc-pv" class="mc-input"><option value="toggle">toggle</option><option value="1">on</option><option value="0">off</option></select>';
   else if (t === "open")
-    p.innerHTML = '<select id="mc-pv" class="mc-input"><option>paperdoll</option><option>backpack</option><option>spellbook</option><option>skills</option><option>minimap</option><option>worldmap</option></select>';
+    p.innerHTML = '<select id="mc-pv" class="mc-input"><option>paperdoll</option><option>backpack</option><option>spellbook</option><option>skills</option><option>minimap</option><option>worldmap</option><option>status</option></select>';
 }
 function setupMacroEditor() {
   const win = document.getElementById("macros");
@@ -4047,6 +4164,7 @@ function setupInput() {
     if (e.code === "KeyO") { e.preventDefault(); toggleMacros(); return; }        // O = macro editor
     if (e.code === "KeyY") { e.preventDefault(); toggleParty(); return; }          // Y = party panel
     if (e.code === "KeyG") { e.preventDefault(); requestAllNames(); return; }      // G = show all names
+    if (e.code === "KeyH") { e.preventDefault(); toggleStatus(); return; }          // H = status bar
     if (e.code === "Escape" && partyOn) { e.preventDefault(); closeParty(); return; }
     if (e.code === "Escape" && macrosOn) { e.preventDefault(); closeMacros(); return; }
     if (e.code === "Escape" && wmOn) { e.preventDefault(); closeWorldmap(); return; }
@@ -4110,6 +4228,16 @@ function setupInput() {
     if (e.button !== 0) return;
     if (!(scene && scene.target && scene.target.active === 1) || targetUIHidden) return;
     if (performance.now() - targetConsumedAt < 200) return; // a mob/item already answered
+    // Our own avatar is always at the canvas centre but isn't a click target (so it
+    // never eats steering). During a target cursor, a click on that centre band IS
+    // self — answer with target:<self> so bandages / beneficial spells work on us.
+    const r = canvas.getBoundingClientRect();
+    const dxp = (e.clientX - r.left) - r.width / 2, dyp = (e.clientY - r.top) - r.height / 2;
+    if (scene.player && Math.abs(dxp) < 28 && dyp > -68 && dyp < 14) {
+      sendInput("target:" + (scene.player.serial >>> 0));
+      endTargetUI();
+      return;
+    }
     const g = clientToGlobal(e.clientX, e.clientY);
     const t = groundTileAt(g.x, g.y);
     sendInput(`targetxy:${t.x}:${t.y}:${t.z}:0`);
@@ -4224,6 +4352,20 @@ function setupInput() {
   makeDraggable(document.getElementById("spellbook"), document.getElementById("sb-title"));
   document.getElementById("sk-close").addEventListener("click", closeSkills);
   makeDraggable(document.getElementById("skills"), document.getElementById("sk-title"));
+  // Status bar: ✕ closes, title drags; remember the dragged position across sessions.
+  const stEl = document.getElementById("statusbar"), stTitle = document.getElementById("st-title");
+  document.getElementById("st-close").addEventListener("click", closeStatus);
+  makeDraggable(stEl, stTitle);
+  try {
+    const sp = JSON.parse(localStorage.getItem("anima.statusPos") || "null");
+    if (sp && sp.left) { stEl.style.left = sp.left; stEl.style.top = sp.top; stEl.style.right = "auto"; }
+  } catch (_) { /* ignore bad/missing saved position */ }
+  stTitle.addEventListener("mouseup", () => {
+    if (stEl.style.left) localStorage.setItem("anima.statusPos", JSON.stringify({ left: stEl.style.left, top: stEl.style.top }));
+  });
+  // Clicking the HUD name "pulls out" the movable status bar.
+  const pn = document.getElementById("pname");
+  if (pn) { pn.style.cursor = "pointer"; pn.title = "Open status bar (H)"; pn.addEventListener("click", toggleStatus); }
   wireSkills();
   loadSkillButtons();   // restore any skill buttons the user pulled out previously
   document.getElementById("pt-close").addEventListener("click", closeParty);
@@ -4253,6 +4395,18 @@ function setupInput() {
   // directly under the cursor (the intuitive UO way), in addition to the list below.
   pdb.addEventListener("mousemove", (e) => {
     if (e.target.closest && e.target.closest("#pd-doll")) dollHitTest(e);
+  });
+  // Drag a worn item OFF the figure: per-pixel hit-test picks the item under the
+  // cursor (not just the topmost layer), then arms the shared pointer-drag — release
+  // over a bag/ground unequips it there; over the doll re-equips. Self doll only.
+  pdb.addEventListener("mousedown", (e) => {
+    if (e.button !== 0 || pdTarget != null) return;        // left only, our own doll
+    if (!(e.target.closest && e.target.closest("#pd-doll"))) return;
+    const img = dollImgAt(e);
+    if (!img) return;
+    e.preventDefault();
+    groundDrag = { serial: (+img.dataset.serial) >>> 0, g: +img.dataset.g | 0,
+                   sx: e.clientX, sy: e.clientY, started: false };
   });
   pdb.addEventListener("mouseleave", () => {
     if (pdTipEl && pdTipEl.closest && pdTipEl.closest("#pd-doll")) { pdTipEl = null; hideTip(); }

@@ -64,6 +64,22 @@ fn delta(d: u8) -> (i64, i64) {
     }
 }
 
+/// Inverse of [`delta`]: a one-tile (dx, dy) step → its UO direction, or `None` if
+/// not a unit step. Used to pick the approach direction for [`calculate_new_z`].
+fn dir_from_delta(dx: i64, dy: i64) -> Option<u8> {
+    match (dx, dy) {
+        (0, -1) => Some(0),
+        (1, -1) => Some(1),
+        (1, 0) => Some(2),
+        (1, 1) => Some(3),
+        (0, 1) => Some(4),
+        (-1, 1) => Some(5),
+        (-1, 0) => Some(6),
+        (-1, -1) => Some(7),
+        _ => None,
+    }
+}
+
 /// Can a body at (fx, fy, fz) step in direction `dir`? Faithful to ClassicUO
 /// `CanWalk`'s per-tile test: the destination must resolve a standing Z via
 /// [`calculate_new_z`] (the full CalculateNewZ — surfaces/bridges/headroom and
@@ -1019,7 +1035,10 @@ pub fn build_scene(
             json!({
                 "serial": it.serial, "cont": it.container,
                 "g": it.graphic, "amount": it.amount,
-                "x": it.pos.x, "y": it.pos.y, "hue": it.hue
+                "x": it.pos.x, "y": it.pos.y, "hue": it.hue,
+                // Is this nested item itself a container? Only then should a
+                // double-click open a container window (bandages/potions/etc. must not).
+                "c": item_is_cont(it.graphic) as u8
             })
         })
         .collect();
@@ -1151,6 +1170,19 @@ pub fn build_scene(
                 } else {
                     land.z as i32 // unwalkable → terrain baseline
                 };
+                // For the player's immediate neighbours — the only tiles a single
+                // step can reach — replace the cheap hint with the AUTHORITATIVE
+                // CalculateNewZ (the same math the server uses). This makes the climb
+                // prediction exact, so a stair/ramp rises *during* the glide instead
+                // of the avatar sliding flat then popping up a poll later. Only 8 extra
+                // tiles per build, so the full-flood cost the cheap path avoids stays away.
+                let sz = if (-1..=1).contains(&dx) && (-1..=1).contains(&dy) && (dx != 0 || dy != 0) {
+                    dir_from_delta(dx, dy)
+                        .and_then(|zd| calculate_new_z(map, x, y, pz, zd))
+                        .unwrap_or(sz)
+                } else {
+                    sz
+                };
                 let _ = write!(
                     tiles,
                     "{{\"w\":{},\"z\":{},\"g\":{},\"tx\":{},\"c\":[{},{},{}],\"h\":{},\"sz\":{}}},",
@@ -1244,6 +1276,17 @@ pub fn build_scene(
         .map(|&(seq, id, x, y)| json!({ "seq": seq, "id": id, "x": x, "y": y }))
         .collect();
     let sounds = serde_json::to_string(&sounds).unwrap_or_else(|_| "[]".into());
+    // Recent character-animation events (0x6E): play group `act` on `serial` once
+    // (combat swings, bows, get-hit). The client plays each `seq` newer than its last.
+    let anims: Vec<Value> = s
+        .world
+        .recent_anims
+        .iter()
+        .map(|&(seq, serial, act, frames, fwd, delay)| {
+            json!({ "seq": seq, "serial": serial, "act": act, "frames": frames, "fwd": fwd, "delay": delay })
+        })
+        .collect();
+    let anims = serde_json::to_string(&anims).unwrap_or_else(|_| "[]".into());
     // Recent damage events (0x0B): `serial` took `amt` HP. The client floats a
     // number over the target for each `seq` newer than the last it showed.
     let damage: Vec<Value> = s
@@ -1337,7 +1380,7 @@ pub fn build_scene(
         "{{\"player\":{player},\
          \"map\":{{\"cx\":{px},\"cy\":{py},\"radius\":{RADIUS},\"tiles\":[{tiles}],\"maxZ\":{max_z},\"dbg\":{dbg}}},\
          \"statics\":[{statics}],\"mobiles\":{mobiles},\"items\":{items},\"contItems\":{cont_items},\
-         \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"damage\":{damage},\"effects\":{effects},\"music\":{music},\
+         \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"damage\":{damage},\"effects\":{effects},\"music\":{music},\
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
          \"popup\":{popup},\"book\":{book},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"aos\":{aos},\
