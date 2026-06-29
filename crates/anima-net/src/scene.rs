@@ -33,13 +33,22 @@ pub fn tile_walkable(world: &World, map: &mut MapData, x: i64, y: i64, current_z
     if map.walkable_z(x as u32, y as u32, current_z).is_none() {
         return false;
     }
+    let ghost = player_is_ghost(world);
     !world.items.values().any(|it| {
         it.container.is_none()
             && it.pos.x as i64 == x
             && it.pos.y as i64 == y
             && map.item_blocks(it.graphic, it.pos.z as i32, current_z)
+            && !(ghost && map.item_flags(it.graphic) & TILEFLAG_DOOR != 0)
     })
 }
+
+/// A dead player is a ghost (human ghost body 402/403). Ghosts walk through doors.
+fn player_is_ghost(world: &World) -> bool {
+    world.player_mobile().is_some_and(|m| matches!(m.body, 402 | 403))
+}
+/// `tiledata.mul` flag bit for a door (`TileFlag.Door`). Ghosts pass through these.
+const TILEFLAG_DOOR: u64 = 0x2000_0000;
 
 /// UO direction (0=N..7=NW) → (dx, dy) tile delta.
 fn delta(d: u8) -> (i64, i64) {
@@ -70,11 +79,13 @@ fn step_ok(world: &World, map: &mut MapData, fx: i64, fy: i64, fz: i32, dir: u8)
     if calculate_new_z(map, tx, ty, fz, dir).is_none() {
         return false;
     }
+    let ghost = player_is_ghost(world);
     !world.items.values().any(|it| {
         it.container.is_none()
             && it.pos.x as i64 == tx
             && it.pos.y as i64 == ty
             && map.item_blocks(it.graphic, it.pos.z as i32, fz)
+            && !(ghost && map.item_flags(it.graphic) & TILEFLAG_DOOR != 0)
     })
 }
 

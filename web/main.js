@@ -741,6 +741,7 @@ async function poll() {
     refreshPaperdoll();   // keep the paperdoll live (equip/stats change)
     if (spellbookOn) refreshSpellMana(); // keep the spellbook's mana readout live
     if (skillsOn) refreshSkills();  // keep the skills window live (values/locks change)
+    checkSkillGains(scene);  // announce skill base changes as journal system messages
     refreshParty();   // keep the party panel live + surface incoming invites (0xBF/0x06)
     refreshContainers();  // keep open container windows live (items move/disappear)
     refreshShop(scene);   // vendor buy/sell window (auto-opens on scene.shop)
@@ -1427,17 +1428,22 @@ function drawMobs() {
     const ent = isSelf ? scene.player : mobById.get(id);
     const mounted = !!(ent && ent.mounted);
     const mountAnim = (ent && (ent.mountAnim | 0)) || 0;
+    // A dead human is a ghost (body 402/403). Those ghost-body ids carry no animation
+    // frames in the muls, so animate the ghost with the LIVING human body (402→400,
+    // 403→401) rendered translucent, equipment hidden (UO shows ghosts bare).
+    const ghost = isGhostBody(st.body);
+    const bodyAnim = ghost ? (st.body === 403 ? 401 : 400) : (st.body | 0);
     // War-mode combat stance applies to our own avatar (the only mobile whose war
     // state the server tells us); others fall back to the normal idle stand.
     const inWar = isSelf && !!(scene && scene.war);
-    const group = animGroup(moving, running, mounted, st.body | 0, inWar);
-    const frames = framesFor(st.body, group, d);
+    const group = animGroup(moving, running, mounted, bodyAnim, inWar);
+    const frames = framesFor(bodyAnim, group, d);
     // animPhase is a 0..1 cycle fraction (advanced per ground covered); map it to
     // the real frame count. Prefetch the whole cycle so frames don't pop in.
     const frame = moving ? Math.floor((st.animPhase || 0) * frames) % frames : 0;
-    if (moving && st.body && st.prevFrameKey !== `${group}/${d}`) {
+    if (moving && bodyAnim && st.prevFrameKey !== `${group}/${d}`) {
       // Prefetch the cycle once per (group,dir) change, not every frame.
-      for (let f = 0; f < frames; f++) texFor(`anim/${st.body}/${group}/${d}/${f}.png`);
+      for (let f = 0; f < frames; f++) texFor(`anim/${bodyAnim}/${group}/${d}/${f}.png`);
       st.prevFrameKey = `${group}/${d}`;
     }
     const skinHue = ent && ent.hue ? ent.hue : 0;
@@ -1463,7 +1469,7 @@ function drawMobs() {
     };
     // MOUNT (behind the rider): the layer-25 item's AnimID animated as an animal
     // (walk=0/run=1/stand=2) driven by the rider's movement; rider uses ONMOUNT groups.
-    if (mountAnim > 0) {
+    if (mountAnim > 0 && !ghost) {
       const mg = moving ? (running ? 1 : 0) : 2;
       const mFrames = framesFor(mountAnim, mg, d);
       const mFrame = moving ? Math.floor((st.animPhase || 0) * mFrames) % mFrames : 0;
@@ -1474,14 +1480,18 @@ function drawMobs() {
       part("mount", `anim/${mountAnim}/${mg}/${d}/${mFrame}.png`, -1, false, mountAnim, mg, mFrame);
     }
     // BODY (hued by skin).
-    part("body", st.body ? `anim/${st.body}/${group}/${d}/${frame}.png${skinHue ? `?hue=${skinHue}` : ""}` : null, 0, true, st.body, group, frame);
+    part("body", bodyAnim ? `anim/${bodyAnim}/${group}/${d}/${frame}.png${skinHue ? `?hue=${skinHue}` : ""}` : null, 0, true, bodyAnim, group, frame);
     // WORN LAYERS (clothes/hair/beard), each hued, over the body in the facing's UO
     // draw order. Layers not in that order (backpack 21, mount 25) are skipped —
     // the mount is drawn separately as the animal above.
     const byLayer = {};
     if (ent && ent.equip) for (const e of ent.equip) byLayer[e.layer] = e;
+    // A ghost wears only the (translucent) death robe — layer 22 OuterTorso. Living
+    // mobiles show every worn layer. The robe's anim aligns because we drew the body
+    // with the living human anim (bodyAnim) above.
     const worn = st.body && ent && ent.equip
-      ? ent.equip.filter((e) => (e.anim | 0) > 0 && layerRank(e.layer, d) >= 0 && !isCovered(byLayer, e.layer)) : null;
+      ? ent.equip.filter((e) => (e.anim | 0) > 0 && layerRank(e.layer, d) >= 0 && !isCovered(byLayer, e.layer)
+          && (!ghost || e.layer === 22)) : null;
     if (worn && worn.length) {
       // Prefetch every layer's WHOLE frame cycle once per (group,dir) change, so the
       // full dressed frame is decoded before it's shown (kills per-frame layer lag).
@@ -1708,6 +1718,108 @@ const PLACES = [
 let wmMarkers = [];
 try { wmMarkers = JSON.parse(localStorage.getItem("anima.markers") || "[]"); } catch (e) { wmMarkers = []; }
 const saveMarkers = () => { try { localStorage.setItem("anima.markers", JSON.stringify(wmMarkers)); } catch (e) {} };
+
+// ---- world-map points of interest (towns, banks, shops, dungeons, …) ----
+// Server endpoint /pois.json → [{x,y,cat,name}, …]; fetched once, cached here.
+let wmPois = null, wmPoisLoading = false;
+// Map the ~73 raw `cat` strings into a handful of display groups. Any category
+// not listed here falls into "Other" automatically (see buildPoiFilter()).
+const POI_GROUPS = {
+  Travel:   ["moongate", "gate", "teleporter", "docks", "shipwright", "bridge", "exit", "stairs", "customs", "stable", "gypsystable"],
+  Services: ["bank", "gypsybank", "inn", "tavern", "healer", "mage", "library", "vet", "fortuneteller", "bard", "painter", "theater", "beekeeper"],
+  Shops:    ["provisioner", "tailor", "blacksmith", "baker", "butcher", "jeweler", "carpenter", "tinker", "bowyer", "fletcher", "tanner", "arms", "reagents", "market"],
+  Guilds:   ["guild", "warriors guild", "miners guild", "fishermans guild", "bardic guild", "armourers guild", "weapons guild", "thieves guild", "merchants guild", "tinkers guild", "chivalrykeeper", "rogues guild", "blacksmiths guild", "cavalry guild", "mages guild", "illusionists guild", "archers guild", "sorcerers guild", "holymage", "gypsymaiden"],
+  Places:   ["town", "shrine", "dungeon", "champion", "landmark", "scenic", "ruins", "graveyard", "point of interest", "terrain", "body of water", "island", "marble patio", "minax's fortress"],
+};
+const POI_CAT_GROUP = {};   // cat → group name, derived from POI_GROUPS
+for (const g in POI_GROUPS) for (const c of POI_GROUPS[g]) POI_CAT_GROUP[c] = g;
+const POI_GROUP_ORDER = ["Travel", "Services", "Shops", "Guilds", "Places", "Other"];
+// A sensible default-on set so the map isn't cluttered on first open.
+const POI_DEFAULTS = ["moongate", "bank", "town", "shrine", "dungeon", "healer", "inn"];
+let wmPoiCats = null;       // Set of enabled categories, persisted to localStorage
+try { const s = JSON.parse(localStorage.getItem("anima.poiCats")); if (Array.isArray(s)) wmPoiCats = new Set(s); } catch (e) {}
+if (!wmPoiCats) wmPoiCats = new Set(POI_DEFAULTS);
+const savePoiCats = () => { try { localStorage.setItem("anima.poiCats", JSON.stringify([...wmPoiCats])); } catch (e) {} };
+let wmPoiExpanded = new Set();   // which filter groups are expanded in the panel
+// Distinct, readable colors for common categories; everything else gets a stable
+// hash-based hue so each category is still visually separable.
+const POI_COLORS = {
+  moongate: "#b06aff", gate: "#9d7bff", teleporter: "#7c5cff", bank: "#ffd24a",
+  gypsybank: "#e6b800", town: "#ffe08a", shrine: "#7fd8ff", dungeon: "#ff5c5c",
+  champion: "#ff2e6b", healer: "#5cff8f", inn: "#ffb066", tavern: "#e0934a",
+  mage: "#7aa7ff", provisioner: "#c9a06a", tailor: "#ff8fd0", blacksmith: "#9aa3ad",
+  docks: "#4ad0c0", shipwright: "#3fb0c8", stable: "#c8a25a", library: "#9ad06a",
+  graveyard: "#9a9aa8", landmark: "#d0c060", scenic: "#7fd09a", ruins: "#b08a6a",
+};
+function poiColor(cat) {
+  if (POI_COLORS[cat]) return POI_COLORS[cat];
+  let h = 0; for (let i = 0; i < cat.length; i++) h = (h * 31 + cat.charCodeAt(i)) >>> 0;
+  return `hsl(${h % 360}, 62%, 62%)`;
+}
+function loadPois() {
+  if (wmPois || wmPoisLoading) return;       // fetch only once; cache the result
+  wmPoisLoading = true;
+  fetch("pois.json").then(r => r.ok ? r.json() : Promise.reject()).then(d => {
+    wmPois = Array.isArray(d) ? d : [];
+    wmPoisLoading = false;
+    buildPoiFilter();
+    if (wmOn) drawWorldmap();
+  }).catch(() => { wmPoisLoading = false; wmPois = []; });   // tolerate failure → just skip POIs
+}
+// Build the category-filter panel from the categories actually present, grouped.
+function buildPoiFilter() {
+  const host = document.getElementById("wmfilter");
+  if (!host || !wmPois) return;
+  const counts = {};
+  for (const p of wmPois) { const c = (p.cat || "other"); counts[c] = (counts[c] || 0) + 1; }
+  const groups = {};
+  for (const c of Object.keys(counts)) {
+    const g = POI_CAT_GROUP[c] || "Other";
+    (groups[g] = groups[g] || []).push(c);
+  }
+  host.innerHTML = "";
+  const title = document.createElement("div"); title.className = "wmf-title"; title.textContent = "POIs";
+  host.appendChild(title);
+  for (const g of POI_GROUP_ORDER) {
+    const cats = groups[g]; if (!cats) continue;
+    cats.sort();
+    const on = cats.filter(c => wmPoiCats.has(c)).length;
+    const grow = document.createElement("div"); grow.className = "wmf-grow";
+    const gcb = document.createElement("input"); gcb.type = "checkbox";
+    gcb.checked = on === cats.length; gcb.indeterminate = on > 0 && on < cats.length;
+    gcb.title = "toggle all in group";
+    gcb.addEventListener("change", () => {
+      if (gcb.checked) cats.forEach(c => wmPoiCats.add(c)); else cats.forEach(c => wmPoiCats.delete(c));
+      savePoiCats(); buildPoiFilter(); if (wmOn) drawWorldmap();
+    });
+    const head = document.createElement("div"); head.className = "wmf-ghead";
+    const exp = document.createElement("span"); exp.className = "wmf-exp"; exp.textContent = wmPoiExpanded.has(g) ? "▾" : "▸";
+    const lbl = document.createElement("span"); lbl.className = "wmf-glabel"; lbl.textContent = `${g} (${on}/${cats.length})`;
+    head.appendChild(exp); head.appendChild(lbl);
+    head.addEventListener("click", () => {
+      if (wmPoiExpanded.has(g)) wmPoiExpanded.delete(g); else wmPoiExpanded.add(g);
+      buildPoiFilter();
+    });
+    grow.appendChild(gcb); grow.appendChild(head);
+    host.appendChild(grow);
+    if (wmPoiExpanded.has(g)) {
+      const body = document.createElement("div"); body.className = "wmf-body";
+      for (const c of cats) {
+        const row = document.createElement("label"); row.className = "wmf-crow";
+        const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = wmPoiCats.has(c);
+        cb.addEventListener("change", () => {
+          if (cb.checked) wmPoiCats.add(c); else wmPoiCats.delete(c);
+          savePoiCats(); buildPoiFilter(); if (wmOn) drawWorldmap();
+        });
+        const sw = document.createElement("span"); sw.className = "wmf-sw"; sw.style.background = poiColor(c);
+        const nm = document.createElement("span"); nm.className = "wmf-cname"; nm.textContent = `${c} (${counts[c]})`;
+        row.appendChild(cb); row.appendChild(sw); row.appendChild(nm);
+        body.appendChild(row);
+      }
+      host.appendChild(body);
+    }
+  }
+}
 function loadWorldmap() {
   if (wmImg || wmLoading) return;
   wmLoading = true;
@@ -1731,7 +1843,7 @@ function openWorldmap() {
   wmOn = true; wmPan = { x: 0, y: 0 };       // re-center on the player
   document.getElementById("worldmap").classList.add("on");
   held.clear();
-  loadWorldmap(); drawWorldmap();
+  loadWorldmap(); loadPois(); buildPoiFilter(); drawWorldmap();
 }
 function closeWorldmap() { wmOn = false; document.getElementById("worldmap").classList.remove("on"); }
 function toggleWorldmap() { wmOn ? closeWorldmap() : openWorldmap(); }
@@ -1754,8 +1866,14 @@ function drawWorldmap() {
   if (!wmOn) return;
   const cv = document.getElementById("wmcanvas");
   const w = cv.clientWidth, h = cv.clientHeight;
-  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  // Back the canvas at the device pixel ratio (retina) so labels/markers render at
+  // native resolution instead of being CSS-upscaled (the source of the blur). The
+  // context is scaled by dpr so all drawing below stays in CSS-pixel coordinates.
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+  if (cv.width !== bw || cv.height !== bh) { cv.width = bw; cv.height = bh; }
   const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   // Fill out-of-map area with sea, not black, so the iso diamond's corners blend.
   ctx.fillStyle = wmOcean; ctx.fillRect(0, 0, w, h);
   if (!wmImg) { ctx.fillStyle = "#9aa0a6"; ctx.font = "14px monospace"; ctx.fillText("rendering world map…", 16, 26); return; }
@@ -1778,6 +1896,24 @@ function drawWorldmap() {
       if (sx < 0 || sy < 0 || sx > w || sy > h) continue;
       ctx.strokeStyle = "rgba(0,0,0,.85)"; ctx.strokeText(name, sx, sy);
       ctx.fillStyle = "#ffe08a"; ctx.fillText(name, sx, sy);
+    }
+  }
+  // points of interest (filtered by enabled category); drawn UNDER the user
+  // markers + player dot so those stay on top. Draw-only — never blocks clicks.
+  if (wmPois && wmPois.length) {
+    const showLabels = s >= 1.2;
+    ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.font = "10px ui-monospace, monospace";
+    for (const p of wmPois) {
+      const cat = p.cat || "other";
+      if (!wmPoiCats.has(cat)) continue;
+      const [sx, sy] = wmWorldToScreen(p.x, p.y, w, h);
+      if (sx < -8 || sy < -8 || sx > w + 8 || sy > h + 8) continue;
+      ctx.fillStyle = poiColor(cat); ctx.strokeStyle = "#0a0e12"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(sx, sy, 3, 0, 7); ctx.fill(); ctx.stroke();
+      if (showLabels && p.name) {   // labels only when zoomed in + a name exists
+        ctx.lineWidth = 2.5; ctx.strokeStyle = "rgba(0,0,0,.85)";
+        ctx.strokeText(p.name, sx + 5, sy); ctx.fillStyle = "#dfe6ee"; ctx.fillText(p.name, sx + 5, sy);
+      }
     }
   }
   // user markers: a cyan pin + label, drawn over everything.
@@ -1827,6 +1963,15 @@ function wmRemoveMarkerNear(sx, sy, w, h) {
 // ---- overhead speech (ClassicUO MessageManager / overhead text) ----
 const OVERHEAD_HEAD = 68;   // px above the feet anchor — clears the head (incl. hats/hair)
 
+// Client-side system messages (skill gains, etc.) that aren't in the server journal.
+// They render after the server's journal lines in `hud()`. Capped FIFO so old notices
+// don't pile up forever at the bottom.
+const localJournal = [];           // { text } — newest last
+const LOCAL_JOURNAL_MAX = 40;
+function addSysMessage(text) {
+  localJournal.push({ text });
+  while (localJournal.length > LOCAL_JOURNAL_MAX) localJournal.shift();
+}
 // Scan the journal for new lines and float each above its speaker once.
 let journalPrimed = false;
 function ingestSpeech(s) {
@@ -2159,6 +2304,13 @@ function hud(s) {
     if (!line.text) continue;
     const d = document.createElement("div");
     d.textContent = line.name ? `${line.name}: ${line.text}` : line.text;
+    j.appendChild(d);
+  }
+  // Client-side system notices (skill gains/losses) after the server lines.
+  for (const line of localJournal) {
+    const d = document.createElement("div");
+    d.className = "jrnl-sys";
+    d.textContent = line.text;
     j.appendChild(d);
   }
   if (atBottom) j.scrollTop = j.scrollHeight;
@@ -2571,6 +2723,33 @@ function closeSkills() {
   document.getElementById("skills").classList.remove("on");
 }
 // Rebuild the list only when the skill data changes (value/base/cap/lock or set).
+// ---- skill-gain / loss system messages ----
+// UO never announced skill changes in T2A's silent way the renderer showed; the
+// traditional client prints "Your skill in X has increased by 0.1." when a skill's
+// BASE rises (ClassicUO diffs the 0x3A base value — `v` includes item/stat bonuses
+// that fluctuate, so we track `b`). We append these as local journal lines.
+const prevSkillBase = new Map();   // skill id -> last seen base (tenths)
+let skillGainPrimed = false;       // skip the first scene so login isn't a flood
+function checkSkillGains(s) {
+  const skills = (s && s.skills) || [];
+  if (!skillGainPrimed) {          // record baselines once; announce only later changes
+    for (const sk of skills) prevSkillBase.set(sk.id | 0, sk.b | 0);
+    skillGainPrimed = true;
+    return;
+  }
+  for (const sk of skills) {
+    const id = sk.id | 0, b = sk.b | 0;
+    const prev = prevSkillBase.get(id);
+    if (prev == null) { prevSkillBase.set(id, b); continue; }
+    if (b !== prev) {
+      const delta = (Math.abs(b - prev) / 10).toFixed(1);
+      const verb = b > prev ? "increased" : "decreased";
+      addSysMessage(`Your skill in ${skillName(id)} has ${verb} by ${delta}.`);
+      prevSkillBase.set(id, b);
+    }
+  }
+}
+
 function refreshSkills() {
   if (!skillsOn) return;
   const win = document.getElementById("skills");
@@ -2671,6 +2850,22 @@ function makeSkillButton(id, x, y) {
   return el;
 }
 function addSkillButton(id) { makeSkillButton(id, null, null); saveSkillButtons(); }
+
+// "Show all names" (G key — ClassicUO's Ctrl+Shift all-names): single-click every
+// in-view character — self, players, NPCs and animals — so the server returns each
+// name. The names arrive as overhead text (shown regardless of the name-label
+// setting) and also fill the persistent labels. Capped so it never floods the link.
+function requestAllNames() {
+  if (!scene) return;
+  let n = 0;
+  if (scene.player) { sendInput("click:" + (scene.player.serial >>> 0)); n++; }
+  for (const m of scene.mobiles || []) {
+    if (n >= 60) break;
+    sendInput("click:" + (m.serial >>> 0));
+    n++;
+  }
+  setStatus(`querying ${n} name${n === 1 ? "" : "s"}…`);
+}
 function loadSkillButtons() {
   let arr = [];
   try { arr = JSON.parse(localStorage.getItem(SKILLBTN_KEY) || "[]"); } catch (e) { arr = []; }
@@ -3652,7 +3847,7 @@ let mcPending = null;           // combo captured in the editor's key field, pen
 const RESERVED_CODES = new Set([
   ...Object.keys(KEY_DIR),
   "KeyT", "Enter", "NumpadEnter",
-  "KeyM", "KeyB", "KeyP", "KeyI", "KeyK", "KeyL", "KeyN", "KeyO", "KeyY",
+  "KeyM", "KeyB", "KeyP", "KeyI", "KeyK", "KeyL", "KeyN", "KeyO", "KeyY", "KeyG",
   "Escape",
   "Tab", "Space", // war-mode toggle / auto-attack (handled in the game keydown)
 ]);
@@ -3820,6 +4015,7 @@ function setupInput() {
     if (e.code === "KeyN") { e.preventDefault(); toggleMute(); return; }
     if (e.code === "KeyO") { e.preventDefault(); toggleMacros(); return; }        // O = macro editor
     if (e.code === "KeyY") { e.preventDefault(); toggleParty(); return; }          // Y = party panel
+    if (e.code === "KeyG") { e.preventDefault(); requestAllNames(); return; }      // G = show all names
     if (e.code === "Escape" && partyOn) { e.preventDefault(); closeParty(); return; }
     if (e.code === "Escape" && macrosOn) { e.preventDefault(); closeMacros(); return; }
     if (e.code === "Escape" && wmOn) { e.preventDefault(); closeWorldmap(); return; }

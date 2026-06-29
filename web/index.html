@@ -100,6 +100,26 @@
         font-size: 11px; color: #8a929c; background: rgba(11,13,16,.7);
         padding: 4px 10px; border-radius: 6px; white-space: nowrap;
       }
+      /* world-map POI category filter (compact dark gump panel) */
+      #wmfilter {
+        position: absolute; top: 52px; left: 8px; z-index: 2;
+        width: 172px; max-height: calc(100% - 96px); overflow-y: auto;
+        background: rgba(11,13,16,.84); border: 1px solid #2a2f37; border-radius: 8px;
+        padding: 6px 8px; font: 11px ui-monospace, monospace; color: #cfd6df;
+        box-shadow: 0 4px 18px rgba(0,0,0,.5);
+      }
+      #wmfilter:empty { display: none; }
+      .wmf-title { font-weight: 700; color: #8ab4f8; letter-spacing: .04em; margin-bottom: 4px; }
+      .wmf-grow { display: flex; align-items: center; gap: 5px; padding: 2px 0; }
+      .wmf-grow input[type=checkbox] { width: 13px; height: 13px; cursor: pointer; margin: 0; flex: none; }
+      .wmf-ghead { display: flex; align-items: center; gap: 4px; cursor: pointer; flex: 1; user-select: none; }
+      .wmf-exp { width: 10px; color: #8a929c; }
+      .wmf-glabel { color: #e8ecf2; }
+      .wmf-body { padding: 1px 0 3px 16px; }
+      .wmf-crow { display: flex; align-items: center; gap: 5px; padding: 1px 0; cursor: pointer; }
+      .wmf-crow input[type=checkbox] { width: 12px; height: 12px; cursor: pointer; margin: 0; flex: none; }
+      .wmf-sw { width: 9px; height: 9px; border-radius: 50%; border: 1px solid #0a0e12; flex: none; }
+      .wmf-cname { color: #b6bcc6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       #targethint {
         position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
         display: none; z-index: 15; padding: 5px 14px; border-radius: 6px;
@@ -162,6 +182,7 @@
         max-height: 34vh; overflow-y: auto;          /* scrolls when it grows */
       }
       #journal div { margin: 2px 0; color: #b6bcc6; white-space: normal; overflow-wrap: anywhere; }
+      #journal div.jrnl-sys { color: #6fb6ff; }   /* client system notices (skill gains, …) */
       #status { margin-top: 10px; color: #6b7280; font-size: 11px; }
       .legend { margin-top: 10px; font-size: 11px; color: #6b7280; }
       .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin: 0 4px -1px 8px; }
@@ -425,6 +446,7 @@
     <div id="abilities"></div>
     <div id="worldmap">
       <canvas id="wmcanvas"></canvas>
+      <div id="wmfilter"></div>
       <div id="wmclose">✕</div>
       <div id="wmhint">drag = pan · wheel = zoom · dbl-click = marker · shift-click = remove · B/Esc = close</div>
     </div>
@@ -447,7 +469,7 @@
       <div id="status">connecting…</div>
       <div id="diag" class="legend" style="margin-top:6px; color:#6b7280"></div>
       <div class="legend" style="margin-top:10px">
-        <b>controls:</b> WASD/arrows move · Q/E/Z/C diagonals · Enter chat · M map · P doll · I bag · K spells · L skills · O macros · N <button id="mutebtn" type="button" style="cursor:pointer">sound</button> · <button id="optbtn" type="button" style="cursor:pointer">⚙ options</button>
+        <b>controls:</b> WASD/arrows move · Q/E/Z/C diagonals · Enter chat · M map · P doll · I bag · K spells · L skills · O macros · G all-names · N <button id="mutebtn" type="button" style="cursor:pointer">sound</button> · <button id="optbtn" type="button" style="cursor:pointer">⚙ options</button>
       </div>
     </div>
     <div id="options" class="gump-win">
