@@ -286,6 +286,21 @@
         user-select: none; border-radius: 3px; visibility: hidden; }
       .sk-row.usable .sk-use { visibility: visible; }
       .sk-use:hover { background: rgba(138, 180, 248, .2); }
+      .sk-pop { width: 18px; text-align: center; color: #8ab4f8; cursor: pointer;
+        user-select: none; border-radius: 3px; }
+      .sk-pop:hover { background: rgba(138, 180, 248, .2); color: #fff; }
+      /* Pulled-out skill buttons (floating, draggable, click to use). */
+      .skill-gump {
+        position: fixed; z-index: 17; display: flex; align-items: center; gap: 6px;
+        padding: 5px 8px; border-radius: 6px; cursor: pointer; user-select: none;
+        border: 1px solid #34404f; background: rgba(22, 28, 38, .92); color: #c7d0dc;
+        font-size: 12px; box-shadow: 0 2px 10px rgba(0,0,0,.45);
+      }
+      .skill-gump:hover { border-color: #4a90d9; color: #e6e9ee; }
+      .skill-gump.flash { border-color: #d9a441; background: rgba(58, 44, 16, .95); color: #ffdf9e; }
+      .skill-gump .sg-name { white-space: nowrap; }
+      .skill-gump .sg-close { color: #8a929c; font-size: 13px; line-height: 1; }
+      .skill-gump .sg-close:hover { color: #fff; }
       /* ---- party panel (0xBF/0x06; toggled by the 'Y' key) ---- */
       #party { top: 60px; left: 16px; width: 230px; display: none; }
       #party.on { display: block; }

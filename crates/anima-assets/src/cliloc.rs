@@ -59,7 +59,28 @@ impl Cliloc {
     ///
     /// See [`substitute`] for the placeholder rules.
     pub fn format(&self, id: u32, args: &str) -> Option<String> {
-        self.get(id).map(|template| substitute(template, args))
+        self.get(id).map(|template| {
+            // UO OPL nests item-name clilocs inside property templates: an argument
+            // of the form `#<id>` is itself a cliloc id. Resolve those first so e.g.
+            // template 1050039 + args "100\t#1023962" → "100 Black Pearl" rather than
+            // leaking "100 #1023962". Parts that aren't `#<id>` pass through verbatim.
+            if args.contains('#') {
+                let resolved = args
+                    .split('\t')
+                    .map(|p| {
+                        p.strip_prefix('#')
+                            .and_then(|n| n.parse::<u32>().ok())
+                            .and_then(|n| self.get(n))
+                            .map(str::to_string)
+                            .unwrap_or_else(|| p.to_string())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\t");
+                substitute(template, &resolved)
+            } else {
+                substitute(template, args)
+            }
+        })
     }
 
     /// Number of loaded entries.

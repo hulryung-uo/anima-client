@@ -9,18 +9,22 @@
 const HALF = 22, ZSTEP = 4;
 // ClassicUO people animation groups
 const WALK = 0, RUN_UNARMED = 2, STAND = 4;
+// War-mode idle stance: PAG_STAND_ONEHANDED_ATTACK (the combat-ready pose a person
+// holds while standing in war mode). ClassicUO swaps the plain Stand (4) for this.
+const PEOPLE_COMBAT_STAND = 7;
 const ONMOUNT_WALK = 23, ONMOUNT_RUN = 24, ONMOUNT_STAND = 25;
 const CHAR_ANIM_DELAY = 80; // ClassicUO Constants.CHARACTER_ANIMATION_DELAY (ms/frame)
 // Animation GROUP NUMBERS differ by body type (ClassicUO): monster (body<200)
 // Walk=0/Stand=1, animal (200..399) Walk=0/Run=1/Stand=2, people (>=400)
 // Walk=0/Run=2/Stand=4. Using the people stand (4) for an animal showed an
 // attack pose (the "cat → alligator when idle" bug).
-function animGroup(moving, running, mounted, body) {
+function animGroup(moving, running, mounted, body, war) {
   if (mounted) return moving ? (running ? ONMOUNT_RUN : ONMOUNT_WALK) : ONMOUNT_STAND;
   const t = body < 200 ? 0 : body < 400 ? 1 : 2;
   if (t === 0) return moving ? 0 : 1;                  // monster: no separate run
   if (t === 1) return moving ? (running ? 1 : 0) : 2;  // animal
-  if (!moving) return STAND;                           // people
+  // people: standing in war mode → combat-ready stance instead of the idle stand.
+  if (!moving) return war ? PEOPLE_COMBAT_STAND : STAND;
   return running ? RUN_UNARMED : WALK;
 }
 let app, world, entLayer, mobs, overLayer, barLayer, itemLayer;
@@ -96,13 +100,73 @@ let audioMuted = false;          // global master mute (N key / on-screen button
 let lastSoundSeq = 0;            // highest sound event seq we've already played
 let curMusicId = null;           // music id currently loaded into bgMusic
 const MAX_CONCURRENT_SFX = 8;
-const activeSfx = new Set();     // currently-playing SFX Audio elements (capped)
-const bgMusic = new Audio();     // single looping background track
+const bgMusic = new Audio();     // single looping background track (HTMLAudio is fine for a long loop)
 bgMusic.loop = true;
 bgMusic.volume = settings.musicVol;
-// Apply the current audio settings to the live <audio> elements.
+
+// SFX use the Web Audio API instead of a fresh `new Audio(url)` per hit. The old
+// path re-fetched AND re-decoded the WAV every single time before it could start —
+// the main cause of "late" sound. Here each id is decoded ONCE into an AudioBuffer,
+// cached, and replayed through a throwaway BufferSource → near-zero latency on any
+// repeat (and the network/decode only ever happens on a sound's very first play).
+let audioCtx = null, sfxGain = null;
+const sfxBuffers = new Map();    // id -> AudioBuffer (ready) | Promise (in-flight)
+const activeSfx = new Set();     // live BufferSource nodes (concurrency cap + mute-stop)
+function ensureAudioCtx() {
+  if (audioCtx) return audioCtx;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    sfxGain = audioCtx.createGain();
+    sfxGain.gain.value = settings.sfxVol;
+    sfxGain.connect(audioCtx.destination);
+  } catch (_) { audioCtx = null; }
+  return audioCtx;
+}
+// Browsers start the context "suspended" until a user gesture — resume it (and kick
+// pending music) on the first click/keypress. Idempotent, so it can fire repeatedly.
+function unlockAudio() {
+  const ctx = ensureAudioCtx();
+  if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {});
+  if (!audioMuted && settings.music && curMusicId != null) bgMusic.play().catch(() => {});
+}
+window.addEventListener("pointerdown", unlockAudio);
+window.addEventListener("keydown", unlockAudio);
+// Fetch + decode a sound id once; cache the AudioBuffer. Returns Promise<AudioBuffer|null>.
+function loadSfx(id) {
+  const c = sfxBuffers.get(id);
+  if (c instanceof AudioBuffer) return Promise.resolve(c);
+  if (c) return c;                       // decode already in flight
+  const ctx = ensureAudioCtx();
+  if (!ctx) return Promise.resolve(null);
+  const p = fetch("sound/" + id + ".wav")
+    .then((r) => r.arrayBuffer())
+    .then((buf) => ctx.decodeAudioData(buf))
+    .then((b) => { sfxBuffers.set(id, b); return b; })
+    .catch(() => { sfxBuffers.delete(id); return null; });
+  sfxBuffers.set(id, p);
+  return p;
+}
+function playBuffer(b) {
+  if (!audioCtx || !b || activeSfx.size >= MAX_CONCURRENT_SFX) return;
+  const src = audioCtx.createBufferSource();
+  src.buffer = b;
+  src.connect(sfxGain);
+  activeSfx.add(src);
+  src.onended = () => activeSfx.delete(src);
+  try { src.start(); } catch (_) { activeSfx.delete(src); }
+}
+function playSfx(id) {
+  const ctx = ensureAudioCtx();
+  if (!ctx) return;
+  if (ctx.state === "suspended") ctx.resume().catch(() => {});
+  const c = sfxBuffers.get(id);
+  if (c instanceof AudioBuffer) { playBuffer(c); return; }  // cached → instant
+  loadSfx(id).then((b) => { if (b) playBuffer(b); });        // first time → decode then play
+}
+// Apply the current audio settings to the live audio nodes/elements.
 function applyAudioSettings() {
   bgMusic.volume = settings.musicVol;
+  if (sfxGain) sfxGain.gain.value = settings.sfxVol;
   if (audioMuted || !settings.music) { bgMusic.pause(); }
   else if (curMusicId != null) { bgMusic.play().catch(() => {}); }
 }
@@ -114,15 +178,25 @@ function playSounds(s) {
     const seq = ev.seq | 0;
     if (seq <= lastSoundSeq) continue;
     lastSoundSeq = seq;
-    if (audioMuted || !settings.sfx || activeSfx.size >= MAX_CONCURRENT_SFX) continue;
-    const a = new Audio("sound/" + (ev.id | 0) + ".wav");
-    a.volume = settings.sfxVol;
-    activeSfx.add(a);
-    const done = () => activeSfx.delete(a);
-    a.addEventListener("ended", done);
-    a.addEventListener("error", done);
-    a.play().catch(() => {}); // autoplay may be blocked until a gesture
+    if (audioMuted || !settings.sfx) continue;
+    playSfx(ev.id | 0);
   }
+}
+// Sound push channel: the server streams each sound the instant it fires (SSE) so a
+// hit no longer waits for the next 150ms poll. EventSource auto-reconnects; the
+// poll's playSounds() covers any frame missed during a reconnect. Both dedupe on
+// `lastSoundSeq`, so whichever delivers a seq first wins and the other skips it.
+function connectSoundStream() {
+  if (typeof EventSource === "undefined") return; // no SSE → poll fallback handles sound
+  const es = new EventSource("sounds");
+  es.onmessage = (e) => {
+    let ev; try { ev = JSON.parse(e.data); } catch (_) { return; }
+    const seq = ev.seq | 0;
+    if (seq <= lastSoundSeq) return;
+    lastSoundSeq = seq;
+    if (audioMuted || !settings.sfx) return;
+    playSfx(ev.id | 0);
+  };
 }
 
 // Sync the looping background track to scene.music (id or null = stop).
@@ -143,7 +217,7 @@ function updateMusic(s) {
 function toggleMute() {
   audioMuted = !audioMuted;
   if (audioMuted) {
-    for (const a of activeSfx) { try { a.pause(); } catch (_) {} }
+    for (const src of activeSfx) { try { src.stop(); } catch (_) {} }
     activeSfx.clear();
   }
   applyAudioSettings();   // pause/resume music respecting both mute + settings.music
@@ -447,6 +521,7 @@ async function main() {
 
   poll();
   setInterval(poll, 150);
+  connectSoundStream(); // SSE: play sounds the instant they fire (no poll wait)
   setInterval(tickBuffTimers, 1000); // count down the buff-bar timers once a second
   // Render-on-demand loop: renderFrame() advances the prediction/glide every
   // animation frame (so motion stays smooth), but app.render() — the expensive GPU
@@ -1352,7 +1427,10 @@ function drawMobs() {
     const ent = isSelf ? scene.player : mobById.get(id);
     const mounted = !!(ent && ent.mounted);
     const mountAnim = (ent && (ent.mountAnim | 0)) || 0;
-    const group = animGroup(moving, running, mounted, st.body | 0);
+    // War-mode combat stance applies to our own avatar (the only mobile whose war
+    // state the server tells us); others fall back to the normal idle stand.
+    const inWar = isSelf && !!(scene && scene.war);
+    const group = animGroup(moving, running, mounted, st.body | 0, inWar);
     const frames = framesFor(st.body, group, d);
     // animPhase is a 0..1 cycle fraction (advanced per ground covered); map it to
     // the real frame count. Prefetch the whole cycle so frames don't pop in.
@@ -1503,6 +1581,8 @@ const DEBUFF_RE = /poison|curse|weaken|clumsy|feeble|strangle|bleed|mortal|corps
 function refreshBuffs(s) {
   const bar = document.getElementById("buffs");
   if (!bar) return;
+  // The buff/debuff icon bar (0xDF) is an AOS/SA feature — hide it entirely in T2A.
+  if (T2A) { bar.style.display = "none"; return; }
   const list = (s && s.buffs) || [];
   const live = new Set(list.map((b) => b.icon));
   // Forget icons that are gone.
@@ -2513,6 +2593,7 @@ function refreshSkills() {
       + `<span class="sk-name" title="${skillName(s.id | 0)}">${skillName(s.id | 0)}</span>`
       + `<span class="sk-val">${((s.v | 0) / 10).toFixed(1)}</span>`
       + `<span class="sk-use" title="use skill">▸</span>`
+      + (usable ? `<span class="sk-pop" title="pull out as a button">⧉</span>` : "")
       + `</div>`;
   }
   list.innerHTML = html;
@@ -2530,6 +2611,10 @@ function wireSkills() {
       sendInput("skilllock:" + id + ":" + next);
       return;
     }
+    if (e.target.classList.contains("sk-pop")) {
+      addSkillButton(id);          // pull the skill out as a floating, draggable button
+      return;
+    }
     if (e.target.classList.contains("sk-use")) {
       sendInput("useskill:" + id);
     }
@@ -2538,6 +2623,58 @@ function wireSkills() {
     const row = e.target.closest(".sk-row");
     if (row) sendInput("useskill:" + (row.dataset.id | 0));
   });
+}
+
+// --- pulled-out skill buttons (UO SkillButtonGump): floating, draggable buttons
+// that invoke a skill on click. Created from the skills list's ⧉ control, persisted
+// in localStorage so they survive a reload. Click = use; drag = reposition; ✕ = remove.
+const SKILLBTN_KEY = "anima.skillbtns";
+let skillBtnCascade = 0;
+function saveSkillButtons() {
+  const arr = [];
+  document.querySelectorAll(".skill-gump").forEach((el) => {
+    arr.push({ id: +el.dataset.id | 0, x: parseInt(el.style.left, 10) || 0, y: parseInt(el.style.top, 10) || 0 });
+  });
+  try { localStorage.setItem(SKILLBTN_KEY, JSON.stringify(arr)); } catch (e) {}
+}
+function makeSkillButton(id, x, y) {
+  id = id | 0;
+  const el = document.createElement("div");
+  el.className = "skill-gump";
+  el.dataset.id = id;
+  if (x == null) { x = 96 + (skillBtnCascade % 8) * 16; y = 130 + (skillBtnCascade % 8) * 16; skillBtnCascade++; }
+  el.style.left = x + "px"; el.style.top = y + "px";
+  el.innerHTML = `<span class="sg-name">${skillName(id)}</span><span class="sg-close gump-close">✕</span>`;
+  // click vs drag: a stationary press uses the skill; a drag repositions it.
+  el.addEventListener("mousedown", (e) => {
+    if (e.target.classList.contains("sg-close")) return;
+    e.preventDefault();
+    bringToFront(el);
+    const r = el.getBoundingClientRect();
+    const ox = e.clientX - r.left, oy = e.clientY - r.top;
+    const dx0 = e.clientX, dy0 = e.clientY;
+    let moved = false;
+    const move = (ev) => {
+      if (Math.abs(ev.clientX - dx0) > 3 || Math.abs(ev.clientY - dy0) > 3) moved = true;
+      el.style.left = Math.max(0, Math.min(window.innerWidth - 40, ev.clientX - ox)) + "px";
+      el.style.top = Math.max(0, Math.min(window.innerHeight - 20, ev.clientY - oy)) + "px";
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up);
+      if (moved) { saveSkillButtons(); }
+      else { sendInput("useskill:" + id); el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 160); }
+    };
+    window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
+  });
+  el.querySelector(".sg-close").addEventListener("click", () => { el.remove(); saveSkillButtons(); });
+  document.body.appendChild(el);
+  return el;
+}
+function addSkillButton(id) { makeSkillButton(id, null, null); saveSkillButtons(); }
+function loadSkillButtons() {
+  let arr = [];
+  try { arr = JSON.parse(localStorage.getItem(SKILLBTN_KEY) || "[]"); } catch (e) { arr = []; }
+  for (const b of arr) makeSkillButton(b.id, b.x, b.y);
 }
 // --- party panel (0xBF/0x06, toggled by the 'Y' key; ✕/Esc close) ---
 // Lists party members with a name + health bar (hits/hitsMax), the leader marked
@@ -2747,6 +2884,11 @@ function applyHueSwatches() {
 // --- container windows (one per serial; openContainer focuses an existing one) ---
 const containerWins = new Map(); // serial -> { el, body, sig }
 let containerCascade = 0;
+// Item graphics that are spellbooks (double-click opens the spell-cast UI, not a
+// container). Magery 0x0EFA plus the AOS+ school books for completeness.
+const SPELLBOOK_GRAPHICS = new Set([0x0efa, 0x2252, 0x2253, 0x238c, 0x23a0, 0x2d50, 0x2d9d]);
+function isSpellbook(g) { return SPELLBOOK_GRAPHICS.has((g | 0) & 0xffff); }
+
 function openContainer(serial) {
   serial = serial >>> 0;
   const existing = containerWins.get(serial);
@@ -2761,6 +2903,9 @@ function openContainer(serial) {
   document.body.appendChild(el);
   const body = el.querySelector(".cont-grid");
   el.querySelector(".gump-close").addEventListener("click", () => closeContainer(serial));
+  // Leaving the window entirely clears any item OPL tooltip it was showing (there's
+  // no PIXI pointerout for DOM cells to fall back on).
+  el.addEventListener("mouseleave", () => { if (tipSerial != null) { tipSerial = null; hideTip(); } });
   makeDraggable(el, el.querySelector(".gump-title"));
   containerWins.set(serial, { el, body, sig: null });
   refreshContainer(serial);
@@ -2803,7 +2948,11 @@ function refreshContainer(serial) {
       a.className = "cont-amt"; a.textContent = it.amount;
       cell.appendChild(a);
     }
-    cell.addEventListener("dblclick", () => { sendInput("use:" + itemSerial); openContainer(itemSerial); });
+    cell.addEventListener("dblclick", () => {
+      // A spellbook opens the spell-casting UI, not a container view.
+      if (isSpellbook(it.g)) { if (!spellbookOn) toggleSpellbook(); return; }
+      sendInput("use:" + itemSerial); openContainer(itemSerial);
+    });
     body.appendChild(cell);
   }
 }
@@ -3134,8 +3283,12 @@ function renderShop(shop) {
   let h = "";
   if (buy && buy.prices && buy.prices.length) {
     const vendor = buy.vendor >>> 0;
-    // Build rows (item matched to price by index), then sort by the chosen column.
-    let rows = buyItems.map((it, i) => ({ it, pr: buy.prices[i] })).filter((r) => r.pr)
+    // Pair each price to its container item. UO sends the buy list (0x74) in the
+    // REVERSE order of the vendor's container contents (0x3C) — ClassicUO reads the
+    // container from its LAST item backward (BuyList, PacketHandlers.cs). Matching
+    // forward swapped every icon vs its name; reverse the items to realign.
+    const pairItems = buyItems.slice().reverse();
+    let rows = pairItems.map((it, i) => ({ it, pr: buy.prices[i] })).filter((r) => r.pr)
       .map((r) => ({ g: r.it.g, serial: r.it.serial >>> 0, amount: r.it.amount | 0,
         name: r.pr.name || ("item " + r.it.g), price: r.pr.price | 0 }));
     const k = shopSort.key, d = shopSort.dir;
@@ -3185,7 +3338,75 @@ function esc(s) {
 //   • the game canvas (ground) → drop it at that tile
 //   • the paperdoll → equip it (server derives the layer from tiledata)
 let dragSerial = null, dragG = 0, dragAmt = 1;
+// Ground-item pointer-drag (canvas sprites can't fire HTML5 dragstart): a left-press
+// on a world item arms `groundDrag`; once the cursor moves past DRAG_THRESHOLD px it
+// becomes a real drag with a floating ghost, and on release we pick up + drop/equip.
+let groundDrag = null;          // { serial, g, sx, sy, started } or null
+let dragGhost = null;           // floating <img> following the cursor while dragging
+const DRAG_THRESHOLD = 5;       // px the pointer must move before a press becomes a drag
+
+// Place/refresh the floating ghost image at the cursor (page coords).
+function moveGhost(clientX, clientY) {
+  if (!dragGhost) return;
+  dragGhost.style.left = clientX + "px";
+  dragGhost.style.top = clientY + "px";
+}
+// Tear down any in-progress ground drag (ghost + state).
+function endGroundDrag() {
+  if (dragGhost) { dragGhost.remove(); dragGhost = null; }
+  groundDrag = null;
+}
+
 function setupItemDnD() {
+  // Promote an armed ground-item press into a real drag once it moves far enough,
+  // then keep the ghost glued to the cursor. Cancelling the pending single-click for
+  // this item suppresses the name-request that a plain click would have fired.
+  window.addEventListener("mousemove", (e) => {
+    if (!groundDrag) return;
+    if (!groundDrag.started) {
+      if (Math.abs(e.clientX - groundDrag.sx) < DRAG_THRESHOLD &&
+          Math.abs(e.clientY - groundDrag.sy) < DRAG_THRESHOLD) return;
+      groundDrag.started = true;
+      if (clickPend && (clickPend.serial >>> 0) === groundDrag.serial) { clearTimeout(clickPend.timer); clickPend = null; }
+      const img = document.createElement("img");
+      img.src = `art/static/${groundDrag.g}.png`;
+      img.style.cssText = "position:fixed;transform:translate(-50%,-50%);opacity:0.7;" +
+        "pointer-events:none;z-index:100000;image-rendering:pixelated;";
+      img.onerror = () => { img.style.visibility = "hidden"; };
+      document.body.appendChild(img);
+      dragGhost = img;
+    }
+    moveGhost(e.clientX, e.clientY);
+  });
+  // Release: if a real drag happened, hit-test the drop target and pick up + place.
+  // The ghost is pointer-events:none so elementFromPoint never returns it.
+  window.addEventListener("mouseup", (e) => {
+    if (!groundDrag) return;
+    if (!groundDrag.started) { groundDrag = null; return; }   // never moved → leave the click alone
+    const serial = groundDrag.serial;
+    endGroundDrag();
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const contWin = el && el.closest(".container-win");
+    if (contWin) {
+      let tgt = null;
+      for (const [s, w] of containerWins) if (w.el === contWin) { tgt = s; break; }
+      if (tgt != null) {
+        const r = contWin.getBoundingClientRect();
+        const gx = Math.max(0, Math.min(150, Math.round(e.clientX - r.left)));
+        const gy = Math.max(0, Math.min(120, Math.round(e.clientY - r.top - 20)));
+        sendInput("pickup:" + serial + ":1");
+        sendInput("drop:" + serial + ":" + gx + ":" + gy + ":0:" + tgt);
+      }
+    } else if (el && el.closest("#paperdoll")) {
+      sendInput("pickup:" + serial + ":1");
+      sendInput("equip:" + serial + ":0");        // layer 0 = server derives the wear layer
+    } else if (el && el.closest("#map")) {
+      const gl = clientToGlobal(e.clientX, e.clientY), t = groundTileAt(gl.x, gl.y);
+      sendInput("pickup:" + serial + ":1");
+      sendInput("drop:" + serial + ":" + t.x + ":" + t.y + ":" + t.z + ":4294967295");
+    }
+    // Dropped on nothing useful → cancel silently (no pickup, item stays put).
+  });
   document.addEventListener("dragstart", (e) => {
     const el = e.target.closest && e.target.closest("[data-serial]");
     if (!el) return;
@@ -3351,6 +3572,13 @@ function onEntityPointerDown(serial, e, isItem) {
   } else {
     if (clickPend) clearTimeout(clickPend.timer);
     clickPend = { serial, timer: setTimeout(() => { sendInput("click:" + serial); clickPend = null; }, DBLCLICK_MS) };
+    // Arm a ground-item pointer-drag: a left-press on a world item may turn into a
+    // drag once the cursor moves past DRAG_THRESHOLD (see setupItemDnD). Until then
+    // this stays a normal click; starting a drag cancels the pending name-request.
+    if (isItem) {
+      const it = (scene && scene.items || []).find((x) => (x.serial >>> 0) === (serial >>> 0));
+      groundDrag = { serial: serial >>> 0, g: it ? it.g : 0, sx: e.clientX, sy: e.clientY, started: false };
+    }
   }
 }
 
@@ -3686,6 +3914,11 @@ function setupInput() {
   // Clear the world tooltip on entering any panel. The paperdoll's own equip-icon
   // tooltip (pdTipEl, set by the icon's mouseover which bubbles first) is preserved.
   document.addEventListener("mouseover", (e) => {
+    // Inventory/container item under the cursor → show its OPL tooltip (same flow
+    // as world items). This must come BEFORE the panel-suppression below, since a
+    // container window IS a gump and would otherwise hide the tooltip.
+    const cell = e.target.closest && e.target.closest(".cont-item[data-serial]");
+    if (cell) { hoverEntity((+cell.dataset.serial) >>> 0); return; }
     const overPanel = e.target.closest && e.target.closest(".gump-win, #worldmap, #paperdoll, .popup-menu");
     if (overPanel && pdTipEl == null && tipSerial != null) { tipSerial = null; hideTip(); }
   });
@@ -3765,6 +3998,7 @@ function setupInput() {
   document.getElementById("sk-close").addEventListener("click", closeSkills);
   makeDraggable(document.getElementById("skills"), document.getElementById("sk-title"));
   wireSkills();
+  loadSkillButtons();   // restore any skill buttons the user pulled out previously
   document.getElementById("pt-close").addEventListener("click", closeParty);
   makeDraggable(document.getElementById("party"), document.getElementById("pt-title"));
   wireParty();

@@ -161,6 +161,11 @@ fn main() {
     // (which made the prediction snap forward → "jump" on stop).
     let (tx, rx) = mpsc::channel::<Option<Action>>();
 
+    // Connected sound-SSE clients; the game loop pushes sound frames to these.
+    let sse_hub: SseHub = Arc::new(Mutex::new(Vec::new()));
+    // World-map POIs (towns/shops/dungeons/…), parsed once from the embedded data.
+    let pois: Arc<String> = Arc::new(parse_pois());
+
     spawn_http(SpawnHttp {
         port: http_port,
         web_dir,
@@ -175,6 +180,8 @@ fn main() {
         worldmap: worldmap.clone(),
         sounds: sounds.clone(),
         music: music.clone(),
+        sse_hub: sse_hub.clone(),
+        pois: pois.clone(),
     });
 
     let mut journal: Vec<serde_json::Value> = Vec::new();
@@ -190,6 +197,13 @@ fn main() {
         .map(|p| (p.pos.x, p.pos.y, p.pos.z))
         .unwrap_or((0u16, 0u16, 0i8));
     let mut dirty = true;
+    // Last seen seqs for the time-sensitive event queues (sound 0x54, damage 0x0B,
+    // effects 0x70/0xC0/0xC7). These don't move the player or add journal lines, so
+    // without this the scene would only rebuild on the 250ms timer → audible/visible
+    // lag (a sound could sit up to ~250ms before it even reaches the served scene).
+    // Bump `dirty` the instant any advances so the next poll (≤150ms) plays it.
+    let mut last_event_seqs = (0u64, 0u64, 0u64); // (sound, damage, effect)
+    let mut last_heartbeat = Instant::now(); // SSE keepalive + dead-connection reaper
     // Click-to-walk (server-paced auto-walk) state. Unlike manual walk (browser-
     // paced), the server owns the route: it re-paths to `auto_goal` each cadence,
     // issues one step, and blacklists denied tiles so it routes around them.
@@ -446,6 +460,38 @@ fn main() {
             }
             last_pos = (pos.0, pos.1, nz);
         }
+        // A new sound/damage/effect event must be reflected immediately (not on the
+        // 250ms timer), or it plays/shows late. Rebuild the scene the moment any of
+        // these monotonic seqs advances.
+        let seqs = (
+            session.world.sound_seq,
+            session.world.damage_seq,
+            session.world.effect_seq,
+        );
+        if seqs != last_event_seqs {
+            // Push each newly-arrived sound to the SSE clients immediately (no poll
+            // wait). Damage/effects still ride the scene poll — only sound is pushed.
+            let prev_sound = last_event_seqs.0;
+            if session.world.sound_seq > prev_sound {
+                for &(seq, id) in &session.world.recent_sounds {
+                    if seq > prev_sound {
+                        sse_broadcast(
+                            &sse_hub,
+                            format!("data: {{\"seq\":{seq},\"id\":{id}}}\n\n").as_bytes(),
+                        );
+                    }
+                }
+            }
+            last_event_seqs = seqs;
+            dirty = true;
+        }
+        // SSE keepalive: a periodic comment frame both keeps proxies from closing
+        // the stream and lets a write to a vanished client fail → that worker thread
+        // unblocks and the dead sender is reaped on the next broadcast.
+        if last_heartbeat.elapsed() >= Duration::from_secs(15) {
+            sse_broadcast(&sse_hub, b": ping\n\n");
+            last_heartbeat = Instant::now();
+        }
         if dirty || last_build.elapsed() >= Duration::from_millis(250) {
             let t0 = Instant::now();
             let mut art_guard = art.as_ref().map(|a| a.lock().unwrap());
@@ -511,10 +557,12 @@ struct SpawnHttp {
     worldmap: Arc<Mutex<Option<Vec<u8>>>>,
     sounds: Option<Arc<Sounds>>,
     music: Arc<HashMap<u16, PathBuf>>,
+    sse_hub: SseHub,
+    pois: Arc<String>,
 }
 
 fn spawn_http(args: SpawnHttp) {
-    let SpawnHttp { port, web_dir, scene, tx, art, anim, gumps, hues, tiledata, texmaps, worldmap, sounds, music } = args;
+    let SpawnHttp { port, web_dir, scene, tx, art, anim, gumps, hues, tiledata, texmaps, worldmap, sounds, music, sse_hub, pois } = args;
     let server = match Server::http(("0.0.0.0", port)) {
         Ok(s) => Arc::new(s),
         Err(e) => {
@@ -546,6 +594,8 @@ fn spawn_http(args: SpawnHttp) {
         let worldmap = worldmap.clone();
         let sounds = sounds.clone();
         let music = music.clone();
+        let sse_hub = sse_hub.clone();
+        let pois = pois.clone();
         thread::spawn(move || {
             while let Ok(req) = server.recv() {
                 handle_request(Ctx {
@@ -566,6 +616,8 @@ fn spawn_http(args: SpawnHttp) {
                     worldmap: &worldmap,
                     sounds: &sounds,
                     music: &music,
+                    sse_hub: &sse_hub,
+                    pois: &pois,
                 });
             }
         });
@@ -591,13 +643,15 @@ struct Ctx<'a> {
     worldmap: &'a Arc<Mutex<Option<Vec<u8>>>>,
     sounds: &'a Option<Arc<Sounds>>,
     music: &'a Arc<HashMap<u16, PathBuf>>,
+    sse_hub: &'a SseHub,
+    pois: &'a Arc<String>,
 }
 
 fn handle_request(ctx: Ctx) {
     REQ_COUNT.fetch_add(1, Ordering::Relaxed);
     let Ctx {
         mut req, web_dir, scene, tx, art, anim, gumps, hues, tiledata, texmaps, tile_cache,
-        anim_cache, texmap_cache, gump_cache, worldmap, sounds, music,
+        anim_cache, texmap_cache, gump_cache, worldmap, sounds, music, sse_hub, pois,
     } = ctx;
     let raw_url = req.url().to_string();
     // Parse the optional `?hue=<n>` query before stripping it. 0 = no hue.
@@ -628,6 +682,26 @@ fn handle_request(ctx: Ctx) {
         let mut r = Response::from_string(body);
         r.add_header(ctype("application/json"));
         let _ = req.respond(r);
+    } else if url == "/sounds" {
+        // SSE stream. tiny_http's Response buffers the socket writer and only flushes
+        // when the body completes — useless for a never-ending stream (headers never
+        // reach the client). So we take the raw socket via into_writer() and write +
+        // FLUSH each frame ourselves. This blocks the worker thread for the
+        // connection's lifetime (one of 6 — fine for a single renderer); it ends when
+        // a write fails (client gone — a heartbeat triggers this) or the hub drops us.
+        let (s, rx) = mpsc::channel::<Vec<u8>>();
+        sse_hub.lock().unwrap().push(s);
+        let mut w = req.into_writer();
+        let head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+            Cache-Control: no-cache\r\nConnection: keep-alive\r\n\
+            Access-Control-Allow-Origin: *\r\n\r\n: ok\n\n";
+        if w.write_all(head).and_then(|_| w.flush()).is_ok() {
+            while let Ok(frame) = rx.recv() {
+                if w.write_all(&frame).and_then(|_| w.flush()).is_err() {
+                    break;
+                }
+            }
+        }
     } else if url == "/worldmap.png" {
         // Ready once the background render finishes; 503 (retry) until then.
         let bytes = worldmap.lock().unwrap().clone();
@@ -637,6 +711,13 @@ fn handle_request(ctx: Ctx) {
                 let _ = req.respond(Response::from_string("building").with_status_code(503));
             }
         }
+    } else if url == "/pois.json" {
+        // World-map points of interest (towns/banks/shops/dungeons/…). Static — built
+        // once at startup; the client fetches it once when the world map opens.
+        let mut r = Response::from_string(pois.as_str());
+        r.add_header(ctype("application/json"));
+        r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=3600"[..]).unwrap());
+        let _ = req.respond(r);
     } else if let Some(id) = parse_sound_url(&url) {
         serve_sound(sounds, id, req);
     } else if let Some(id) = parse_music_url(&url) {
@@ -966,6 +1047,36 @@ fn serve_art(
     }
 }
 
+/// Points of interest (towns, banks, shops, dungeons, moongates, shrines, …) for
+/// the world map, parsed from ServUO's UOAM-style `Data/Common.map` (embedded at
+/// build time). Each non-header line is `[+|-]<category>: <x> <y> <z> [name]`,
+/// where the category may contain spaces (e.g. `weapons guild`). Returns a JSON
+/// array string `[{"x":..,"y":..,"cat":"..","name":".."}, …]` built once at startup.
+fn parse_pois() -> String {
+    const RAW: &str = include_str!("../../data/Common.map");
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for line in RAW.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Header is a bare count (e.g. "3"); every POI line has a "category:" head.
+        let Some(colon) = line.find(':') else { continue };
+        let cat = line[..colon].trim_start_matches(['+', '-']).trim().to_ascii_lowercase();
+        if cat.is_empty() {
+            continue;
+        }
+        let mut rest = line[colon + 1..].split_whitespace();
+        let (Some(xs), Some(ys), Some(_zs)) = (rest.next(), rest.next(), rest.next()) else {
+            continue;
+        };
+        let (Ok(x), Ok(y)) = (xs.parse::<i32>(), ys.parse::<i32>()) else { continue };
+        let name = rest.collect::<Vec<_>>().join(" ");
+        out.push(serde_json::json!({ "x": x, "y": y, "cat": cat, "name": name }));
+    }
+    serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
+}
+
 fn serve_static(web_dir: &Path, url: &str, req: tiny_http::Request) {
     let rel = if url == "/" { "index.html" } else { url.trim_start_matches('/') };
     // Prevent path traversal.
@@ -991,6 +1102,20 @@ fn serve_static(web_dir: &Path, url: &str, req: tiny_http::Request) {
 
 fn ctype(v: &str) -> Header {
     Header::from_bytes(&b"Content-Type"[..], v.as_bytes()).unwrap()
+}
+
+// ── Sound push channel (Server-Sent Events) ────────────────────────────────
+// Sounds used to ride the 150ms scene poll, so a hit could play up to a poll late.
+// Instead the game loop pushes each sound the instant it arrives over an SSE stream
+// (`GET /sounds`). The hub is the set of connected clients' senders; the loop
+// broadcasts `data: {"seq":..,"id":..}\n\n` frames (plus a periodic heartbeat that
+// also reaps dead connections, since a blocked reader only unblocks on a failed write).
+type SseHub = Arc<Mutex<Vec<mpsc::Sender<Vec<u8>>>>>;
+
+/// Send a raw SSE frame to every connected client; drop any whose receiver is gone.
+fn sse_broadcast(hub: &SseHub, frame: &[u8]) {
+    let mut g = hub.lock().unwrap();
+    g.retain(|s| s.send(frame.to_vec()).is_ok());
 }
 
 fn content_type(path: &str) -> &'static str {
