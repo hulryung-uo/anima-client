@@ -652,9 +652,11 @@ fn parse_gump_layout(layout: &str, text: &[String], cliloc: Option<&Cliloc>) -> 
                 elements.push(json!({"t":"bg","x":num(1),"y":num(2),"page":page}));
             }
             // button x y up down type param id — type 1 = page-less reply button.
+            // `up` (the normal-state gump graphic) lets the client draw the real
+            // button art (a small gump) instead of the raw reply id as text.
             "button" => {
-                let (x, y, id) = (num(1), num(2), num(7));
-                elements.push(json!({"t":"button","x":x,"y":y,"id":id,"page":page}));
+                let (x, y, up, id) = (num(1), num(2), num(3), num(7));
+                elements.push(json!({"t":"button","x":x,"y":y,"g":up,"id":id,"page":page}));
                 max_x = max_x.max(x + 32);
                 max_y = max_y.max(y + 24);
             }

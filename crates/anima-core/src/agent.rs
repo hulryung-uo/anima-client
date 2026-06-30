@@ -82,6 +82,18 @@ pub struct Observation {
     pub pending_target: Option<TargetCursor>,
     /// Our skills, sorted by id (values in human units, e.g. 50.0).
     pub skills: Vec<SkillView>,
+    /// Open server gumps/dialogs (0xB0/0xDD) — e.g. a craft menu. Answer with
+    /// [`Action::GumpResponse`].
+    pub gumps: Vec<GumpView>,
+}
+
+/// A read-only view of an open server gump/dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GumpView {
+    pub serial: u32,
+    pub gump_id: u32,
+    /// The raw UO gump layout string (`{ button … }{ gumppic … }…`).
+    pub layout: String,
 }
 
 /// A decision-maker that turns perception into intent. Scripted, RL, or LLM
@@ -279,6 +291,16 @@ impl World {
             .collect();
         skills.sort_by_key(|s| s.id);
 
+        let gumps = self
+            .gumps
+            .iter()
+            .map(|g| GumpView {
+                serial: g.serial,
+                gump_id: g.gump_id,
+                layout: g.layout.clone(),
+            })
+            .collect();
+
         Observation {
             player,
             mobiles,
@@ -286,6 +308,7 @@ impl World {
             new_journal,
             pending_target: self.pending_target,
             skills,
+            gumps,
         }
     }
 }

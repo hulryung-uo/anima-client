@@ -3681,7 +3681,20 @@ function buildGumpElement(serial, gumpId, e) {
   } else if (e.t === "button") {
     node.classList.add("dlg-btn");
     node.type = "button";
-    node.textContent = (e.id | 0) || "?";
+    // Draw the real button gump art (a small image sized to the art) so it sits in
+    // the slot the gump intended — not a wide numbered box that overlaps the text.
+    // Fall back to the reply id text if the art is missing.
+    if (e.g) {
+      node.classList.add("img");
+      const img = document.createElement("img");
+      img.className = "dlg-btn-img";
+      img.src = `gump/${e.g | 0}.png`;
+      img.alt = "";
+      img.onerror = () => { img.remove(); node.classList.remove("img"); node.textContent = (e.id | 0) || "?"; };
+      node.appendChild(img);
+    } else {
+      node.textContent = (e.id | 0) || "?";
+    }
     node.title = "reply " + (e.id | 0);
     node.addEventListener("click", () => submitGump(serial, gumpId, e.id | 0));
   } else if (e.t === "check" || e.t === "radio") {

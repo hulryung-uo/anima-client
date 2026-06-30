@@ -5,7 +5,9 @@
 //! shapes are the contract mirrored by `anima2/anima2/contract.py` — keep the
 //! two in lockstep.
 
-use anima_core::agent::{Action, ItemView, MobileView, Observation, PlayerView, SkillView};
+use anima_core::agent::{
+    Action, GumpView, ItemView, MobileView, Observation, PlayerView, SkillView,
+};
 use anima_core::types::Position;
 use anima_core::world::JournalEntry;
 use serde_json::{json, Value};
@@ -43,6 +45,10 @@ fn skill_json(s: &SkillView) -> Value {
     json!({ "id": s.id, "value": s.value, "base": s.base, "cap": s.cap, "lock": s.lock })
 }
 
+fn gump_json(g: &GumpView) -> Value {
+    json!({ "serial": g.serial, "gump_id": g.gump_id, "layout": g.layout })
+}
+
 fn journal_json(j: &JournalEntry) -> Value {
     json!({
         "serial": j.serial, "name": j.name, "text": j.text,
@@ -62,6 +68,7 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "new_journal": obs.new_journal.iter().map(journal_json).collect::<Vec<_>>(),
         "pending_target": pending,
         "skills": obs.skills.iter().map(skill_json).collect::<Vec<_>>(),
+        "gumps": obs.gumps.iter().map(gump_json).collect::<Vec<_>>(),
     })
 }
 
