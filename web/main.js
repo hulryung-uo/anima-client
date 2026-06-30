@@ -3013,37 +3013,79 @@ function checkSkillGains(s) {
   }
 }
 
+// Skills introduced in AOS or later (ServUO SkillName ≥ 46: Necromancy, Focus,
+// Chivalry, Bushido, Ninjitsu, Spellweaving, Mysticism, Imbuing, Throwing). Everything
+// below is the classic/T2A set. We only show T2A skills on a non-AOS shard; on AOS we
+// list T2A and AOS skills in separate groups.
+const AOS_SKILL_MIN = 46;
+let skillSort = { key: "name", dir: 1 };  // key: name | value | base
+function skillRowHtml(s) {
+  const lock = ((s.lock | 0) % 3 + 3) % 3;
+  const usable = USABLE_SKILLS.has(s.id | 0);
+  return `<div class="sk-row${usable ? " usable" : ""}" data-id="${s.id}">`
+    + `<span class="sk-lock" data-lock="${lock}" title="${LOCK_TITLES[lock]}">${LOCK_ICONS[lock]}</span>`
+    + `<span class="sk-name" title="${skillName(s.id | 0)}">${skillName(s.id | 0)}</span>`
+    + `<span class="sk-val">${((s.v | 0) / 10).toFixed(1)}</span>`
+    + `<span class="sk-use" title="use skill">▸</span>`
+    + (usable ? `<span class="sk-pop" title="pull out as a button">⧉</span>` : "")
+    + `</div>`;
+}
 function refreshSkills() {
   if (!skillsOn) return;
   const win = document.getElementById("skills");
   const list = document.getElementById("sk-list");
-  const skills = (scene && scene.skills) || [];
-  const sig = skills.map((s) => `${s.id}:${s.v}:${s.b}:${s.c}:${s.lock}`).join("|");
+  const aos = !!(scene && scene.aos);
+  let skills = (scene && scene.skills) || [];
+  if (!aos) skills = skills.filter((s) => (s.id | 0) < AOS_SKILL_MIN); // T2A only on non-AOS shards
+  const sig = JSON.stringify({
+    sort: skillSort, aos,
+    s: skills.map((s) => `${s.id}:${s.v}:${s.b}:${s.c}:${s.lock}`),
+  });
   if (win._sig === sig) return;
   win._sig = sig;
   // Total skill points = sum of base values (tenths → divide by 10).
   let totalBase = 0;
   for (const s of skills) totalBase += (s.b | 0);
   set("sk-total", `Total: ${(totalBase / 10).toFixed(1)}  ·  ${skills.length} skills`);
+  // Sort header (clickable; same column toggles ascending/descending).
+  const arrow = (k) => (skillSort.key === k ? (skillSort.dir > 0 ? " ▲" : " ▼") : "");
+  document.getElementById("sk-sortbar").innerHTML = "Sort: "
+    + `<span class="sk-sortk" data-k="name">Name${arrow("name")}</span>`
+    + `<span class="sk-sortk" data-k="value">Value${arrow("value")}</span>`
+    + `<span class="sk-sortk" data-k="base">Base${arrow("base")}</span>`;
   if (!skills.length) { list.innerHTML = '<div class="cont-empty">no skill data</div>'; return; }
-  let html = "";
-  for (const s of skills) {
-    const lock = ((s.lock | 0) % 3 + 3) % 3;
-    const usable = USABLE_SKILLS.has(s.id | 0);
-    html += `<div class="sk-row${usable ? " usable" : ""}" data-id="${s.id}">`
-      + `<span class="sk-lock" data-lock="${lock}" title="${LOCK_TITLES[lock]}">${LOCK_ICONS[lock]}</span>`
-      + `<span class="sk-name" title="${skillName(s.id | 0)}">${skillName(s.id | 0)}</span>`
-      + `<span class="sk-val">${((s.v | 0) / 10).toFixed(1)}</span>`
-      + `<span class="sk-use" title="use skill">▸</span>`
-      + (usable ? `<span class="sk-pop" title="pull out as a button">⧉</span>` : "")
-      + `</div>`;
+  const cmp = (a, b) => {
+    const d = skillSort.dir;
+    if (skillSort.key === "name") return d * skillName(a.id | 0).localeCompare(skillName(b.id | 0));
+    if (skillSort.key === "value") return d * ((a.v | 0) - (b.v | 0));
+    return d * ((a.b | 0) - (b.b | 0)); // base
+  };
+  const rows = (arr) => arr.slice().sort(cmp).map(skillRowHtml).join("");
+  if (aos) {
+    // Group T2A vs AOS+ skills, each sorted.
+    const t2a = skills.filter((s) => (s.id | 0) < AOS_SKILL_MIN);
+    const aosk = skills.filter((s) => (s.id | 0) >= AOS_SKILL_MIN);
+    let html = "";
+    if (t2a.length) html += '<div class="sk-group">T2A</div>' + rows(t2a);
+    if (aosk.length) html += '<div class="sk-group">AOS</div>' + rows(aosk);
+    list.innerHTML = html;
+  } else {
+    list.innerHTML = rows(skills);
   }
-  list.innerHTML = html;
 }
 // One delegated listener (wired once at startup): lock click cycles the lock; the
 // ▸ button or a row double-click uses the skill.
 function wireSkills() {
   const list = document.getElementById("sk-list");
+  // Sort-header clicks: pick a column; clicking the active column flips direction.
+  document.getElementById("sk-sortbar").addEventListener("click", (e) => {
+    const k = e.target.closest && e.target.closest(".sk-sortk");
+    if (!k) return;
+    const key = k.dataset.k;
+    skillSort = { key, dir: skillSort.key === key ? -skillSort.dir : 1 };
+    const win = document.getElementById("skills"); if (win) win._sig = null;
+    refreshSkills();
+  });
   list.addEventListener("click", (e) => {
     const row = e.target.closest(".sk-row");
     if (!row) return;

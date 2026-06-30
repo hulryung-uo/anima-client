@@ -329,6 +329,13 @@
       .sk-pop { width: 18px; text-align: center; color: #8ab4f8; cursor: pointer;
         user-select: none; border-radius: 3px; }
       .sk-pop:hover { background: rgba(138, 180, 248, .2); color: #fff; }
+      #sk-sortbar { font-size: 11px; color: #6b7280; margin: 0 0 5px; }
+      #sk-sortbar:empty { display: none; }
+      .sk-sortk { cursor: pointer; color: #8ab4f8; margin-left: 8px; }
+      .sk-sortk:hover { color: #fff; text-decoration: underline; }
+      .sk-group { color: #8ab4f8; font-size: 11px; letter-spacing: .04em; margin: 8px 0 3px;
+        padding-bottom: 2px; border-bottom: 1px solid #2a2f37; }
+      .sk-group:first-child { margin-top: 0; }
       /* Pulled-out skill buttons (floating, draggable, click to use). */
       .skill-gump {
         position: fixed; z-index: 17; display: flex; align-items: center; gap: 6px;
@@ -546,6 +553,7 @@
       </div>
       <div class="gump-body">
         <div id="sk-total">Total: —</div>
+        <div id="sk-sortbar"></div>
         <div id="sk-list"></div>
       </div>
     </div>

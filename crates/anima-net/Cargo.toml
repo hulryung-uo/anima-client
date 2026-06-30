@@ -18,3 +18,7 @@ path = "src/main.rs"
 [[bin]]
 name = "anima-agent"
 path = "src/bin/agent.rs"
+
+[[bin]]
+name = "find-water"
+path = "src/bin/find_water.rs"
