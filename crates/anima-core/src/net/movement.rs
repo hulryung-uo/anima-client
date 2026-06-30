@@ -256,13 +256,17 @@ impl Walker {
         }
     }
 
-    /// ClassicUO `WalkerManager.Reset`.
-    fn reset(&mut self) {
+    /// ClassicUO `WalkerManager.Reset`. Also call this after a server-initiated
+    /// **teleport** (0x20 MobileUpdate for the player): the in-flight sequence and
+    /// pending steps are stale, so further walk requests would be denied until a
+    /// resync. Sequence restarts at 0 (UO's post-reset first-step value).
+    pub fn reset(&mut self) {
         self.steps_count = 0;
         self.unaccepted = 0;
         self.walk_sequence = 0;
         self.walking_failed = false;
         self.resend_resync = false;
+        self.resync_out = false;
     }
 
     /// Take a pending Resync packet to send, if any (driver pumps this each loop).

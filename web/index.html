@@ -12,6 +12,25 @@
         margin: 0; overflow: hidden; background: #05070a; color: #d6dae0;
         font: 13px/1.4 ui-monospace, "SF Mono", Menlo, "Apple SD Gothic Neo", "Malgun Gothic", monospace;
       }
+      /* Login overlay (shown until connected in ANIMA_LOGIN mode). */
+      #login { position: fixed; inset: 0; z-index: 50; display: none;
+        align-items: center; justify-content: center;
+        background: radial-gradient(circle at 50% 35%, #10151d, #05070a); }
+      #login.on { display: flex; }
+      .login-box { width: 280px; padding: 22px 22px 18px; border: 1px solid #2a2f37;
+        border-radius: 10px; background: rgba(13,16,20,.96); box-shadow: 0 8px 40px rgba(0,0,0,.6);
+        display: flex; flex-direction: column; gap: 9px; }
+      .login-title { font-size: 16px; color: #8ab4f8; letter-spacing: .06em; text-align: center;
+        margin-bottom: 6px; }
+      .login-box label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: #8a929c; }
+      .login-box input { background: rgba(0,0,0,.4); border: 1px solid #2a3a4a; border-radius: 5px;
+        color: #e6eaf0; padding: 7px 9px; font-size: 13px; outline: none; }
+      .login-box input:focus { border-color: #4a90d9; }
+      #lg-go { margin-top: 6px; padding: 9px; border-radius: 6px; cursor: pointer;
+        border: 1px solid #2a3a4a; background: #1b2530; color: #8ab4f8; font-size: 13px; letter-spacing: .04em; }
+      #lg-go:hover:not(:disabled) { background: rgba(138,180,248,.18); color: #fff; }
+      #lg-go:disabled { opacity: .5; cursor: default; }
+      #lg-msg { font-size: 11px; color: #e5a04d; min-height: 14px; text-align: center; }
       /* Game fills the whole viewport; HUD + chat float over it. */
       #map { position: fixed; inset: 0; overflow: hidden; background: #05070a; }
       #map canvas { display: block; }
@@ -263,8 +282,8 @@
       .eq-row.bp { cursor: pointer; border-radius: 4px; }
       .eq-row.bp:hover { background: rgba(138, 180, 248, .1); }
       .eq-open { margin-left: auto; color: #8ab4f8; font-size: 11px; }
-      /* ---- spellbook (rendered as the real ClassicUO book gump) ---- */
-      #spellbook { top: 60px; right: 16px; width: auto; display: none; }
+      /* ---- spellbook (power words + reagents list) ---- */
+      #spellbook { top: 60px; right: 16px; width: 250px; display: none; }
       #spellbook.on { display: block; }
       #sb-title #sb-mana { margin-left: auto; font-size: 11px; color: #8ab4f8;
         letter-spacing: 0; }
@@ -273,21 +292,17 @@
         padding: 3px 6px; border-radius: 4px; cursor: pointer; user-select: none; }
       .sb-tab:hover { background: rgba(138, 180, 248, .12); }
       .sb-tab.sel { background: rgba(138, 180, 248, .22); color: #cfe0ff; }
-      #sb-book { position: relative; }   /* the book art; spell entries overlay it */
-      .sb-bg { display: block; user-select: none; -webkit-user-drag: none; }
-      .sb-entry { position: absolute; display: flex; align-items: center; gap: 4px;
-        cursor: pointer; }
-      .sb-icon { width: 44px; height: 44px; flex: 0 0 44px;
-        image-rendering: pixelated; -webkit-user-drag: none; }
-      .sb-icon.miss { width: 0; }   /* gump 404'd → collapse, keep the name */
-      .sb-name { font-size: 11px; line-height: 1.05; color: #3a2a14;
-        font-weight: 600; }
-      .sb-entry:hover .sb-name { color: #7a1010; }
-      .sb-entry:hover { filter: brightness(1.12); }
-      .sb-corner { position: absolute; cursor: pointer; -webkit-user-drag: none; }
-      .sb-corner:hover { filter: brightness(1.3); }
-      .sb-page-no { position: absolute; bottom: 6px; left: 50%;
-        transform: translateX(-50%); font-size: 10px; color: #8a7a55; }
+      #sb-book { max-height: 60vh; overflow-y: auto; }
+      .sp-circle { font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+        color: #8ab4f8; margin: 8px 0 3px; border-bottom: 1px solid #222; padding-bottom: 2px; }
+      .sp-circle:first-child { margin-top: 0; }
+      .sp-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 5px; cursor: pointer; }
+      .sp-row:hover { background: rgba(138, 180, 248, .14); }
+      .sp-icon { width: 38px; height: 38px; flex: 0 0 38px; image-rendering: pixelated; cursor: grab; }
+      .sp-txt { min-width: 0; }
+      .sp-name { font-size: 12px; color: #e8ecf2; font-weight: 600; }
+      .sp-words { font-size: 11px; color: #c8b06a; font-style: italic; }   /* power words (mantra) */
+      .sp-reags { font-size: 10px; color: #8a929c; }                       /* reagents */
       /* ---- skills window (0x3A) ---- */
       #skills { top: 60px; right: 16px; width: 280px; display: none; }
       #statusbar { top: 60px; left: 210px; width: 170px; display: none; }
@@ -326,6 +341,18 @@
       .skill-gump .sg-name { white-space: nowrap; }
       .skill-gump .sg-close { color: #8a929c; font-size: 13px; line-height: 1; }
       .skill-gump .sg-close:hover { color: #fff; }
+      /* spell quick-cast button (dragged out of the spellbook) */
+      .spell-gump {
+        position: fixed; z-index: 17; display: flex; align-items: center; gap: 4px;
+        padding: 3px; border-radius: 6px; cursor: pointer; user-select: none;
+        border: 1px solid #34404f; background: rgba(22, 28, 38, .92);
+        box-shadow: 0 2px 10px rgba(0,0,0,.45);
+      }
+      .spell-gump:hover { border-color: #4a90d9; }
+      .spell-gump.flash { border-color: #d9a441; box-shadow: 0 0 8px rgba(217,164,65,.6); }
+      .spell-gump .spell-gump-ic { width: 38px; height: 38px; image-rendering: pixelated; }
+      .spell-gump .sg-close { color: #8a929c; font-size: 12px; line-height: 1; padding: 0 2px; }
+      .spell-gump .sg-close:hover { color: #fff; }
       /* ---- party panel (0xBF/0x06; toggled by the 'Y' key) ---- */
       #party { top: 60px; left: 16px; width: 230px; display: none; }
       #party.on { display: block; }
@@ -429,6 +456,17 @@
     </style>
   </head>
   <body>
+    <div id="login">
+      <div class="login-box">
+        <div class="login-title">anima-client</div>
+        <label>Server <input id="lg-host" value="127.0.0.1" spellcheck="false" autocomplete="off"></label>
+        <label>Port <input id="lg-port" value="2593" spellcheck="false" autocomplete="off"></label>
+        <label>Account <input id="lg-user" spellcheck="false" autocomplete="username"></label>
+        <label>Password <input id="lg-pass" type="password" autocomplete="current-password"></label>
+        <button id="lg-go" type="button">Connect</button>
+        <div id="lg-msg"></div>
+      </div>
+    </div>
     <div id="map">
       <!-- Day/night tint + weather particles. Lives inside #map so it paints over
            the PIXI game canvas but UNDER all HUD/minimap/chat/worldmap (those are

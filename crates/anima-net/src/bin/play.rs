@@ -137,21 +137,6 @@ fn main() {
     // Starting city for a newly-created character (ServUO honors the selection):
     // 0=Magincia/New Haven list-dependent, 3=Britain, ... Override via ANIMA_CITY.
     let city_index: u16 = std::env::var("ANIMA_CITY").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
-    let mut cfg = LoginConfig {
-        username: user.clone(),
-        password: pass,
-        ..Default::default()
-    };
-    cfg.appearance.city_index = city_index;
-    println!("play: connecting to {host}:{port} as {user} ...");
-    let mut session = match Session::connect_and_login(&Endpoint::new(host, port), cfg) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("login failed: {e}");
-            std::process::exit(1);
-        }
-    };
-    println!("play: in world. open http://127.0.0.1:{http_port}/  (WASD/arrows move, T to talk)");
 
     // Shared scene JSON (HTTP thread reads, game loop writes) + input channel.
     let scene = Arc::new(Mutex::new(String::from("{}")));
@@ -165,12 +150,17 @@ fn main() {
     let sse_hub: SseHub = Arc::new(Mutex::new(Vec::new()));
     // World-map POIs (towns/shops/dungeons/…), parsed once from the embedded data.
     let pois: Arc<String> = Arc::new(parse_pois());
+    // Login credentials submitted by the web login page (host, port, user, pass).
+    let (login_tx, login_rx) = mpsc::channel::<(String, u16, String, String)>();
 
+    // The HTTP server comes up FIRST so the login page is reachable before we've
+    // connected to any game server.
     spawn_http(SpawnHttp {
         port: http_port,
         web_dir,
         scene: scene.clone(),
         tx,
+        login: login_tx,
         art: art.clone(),
         anim: anim.clone(),
         gumps: gumps.clone(),
@@ -183,6 +173,46 @@ fn main() {
         sse_hub: sse_hub.clone(),
         pois: pois.clone(),
     });
+
+    // Connect to the game server. With ANIMA_LOGIN set we serve the web login page
+    // and wait for the browser to POST a server + account; otherwise we auto-login
+    // with the CLI host/port/user/pass (backward compatible with scripts/agents).
+    let login_page = std::env::var("ANIMA_LOGIN").is_ok();
+    let connect = |h: String, p: u16, u: String, pw: String| {
+        let mut cfg = LoginConfig { username: u, password: pw, ..Default::default() };
+        cfg.appearance.city_index = city_index;
+        Session::connect_and_login(&Endpoint::new(h, p), cfg)
+    };
+    let mut session = if !login_page {
+        println!("play: connecting to {host}:{port} as {user} ...");
+        match connect(host.clone(), port, user.clone(), pass.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("login failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        *scene.lock().unwrap() = r#"{"auth":"login"}"#.into();
+        println!("play: login page at http://127.0.0.1:{http_port}/  (enter server + account)");
+        loop {
+            let (lh, lp, lu, lpw) = match login_rx.recv() {
+                Ok(v) => v,
+                Err(_) => std::process::exit(1),
+            };
+            *scene.lock().unwrap() = r#"{"auth":"connecting"}"#.into();
+            println!("play: connecting to {lh}:{lp} as {lu} ...");
+            match connect(lh, lp, lu, lpw) {
+                Ok(s) => break s,
+                Err(e) => {
+                    eprintln!("login failed: {e}");
+                    let msg = format!("{e}").replace(['"', '\\', '\n'], " ");
+                    *scene.lock().unwrap() = format!(r#"{{"auth":"error","msg":"{msg}"}}"#);
+                }
+            }
+        }
+    };
+    println!("play: in world. open http://127.0.0.1:{http_port}/  (WASD/arrows move, T to talk)");
 
     let mut journal: Vec<serde_json::Value> = Vec::new();
     let mut journal_seq: u64 = 0; // monotonic id so the client floats each line once
@@ -549,6 +579,7 @@ struct SpawnHttp {
     web_dir: PathBuf,
     scene: Arc<Mutex<String>>,
     tx: mpsc::Sender<Option<Action>>,
+    login: mpsc::Sender<(String, u16, String, String)>,
     art: Option<Arc<Mutex<Art>>>,
     anim: Option<Arc<Anim>>,
     gumps: Option<Arc<Gumps>>,
@@ -563,7 +594,7 @@ struct SpawnHttp {
 }
 
 fn spawn_http(args: SpawnHttp) {
-    let SpawnHttp { port, web_dir, scene, tx, art, anim, gumps, hues, tiledata, texmaps, worldmap, sounds, music, sse_hub, pois } = args;
+    let SpawnHttp { port, web_dir, scene, tx, login, art, anim, gumps, hues, tiledata, texmaps, worldmap, sounds, music, sse_hub, pois } = args;
     let server = match Server::http(("0.0.0.0", port)) {
         Ok(s) => Arc::new(s),
         Err(e) => {
@@ -582,6 +613,7 @@ fn spawn_http(args: SpawnHttp) {
         let web_dir = web_dir.clone();
         let scene = scene.clone();
         let tx = tx.clone();
+        let login = login.clone();
         let art = art.clone();
         let anim = anim.clone();
         let gumps = gumps.clone();
@@ -604,6 +636,7 @@ fn spawn_http(args: SpawnHttp) {
                     web_dir: &web_dir,
                     scene: &scene,
                     tx: &tx,
+                    login: &login,
                     art: &art,
                     anim: &anim,
                     gumps: &gumps,
@@ -631,6 +664,7 @@ struct Ctx<'a> {
     web_dir: &'a Path,
     scene: &'a Arc<Mutex<String>>,
     tx: &'a mpsc::Sender<Option<Action>>,
+    login: &'a mpsc::Sender<(String, u16, String, String)>,
     art: &'a Option<Arc<Mutex<Art>>>,
     anim: &'a Option<Arc<Anim>>,
     gumps: &'a Option<Arc<Gumps>>,
@@ -651,7 +685,7 @@ struct Ctx<'a> {
 fn handle_request(ctx: Ctx) {
     REQ_COUNT.fetch_add(1, Ordering::Relaxed);
     let Ctx {
-        mut req, web_dir, scene, tx, art, anim, gumps, hues, tiledata, texmaps, tile_cache,
+        mut req, web_dir, scene, tx, login, art, anim, gumps, hues, tiledata, texmaps, tile_cache,
         anim_cache, texmap_cache, gump_cache, worldmap, sounds, music, sse_hub, pois,
     } = ctx;
     let raw_url = req.url().to_string();
@@ -678,6 +712,23 @@ fn handle_request(ctx: Ctx) {
             let _ = tx.send(Some(action));
         }
         let _ = req.respond(Response::from_string("ok"));
+    } else if is_post && url == "/login" {
+        // Web login page submitted a server + account: "host:port:user:pass" (the
+        // password is the remainder, so it may itself contain ':'). Hand it to the
+        // connect loop in main(); ignored if we're already in-world.
+        let mut body = String::new();
+        let _ = req.as_reader().read_to_string(&mut body);
+        let mut it = body.trim().splitn(4, ':');
+        let h = it.next().unwrap_or("").to_string();
+        let p: u16 = it.next().and_then(|s| s.parse().ok()).unwrap_or(2593);
+        let u = it.next().unwrap_or("").to_string();
+        let pw = it.next().unwrap_or("").to_string();
+        if h.is_empty() || u.is_empty() {
+            let _ = req.respond(Response::from_string("bad").with_status_code(400));
+        } else {
+            let _ = login.send((h, p, u, pw));
+            let _ = req.respond(Response::from_string("ok"));
+        }
     } else if url == "/scene.json" {
         let body = scene.lock().unwrap().clone();
         let mut r = Response::from_string(body);

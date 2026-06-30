@@ -27,6 +27,21 @@ function animGroup(moving, running, mounted, body, war) {
   if (!moving) return war ? PEOPLE_COMBAT_STAND : STAND;
   return running ? RUN_UNARMED : WALK;
 }
+
+// People animation groups (ClassicUO PeopleAnimationGroup): 16 = CastDirected,
+// 17 = CastArea. UO spell casts are sent (0x6E) with the SpellInfo.Action code,
+// not a direct group — those live in the ~200+ range and must fold onto the cast
+// gesture. Map a 0x6E `action` to the body's real animation group.
+const PEOPLE_CAST_DIRECTED = 16;
+function resolveActionGroup(action, body) {
+  action = action | 0;
+  if (body >= 400) {                 // people / humanoid
+    if (action >= 200) return PEOPLE_CAST_DIRECTED; // spell cast gesture
+    if (action >= 35) return action % 35;           // other out-of-range → fold in
+    return action;                                  // direct people group (combat swings, etc.)
+  }
+  return action;                     // monsters/animals: action indexes their own group set
+}
 let app, world, entLayer, mobs, overLayer, barLayer, itemLayer;
 let scene = null;
 // Render-on-demand: only re-draw the canvas when the scene changed. markDirty()
@@ -757,12 +772,50 @@ function drawQuestArrow(ctx, x, y, ang, now) {
   ctx.restore();
 }
 
+// ---- login page (shown when the play-server is in ANIMA_LOGIN mode and not yet
+// in world; scene carries {auth:"login"|"connecting"|"error", msg}) ----
+let loginWired = false;
+function wireLogin() {
+  if (loginWired) return; loginWired = true;
+  const go = document.getElementById("lg-go");
+  const submit = () => {
+    const host = (document.getElementById("lg-host").value || "127.0.0.1").trim();
+    const port = (document.getElementById("lg-port").value || "2593").trim();
+    const user = (document.getElementById("lg-user").value || "").trim();
+    const pass = document.getElementById("lg-pass").value || "";
+    if (!user) { document.getElementById("lg-msg").textContent = "Enter an account name."; return; }
+    document.getElementById("lg-msg").textContent = "Connecting…";
+    fetch("login", { method: "POST", body: `${host}:${port}:${user}:${pass}` }).catch(() => {});
+  };
+  go.addEventListener("click", submit);
+  for (const id of ["lg-host", "lg-port", "lg-user", "lg-pass"]) {
+    document.getElementById(id).addEventListener("keydown", (e) => { if (e.code === "Enter") submit(); });
+  }
+}
+function showLogin(auth, msg) {
+  wireLogin();
+  const el = document.getElementById("login");
+  if (el) el.classList.add("on");
+  const m = document.getElementById("lg-msg");
+  const go = document.getElementById("lg-go");
+  if (auth === "connecting") { if (m) m.textContent = "Connecting…"; if (go) go.disabled = true; }
+  else if (auth === "error") { if (m) m.textContent = "Login failed: " + (msg || "unknown error"); if (go) go.disabled = false; }
+  else { if (go) go.disabled = false; }
+}
+function hideLogin() {
+  const el = document.getElementById("login");
+  if (el && el.classList.contains("on")) el.classList.remove("on");
+}
+
 async function poll() {
   const t0 = performance.now();
   try {
     const r = await fetch("scene.json?" + Date.now());
     if (!r.ok) throw new Error(r.status);
     scene = await r.json();
+    // Not in world yet (login-page mode): show the login form instead of rendering.
+    if (scene && scene.auth) { showLogin(scene.auth, scene.msg); return; }
+    hideLogin();
     updateAnimStates(scene);
     const ts = performance.now();
     syncWorld(scene); // diffs only — no full rebuild
@@ -988,8 +1041,8 @@ function syncWorld(s) {
     sp.eventMode = "static"; sp.cursor = "pointer";
     const serial = it.serial;
     sp.on("pointerdown", (ev) => onEntityPointerDown(serial, ev, true)); // world item → loot on dbl-click
-    sp.on("pointerover", () => hoverEntity(serial));
-    sp.on("pointerout", () => hoverOut(serial));
+    sp.on("pointerover", () => { hoverEntity(serial); targetHighlightOn(sp); });
+    sp.on("pointerout", () => { hoverOut(serial); targetHighlightOff(sp); });
     world.addChild(sp);
     itemPool.set(key, { sp, g: it.g, x: it.x, y: it.y, z: iz });
     markDirty();
@@ -1486,15 +1539,19 @@ function drawMobs() {
     // group's real frame count has loaded (so a placeholder count can't cut it short).
     let group, frames, frame;
     const act = st.act;
+    // The raw 0x6E `action` isn't always a direct animation group: spell casts send
+    // high "action" codes (UO SpellInfo.Action, ~200+) that map to the cast gesture.
+    // resolveActionGroup() folds those onto the body's real group set.
+    const ag = (act && !ghost) ? resolveActionGroup(act.group, bodyAnim) : 0;
     if (act && !ghost) {
-      framesFor(bodyAnim, act.group, d); // kick the frame-count/centers load
-      const fk = `${bodyAnim}/${act.group}/${d}`;
+      framesFor(bodyAnim, ag, d); // kick the frame-count/centers load
+      const fk = `${bodyAnim}/${ag}/${d}`;
       const loaded = frameCount.has(fk) ? Math.max(1, frameCount.get(fk)) : 0;
       const fi = Math.floor((performance.now() - act.startMs) / act.frameMs);
       if (loaded > 0 && fi >= loaded) st.act = null; // played every frame → done
     }
     if (st.act && !ghost) {
-      group = act.group;
+      group = ag;
       frames = framesFor(bodyAnim, group, d);
       const fi = Math.max(0, Math.min(frames - 1, Math.floor((performance.now() - act.startMs) / act.frameMs)));
       frame = act.fwd ? fi : (frames - 1 - fi);
@@ -1598,9 +1655,9 @@ function drawMobs() {
             sp.cursor = "pointer";
             const serial = id.slice(1);
             sp.on("pointerdown", (ev) => onEntityPointerDown(serial, ev));
-            // OPL tooltip on hover (same flow as world items).
-            sp.on("pointerover", () => hoverEntity(serial));
-            sp.on("pointerout", () => hoverOut(serial));
+            // OPL tooltip on hover (same flow as world items) + target highlight.
+            sp.on("pointerover", () => { hoverEntity(serial); targetHighlightOn(sp); });
+            sp.on("pointerout", () => { hoverOut(serial); targetHighlightOff(sp); });
           } else {
             sp.eventMode = "none";
           }
@@ -2666,6 +2723,74 @@ const MASTERY_SPELLS = [
 // endpoint /gump/<id>.png wants decimal). Source: SpellbookGump.cs GetBookInfo.
 // `spells` is normalised to [globalId, name] for every school (Magery built below).
 const MAGERY_PAIRS = MAGERY_SPELLS.map((name, i) => [i + 1, name]);
+// Power words (mantra) + reagents per Magery spell, keyed by name. Source: ServUO
+// Scripts/Spells/{First..Eighth}/*.cs SpellInfo (name, mantra, Reagent.*).
+const MAGERY_INFO = {
+  "Clumsy": ["Uus Jux", "Bloodmoss, Nightshade"],
+  "Create Food": ["In Mani Ylem", "Garlic, Ginseng, Mandrake Root"],
+  "Feeblemind": ["Rel Wis", "Ginseng, Nightshade"],
+  "Heal": ["In Mani", "Garlic, Ginseng, Spider's Silk"],
+  "Magic Arrow": ["In Por Ylem", "Sulfurous Ash"],
+  "Night Sight": ["In Lor", "Sulfurous Ash, Spider's Silk"],
+  "Reactive Armor": ["Flam Sanct", "Garlic, Spider's Silk, Sulfurous Ash"],
+  "Weaken": ["Des Mani", "Garlic, Nightshade"],
+  "Agility": ["Ex Uus", "Bloodmoss, Mandrake Root"],
+  "Cunning": ["Uus Wis", "Mandrake Root, Nightshade"],
+  "Cure": ["An Nox", "Garlic, Ginseng"],
+  "Harm": ["An Mani", "Nightshade, Spider's Silk"],
+  "Magic Trap": ["In Jux", "Garlic, Spider's Silk, Sulfurous Ash"],
+  "Magic Untrap": ["An Jux", "Bloodmoss, Sulfurous Ash"],
+  "Protection": ["Uus Sanct", "Garlic, Ginseng, Sulfurous Ash"],
+  "Strength": ["Uus Mani", "Mandrake Root, Nightshade"],
+  "Bless": ["Rel Sanct", "Garlic, Mandrake Root"],
+  "Fireball": ["Vas Flam", "Black Pearl"],
+  "Magic Lock": ["An Por", "Garlic, Bloodmoss, Sulfurous Ash"],
+  "Poison": ["In Nox", "Nightshade"],
+  "Telekinesis": ["Ort Por Ylem", "Bloodmoss, Mandrake Root"],
+  "Teleport": ["Rel Por", "Bloodmoss, Mandrake Root"],
+  "Unlock": ["Ex Por", "Bloodmoss, Sulfurous Ash"],
+  "Wall of Stone": ["In Sanct Ylem", "Bloodmoss, Garlic"],
+  "Arch Cure": ["Vas An Nox", "Garlic, Ginseng, Mandrake Root"],
+  "Arch Protection": ["Vas Uus Sanct", "Garlic, Ginseng, Mandrake Root, Sulfurous Ash"],
+  "Curse": ["Des Sanct", "Nightshade, Garlic, Sulfurous Ash"],
+  "Fire Field": ["In Flam Grav", "Black Pearl, Spider's Silk, Sulfurous Ash"],
+  "Greater Heal": ["In Vas Mani", "Garlic, Ginseng, Mandrake Root, Spider's Silk"],
+  "Lightning": ["Por Ort Grav", "Mandrake Root, Sulfurous Ash"],
+  "Mana Drain": ["Ort Rel", "Black Pearl, Mandrake Root, Spider's Silk"],
+  "Recall": ["Kal Ort Por", "Black Pearl, Bloodmoss, Mandrake Root"],
+  "Blade Spirits": ["In Jux Hur Ylem", "Black Pearl, Mandrake Root, Nightshade"],
+  "Dispel Field": ["An Grav", "Black Pearl, Spider's Silk, Sulfurous Ash, Garlic"],
+  "Incognito": ["Kal In Ex", "Bloodmoss, Garlic, Nightshade"],
+  "Magic Reflection": ["In Jux Sanct", "Garlic, Mandrake Root, Spider's Silk"],
+  "Mind Blast": ["Por Corp Wis", "Black Pearl, Mandrake Root, Nightshade, Sulfurous Ash"],
+  "Paralyze": ["An Ex Por", "Garlic, Mandrake Root, Spider's Silk"],
+  "Poison Field": ["In Nox Grav", "Black Pearl, Nightshade, Spider's Silk"],
+  "Summon Creature": ["Kal Xen", "Bloodmoss, Mandrake Root, Spider's Silk"],
+  "Dispel": ["An Ort", "Garlic, Mandrake Root, Sulfurous Ash"],
+  "Energy Bolt": ["Corp Por", "Black Pearl, Nightshade"],
+  "Explosion": ["Vas Ort Flam", "Bloodmoss, Mandrake Root"],
+  "Invisibility": ["An Lor Xen", "Bloodmoss, Nightshade"],
+  "Mark": ["Kal Por Ylem", "Black Pearl, Bloodmoss, Mandrake Root"],
+  "Mass Curse": ["Vas Des Sanct", "Garlic, Nightshade, Mandrake Root, Sulfurous Ash"],
+  "Paralyze Field": ["In Ex Grav", "Black Pearl, Ginseng, Spider's Silk"],
+  "Reveal": ["Wis Quas", "Bloodmoss, Sulfurous Ash"],
+  "Chain Lightning": ["Vas Ort Grav", "Black Pearl, Bloodmoss, Mandrake Root, Sulfurous Ash"],
+  "Energy Field": ["In Sanct Grav", "Black Pearl, Mandrake Root, Spider's Silk, Sulfurous Ash"],
+  "Flamestrike": ["Kal Vas Flam", "Spider's Silk, Sulfurous Ash"],
+  "Gate Travel": ["Vas Rel Por", "Black Pearl, Mandrake Root, Sulfurous Ash"],
+  "Mana Vampire": ["Ort Sanct", "Black Pearl, Bloodmoss, Mandrake Root, Spider's Silk"],
+  "Mass Dispel": ["Vas An Ort", "Garlic, Mandrake Root, Black Pearl, Sulfurous Ash"],
+  "Meteor Swarm": ["Flam Kal Des Ylem", "Bloodmoss, Mandrake Root, Sulfurous Ash, Spider's Silk"],
+  "Polymorph": ["Vas Ylem Rel", "Bloodmoss, Spider's Silk, Mandrake Root"],
+  "Earthquake": ["In Vas Por", "Bloodmoss, Ginseng, Mandrake Root, Sulfurous Ash"],
+  "Energy Vortex": ["Vas Corp Por", "Bloodmoss, Black Pearl, Mandrake Root, Nightshade"],
+  "Resurrection": ["An Corp", "Bloodmoss, Garlic, Ginseng"],
+  "Air Elemental": ["Kal Vas Xen Hur", "Bloodmoss, Mandrake Root, Spider's Silk"],
+  "Summon Daemon": ["Kal Vas Xen Corp", "Bloodmoss, Mandrake Root, Spider's Silk, Sulfurous Ash"],
+  "Earth Elemental": ["Kal Vas Xen Ylem", "Bloodmoss, Mandrake Root, Spider's Silk"],
+  "Fire Elemental": ["Kal Vas Xen Flam", "Bloodmoss, Mandrake Root, Spider's Silk, Sulfurous Ash"],
+  "Water Elemental": ["Kal Vas Xen An Flam", "Bloodmoss, Mandrake Root, Spider's Silk"],
+};
 const SPELL_SCHOOLS = [
   { key: "magery", label: "Magery", book: 0x08AC, iconStart: 0x08C0, spells: MAGERY_PAIRS },
   { key: "necromancy", label: "Necro", book: 0x2B00, iconStart: 0x5000, spells: NECROMANCY_SPELLS },
@@ -2695,42 +2820,33 @@ let spellSchool = "magery";   // remembered across opens (module-scoped)
 let spellPage = 0;            // current spread index (0-based)
 // One overlaid spell entry: the spell's icon gump + its name. If the icon gump
 // 404s (exotic schools), onerror collapses the <img> so only the name shows.
-function spellEntry(id, name, iconId, x, y) {
-  return `<div class="sb-entry" data-id="${id}" title="${name}" style="left:${x}px;top:${y}px;">` +
-    `<img class="sb-icon" src="gump/${iconId}.png" alt="" crossorigin="anonymous"` +
-    ` onerror="this.onerror=null;this.classList.add('miss');this.removeAttribute('src');">` +
-    `<span class="sb-name">${name}</span></div>`;
-}
+// Render the spell list (no book art): each spell shows its name, power words
+// (mantra) and reagents — the classic in-fiction spellbook info. Magery is grouped
+// by its 8 circles. Click a row to cast.
 function renderSpellSchool() {
   const book = document.getElementById("sb-book");
   const school = VISIBLE_SCHOOLS.find((s) => s.key === spellSchool) || VISIBLE_SCHOOLS[0];
-  const spells = school.spells;
-  const perSpread = SB_PER_PAGE * 2;
-  const maxPage = Math.max(1, Math.ceil(spells.length / perSpread));
-  if (spellPage >= maxPage) spellPage = maxPage - 1;
-  if (spellPage < 0) spellPage = 0;
-  // Book background sized to its natural art; spell entries overlay it absolutely.
-  let html = `<img class="sb-bg" src="gump/${school.book}.png" alt="" crossorigin="anonymous">`;
-  const base = spellPage * perSpread;
-  for (let i = 0; i < perSpread; i++) {
-    const idx = base + i;
-    if (idx >= spells.length) break;
-    const [id, name] = spells[idx];
-    const iconId = school.iconStart + idx;   // k-th icon = iconStart + k (k over full list)
-    const col = i < SB_PER_PAGE ? 0 : 1;
-    const row = i % SB_PER_PAGE;
-    html += spellEntry(id, name, iconId, SB_COL_X[col], SB_ROW_Y0 + row * SB_ROW_H);
-  }
-  if (spellPage > 0)
-    html += `<img class="sb-corner" data-dir="-1" src="gump/${SB_CORNER_L}.png" alt="prev"` +
-      ` style="left:50px;bottom:8px;" crossorigin="anonymous">`;
-  if (spellPage < maxPage - 1)
-    html += `<img class="sb-corner" data-dir="1" src="gump/${SB_CORNER_R}.png" alt="next"` +
-      ` style="right:8px;bottom:8px;" crossorigin="anonymous">`;
-  if (maxPage > 1)
-    html += `<span class="sb-page-no">${spellPage + 1} / ${maxPage}</span>`;
+  const isMagery = school.key === "magery";
+  let html = "", lastCircle = 0;
+  school.spells.forEach(([id, name], idx) => {
+    if (isMagery) {
+      const circle = Math.floor(idx / 8) + 1;        // 8 spells per circle
+      if (circle !== lastCircle) { html += `<div class="sp-circle">Circle ${circle}</div>`; lastCircle = circle; }
+    }
+    const info = isMagery ? MAGERY_INFO[name] : null;
+    const iconId = school.iconStart + idx;           // k-th spell icon = iconStart + k
+    // The icon is draggable out onto the screen → a floating quick-cast button.
+    html += `<div class="sp-row" data-id="${id}" data-icon="${iconId}" data-name="${name}" title="Cast ${name}">`
+      + `<img class="sp-icon" src="gump/${iconId}.png" alt="" draggable="true" crossorigin="anonymous"`
+      + ` onerror="this.onerror=null;this.style.visibility='hidden'">`
+      + `<div class="sp-txt"><div class="sp-name">${name}</div>`;
+    if (info) {
+      html += `<div class="sp-words">${info[0]}</div>`
+        + `<div class="sp-reags">${info[1]}</div>`;
+    }
+    html += "</div></div>";
+  });
   book.innerHTML = html;
-  // Reflect the active tab.
   for (const t of document.querySelectorAll("#sb-tabs .sb-tab"))
     t.classList.toggle("sel", t.dataset.school === spellSchool);
 }
@@ -2743,18 +2859,16 @@ function buildSpellbook() {
     const tab = e.target.closest(".sb-tab");
     if (!tab) return;
     spellSchool = tab.dataset.school;
-    spellPage = 0;                 // new school → back to its first spread
     renderSpellSchool();
   });
   document.getElementById("sb-book").addEventListener("click", (e) => {
-    const corner = e.target.closest(".sb-corner");
-    if (corner) { spellPage += Number(corner.dataset.dir); renderSpellSchool(); return; }
-    const entry = e.target.closest(".sb-entry");
-    if (!entry) return;
+    const row = e.target.closest(".sp-row");
+    if (!row) return;
     // Cast → server replies with a target cursor when the spell needs one; the
     // existing target UI (scene.target) lets the player click the target.
-    sendInput("cast:" + entry.dataset.id);
+    sendInput("cast:" + row.dataset.id);
   });
+  wireSpellDragOut();   // dragging a spell icon out spawns a quick-cast button
   renderSpellSchool();
 }
 function refreshSpellMana() {
@@ -2824,6 +2938,30 @@ function toggleStatus() {
 function closeStatus() {
   statusOn = false;
   document.getElementById("statusbar").classList.remove("on");
+}
+// HUD (top-right character status panel) + journal visibility toggles. Both persist.
+// The journal lives inside the HUD, so hiding the HUD hides it too; the journal
+// toggle hides just the log while the HUD stays. U = HUD, J = journal.
+let hudHidden = false, journalHidden = false;
+function applyHudVisibility() {
+  const hud = document.getElementById("hud"); if (hud) hud.style.display = hudHidden ? "none" : "";
+  const jr = document.getElementById("journal"); if (jr) jr.style.display = journalHidden ? "none" : "";
+}
+function loadHudVisibility() {
+  hudHidden = localStorage.getItem("anima.hudHidden") === "1";
+  journalHidden = localStorage.getItem("anima.journalHidden") === "1";
+  applyHudVisibility();
+}
+function toggleHud() {
+  hudHidden = !hudHidden;
+  localStorage.setItem("anima.hudHidden", hudHidden ? "1" : "0");
+  applyHudVisibility();
+  setStatus(hudHidden ? "status panel hidden (U)" : "status panel shown");
+}
+function toggleJournal() {
+  journalHidden = !journalHidden;
+  localStorage.setItem("anima.journalHidden", journalHidden ? "1" : "0");
+  applyHudVisibility();
 }
 function refreshStatus(s) {
   if (!statusOn || !s || !s.player) return;
@@ -2987,6 +3125,81 @@ function loadSkillButtons() {
   let arr = [];
   try { arr = JSON.parse(localStorage.getItem(SKILLBTN_KEY) || "[]"); } catch (e) { arr = []; }
   for (const b of arr) makeSkillButton(b.id, b.x, b.y);
+}
+
+// --- spell quick-cast buttons: drag a spell icon out of the spellbook onto the
+// screen → a floating icon button that casts on click, drags to reposition, ✕ to
+// remove. Persisted (like skill buttons). ---
+const SPELLBTN_KEY = "anima.spellbtns";
+let spellBtnCascade = 0;
+let spellDrag = null;   // { id, icon, name } while dragging an icon out of the book
+function saveSpellButtons() {
+  const arr = [];
+  document.querySelectorAll(".spell-gump").forEach((el) => {
+    arr.push({ id: +el.dataset.id | 0, icon: +el.dataset.icon | 0, name: el.dataset.name || "",
+      x: parseInt(el.style.left, 10) || 0, y: parseInt(el.style.top, 10) || 0 });
+  });
+  try { localStorage.setItem(SPELLBTN_KEY, JSON.stringify(arr)); } catch (e) {}
+}
+function makeSpellButton(id, icon, name, x, y) {
+  const el = document.createElement("div");
+  el.className = "spell-gump";
+  el.dataset.id = id | 0; el.dataset.icon = icon | 0; el.dataset.name = name || "";
+  if (x == null) { x = 120 + (spellBtnCascade % 8) * 16; y = 150 + (spellBtnCascade % 8) * 16; spellBtnCascade++; }
+  el.style.left = x + "px"; el.style.top = y + "px";
+  el.title = name ? ("Cast " + name) : "Cast";
+  el.innerHTML = `<img class="spell-gump-ic" src="gump/${icon | 0}.png" alt="" crossorigin="anonymous"`
+    + ` onerror="this.style.visibility='hidden'"><span class="sg-close gump-close">✕</span>`;
+  // Stationary press = cast; a drag repositions it (same model as skill buttons).
+  el.addEventListener("mousedown", (e) => {
+    if (e.target.classList.contains("sg-close")) return;
+    e.preventDefault(); bringToFront(el);
+    const r = el.getBoundingClientRect();
+    const ox = e.clientX - r.left, oy = e.clientY - r.top, dx0 = e.clientX, dy0 = e.clientY;
+    let moved = false;
+    const move = (ev) => {
+      if (Math.abs(ev.clientX - dx0) > 3 || Math.abs(ev.clientY - dy0) > 3) moved = true;
+      el.style.left = Math.max(0, Math.min(window.innerWidth - 40, ev.clientX - ox)) + "px";
+      el.style.top = Math.max(0, Math.min(window.innerHeight - 20, ev.clientY - oy)) + "px";
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up);
+      if (moved) saveSpellButtons();
+      else { sendInput("cast:" + (id | 0)); el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 160); }
+    };
+    window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
+  });
+  el.querySelector(".sg-close").addEventListener("click", () => { el.remove(); saveSpellButtons(); });
+  document.body.appendChild(el);
+  return el;
+}
+function loadSpellButtons() {
+  let arr = [];
+  try { arr = JSON.parse(localStorage.getItem(SPELLBTN_KEY) || "[]"); } catch (e) { arr = []; }
+  for (const b of arr) makeSpellButton(b.id, b.icon, b.name, b.x, b.y);
+}
+// Wire the HTML5 drag-out: dragging a `.sp-icon` from the book drops a button on the
+// screen. Registered once (idempotent via a flag).
+let spellDragWired = false;
+function wireSpellDragOut() {
+  if (spellDragWired) return; spellDragWired = true;
+  document.getElementById("sb-book").addEventListener("dragstart", (e) => {
+    const ic = e.target.closest && e.target.closest(".sp-icon");
+    const row = ic && ic.closest(".sp-row");
+    if (!row) return;
+    spellDrag = { id: +row.dataset.id | 0, icon: +row.dataset.icon | 0, name: row.dataset.name || "" };
+    e.dataTransfer.effectAllowed = "copy";
+    try { e.dataTransfer.setData("text/plain", String(spellDrag.id)); } catch (_) {}
+  });
+  document.addEventListener("dragover", (e) => { if (spellDrag) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } });
+  document.addEventListener("drop", (e) => {
+    if (!spellDrag) return;
+    e.preventDefault();
+    makeSpellButton(spellDrag.id, spellDrag.icon, spellDrag.name, e.clientX - 22, e.clientY - 22);
+    saveSpellButtons();
+    spellDrag = null;
+  });
+  document.addEventListener("dragend", () => { spellDrag = null; });
 }
 // --- party panel (0xBF/0x06, toggled by the 'Y' key; ✕/Esc close) ---
 // Lists party members with a name + health bar (hits/hitsMax), the leader marked
@@ -3184,7 +3397,7 @@ function refreshPaperdoll() {
     // dyed robe/cloak/etc. shows its real colour in the list instead of base art.
     const hueQ = (e.hue | 0) ? `?hue=${e.hue | 0}` : "";
     h += `<div class="eq-row${isBp ? " bp" : ""}"${attr}>`
-      + `<img class="eq-icon" src="art/static/${e.g}.png${hueQ}" alt="" draggable="${isSelf}"`
+      + `<img class="eq-icon" src="art/static/${e.g}.png${hueQ}" alt="" draggable="false"`
       + ` data-serial="${e.serial >>> 0}" data-g="${e.g}" data-amount="1"`
       + ` data-layer="${e.layer}" data-hue="${e.hue | 0}"`
       + ` onerror="this.style.visibility='hidden'">`
@@ -3266,7 +3479,7 @@ function refreshContainer(serial) {
     const cell = document.createElement("div");
     cell.className = "cont-item";
     cell.title = "double-click to use / open · drag to move";
-    cell.draggable = true;                 // drag to another bag / ground / paperdoll
+    cell.draggable = false;                // pointer-drag (held-on-cursor), not native HTML5 drag
     cell.dataset.serial = itemSerial;
     cell.dataset.g = it.g;
     cell.dataset.amount = (it.amount | 0) || 1;
@@ -3619,11 +3832,13 @@ function renderShop(shop) {
   let h = "";
   if (buy && buy.prices && buy.prices.length) {
     const vendor = buy.vendor >>> 0;
-    // Pair each price to its container item. UO sends the buy list (0x74) in the
-    // REVERSE order of the vendor's container contents (0x3C) — ClassicUO reads the
-    // container from its LAST item backward (BuyList, PacketHandlers.cs). Matching
-    // forward swapped every icon vs its name; reverse the items to realign.
-    const pairItems = buyItems.slice().reverse();
+    // Pair each price to its container item by the item's X slot. ServUO's buy list
+    // (0x74) is in sorted forward order, while the container-content packet (0x3C) is
+    // written REVERSED but stamps each item with X = its 1-based position (Packets.cs
+    // VendorBuyContent). Our items live in a HashMap (arrival order lost), so neither
+    // forward nor reverse indexing is reliable — sorting by that X restores the exact
+    // 0x74 order (this is also why ClassicUO sorts the vendor container by X).
+    const pairItems = buyItems.slice().sort((a, b) => (a.x | 0) - (b.x | 0));
     let rows = pairItems.map((it, i) => ({ it, pr: buy.prices[i] })).filter((r) => r.pr)
       .map((r) => ({ g: r.it.g, serial: r.it.serial >>> 0, amount: r.it.amount | 0,
         name: r.pr.name || ("item " + r.it.g), price: r.pr.price | 0 }));
@@ -3673,12 +3888,18 @@ function esc(s) {
 //   • another container window → move it into that bag
 //   • the game canvas (ground) → drop it at that tile
 //   • the paperdoll → equip it (server derives the layer from tiledata)
-let dragSerial = null, dragG = 0, dragAmt = 1;
-// Ground-item pointer-drag (canvas sprites can't fire HTML5 dragstart): a left-press
-// on a world item arms `groundDrag`; once the cursor moves past DRAG_THRESHOLD px it
-// becomes a real drag with a floating ghost, and on release we pick up + drop/equip.
-let groundDrag = null;          // { serial, g, sx, sy, started } or null
-let dragGhost = null;           // floating <img> following the cursor while dragging
+// UO "item on the cursor": once an item is lifted it sticks to the mouse and follows
+// it until the player clicks a valid place target. This is the single shared held
+// state; every drag source (world item, container icon, paperdoll icon, worn doll
+// item) funnels into it, and every placement reads from it.
+let cursorItem = null;          // { serial, g, amount } | null — the held item, or nothing
+let liftDrag = false;           // true while the very press that lifted the item is still down
+let placedAt = 0;               // perf time of the last placement (debounces the trailing mousedown)
+// Pointer-drag arming (canvas sprites can't fire HTML5 dragstart): a left-press on a
+// draggable item arms `groundDrag`; once the cursor moves past DRAG_THRESHOLD px the
+// item lifts onto the cursor (held), and a release/next-click places it.
+let groundDrag = null;          // { serial, g, amount, sx, sy, started } or null
+let dragGhost = null;           // floating <img> glued to the cursor while an item is held
 const DRAG_THRESHOLD = 5;       // px the pointer must move before a press becomes a drag
 
 // Place/refresh the floating ghost image at the cursor (page coords).
@@ -3693,104 +3914,139 @@ function endGroundDrag() {
   groundDrag = null;
 }
 
+// Lift an item onto the cursor (UO pickup): set the shared held state, send the
+// `pickup` ONCE, and show the floating ghost that now follows the mouse until the
+// item is placed. Reused by every drag source so lifting behaves identically.
+function liftToCursor(serial, g, amount, clientX, clientY) {
+  serial = serial >>> 0; g = g | 0; amount = amount || 1;
+  cursorItem = { serial, g, amount };
+  sendInput("pickup:" + serial + (amount > 1 ? ":" + amount : ""));
+  if (dragGhost) { dragGhost.remove(); dragGhost = null; }
+  const img = document.createElement("img");
+  img.src = `art/static/${g}.png`;
+  img.style.cssText = "position:fixed;transform:translate(-50%,-50%);opacity:0.8;" +
+    "pointer-events:none;z-index:100000;image-rendering:pixelated;";   // pointer-events:none → never blocks elementFromPoint
+  img.onerror = () => { img.style.visibility = "hidden"; };
+  document.body.appendChild(img);
+  dragGhost = img;
+  if (clientX != null) moveGhost(clientX, clientY);
+}
+// Drop the held item from the cursor: clear state and remove the ghost.
+function clearCursorItem() {
+  cursorItem = null; liftDrag = false;
+  if (dragGhost) { dragGhost.remove(); dragGhost = null; }
+}
+// Resolve where a placement click landed and issue the matching drop/equip (the
+// `pickup` already went out at lift, so only one command here). Returns true if the
+// item was placed (caller clears it); false to KEEP holding (clicked an invalid spot).
+function placeCursorItem(clientX, clientY) {
+  if (!cursorItem) return false;
+  const serial = cursorItem.serial;
+  const el = document.elementFromPoint(clientX, clientY);
+  const contWin = el && el.closest && el.closest(".container-win");
+  if (contWin) {
+    let tgt = null;
+    for (const [s, w] of containerWins) if (w.el === contWin) { tgt = s; break; }
+    if (tgt == null) return false;
+    const r = contWin.getBoundingClientRect();
+    const gx = Math.max(0, Math.min(150, Math.round(clientX - r.left)));
+    const gy = Math.max(0, Math.min(120, Math.round(clientY - r.top - 20)));
+    sendInput("drop:" + serial + ":" + gx + ":" + gy + ":0:" + tgt);
+    return true;
+  }
+  if (el && el.closest && el.closest("#paperdoll")) {
+    sendInput("equip:" + serial + ":0");   // layer 0 = server derives the wear layer
+    return true;
+  }
+  if (el && el.closest && el.closest("#map")) {
+    const gl = clientToGlobal(clientX, clientY), t = groundTileAt(gl.x, gl.y);
+    sendInput("drop:" + serial + ":" + t.x + ":" + t.y + ":" + t.z + ":4294967295");
+    return true;
+  }
+  return false;   // other UI / empty space → keep holding
+}
+// Esc while holding → return the item. Choice: drop it back into our own backpack
+// (the layer-21 worn pack) if we know its serial — that's the safe "undo" that won't
+// scatter loot on the floor; only if we have no backpack do we fall back to dropping
+// on the ground tile under the cursor. Then clear the held state.
+function returnCursorItem() {
+  if (!cursorItem) return;
+  const serial = cursorItem.serial;
+  const bp = backpackSerial();
+  if (bp != null) {
+    sendInput("drop:" + serial + ":0:0:0:" + bp);
+  } else {
+    const gl = clientToGlobal(lastMenuX, lastMenuY), t = groundTileAt(gl.x, gl.y);
+    sendInput("drop:" + serial + ":" + t.x + ":" + t.y + ":" + t.z + ":4294967295");
+  }
+  clearCursorItem();
+}
+
 function setupItemDnD() {
-  // Promote an armed ground-item press into a real drag once it moves far enough,
-  // then keep the ghost glued to the cursor. Cancelling the pending single-click for
-  // this item suppresses the name-request that a plain click would have fired.
+  // Promote an armed press (world item / container icon / paperdoll icon / worn doll
+  // item) into a real lift once it moves past DRAG_THRESHOLD: the item jumps onto the
+  // cursor (UO pickup) and the ghost follows the mouse until placed. Cancelling the
+  // pending single-click for this item suppresses the name-request a plain click fires.
   window.addEventListener("mousemove", (e) => {
-    if (!groundDrag) return;
-    if (!groundDrag.started) {
+    if (groundDrag && !cursorItem && !groundDrag.started) {
       if (Math.abs(e.clientX - groundDrag.sx) < DRAG_THRESHOLD &&
           Math.abs(e.clientY - groundDrag.sy) < DRAG_THRESHOLD) return;
       groundDrag.started = true;
       if (clickPend && (clickPend.serial >>> 0) === groundDrag.serial) { clearTimeout(clickPend.timer); clickPend = null; }
-      const img = document.createElement("img");
-      img.src = `art/static/${groundDrag.g}.png`;
-      img.style.cssText = "position:fixed;transform:translate(-50%,-50%);opacity:0.7;" +
-        "pointer-events:none;z-index:100000;image-rendering:pixelated;";
-      img.onerror = () => { img.style.visibility = "hidden"; };
-      document.body.appendChild(img);
-      dragGhost = img;
+      liftToCursor(groundDrag.serial, groundDrag.g, groundDrag.amount, e.clientX, e.clientY);
+      liftDrag = true;            // the lifting press is still down; its release decides one-motion placement
+      groundDrag = null;
     }
-    moveGhost(e.clientX, e.clientY);
+    if (cursorItem) moveGhost(e.clientX, e.clientY);
   });
-  // Release: if a real drag happened, hit-test the drop target and pick up + place.
-  // The ghost is pointer-events:none so elementFromPoint never returns it.
+  // Release of the LIFTING press: a one-motion drag that ends over a valid target
+  // places immediately; ending over nothing leaves the item held for a later click.
+  // (Separate placement clicks are handled in the pointerdown listener below.)
   window.addEventListener("mouseup", (e) => {
-    if (!groundDrag) return;
-    if (!groundDrag.started) { groundDrag = null; return; }   // never moved → leave the click alone
-    const serial = groundDrag.serial;
-    endGroundDrag();
-    const el = document.elementFromPoint(e.clientX, e.clientY);
-    const contWin = el && el.closest(".container-win");
-    if (contWin) {
-      let tgt = null;
-      for (const [s, w] of containerWins) if (w.el === contWin) { tgt = s; break; }
-      if (tgt != null) {
-        const r = contWin.getBoundingClientRect();
-        const gx = Math.max(0, Math.min(150, Math.round(e.clientX - r.left)));
-        const gy = Math.max(0, Math.min(120, Math.round(e.clientY - r.top - 20)));
-        sendInput("pickup:" + serial + ":1");
-        sendInput("drop:" + serial + ":" + gx + ":" + gy + ":0:" + tgt);
-      }
-    } else if (el && el.closest("#paperdoll")) {
-      sendInput("pickup:" + serial + ":1");
-      sendInput("equip:" + serial + ":0");        // layer 0 = server derives the wear layer
-    } else if (el && el.closest("#map")) {
-      const gl = clientToGlobal(e.clientX, e.clientY), t = groundTileAt(gl.x, gl.y);
-      sendInput("pickup:" + serial + ":1");
-      sendInput("drop:" + serial + ":" + t.x + ":" + t.y + ":" + t.z + ":4294967295");
+    if (e.button !== 0) return;
+    if (groundDrag && !groundDrag.started) { groundDrag = null; return; }  // never moved → leave the click alone
+    groundDrag = null;
+    if (!liftDrag) return;        // not the lifting press → nothing to resolve here
+    liftDrag = false;
+    placedAt = performance.now();
+    if (placeCursorItem(e.clientX, e.clientY)) clearCursorItem();
+  });
+  // A held item is placed by the NEXT primary click; when not holding, a left press on
+  // a container / own-paperdoll item icon arms the same pointer-drag world items use.
+  // Capture phase + stopImmediatePropagation while placing so the click resolves the
+  // placement BEFORE PIXI entity handlers / canvas steering and does nothing else.
+  // Guard: if a server TARGET cursor is up, the click must answer it, so don't place.
+  window.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    if (cursorItem) {
+      if (liftDrag) return;       // the lifting press is still down → its mouseup resolves it
+      if (scene && scene.target && scene.target.active === 1 && !targetUIHidden) return;
+      e.preventDefault(); e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      placedAt = performance.now();
+      if (placeCursorItem(e.clientX, e.clientY)) clearCursorItem();
+      return;                     // invalid spot → keep holding (the item stays on the cursor)
     }
-    // Dropped on nothing useful → cancel silently (no pickup, item stays put).
-  });
-  document.addEventListener("dragstart", (e) => {
-    const el = e.target.closest && e.target.closest("[data-serial]");
-    if (!el) return;
-    dragSerial = (+el.dataset.serial) >>> 0;
-    dragG = +el.dataset.g | 0;
-    dragAmt = +el.dataset.amount || 1;
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", String(dragSerial));
-  });
-  document.addEventListener("dragend", () => { dragSerial = null; });
+    const cell = e.target.closest && e.target.closest(".cont-item[data-serial]");
+    if (cell) {
+      e.preventDefault();
+      groundDrag = { serial: (+cell.dataset.serial) >>> 0, g: +cell.dataset.g | 0,
+                     amount: (+cell.dataset.amount) || 1, sx: e.clientX, sy: e.clientY, started: false };
+      return;
+    }
+    if (pdTarget == null) {       // own paperdoll only — can't move another mobile's gear
+      const ic = e.target.closest && e.target.closest("#paperdoll .eq-icon[data-serial]");
+      if (ic) {
+        e.preventDefault();
+        groundDrag = { serial: (+ic.dataset.serial) >>> 0, g: +ic.dataset.g | 0,
+                       amount: 1, sx: e.clientX, sy: e.clientY, started: false };
+      }
+    }
+  }, true);
   // Tooltip follows the cursor while visible.
   window.addEventListener("mousemove", (e) => {
     const t = document.getElementById("tip");
     if (t && t.style.display === "block") { t.style.left = (e.clientX + 14) + "px"; t.style.top = (e.clientY + 10) + "px"; }
-  });
-  document.addEventListener("dragover", (e) => {
-    if (dragSerial == null) return;
-    if (e.target.closest(".container-win") || e.target.closest("#paperdoll") || e.target.closest("#map")) {
-      e.preventDefault(); e.dataTransfer.dropEffect = "move";
-    }
-  });
-  document.addEventListener("drop", (e) => {
-    if (dragSerial == null) return;
-    const serial = dragSerial, amt = dragAmt, g = dragG;
-    const contWin = e.target.closest(".container-win");
-    if (contWin) {
-      e.preventDefault();
-      let tgt = null;
-      for (const [s, w] of containerWins) if (w.el === contWin) { tgt = s; break; }
-      if (tgt != null) {
-        const r = contWin.getBoundingClientRect();
-        const gx = Math.max(0, Math.min(150, Math.round(e.clientX - r.left)));
-        const gy = Math.max(0, Math.min(120, Math.round(e.clientY - r.top - 20)));
-        sendInput("pickup:" + serial + ":" + amt);
-        sendInput("drop:" + serial + ":" + gx + ":" + gy + ":0:" + tgt);
-      }
-    } else if (e.target.closest("#paperdoll")) {
-      e.preventDefault();
-      // Equip: layer 0 tells the server to derive the wear layer from tiledata.
-      sendInput("pickup:" + serial + ":" + amt);
-      sendInput("equip:" + serial + ":0");
-    } else if (e.target.closest("#map")) {
-      e.preventDefault();
-      const gl = clientToGlobal(e.clientX, e.clientY), t = groundTileAt(gl.x, gl.y);
-      sendInput("pickup:" + serial + ":" + amt);
-      sendInput("drop:" + serial + ":" + t.x + ":" + t.y + ":" + t.z + ":4294967295");
-    }
-    dragSerial = null;
   });
 }
 
@@ -3811,9 +4067,18 @@ let rightDown = false, mouseX = 0, mouseY = 0;
 // pointerdown fires before the canvas DOM mousedown, so it sets this timestamp;
 // the button-2 mousedown handler sees it and skips starting RMB steering.
 let suppressSteerUntil = 0;
-// A right-button press that landed on an entity, pending a quick-click vs drag
-// decision on mouseup: { serial, t, x, y } or null.
+// A right-button press that landed on an entity, pending a quick-tap (→ context
+// menu) vs hold/drag (→ steer) decision: { serial, t, x, y, steering, timer } or null.
 let rmbEntity = null;
+const STEER_HOLD_MS = 180;    // hold RMB this long on an entity → start steering (not a menu)
+// Promote a pending entity-RMB into steering (hold/drag detected). After this the
+// release won't open a context menu — it was a move, not a tap.
+function promoteRmbSteer() {
+  if (!rmbEntity || rmbEntity.steering) return;
+  rmbEntity.steering = true;
+  if (rmbEntity.timer) { clearTimeout(rmbEntity.timer); rmbEntity.timer = null; }
+  rightDown = true; // mouseX/mouseY are already tracked → steer toward the cursor
+}
 // Last cursor position (page coords) where a context menu should open.
 let lastMenuX = 0, lastMenuY = 0;
 const MOUSE_RUN_RANGE = 190;  // ClassicUO: run when cursor ≥190px from center
@@ -3869,13 +4134,16 @@ let targetUIHidden = false;     // user pressed Esc → hide crosshair/banner lo
 // target cursor first; otherwise shift = attack, double = use, single = request name.
 function onEntityPointerDown(serial, e, isItem) {
   if (e.button === 2) {               // right-button on an entity
-    // ClassicUO model: RMB = move (steer). A *quick* right-click without dragging
-    // opens the entity's context menu; holding/dragging steers the character. So
-    // don't suppress steering here — record a candidate and decide on mouseup. This
-    // lets the player walk even while an OPL tooltip is up over an entity.
-    rmbEntity = { serial: serial >>> 0, t: performance.now(), x: e.clientX, y: e.clientY };
+    // RMB on an entity is ambiguous: a *quick tap* = open its context menu, a
+    // *hold or drag* = steer the character. To stop the two from firing together we
+    // DON'T steer immediately here (the canvas mousedown checks `rmbEntity` and skips
+    // starting the steer). Steering is promoted only once the press is held past
+    // STEER_HOLD_MS or the cursor drags > a few px (see the mousemove/timer below);
+    // a release before that opens the menu and never moved the character.
+    rmbEntity = { serial: serial >>> 0, t: performance.now(), x: e.clientX, y: e.clientY, steering: false };
     lastMenuX = e.clientX; lastMenuY = e.clientY; // anchor a possible menu at the cursor
-    return;                           // fall through to the canvas DOM mousedown → steer
+    rmbEntity.timer = setTimeout(() => { promoteRmbSteer(); }, STEER_HOLD_MS);
+    return;
   }
   if (e.button !== 0) return;   // left only — right button still steers movement
   entityClickedAt = performance.now(); // a mobile/item ate this click → no click-to-walk
@@ -3884,11 +4152,6 @@ function onEntityPointerDown(serial, e, isItem) {
     targetConsumedAt = performance.now();
     sendInput("target:" + serial);   // answer the object-target cursor
     endTargetUI();
-    return;
-  }
-  if (e.shiftKey) {                    // shift+click → attack
-    if (clickPend) { clearTimeout(clickPend.timer); clickPend = null; }
-    sendInput("attack:" + serial);
     return;
   }
   if (clickPend && clickPend.serial === serial) {  // second click in time → double-click
@@ -3919,7 +4182,7 @@ function onEntityPointerDown(serial, e, isItem) {
     // this stays a normal click; starting a drag cancels the pending name-request.
     if (isItem) {
       const it = (scene && scene.items || []).find((x) => (x.serial >>> 0) === (serial >>> 0));
-      groundDrag = { serial: serial >>> 0, g: it ? it.g : 0, sx: e.clientX, sy: e.clientY, started: false };
+      groundDrag = { serial: serial >>> 0, g: it ? it.g : 0, amount: (it && (it.amount | 0)) || 1, sx: e.clientX, sy: e.clientY, started: false };
     }
   }
 }
@@ -3974,6 +4237,29 @@ function updateTargetUI() {
   if (app && app.canvas) app.canvas.style.cursor = show ? "crosshair" : "";
   const hint = document.getElementById("targethint");
   if (hint) hint.style.display = show ? "block" : "none";
+  if (!show) clearTargetHighlight();   // target resolved/cancelled → drop any highlight
+}
+// While a target cursor is active, the entity (mobile or world item) under the cursor
+// is tinted gold so the player can see exactly what they're about to target. Only one
+// at a time; restored on pointer-out or when targeting ends.
+let targetHL = null;   // { sp, tint } of the currently-highlighted sprite
+const TARGET_HL_TINT = 0xffd24a;
+function targetingActive() {
+  return !!(scene && scene.target && scene.target.active === 1 && !targetUIHidden);
+}
+function clearTargetHighlight() {
+  if (targetHL && targetHL.sp) { try { targetHL.sp.tint = targetHL.tint; } catch (_) {} markDirty(); }
+  targetHL = null;
+}
+function targetHighlightOn(sp) {
+  if (!targetingActive() || !sp || (targetHL && targetHL.sp === sp)) return;
+  clearTargetHighlight();
+  targetHL = { sp, tint: sp.tint };
+  sp.tint = TARGET_HL_TINT;
+  markDirty();
+}
+function targetHighlightOff(sp) {
+  if (targetHL && targetHL.sp === sp) clearTargetHighlight();
 }
 
 // ---- user macros / hotkeys (client-only; persisted in localStorage) ----
@@ -3994,7 +4280,7 @@ let mcPending = null;           // combo captured in the editor's key field, pen
 const RESERVED_CODES = new Set([
   ...Object.keys(KEY_DIR),
   "KeyT", "Enter", "NumpadEnter",
-  "KeyM", "KeyB", "KeyP", "KeyI", "KeyK", "KeyL", "KeyN", "KeyO", "KeyY", "KeyG", "KeyH",
+  "KeyM", "KeyB", "KeyP", "KeyI", "KeyK", "KeyL", "KeyN", "KeyO", "KeyY", "KeyG", "KeyH", "KeyU", "KeyJ",
   "Escape",
   "Tab", "Space", // war-mode toggle / auto-attack (handled in the game keydown)
 ]);
@@ -4147,24 +4433,60 @@ function setupMacroEditor() {
   makeDraggable(win, document.getElementById("mc-title"));
 }
 
+// Spell quick-cast chord: press K, then a circle digit (1-8), then a spell digit
+// (1-8) → cast that Magery spell by position. E.g. K 1 1 = Clumsy, K 1 2 = Create
+// Food, K 8 8 = Water Elemental. Active for ~1.5s after each key.
+let spellChord = null;          // { circle: number|null, t: perf-ms } | null
+const SPELL_CHORD_MS = 1500;
+function chordDigit(code) {
+  const m = /^Digit([1-8])$/.exec(code) || /^Numpad([1-8])$/.exec(code);
+  return m ? +m[1] : null;
+}
+function armSpellChord() { spellChord = { circle: null, t: performance.now() }; setStatus("Spell: circle 1-8…"); }
+
 function setupInput() {
   loadMacros();
   setupMacroEditor();
   window.addEventListener("keydown", (e) => {
     shiftHeld = e.shiftKey;
     if (chatting) return;
+    // Spell chord capture (after K): consume circle/spell digits and cast.
+    if (spellChord) {
+      if (performance.now() - spellChord.t > SPELL_CHORD_MS) {
+        spellChord = null;                       // timed out
+      } else {
+        const d = chordDigit(e.code);
+        if (d != null) {
+          e.preventDefault();
+          if (spellChord.circle == null) { spellChord.circle = d; spellChord.t = performance.now(); setStatus(`Spell ${d}-_`); }
+          else {
+            const id = (spellChord.circle - 1) * 8 + d;   // Magery spell 1..64
+            sendInput("cast:" + id);
+            setStatus(`cast ${spellChord.circle}-${d} (${MAGERY_SPELLS[id - 1] || "spell " + id})`);
+            spellChord = null;
+          }
+          return;
+        }
+        spellChord = null;                       // any non-digit cancels; fall through
+      }
+    }
     if (e.code === "KeyT" || e.code === "Enter") { e.preventDefault(); openChat(); return; }
     if (e.code === "KeyM") { e.preventDefault(); toggleMinimap(); return; }
     if (e.code === "KeyB") { e.preventDefault(); toggleWorldmap(); return; }
     if (e.code === "KeyP") { e.preventDefault(); togglePaperdoll(); return; }   // P = paperdoll
     if (e.code === "KeyI") { e.preventDefault(); openBackpack(); return; }       // I = backpack
-    if (e.code === "KeyK") { e.preventDefault(); toggleSpellbook(); return; }     // K = spellbook
+    if (e.code === "KeyK") { e.preventDefault(); toggleSpellbook(); armSpellChord(); return; } // K = spellbook (+ spell chord)
     if (e.code === "KeyL") { e.preventDefault(); toggleSkills(); return; }         // L = skills
     if (e.code === "KeyN") { e.preventDefault(); toggleMute(); return; }
     if (e.code === "KeyO") { e.preventDefault(); toggleMacros(); return; }        // O = macro editor
     if (e.code === "KeyY") { e.preventDefault(); toggleParty(); return; }          // Y = party panel
     if (e.code === "KeyG") { e.preventDefault(); requestAllNames(); return; }      // G = show all names
     if (e.code === "KeyH") { e.preventDefault(); toggleStatus(); return; }          // H = status bar
+    if (e.code === "KeyU") { e.preventDefault(); toggleHud(); return; }              // U = hide/show HUD status panel
+    if (e.code === "KeyJ") { e.preventDefault(); toggleJournal(); return; }          // J = hide/show journal
+    // Esc while holding an item on the cursor → return it (backpack, else ground).
+    // Takes priority over closing windows so a held item is never silently lost.
+    if (e.code === "Escape" && cursorItem) { e.preventDefault(); returnCursorItem(); return; }
     if (e.code === "Escape" && partyOn) { e.preventDefault(); closeParty(); return; }
     if (e.code === "Escape" && macrosOn) { e.preventDefault(); closeMacros(); return; }
     if (e.code === "Escape" && wmOn) { e.preventDefault(); closeWorldmap(); return; }
@@ -4212,13 +4534,23 @@ function setupInput() {
   // state. Position is tracked window-wide so dragging off-canvas still steers.
   const canvas = app.canvas;
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
-  const track = (e) => { const r = canvas.getBoundingClientRect(); mouseX = e.clientX - r.left; mouseY = e.clientY - r.top; lastMenuX = e.clientX; lastMenuY = e.clientY; };
+  const track = (e) => {
+    const r = canvas.getBoundingClientRect(); mouseX = e.clientX - r.left; mouseY = e.clientY - r.top;
+    lastMenuX = e.clientX; lastMenuY = e.clientY;
+    // A pending entity-RMB that drags past a few px is a steer, not a context menu.
+    if (rmbEntity && !rmbEntity.steering &&
+        (Math.abs(e.clientX - rmbEntity.x) > 6 || Math.abs(e.clientY - rmbEntity.y) > 6)) {
+      promoteRmbSteer();
+    }
+  };
   canvas.addEventListener("mousedown", (e) => {
     if (e.button !== 2) return;
-    // An entity right-click (handled by its PIXI pointerdown, which fired first)
-    // opened a context menu — don't also start RMB steering for this press.
-    if (performance.now() < suppressSteerUntil) { e.preventDefault(); return; }
-    rightDown = true; track(e); e.preventDefault();
+    track(e); e.preventDefault();
+    // RMB on an entity defers steering (the PIXI pointerdown set `rmbEntity` first):
+    // a quick tap opens its menu, a hold/drag promotes to steering. RMB on empty
+    // ground steers immediately.
+    if (rmbEntity && !rmbEntity.steering) return;
+    rightDown = true;
   });
   // Left-click on empty ground while a target cursor is active → answer with a
   // tile (targetxy). Clicks that hit a mobile/item are handled by their PIXI
@@ -4249,12 +4581,12 @@ function setupInput() {
   window.addEventListener("mouseup", (e) => {
     if (e.button !== 2) return;
     rightDown = false;
-    // A quick, stationary right-click on an entity = open its context menu (vs a
-    // hold/drag, which was steering and should NOT pop a menu).
+    // Decide the pending entity-RMB: if it never promoted to steering (released
+    // before the hold timer + no drag), it was a quick tap → open the context menu.
+    // If it steered, the character moved and NO menu pops. Either way it's resolved.
     if (rmbEntity) {
-      const quick = performance.now() - rmbEntity.t < 250;
-      const still = Math.abs(e.clientX - rmbEntity.x) < 6 && Math.abs(e.clientY - rmbEntity.y) < 6;
-      if (quick && still) { lastMenuX = e.clientX; lastMenuY = e.clientY; sendInput("popupreq:" + rmbEntity.serial); }
+      if (rmbEntity.timer) { clearTimeout(rmbEntity.timer); rmbEntity.timer = null; }
+      if (!rmbEntity.steering) { lastMenuX = e.clientX; lastMenuY = e.clientY; sendInput("popupreq:" + rmbEntity.serial); }
       rmbEntity = null;
     }
   });
@@ -4366,8 +4698,10 @@ function setupInput() {
   // Clicking the HUD name "pulls out" the movable status bar.
   const pn = document.getElementById("pname");
   if (pn) { pn.style.cursor = "pointer"; pn.title = "Open status bar (H)"; pn.addEventListener("click", toggleStatus); }
+  loadHudVisibility();   // restore hidden HUD/journal state (U / J toggles)
   wireSkills();
   loadSkillButtons();   // restore any skill buttons the user pulled out previously
+  loadSpellButtons();   // restore any spell quick-cast buttons dragged out earlier
   document.getElementById("pt-close").addEventListener("click", closeParty);
   makeDraggable(document.getElementById("party"), document.getElementById("pt-title"));
   wireParty();
@@ -4401,12 +4735,13 @@ function setupInput() {
   // over a bag/ground unequips it there; over the doll re-equips. Self doll only.
   pdb.addEventListener("mousedown", (e) => {
     if (e.button !== 0 || pdTarget != null) return;        // left only, our own doll
+    if (cursorItem || performance.now() - placedAt < 250) return; // holding / just placed → don't re-arm
     if (!(e.target.closest && e.target.closest("#pd-doll"))) return;
     const img = dollImgAt(e);
     if (!img) return;
     e.preventDefault();
     groundDrag = { serial: (+img.dataset.serial) >>> 0, g: +img.dataset.g | 0,
-                   sx: e.clientX, sy: e.clientY, started: false };
+                   amount: 1, sx: e.clientX, sy: e.clientY, started: false };
   });
   pdb.addEventListener("mouseleave", () => {
     if (pdTipEl && pdTipEl.closest && pdTipEl.closest("#pd-doll")) { pdTipEl = null; hideTip(); }

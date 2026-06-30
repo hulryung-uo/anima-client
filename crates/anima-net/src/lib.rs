@@ -324,7 +324,20 @@ impl Session {
                 self.stream.write_all(&build_client_version(CLIENT_VERSION))?;
             }
             _ => {
+                // A server-pushed jump of the player's tile (>1 step) is a teleport
+                // — e.g. a GM [Set X Y Z, a moongate, a recall. It can arrive as
+                // 0x20 / 0x77 / 0x78 depending on the server, so detect it by the
+                // position delta rather than the packet id, and resync the walk
+                // predictor (stale sequence + pending steps would deny all movement).
+                let before = self.world.player_mobile().map(|m| m.pos);
                 apply_packet(&mut self.world, frame);
+                if let (Some(b), Some(a)) =
+                    (before, self.world.player_mobile().map(|m| m.pos))
+                {
+                    if b.x.abs_diff(a.x).max(b.y.abs_diff(a.y)) > 1 {
+                        self.walker.reset();
+                    }
+                }
             }
         }
         Ok(())
