@@ -744,16 +744,23 @@ fn handle_request(ctx: Ctx) {
         let (s, rx) = mpsc::channel::<Vec<u8>>();
         sse_hub.lock().unwrap().push(s);
         let mut w = req.into_writer();
-        let head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
-            Cache-Control: no-cache\r\nConnection: keep-alive\r\n\
-            Access-Control-Allow-Origin: *\r\n\r\n: ok\n\n";
-        if w.write_all(head).and_then(|_| w.flush()).is_ok() {
-            while let Ok(frame) = rx.recv() {
-                if w.write_all(&frame).and_then(|_| w.flush()).is_err() {
-                    break;
+        // Stream on a DEDICATED thread, not the shared worker pool: an SSE connection
+        // lives for the page's lifetime, so blocking a pooled worker here meant a few
+        // browser refreshes (each leaving a stale stream until the next heartbeat
+        // reaps it) could occupy all workers → /scene.json and /login stopped
+        // responding ("can't connect"). The worker returns to the pool immediately.
+        thread::spawn(move || {
+            let head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                Cache-Control: no-cache\r\nConnection: keep-alive\r\n\
+                Access-Control-Allow-Origin: *\r\n\r\n: ok\n\n";
+            if w.write_all(head).and_then(|_| w.flush()).is_ok() {
+                while let Ok(frame) = rx.recv() {
+                    if w.write_all(&frame).and_then(|_| w.flush()).is_err() {
+                        break;
+                    }
                 }
             }
-        }
+        });
     } else if url == "/worldmap.png" {
         // Ready once the background render finishes; 503 (retry) until then.
         let bytes = worldmap.lock().unwrap().clone();
