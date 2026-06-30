@@ -792,6 +792,14 @@ function wireLogin() {
     document.getElementById(id).addEventListener("keydown", (e) => { if (e.code === "Enter") submit(); });
   }
 }
+// True when a key event is going to a text field (login form, etc.), so the global
+// game-input handler must not consume it (otherwise letters like a/w/s/d/m/b/t —
+// movement + hotkeys — never reach the field and typing drops characters).
+function isTypingTarget(el) {
+  if (!el) return false;
+  const t = el.tagName;
+  return t === "INPUT" || t === "TEXTAREA" || t === "SELECT" || el.isContentEditable;
+}
 function showLogin(auth, msg) {
   wireLogin();
   const el = document.getElementById("login");
@@ -4450,6 +4458,9 @@ function setupInput() {
   window.addEventListener("keydown", (e) => {
     shiftHeld = e.shiftKey;
     if (chatting) return;
+    // A form field has focus (login form, etc.) → let it receive the keystroke;
+    // don't steal movement/hotkey letters (a, w, s, d, m, b, t…) from typing.
+    if (isTypingTarget(e.target)) return;
     // Spell chord capture (after K): consume circle/spell digits and cast.
     if (spellChord) {
       if (performance.now() - spellChord.t > SPELL_CHORD_MS) {
@@ -4529,6 +4540,7 @@ function setupInput() {
   });
   window.addEventListener("keyup", (e) => {
     shiftHeld = e.shiftKey;
+    if (isTypingTarget(e.target)) return;
     if (e.code in KEY_DIR) { held.delete(KEY_DIR[e.code]); if (!held.size) trace("KU"); }
   });
   // Right-button movement: suppress the context menu, track the cursor, and hold
