@@ -780,7 +780,7 @@ function wireLogin() {
   const go = document.getElementById("lg-go");
   const submit = () => {
     const host = (document.getElementById("lg-host").value || "127.0.0.1").trim();
-    const port = (document.getElementById("lg-port").value || "2593").trim();
+    const port = (document.getElementById("lg-port").value || "2594").trim();
     const user = (document.getElementById("lg-user").value || "").trim();
     const pass = document.getElementById("lg-pass").value || "";
     if (!user) { document.getElementById("lg-msg").textContent = "Enter an account name."; return; }
