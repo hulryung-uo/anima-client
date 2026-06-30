@@ -176,6 +176,7 @@ impl Session {
             Action::TargetGround { x, y, z, graphic } => {
                 self.respond_target(None, *x, *y, *z, *graphic)?
             }
+            Action::TargetCancel => self.cancel_target()?,
             Action::BuyItems { vendor, items } => self.send(&build_buy(*vendor, items))?,
             Action::SellItems { vendor, items } => self.send(&build_sell(*vendor, items))?,
             Action::GumpResponse { serial, gump_id, button, switches, entries } => {
@@ -262,6 +263,28 @@ impl Session {
             y,
             z,
             graphic,
+        );
+        self.send(&pkt)?;
+        self.world.pending_target = None;
+        Ok(())
+    }
+
+    /// Cancel a pending target cursor (Esc). UO signals a cancel by echoing the
+    /// cursor with serial 0 and an all-`0xFFFF` location; the server then aborts the
+    /// spell/skill that was waiting for a target instead of staying in target mode.
+    fn cancel_target(&mut self) -> Result<(), DriverError> {
+        let Some(cursor) = self.world.pending_target else {
+            return Ok(());
+        };
+        let pkt = build_target_response(
+            cursor.target_type,
+            cursor.cursor_id,
+            cursor.cursor_flag,
+            0,
+            0xFFFF,
+            0xFFFF,
+            0,
+            0,
         );
         self.send(&pkt)?;
         self.world.pending_target = None;

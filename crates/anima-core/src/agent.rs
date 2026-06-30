@@ -147,6 +147,9 @@ pub enum Action {
     TargetObject { serial: u32 },
     /// Answer a pending target cursor by selecting a ground location.
     TargetGround { x: u16, y: u16, z: i16, graphic: u16 },
+    /// Cancel a pending target cursor (Esc): the server stops waiting for a target
+    /// (the spell/skill awaiting one is aborted) instead of hanging.
+    TargetCancel,
     /// Buy `items` (each `(item serial, amount)`) from a vendor mobile (UO 0x3B).
     BuyItems { vendor: u32, items: Vec<(u32, u16)> },
     /// Sell `items` (each `(item serial, amount)`) to a vendor mobile (UO 0x9F).

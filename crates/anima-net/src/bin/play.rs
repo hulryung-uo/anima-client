@@ -1325,6 +1325,7 @@ fn parse_command(body: &str) -> Option<Action> {
         // useskill:<id> — invoke an active skill (0x12 ActionRequest type 0x24).
         "useskill" => Some(Action::UseSkill { skill: arg.parse().ok()? }),
         "target" => Some(Action::TargetObject { serial: parse_serial(arg)? }),
+        "targetcancel" => Some(Action::TargetCancel),
         "targetxy" => {
             let mut p = arg.split(':');
             Some(Action::TargetGround {

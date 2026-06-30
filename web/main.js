@@ -4496,9 +4496,10 @@ function setupInput() {
     if (e.code === "Escape" && shopWin) { e.preventDefault(); shopDismissed = true; closeShop(); return; }
     if (e.code === "Escape" && popupEl) { e.preventDefault(); hidePopup(); return; }
     if (e.code === "Escape" && bookWin) { e.preventDefault(); closeBook(); return; }
-    // Esc cancels the local targeting UI (we can't truly cancel server-side).
+    // Esc cancels targeting: tell the SERVER to drop the cursor (so the spell/skill
+    // waiting for a target is aborted, not left hanging) and hide the local UI.
     if (e.code === "Escape" && scene && scene.target && scene.target.active === 1 && !targetUIHidden) {
-      e.preventDefault(); endTargetUI(); return;
+      e.preventDefault(); sendInput("targetcancel"); endTargetUI(); return;
     }
     // Tab = toggle war mode (ClassicUO default). preventDefault so it never moves
     // focus; send the opposite of the server's authoritative `scene.war`.
