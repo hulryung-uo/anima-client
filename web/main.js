@@ -14,13 +14,17 @@ const WALK = 0, RUN_UNARMED = 2, STAND = 4;
 const PEOPLE_COMBAT_STAND = 7;
 const ONMOUNT_WALK = 23, ONMOUNT_RUN = 24, ONMOUNT_STAND = 25;
 const CHAR_ANIM_DELAY = 80; // ClassicUO Constants.CHARACTER_ANIMATION_DELAY (ms/frame)
-// Animation GROUP NUMBERS differ by body type (ClassicUO): monster (body<200)
-// Walk=0/Stand=1, animal (200..399) Walk=0/Run=1/Stand=2, people (>=400)
-// Walk=0/Run=2/Stand=4. Using the people stand (4) for an animal showed an
-// attack pose (the "cat → alligator when idle" bug).
-function animGroup(moving, running, mounted, body, war) {
+// Animation GROUP NUMBERS differ by body type (ClassicUO): monster Walk=0/Stand=1,
+// animal Walk=0/Run=1/Stand=2, people Walk=0/Run=2/Stand=4. `atype` (0 monster /
+// 1 animal / 2 people) comes from the server (mobtypes.txt), which is authoritative
+// over the raw body-range guess (fallback when `atype` is absent). Using the wrong
+// type showed an attack pose while idle (the "cat → alligator when idle" bug).
+function bodyType(body, atype) {
+  return atype != null ? atype : body < 200 ? 0 : body < 400 ? 1 : 2;
+}
+function animGroup(moving, running, mounted, body, war, atype) {
   if (mounted) return moving ? (running ? ONMOUNT_RUN : ONMOUNT_WALK) : ONMOUNT_STAND;
-  const t = body < 200 ? 0 : body < 400 ? 1 : 2;
+  const t = bodyType(body, atype);
   if (t === 0) return moving ? 0 : 1;                  // monster: no separate run
   if (t === 1) return moving ? (running ? 1 : 0) : 2;  // animal
   // people: standing in war mode → combat-ready stance instead of the idle stand.
@@ -33,9 +37,9 @@ function animGroup(moving, running, mounted, body, war) {
 // not a direct group — those live in the ~200+ range and must fold onto the cast
 // gesture. Map a 0x6E `action` to the body's real animation group.
 const PEOPLE_CAST_DIRECTED = 16;
-function resolveActionGroup(action, body) {
+function resolveActionGroup(action, body, atype) {
   action = action | 0;
-  if (body >= 400) {                 // people / humanoid
+  if (bodyType(body, atype) === 2) { // people / humanoid
     if (action >= 200) return PEOPLE_CAST_DIRECTED; // spell cast gesture
     if (action >= 35) return action % 35;           // other out-of-range → fold in
     return action;                                  // direct people group (combat swings, etc.)
@@ -1539,6 +1543,9 @@ function drawMobs() {
     // 403→401) rendered translucent, equipment hidden (UO shows ghosts bare).
     const ghost = isGhostBody(st.body);
     const bodyAnim = ghost ? (st.body === 403 ? 401 : 400) : (st.body | 0);
+    // Authoritative animation type from the server (mobtypes.txt). A ghost is drawn
+    // with a living human body, so it animates as people (2) regardless of st.at.
+    const atype = ghost ? 2 : (st.at != null ? (st.at | 0) : null);
     // War-mode combat stance applies to our own avatar (the only mobile whose war
     // state the server tells us); others fall back to the normal idle stand.
     const inWar = isSelf && !!(scene && scene.war);
@@ -1550,7 +1557,7 @@ function drawMobs() {
     // The raw 0x6E `action` isn't always a direct animation group: spell casts send
     // high "action" codes (UO SpellInfo.Action, ~200+) that map to the cast gesture.
     // resolveActionGroup() folds those onto the body's real group set.
-    const ag = (act && !ghost) ? resolveActionGroup(act.group, bodyAnim) : 0;
+    const ag = (act && !ghost) ? resolveActionGroup(act.group, bodyAnim, atype) : 0;
     if (act && !ghost) {
       framesFor(bodyAnim, ag, d); // kick the frame-count/centers load
       const fk = `${bodyAnim}/${ag}/${d}`;
@@ -1568,7 +1575,7 @@ function drawMobs() {
         st.prevFrameKey = `${group}/${d}`;
       }
     } else {
-      group = animGroup(moving, running, mounted, bodyAnim, inWar);
+      group = animGroup(moving, running, mounted, bodyAnim, inWar, atype);
       frames = framesFor(bodyAnim, group, d);
       // animPhase is a 0..1 cycle fraction (advanced per ground covered); map it to
       // the real frame count. Prefetch the whole cycle so frames don't pop in.

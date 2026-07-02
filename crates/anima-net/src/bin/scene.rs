@@ -62,7 +62,7 @@ fn main() {
             journal.remove(0);
         }
 
-        let scene = build_scene(&mut s, map.as_mut(), art.as_mut(), None, None, &journal);
+        let scene = build_scene(&mut s, map.as_mut(), art.as_mut(), None, None, None, &journal);
         write_atomic(&out, &scene);
     }
 }

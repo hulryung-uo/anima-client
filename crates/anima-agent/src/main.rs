@@ -67,6 +67,7 @@ fn main() {
                 Action::TargetGround { x, y, z, graphic } => {
                     format!("targetXY({x},{y},{z},0x{graphic:04X})")
                 }
+                Action::TargetCancel => "targetcancel".into(),
                 Action::BuyItems { vendor, items } => {
                     format!("buy(0x{vendor:08X}×{})", items.len())
                 }

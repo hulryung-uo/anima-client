@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
-use anima_assets::{AnimData, Art, Cliloc, Image, MapData, RadarCol, MAP_HEIGHT, MAP_WIDTH};
+use anima_assets::{Anim, AnimData, Art, Cliloc, Image, MapData, RadarCol, MAP_HEIGHT, MAP_WIDTH};
 use anima_core::World;
 use serde_json::{json, Value};
 
@@ -886,8 +886,26 @@ pub fn build_scene(
     mut art: Option<&mut Art>,
     cliloc: Option<&Cliloc>,
     animdata: Option<&AnimData>,
+    anim: Option<&Anim>,
     journal: &[Value],
 ) -> String {
+    // `Body.def` remap (ClassicUO ReplaceBody): redirect an exotic body to its real
+    // animation body so the renderer picks the right group + resolves a sprite. The
+    // mobile's own hue wins; Body.def's hue is only a fallback for base creatures.
+    let remap = |body: u16, hue: u16| -> (u16, u16) {
+        let (rbody, rhue) = anim.map_or((body, 0), |a| a.remap(body));
+        (rbody, if hue != 0 { hue } else { rhue })
+    };
+    // Authoritative animation group kind (0 monster, 1 animal, 2 people) for the
+    // (already Body.def-remapped) body: `mobtypes.txt` via `Anim`, else the raw range
+    // heuristic. Sent as `at` so the renderer picks group numbers that match the file
+    // layout the reader uses (an animal's stand is group 2, a monster's is group 1).
+    let atype = |body: u16| -> u8 {
+        anim.map_or_else(
+            || (body >= 200) as u8 + (body >= 400) as u8,
+            |a| a.anim_type(body),
+        )
+    };
     let p = s.world.player_mobile().cloned().unwrap_or_default();
     let st = &s.world.player_stats;
     let mounted = s.world.player_mounted();
@@ -928,9 +946,10 @@ pub fn build_scene(
         .values()
         .filter(|m| m.serial != p.serial)
         .map(|m| {
+            let (body, hue) = remap(m.body, m.hue);
             // Only "people" bodies (>= 400) wear clothes/hair/beard; animals and
             // monsters carry nothing, so skip the per-item work for them.
-            let equip: Vec<Value> = if m.body >= 400 {
+            let equip: Vec<Value> = if body >= 400 {
                 s.world
                     .items
                     .values()
@@ -957,9 +976,9 @@ pub fn build_scene(
             json!({
                 "serial": m.serial,
                 "x": m.pos.x, "y": m.pos.y, "z": m.pos.z, "dir": m.direction,
-                "body": m.body, "noto": m.notoriety, "name": m.name,
+                "body": body, "at": atype(body), "noto": m.notoriety, "name": m.name,
                 "hits": m.hits, "hitsMax": m.hits_max,
-                "hue": m.hue, "equip": equip,
+                "hue": hue, "equip": equip,
                 "mounted": mount.is_some() as u8, "mountAnim": mount_anim
             })
         })
@@ -1259,10 +1278,11 @@ pub fn build_scene(
     }
 
     // Small parts go through serde (cheap + handles string escaping for names).
+    let (p_body, p_hue) = remap(p.body, p.hue);
     let player = json!({
         "serial": p.serial,
-        "x": p.pos.x, "y": p.pos.y, "z": p.pos.z, "dir": p.direction, "body": p.body, "name": p.name,
-        "hue": p.hue,
+        "x": p.pos.x, "y": p.pos.y, "z": p.pos.z, "dir": p.direction, "body": p_body, "at": atype(p_body), "name": p.name,
+        "hue": p_hue,
         "mounted": mounted, "mountAnim": player_mount_anim,
         "hits": p.hits, "hitsMax": p.hits_max, "mana": p.mana, "manaMax": p.mana_max,
         "stam": p.stam, "stamMax": p.stam_max,

@@ -526,7 +526,7 @@ fn main() {
         if dirty || last_build.elapsed() >= Duration::from_millis(250) {
             let t0 = Instant::now();
             let mut art_guard = art.as_ref().map(|a| a.lock().unwrap());
-            let json = build_scene(&mut session, map.as_mut(), art_guard.as_deref_mut(), cliloc.as_deref(), animdata.as_ref(), &journal);
+            let json = build_scene(&mut session, map.as_mut(), art_guard.as_deref_mut(), cliloc.as_deref(), animdata.as_ref(), anim.as_deref(), &journal);
             drop(art_guard);
             *scene.lock().unwrap() = json;
             last_build = Instant::now();
