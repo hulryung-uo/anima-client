@@ -3691,6 +3691,7 @@ function refreshContainer(serial) {
     cell.dataset.serial = itemSerial;
     cell.dataset.g = it.g;
     cell.dataset.amount = (it.amount | 0) || 1;
+    cell.dataset.st = it.st ? "1" : "0";
     const img = document.createElement("img");
     img.className = "cont-icon"; img.src = `art/static/${stackGraphic(it.g, it.amount | 0)}.png`;
     img.draggable = false;                  // let the cell own the drag
@@ -4161,7 +4162,7 @@ let placedAt = 0;               // perf time of the last placement (debounces th
 // Pointer-drag arming (canvas sprites can't fire HTML5 dragstart): a left-press on a
 // draggable item arms `groundDrag`; once the cursor moves past DRAG_THRESHOLD px the
 // item lifts onto the cursor (held), and a release/next-click places it.
-let groundDrag = null;          // { serial, g, amount, sx, sy, started } or null
+let groundDrag = null;          // { serial, g, amount, st, sx, sy, started } or null
 let dragGhost = null;           // floating <img> glued to the cursor while an item is held
 const DRAG_THRESHOLD = 5;       // px the pointer must move before a press becomes a drag
 
@@ -4245,6 +4246,63 @@ function returnCursorItem() {
   clearCursorItem();
 }
 
+// ---- stack-split dialog (ClassicUO SplitMenuGump) -------------------------
+// Dragging a stack (amount > 1) without Shift pops this at the cursor instead of
+// lifting the whole pile: a slider + numeric field (kept in sync) pick how many
+// to take. OK/Enter confirms and feeds liftToCursor() the chosen amount, exactly
+// as if that many had been dragged; Cancel/Esc/✕/clicking away abandons the drag
+// and leaves the stack untouched (nothing was ever sent to the server for this
+// press — the pickup packet only goes out once liftToCursor actually runs).
+let splitWin = null;   // { el, serial, g, amount, clientX, clientY, input, slider } | null
+function closeSplitDialog() {
+  if (splitWin) { splitWin.el.remove(); splitWin = null; }
+}
+function confirmSplitDialog() {
+  if (!splitWin) return;
+  const n = Math.max(1, Math.min(splitWin.amount, parseInt(splitWin.input.value, 10) || 1));
+  const { serial, g, clientX, clientY } = splitWin;
+  closeSplitDialog();
+  liftToCursor(serial, g, n, clientX, clientY);
+}
+function openSplitDialog(serial, g, amount, clientX, clientY) {
+  closeSplitDialog();
+  const el = document.createElement("div");
+  el.className = "gump-win split-win";
+  el.style.left = Math.max(4, Math.min(window.innerWidth - 180, clientX - 75)) + "px";
+  el.style.top = Math.max(4, Math.min(window.innerHeight - 110, clientY - 30)) + "px";
+  el.innerHTML = '<div class="gump-title"><span>Split Stack</span><span class="gump-close">✕</span></div>'
+    + '<div class="gump-body split-body">'
+    + `<input type="range" class="split-slider" min="1" max="${amount}" value="${amount}">`
+    + `<input type="number" class="split-input" min="1" max="${amount}" value="${amount}">`
+    + '<div class="split-actions"><button class="dlg-btn split-ok">OK</button>'
+    + '<button class="dlg-btn split-cancel">Cancel</button></div>'
+    + '</div>';
+  document.body.appendChild(el);
+  const slider = el.querySelector(".split-slider"), input = el.querySelector(".split-input");
+  splitWin = { el, serial, g, amount, clientX, clientY, input, slider };
+  // Slider and text field mirror each other (both clamped to 1..amount); typing an
+  // out-of-range value just clamps rather than rejecting the keystroke.
+  slider.addEventListener("input", () => { input.value = slider.value; });
+  input.addEventListener("input", () => {
+    slider.value = Math.max(1, Math.min(amount, parseInt(input.value, 10) || 1));
+  });
+  el.querySelector(".split-ok").addEventListener("click", confirmSplitDialog);
+  el.querySelector(".split-cancel").addEventListener("click", closeSplitDialog);
+  el.querySelector(".gump-close").addEventListener("click", closeSplitDialog);
+  // Keep Enter/Esc local to this window (stopPropagation, same pattern as the
+  // macro editor's win-level keydown) so the global game-input handler never also
+  // sees them — it would otherwise be a no-op here anyway since isTypingTarget()
+  // already skips it while the number field has focus, but this also covers a
+  // click landing on the slider/buttons, which aren't typing targets.
+  el.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.code === "Enter") { e.preventDefault(); confirmSplitDialog(); }
+    else if (e.code === "Escape") { e.preventDefault(); closeSplitDialog(); }
+  });
+  input.focus(); input.select();
+  makeDraggable(el, el.querySelector(".gump-title"));
+}
+
 function setupItemDnD() {
   // Promote an armed press (world item / container icon / paperdoll icon / worn doll
   // item) into a real lift once it moves past DRAG_THRESHOLD: the item jumps onto the
@@ -4256,9 +4314,21 @@ function setupItemDnD() {
           Math.abs(e.clientY - groundDrag.sy) < DRAG_THRESHOLD) return;
       groundDrag.started = true;
       if (clickPend && (clickPend.serial >>> 0) === groundDrag.serial) { clearTimeout(clickPend.timer); clickPend = null; }
-      liftToCursor(groundDrag.serial, groundDrag.g, groundDrag.amount, e.clientX, e.clientY);
-      liftDrag = true;            // the lifting press is still down; its release decides one-motion placement
+      const { serial, g, amount, st } = groundDrag;
       groundDrag = null;
+      // A STACKABLE stack (amount > 1): mirror ClassicUO's SplitMenuGump — a plain
+      // drag opens a split dialog to pick how many to lift; SHIFT+drag skips it and
+      // takes the whole pile immediately (ClassicUO GameActions.PickUp only opens
+      // the gump when `ProfileManager.CurrentProfile.HoldShiftToSplitStack ==
+      // Keyboard.Shift`; the profile default is `false`, so the gump shows exactly
+      // when Shift is UP). `amount > 1` alone isn't enough — PickUp also requires
+      // `item.ItemData.IsStackable` (`st`); a non-stackable item just lifts whole.
+      // Read the live modifier off the event, not the mirrored `shiftHeld` — the
+      // split dialog's own keydown handler stopPropagation()s Shift while it has
+      // focus, which would otherwise leave `shiftHeld` stuck stale.
+      if (amount > 1 && st && !e.shiftKey) { openSplitDialog(serial, g, amount, e.clientX, e.clientY); return; }
+      liftToCursor(serial, g, amount, e.clientX, e.clientY);
+      liftDrag = true;            // the lifting press is still down; its release decides one-motion placement
     }
     if (cursorItem) moveGhost(e.clientX, e.clientY);
   });
@@ -4294,7 +4364,8 @@ function setupItemDnD() {
     if (cell) {
       e.preventDefault();
       groundDrag = { serial: (+cell.dataset.serial) >>> 0, g: +cell.dataset.g | 0,
-                     amount: (+cell.dataset.amount) || 1, sx: e.clientX, sy: e.clientY, started: false };
+                     amount: (+cell.dataset.amount) || 1, st: cell.dataset.st === "1",
+                     sx: e.clientX, sy: e.clientY, started: false };
       return;
     }
     if (pdTarget == null) {       // own paperdoll only — can't move another mobile's gear
@@ -4305,6 +4376,12 @@ function setupItemDnD() {
                        amount: 1, sx: e.clientX, sy: e.clientY, started: false };
       }
     }
+  }, true);
+  // A mousedown anywhere outside an open split dialog abandons it (nothing was
+  // ever lifted for this press, so there's nothing to undo). Its own OK/Cancel/✕
+  // handle clicks on the dialog itself before this ever sees them.
+  window.addEventListener("mousedown", (e) => {
+    if (splitWin && !splitWin.el.contains(e.target)) closeSplitDialog();
   }, true);
   // Tooltip follows the cursor while visible.
   window.addEventListener("mousemove", (e) => {
@@ -4445,7 +4522,8 @@ function onEntityPointerDown(serial, e, isItem) {
     // this stays a normal click; starting a drag cancels the pending name-request.
     if (isItem) {
       const it = (scene && scene.items || []).find((x) => (x.serial >>> 0) === (serial >>> 0));
-      groundDrag = { serial: serial >>> 0, g: it ? it.g : 0, amount: (it && (it.amount | 0)) || 1, sx: e.clientX, sy: e.clientY, started: false };
+      groundDrag = { serial: serial >>> 0, g: it ? it.g : 0, amount: (it && (it.amount | 0)) || 1,
+                     st: !!(it && it.st), sx: e.clientX, sy: e.clientY, started: false };
     }
   }
 }
@@ -4753,6 +4831,9 @@ function setupInput() {
     // Esc while holding an item on the cursor → return it (backpack, else ground).
     // Takes priority over closing windows so a held item is never silently lost.
     if (e.code === "Escape" && cursorItem) { e.preventDefault(); returnCursorItem(); return; }
+    // Belt-and-braces: the dialog's own keydown listener (stopPropagation) already
+    // handles Esc while it has focus; this only catches it somehow losing focus.
+    if (e.code === "Escape" && splitWin) { e.preventDefault(); closeSplitDialog(); return; }
     if (e.code === "Escape" && partyOn) { e.preventDefault(); closeParty(); return; }
     if (e.code === "Escape" && macrosOn) { e.preventDefault(); closeMacros(); return; }
     if (e.code === "Escape" && wmOn) { e.preventDefault(); closeWorldmap(); return; }

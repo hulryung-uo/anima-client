@@ -300,3 +300,21 @@ impl MapData {
         best
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `TileFlag.Generic` (0x800, ClassicUO `ItemData.IsStackable`) distinguishes
+    /// a real stack (gold coins) from an `amount`-bearing-but-unstackable item
+    /// (a backpack's `amount` is unused/1); `scene.rs`'s split-stack dialog needs
+    /// this so it doesn't offer to split something the server would reject.
+    #[test]
+    #[ignore]
+    fn item_flags_stackable_bit_matches_known_items() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let map = MapData::open(&dir).expect("open map data");
+        assert_ne!(map.item_flags(0x0EED) & 0x800, 0, "gold coins should be stackable");
+        assert_eq!(map.item_flags(0x0E75) & 0x800, 0, "a backpack should not be stackable");
+    }
+}

@@ -201,6 +201,10 @@ const FLAG_ROOF: u64 = 0x1000_0000;
 /// Foliage flag (trees/bushes): the renderer fades these when they'd hide the
 /// player, like ClassicUO's foliage transparency.
 const FLAG_FOLIAGE: u64 = 0x2_0000;
+/// Stackable flag (`TileFlag.Generic`, ClassicUO `ItemData.IsStackable`): drives
+/// whether a dragged stack (amount > 1) offers the split-stack dialog, mirroring
+/// ClassicUO `GameActions.PickUp` (`item.Amount > 1 && item.ItemData.IsStackable`).
+const FLAG_STACKABLE: u64 = 0x800;
 
 /// Per-frame interval (ms) for an animated static, from animdata's `frameInterval`
 /// tick count. The raw value is a small tick count (often 0–3); we scale it into a
@@ -987,6 +991,9 @@ pub fn build_scene(
     // Container (chest/bag/corpse 0x2006) → the client opens a loot window on
     // double-click; non-containers (doors, etc.) must NOT spawn an empty window.
     let item_is_cont = |g: u16| g == 0x2006 || map.as_deref().is_some_and(|m| m.item_is_container(g));
+    // STACKABLE tiledata — the split-stack dialog should only ever offer to split
+    // an item the server would actually accept a partial amount from.
+    let item_stackable = |g: u16| map.as_deref().is_some_and(|m| m.item_flags(g) & FLAG_STACKABLE != 0);
     // Draw-sort priority for a dynamic item (same scheme as statics): base z, with
     // a background tile under, and a tile with height (a wall/door) over, same-tile flats.
     let item_pz = |g: u16, z: i32| -> i32 {
@@ -1068,6 +1075,19 @@ pub fn build_scene(
             if item_is_cont(it.graphic) {
                 v["c"] = json!(1);
             }
+            // Stack count, so the renderer's pointer-drag can offer a stack-split
+            // dialog when lifting amount > 1 (ClassicUO SplitMenuGump). Omitted for
+            // a corpse (graphic 0x2006): its `amount` is overloaded with the dead
+            // creature's BODY id below, not a real stack size, and a corpse can't
+            // be picked up/split like an ordinary item anyway.
+            if it.graphic != 0x2006 {
+                v["amount"] = json!(it.amount);
+                // Mark stackable so the renderer's split dialog only offers to split
+                // items the server would actually accept a partial amount from.
+                if item_stackable(it.graphic) {
+                    v["st"] = json!(1);
+                }
+            }
             // A corpse (graphic 0x2006): the dead creature's BODY id rides in
             // `amount` (see `Item::amount`'s doc comment) and its facing in
             // `direction`. Remap through Corpse.def, resolve the primary death-pose
@@ -1140,14 +1160,20 @@ pub fn build_scene(
         .filter(|it| it.container.is_some())
         .take(400)
         .map(|it| {
-            json!({
+            let mut v = json!({
                 "serial": it.serial, "cont": it.container,
                 "g": it.graphic, "amount": it.amount,
                 "x": it.pos.x, "y": it.pos.y, "hue": it.hue,
                 // Is this nested item itself a container? Only then should a
                 // double-click open a container window (bandages/potions/etc. must not).
                 "c": item_is_cont(it.graphic) as u8
-            })
+            });
+            // Mark stackable so a dragged stack only offers the split dialog when
+            // the server would actually accept a partial amount (only when true).
+            if item_stackable(it.graphic) {
+                v["st"] = json!(1);
+            }
+            v
         })
         .collect();
     // Vendor shop windows. `buy` (0x74) lists the vendor's for-sale prices in
