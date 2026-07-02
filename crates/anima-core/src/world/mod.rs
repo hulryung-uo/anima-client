@@ -292,6 +292,15 @@ pub struct World {
     pub recent_anims: Vec<(u64, u32, u16, u16, bool, u8)>,
     /// Monotonic counter assigning each animation event a unique `seq`.
     pub anim_seq: u64,
+    /// Recent *typed* animation events (0xE2): `(seq, serial, kind, action, mode)`.
+    /// `kind` is the wire `AnimationType` (0-15: Attack/Parry/.../Spawn — see
+    /// [`crate::net::game`]'s `typed_anim`), not a raw group like 0x6E's `action`.
+    /// `mode` is the wire "delay" byte, repurposed by the renderer only to pick a
+    /// cosmetic variant. The renderer resolves the real per-body animation group
+    /// (ClassicUO `GetObjectNewAnimation`) before playing it.
+    pub recent_typed_anims: Vec<(u64, u32, u16, u16, u8)>,
+    /// Monotonic counter assigning each typed-animation event a unique `seq`.
+    pub typed_anim_seq: u64,
     /// The current background music track id (0x6D), or `None` if stopped.
     pub current_music: Option<u16>,
     /// Overall light level (0x4F): 0 = brightest day, ~0x1F darkest night.
@@ -473,6 +482,19 @@ impl World {
         let overflow = self.recent_anims.len().saturating_sub(MAX_RECENT_ANIMS);
         if overflow > 0 {
             self.recent_anims.drain(0..overflow);
+        }
+    }
+
+    /// Record a typed-animation event (0xE2): `serial` was told to play
+    /// `AnimationType` `kind`'s `action` (an emote, gesture, alert, …). Assigns the
+    /// next monotonic `seq` and keeps only the most recent [`MAX_RECENT_ANIMS`].
+    pub fn push_typed_anim(&mut self, serial: u32, kind: u16, action: u16, mode: u8) {
+        self.typed_anim_seq += 1;
+        self.recent_typed_anims
+            .push((self.typed_anim_seq, serial, kind, action, mode));
+        let overflow = self.recent_typed_anims.len().saturating_sub(MAX_RECENT_ANIMS);
+        if overflow > 0 {
+            self.recent_typed_anims.drain(0..overflow);
         }
     }
 

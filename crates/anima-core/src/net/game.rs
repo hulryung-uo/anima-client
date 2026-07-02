@@ -50,6 +50,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0xC7 => graphic_effect(world, frame, true)?,
         0x54 => play_sound(world, frame)?,
         0x6E => character_anim(world, frame)?,
+        0xE2 => typed_anim(world, frame)?,
         0x6D => play_music(world, frame)?,
         0x72 => war_mode(world, frame)?,
         0x4F => overall_light(world, frame)?,
@@ -520,6 +521,30 @@ fn character_anim(world: &mut World, frame: &[u8]) -> PResult<()> {
     r.skip(1)?; // repeat flag
     let delay = r.u8()?;
     world.push_anim(serial, action, frame_count, dir == 0, delay);
+    Ok(())
+}
+
+/// 0xE2 NewMobileAnimation — `[id][serial:u32][type:u16][action:u16][mode:u8]`
+/// (10 bytes, ServUO `NewMobileAnimation : base(0xE2, 10)`). Sent by
+/// `Mobile.Animate(AnimationType, action)` (e.g. the `.bow`/`.salute` text
+/// emotes, spell-cast gestures, alerts, …) — `type` is the `AnimationType` enum
+/// (0=Attack 1=Parry 2=Block 3=Die 4=Impact 5=Fidget 6=Eat 7=Emote 8=Alert
+/// 9=TakeOff 10=Land 11=Spell 12=StartCombat 13=EndCombat 14=Pillage 15=Spawn),
+/// not a raw animation group like 0x6E's `action`. `mode` is nominally a "delay"
+/// (ServUO fills it with `Utility.Random(0, 60)`) but ClassicUO never uses it for
+/// timing here — `Mobile.SetAnimation` is called with the default interval — it
+/// only feeds `(mode % 2/3/4)` inside `Mobile.GetObjectNewAnimation` to pick
+/// between cosmetically-equivalent variants of the same emote. We store the raw
+/// triple; the renderer (which alone knows the body's animation-group layout)
+/// converts `(type, action, mode)` to a real group, mirroring ClassicUO's
+/// `GetObjectNewAnimation`/`GetObjectNewAnimationType_*`.
+fn typed_anim(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let serial = r.u32()?;
+    let kind = r.u16()?;
+    let action = r.u16()?;
+    let mode = r.u8()?;
+    world.push_typed_anim(serial, kind, action, mode);
     Ok(())
 }
 
@@ -2017,6 +2042,25 @@ mod tests {
         let b = w.book.as_ref().expect("book present");
         assert_eq!(b.pages[0], vec!["line one".to_string(), "line two".to_string()]);
         assert_eq!(b.pages[1], vec!["page two".to_string()]);
+    }
+
+    #[test]
+    fn typed_animation_stores_kind_action_and_mode() {
+        let mut w = World::new();
+        // 0xE2 NewMobileAnimation: serial 0xDEAD_BEEF, AnimationType::Emote (7),
+        // action 1 ("salute"), mode/delay 42 — matches ServUO's `.salute` emote.
+        let mut p = PacketWriter::new();
+        p.u8(0xE2).u32(0xDEAD_BEEF).u16(7).u16(1).u8(42);
+        let frame = p.into_vec();
+        assert_eq!(frame.len(), 10); // ServUO NewMobileAnimation : base(0xE2, 10)
+        assert!(apply_packet(&mut w, &frame));
+        let (seq, serial, kind, action, mode) =
+            *w.recent_typed_anims.last().expect("typed anim recorded");
+        assert_eq!(seq, 1);
+        assert_eq!(serial, 0xDEAD_BEEF);
+        assert_eq!(kind, 7); // Emote
+        assert_eq!(action, 1); // salute
+        assert_eq!(mode, 42);
     }
 
     #[test]

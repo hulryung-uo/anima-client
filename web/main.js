@@ -46,6 +46,85 @@ function resolveActionGroup(action, body, atype) {
   }
   return action;                     // monsters/animals: action indexes their own group set
 }
+
+// Convert an 0xE2 NewMobileAnimation's `(typ, action, mode)` to a real per-body
+// animation group, following ClassicUO `Mobile.GetObjectNewAnimation` /
+// `GetObjectNewAnimationType_*` exactly. `typ` is the wire `AnimationType`
+// (Server/Mobile.cs): 0 Attack, 1 Parry, 2 Block, 3 Die, 4 Impact, 5 Fidget,
+// 6 Eat, 7 Emote, 8 Alert, 9 TakeOff, 10 Land, 11 Spell, 14 Pillage (12
+// StartCombat/13 EndCombat/15 Spawn aren't special-cased upstream either — they
+// fall through to group 0, same as here). `mode` is the wire "delay" byte,
+// which ClassicUO uses only as a `mode % 2/3/4` seed to pick between a few
+// cosmetically-equivalent variants of the same action (NOT a timing value).
+// ClassicUO keys off the body's 5-way AnimationGroupsType (Monster/SeaMonster/
+// Animal/Human/Equipment); our server only hands us the 3-way `atype`
+// (0 monster+sea_monster / 1 animal / 2 people+equipment, see anima-assets
+// mobtypes parsing + resolveActionGroup above), so the rare true-SeaMonster
+// case plays the Monster variant here instead of ClassicUO's differing (often
+// "no animation") one — a small, deliberate loss of fidelity consistent with
+// the same collapse `resolveActionGroup`/`bodyType` already make for 0x6E.
+// Likewise gargoyle-only flight variants (e.g. Emote-while-flying) aren't
+// modeled — those fall back to the grounded/human variant. Returns `null` when
+// ClassicUO's own mapping is "don't animate" (its `0xFF` sentinel), e.g. an
+// Attack/Parry/Block/Impact/Alert/Spell sent to a mounted person.
+function resolveTypedAnimGroup(typ, action, mode, body, atype, mounted) {
+  const t = bodyType(body, atype); // 0 monster(+sea_monster), 1 animal, 2 people(+equipment)
+  const monster = t === 0, animal = t === 1; // people/equipment: else
+  switch (typ) {
+    case 0: // Attack
+      if (action > 10) return 0; // CUO GetObjectNewAnimationType_0: out-of-range action still plays group 0, not "no animation"
+      if (monster) return mode % 4 === 1 ? 5 : mode % 4 === 2 ? 6 : 4;
+      if (animal) return mode % 2 !== 0 ? 6 : 5;
+      if (mounted) return action > 0 ? (action === 1 ? 27 : action === 2 ? 28 : 26) : 29;
+      switch (action) {
+        case 1: return 18;
+        case 2: return 19;
+        case 6: return 12;
+        case 7: return 13;
+        case 8: return 14;
+        case 3: return 11;
+        case 4: return 9;
+        case 5: return 10;
+        default: return 31;
+      }
+    case 1: case 2: // Parry / Block
+      if (monster) return mode % 2 !== 0 ? 15 : 16;
+      if (animal || mounted) return null;
+      return 30;
+    case 3: // Die
+      if (monster) return mode % 2 !== 0 ? 2 : 3;
+      if (animal) return mode % 2 !== 0 ? 21 : 22;
+      return mode % 2 !== 0 ? 8 : 12;
+    case 4: // Impact
+      if (monster) return 10;
+      if (animal) return 7;
+      return mounted ? null : 20;
+    case 5: // Fidget
+      if (monster) return mode % 2 !== 0 ? 18 : 17;
+      if (animal) return mode % 3 === 1 ? 10 : mode % 3 === 2 ? 3 : 9;
+      return mounted ? null : (mode % 2 !== 0 ? 6 : 5);
+    case 6: case 14: // Eat / Pillage
+      if (monster) return 11;
+      if (animal) return 3;
+      return mounted ? null : 34;
+    case 7: // Emote (e.g. .bow / .salute)
+      if (mounted) return null;
+      return action === 0 ? 32 : action === 1 ? 33 : 0;
+    case 8: // Alert
+      if (monster) return 11;
+      if (animal) return 9;
+      return mounted ? null : 33;
+    case 9: // TakeOff
+    case 10: // Land
+      return monster ? 20 : null; // non-gargoyle person/animal: no anim (matches CUO)
+    case 11: // Spell
+      if (monster) return 12;
+      if (mounted) return null;
+      return action === 1 || action === 2 ? 17 : 16;
+    default: // 12 StartCombat, 13 EndCombat, 15 Spawn, anything else
+      return 0;
+  }
+}
 let app, world, entLayer, mobs, overLayer, barLayer, itemLayer;
 let scene = null;
 // Render-on-demand: only re-draw the canvas when the scene changed. markDirty()
@@ -61,6 +140,7 @@ let lastJournalSeq = 0;
 const damageFloaters = [];     // { id, sprite, born, ttl }
 let lastDamageSeq = 0;         // highest damage event seq we've already floated
 let lastAnimSeq = 0;           // highest character-animation (0x6E) event we've played
+let lastTypedAnimSeq = 0;      // highest typed-animation (0xE2) event we've played
 // Map a 0x6E `action` to the animation group for this body. For people (>=400) the
 // action IS the people group (9=1H attack, 12-14=2H, 18/19=bow, 20=get-hit, …); for
 // monsters/animals the action indexes their own group set — pass it through either way.
@@ -835,6 +915,7 @@ async function poll() {
     markDirty(); // a fresh poll may change tiles/entities → redraw once
     ingestSpeech(scene); // float new speech above its speaker
     ingestAnims(scene); // play new character animations (0x6E: combat swings, bows…)
+    ingestTypedAnims(scene); // play new typed animations (0xE2: emotes, gestures, alerts…)
     ingestDamage(scene); // float new combat damage numbers (0x0B)
     ingestEffects(scene); // spawn new graphical effects (0x70/0xC0/0xC7)
     refreshTip(); // update the hover tooltip if its OPL just arrived/changed
@@ -1556,14 +1637,24 @@ function drawMobs() {
     const act = st.act;
     // The raw 0x6E `action` isn't always a direct animation group: spell casts send
     // high "action" codes (UO SpellInfo.Action, ~200+) that map to the cast gesture.
-    // resolveActionGroup() folds those onto the body's real group set.
-    const ag = (act && !ghost) ? resolveActionGroup(act.group, bodyAnim, atype) : 0;
+    // resolveActionGroup() folds those onto the body's real group set; a *typed*
+    // 0xE2 event instead needs resolveTypedAnimGroup()'s ClassicUO-style dispatch,
+    // which can also decide there's nothing to play (e.g. an emote while mounted).
+    const ag = (act && !ghost)
+      ? (act.typed
+          ? resolveTypedAnimGroup(act.typ, act.action, act.mode, bodyAnim, atype, mounted)
+          : resolveActionGroup(act.group, bodyAnim, atype))
+      : 0;
     if (act && !ghost) {
-      framesFor(bodyAnim, ag, d); // kick the frame-count/centers load
-      const fk = `${bodyAnim}/${ag}/${d}`;
-      const loaded = frameCount.has(fk) ? Math.max(1, frameCount.get(fk)) : 0;
-      const fi = Math.floor((performance.now() - act.startMs) / act.frameMs);
-      if (loaded > 0 && fi >= loaded) st.act = null; // played every frame → done
+      if (ag == null) {
+        st.act = null; // no valid animation for this body/mount combo — revert now
+      } else {
+        framesFor(bodyAnim, ag, d); // kick the frame-count/centers load
+        const fk = `${bodyAnim}/${ag}/${d}`;
+        const loaded = frameCount.has(fk) ? Math.max(1, frameCount.get(fk)) : 0;
+        const fi = Math.floor((performance.now() - act.startMs) / act.frameMs);
+        if (loaded > 0 && fi >= loaded) st.act = null; // played every frame → done
+      }
     }
     if (st.act && !ghost) {
       group = ag;
@@ -2201,6 +2292,30 @@ function ingestAnims(s) {
     if (!st) continue;                               // actor not in view
     st.act = { group: ev.act | 0, fwd: ev.fwd !== false, startMs: now,
                frameMs: CHAR_ANIM_FRAME_MS + (ev.delay | 0) * 10 };
+    markDirty();
+  }
+}
+
+// Play new *typed* animation events (0xE2): an emote/gesture/alert/… on a mobile.
+// Unlike 0x6E, `typ`/`act` aren't a raw animation group — resolveTypedAnimGroup()
+// (called from drawMobs, where the body/mount state is known) converts them.
+// ClassicUO never uses the wire "delay" as a timing value here (SetAnimation is
+// called with the default interval), so — unlike ingestAnims — we don't stretch
+// frameMs by it; it's kept only as `mode` for the per-body group resolver.
+function ingestTypedAnims(s) {
+  if (!s || !s.tanims) return;
+  const now = performance.now();
+  const pserial = s.player ? (s.player.serial >>> 0) : 0;
+  for (const ev of s.tanims) {
+    const seq = ev.seq | 0;
+    if (seq <= lastTypedAnimSeq) continue;
+    lastTypedAnimSeq = seq;
+    const serial = ev.serial >>> 0;
+    const id = serial === pserial ? "self" : "m" + serial;
+    const st = anim.get(id);
+    if (!st) continue;                               // actor not in view
+    st.act = { typed: true, typ: ev.typ | 0, action: ev.act | 0, mode: ev.mode | 0,
+               fwd: true, startMs: now, frameMs: CHAR_ANIM_FRAME_MS };
     markDirty();
   }
 }

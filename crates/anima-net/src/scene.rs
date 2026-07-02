@@ -1309,6 +1309,21 @@ pub fn build_scene(
         })
         .collect();
     let anims = serde_json::to_string(&anims).unwrap_or_else(|_| "[]".into());
+    // Recent *typed* animation events (0xE2): `serial` was told to play
+    // `AnimationType` `typ`'s `act` (an emote/gesture/alert/…), with `mode` (the
+    // wire "delay" byte) available for the client to pick a cosmetic variant. Unlike
+    // 0x6E's `act`, `typ`/`act` here are NOT a raw animation group — the client
+    // converts them per body (ClassicUO `GetObjectNewAnimation`), since only it
+    // knows each body's animation-group layout.
+    let tanims: Vec<Value> = s
+        .world
+        .recent_typed_anims
+        .iter()
+        .map(|&(seq, serial, typ, act, mode)| {
+            json!({ "seq": seq, "serial": serial, "typ": typ, "act": act, "mode": mode })
+        })
+        .collect();
+    let tanims = serde_json::to_string(&tanims).unwrap_or_else(|_| "[]".into());
     // Recent damage events (0x0B): `serial` took `amt` HP. The client floats a
     // number over the target for each `seq` newer than the last it showed.
     let damage: Vec<Value> = s
@@ -1402,7 +1417,7 @@ pub fn build_scene(
         "{{\"player\":{player},\
          \"map\":{{\"cx\":{px},\"cy\":{py},\"radius\":{RADIUS},\"tiles\":[{tiles}],\"maxZ\":{max_z},\"dbg\":{dbg}}},\
          \"statics\":[{statics}],\"mobiles\":{mobiles},\"items\":{items},\"contItems\":{cont_items},\
-         \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"damage\":{damage},\"effects\":{effects},\"music\":{music},\
+         \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"tanims\":{tanims},\"damage\":{damage},\"effects\":{effects},\"music\":{music},\
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
          \"popup\":{popup},\"book\":{book},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"aos\":{aos},\
