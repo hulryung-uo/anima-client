@@ -1,0 +1,22 @@
+[package]
+name = "anima-desktop"
+version = "0.0.0"
+edition = "2021"
+description = "Standalone desktop shell (Tauri): runs the play server in-process (direct TCP, no relay) and opens the web renderer in a native webview."
+license = "MIT OR Apache-2.0"
+
+[build-dependencies]
+# Reads tauri.conf.json at build time (icons, bundle identifier, …) and wires
+# codegen for tauri::generate_context!() below.
+tauri-build = "2"
+
+[dependencies]
+anima-net = { path = "../anima-net" }
+# Desktop shell only — anima-core/assets/net stay tauri-free; this is the one
+# crate allowed to depend on it.
+tauri = "2"
+# Native folder picker, used once at first run to locate the UO client data
+# directory (.mul/.uop files) when it isn't at the default path.
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

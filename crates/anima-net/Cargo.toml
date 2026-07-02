@@ -10,6 +10,12 @@ anima-core = { path = "../anima-core" }
 anima-assets = { path = "../anima-assets" }
 serde_json = "1"
 tiny_http = "0.12"
+# Embeds `web/` (the renderer: plain JS + one vendored PixiJS build, ~1MB) into
+# this binary at compile time, as a fallback when `play_server::PlayConfig`
+# has no on-disk `web_dir` — needed by `anima-desktop`, which runs outside a
+# repo checkout and so has no `web/` directory to point at. Pure Rust, no
+# build.rs, no bundler; a plain proc-macro `include_dir!()` call.
+include_dir = "0.7"
 
 [[bin]]
 name = "anima-login"

@@ -12,6 +12,7 @@ use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 pub mod json;
+pub mod play_server;
 pub mod scene;
 
 use anima_core::agent::{Action, Observation};

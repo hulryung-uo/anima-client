@@ -1,10 +1,25 @@
 [workspace]
 resolver = "2"
-members = ["crates/anima-core", "crates/anima-net", "crates/anima-assets", "crates/anima-wasm", "crates/anima-agent"]
+members = [
+    "crates/anima-core",
+    "crates/anima-net",
+    "crates/anima-assets",
+    "crates/anima-wasm",
+    "crates/anima-agent",
+    "crates/anima-desktop",
+]
+# `cargo build`/`cargo test` (no --workspace) only touch these — keeps the
+# everyday inner loop fast. `anima-desktop` pulls in Tauri (a long first
+# build); `cargo build/test --workspace` still builds/tests everything,
+# `anima-desktop` included.
+default-members = [
+    "crates/anima-core",
+    "crates/anima-net",
+    "crates/anima-assets",
+    "crates/anima-wasm",
+    "crates/anima-agent",
+]
 
-# Future members (added as they come online):
-#   crates/anima-desktop   — Tauri native shell (direct TCP, reads local UO data)
-#   crates/anima-agent     — headless AI driver(s) built on anima-core
 # The web frontend (TypeScript + PixiJS) lives outside the Cargo workspace,
 # under web/, and consumes anima-core compiled to WASM.
 
