@@ -77,6 +77,18 @@ pub struct MapData {
 impl MapData {
     /// Open the map from a UO data directory (containing `map0LegacyMUL.uop`,
     /// `staidx0.mul`, `statics0.mul`, `tiledata.mul`).
+    ///
+    /// This always opens **facet 0** (Felucca) — hardcoded in the filenames above
+    /// and in the [`MAP_WIDTH`]/[`MAP_HEIGHT`] consts this module bounds-checks
+    /// against. `anima_core::World::map_index` (set from the server's 0xBF/0x08
+    /// MapChange) tracks which facet the *server* thinks we're on, but nothing
+    /// reloads `MapData` to match: a real per-facet open would need this
+    /// constructor to take a facet id, per-facet file names (`map{N}LegacyMUL.uop`
+    /// /`staidx{N}.mul`/`statics{N}.mul`), AND per-facet dimensions (ClassicUO
+    /// `MapLoader.MapsDefaultSize`: Felucca/Trammel 7168×4096, Ilshenar 2304×1600,
+    /// Malas 2560×2048, Tokuno 1448×1448, TerMur 1280×4096) threaded through every
+    /// `MAP_WIDTH`/`MAP_HEIGHT` use here AND in `anima_net::scene::render_worldmap`
+    /// — not attempted (see `World::map_index`'s doc for the full rationale).
     pub fn open(resource_dir: impl AsRef<Path>) -> std::io::Result<MapData> {
         let dir: PathBuf = resource_dir.as_ref().to_path_buf();
         Ok(MapData {

@@ -155,6 +155,19 @@ const DAMAGE_RISE = 20;        // px it rises over its life
 const fxEffects = [];          // { seq, kind, frames[], fm, born, totalMs, sprite, hue, anchors… }
 let lastEffectSeq = 0;         // highest effect event seq we've already spawned
 
+// ---- lift-rejection events (0x27 LiftRej) ----
+let lastLiftRejectSeq = 0;     // highest lift-reject event seq we've already handled
+// ClassicUO ServerErrorMessages._pickUpErrors, indexed by the wire reason byte;
+// any reason >= 4 (including the "generic/Inspecific" 5) reads the same message
+// as 4 (ClassicUO clamps `code >= 5` to `code = 4`).
+const LIFT_REJECT_MSG = [
+  "You can't pick that up.",           // 0 CannotLift
+  "That is too far away.",             // 1 OutOfRange
+  "That is out of sight.",             // 2 OutOfSight
+  "That item does not belong to you.", // 3 BelongsToAnother
+  "You are already holding an item.",  // 4 AlreadyHolding / generic fallback
+];
+
 // ---- user settings (persisted to localStorage; edited via the Options panel) ----
 const SETTINGS_KEY = "anima.settings";
 const SETTINGS_DEFAULTS = {
@@ -918,6 +931,7 @@ async function poll() {
     ingestTypedAnims(scene); // play new typed animations (0xE2: emotes, gestures, alerts…)
     ingestDamage(scene); // float new combat damage numbers (0x0B)
     ingestEffects(scene); // spawn new graphical effects (0x70/0xC0/0xC7)
+    ingestLiftRejects(scene); // clear the held item + show a message (0x27 LiftRej)
     refreshTip(); // update the hover tooltip if its OPL just arrived/changed
     drawMinimap(scene);
     refreshBuffs(scene); // reconcile the buff/debuff bar with scene.buffs
@@ -934,6 +948,7 @@ async function poll() {
     refreshGumps(scene);  // server-sent generic gumps/dialogs (0xB0/0xDD)
     refreshPopup(scene);  // right-click context menu (0xBF/0x14)
     refreshBook(scene);   // open book reader (0x93/0xD4 + 0x66)
+    refreshPrompt(scene); // server text-prompt dialog (0xC2 UnicodePrompt)
     updateTargetUI(); // reflect the server's target-cursor state (crosshair + banner)
     updateDeathUI(scene); // grayscale + "You are dead" banner while the player is a ghost
     playSounds(scene);   // play new sound effects (0x54)
@@ -2417,6 +2432,23 @@ function ingestEffects(s) {
   }
 }
 
+// The server refused our last pickup (0x27 LiftRej): the item never left its
+// source, so just clear the held drag-ghost locally — NOT a drop (nothing ever
+// moved, so sending one would wrongly ask the server to place an item it never
+// gave us) — and surface the reason as a system journal line, for each `seq`
+// newer than the last we handled.
+function ingestLiftRejects(s) {
+  if (!s || !s.liftRejects) return;
+  for (const ev of s.liftRejects) {
+    const seq = ev.seq | 0;
+    if (seq <= lastLiftRejectSeq) continue;
+    lastLiftRejectSeq = seq;
+    if (cursorItem) clearCursorItem();
+    const reason = ev.reason | 0;
+    addSysMessage(LIFT_REJECT_MSG[reason] || LIFT_REJECT_MSG[LIFT_REJECT_MSG.length - 1]);
+  }
+}
+
 function spawnEffect(ev, now) {
   const frames = (ev.frames && ev.frames.length) ? ev.frames : [ev.g | 0];
   const hue = ev.hue | 0;
@@ -2514,6 +2546,10 @@ function drawBars(now) {
   const seen = new Set();
   let changed = false;
   const lastAttack = (scene.lastAttack | 0) >>> 0; // current auto-attack target (0 = none)
+  // The server's authoritative combat opponent (0xAA ChangeCombatant) — usually
+  // the same mobile as lastAttack, but the server can retarget on its own (e.g. a
+  // pet defending itself), so it's tracked + highlighted separately.
+  const combatant = (scene.combatant | 0) >>> 0;
   for (const m of scene.mobiles || []) {
     const id = "m" + m.serial;
     const st = anim.get(id);
@@ -2522,8 +2558,10 @@ function drawBars(now) {
     const feetY = isoY(st.rx, st.ry, st.rz ?? st.z);
     const topY = feetY - BAR_HEAD;       // name + target marker: above the head
     const barY = feetY + 2;              // HP bar: down at the feet (ClassicUO-style)
-    // Is this the current attack target? Highlight its bar + draw a marker.
-    const tgt = lastAttack !== 0 && (m.serial >>> 0) === lastAttack;
+    // Is this the current attack target (ours or the server's combatant)?
+    // Highlight its bar + draw a marker.
+    const serial = m.serial >>> 0;
+    const tgt = (lastAttack !== 0 && serial === lastAttack) || (combatant !== 0 && serial === combatant);
     // --- HP bar (only when the server gave us hits/hitsMax) ---
     if (settings.bars && (m.hitsMax | 0) > 0) {
       seen.add(id);
@@ -4301,6 +4339,88 @@ function openSplitDialog(serial, g, amount, clientX, clientY) {
   });
   input.focus(); input.select();
   makeDraggable(el, el.querySelector(".gump-title"));
+}
+
+// ---- server text-prompt dialog (ClassicUO's Unicode "enter text" prompt) --
+// scene.prompt = { active, serial, promptId } (0xC2 UnicodePrompt). The
+// question text itself is NOT carried on that packet — ServUO sends it
+// separately as a journal/system line just before opening the prompt — so
+// this is only the response box: pet rename, house sign, guild abbreviation,
+// … (~38 flows).
+let promptWin = null;        // the live dialog element (null = hidden)
+let promptDialogKey = null;  // (serial,promptId) key `promptWin` was built for, or null
+// Key we just answered/canceled locally: the server often takes a beat to
+// clear/replace its prompt, so a re-poll can still report the SAME key we just
+// submitted for — suppress reopening it until the key actually changes (either
+// to a different prompt, chained straight out of ServUO's OnResponse/OnCancel,
+// or to `null` once the server catches up and clears it).
+let promptSuppressKey = null;
+function keyOfPrompt(p) { return p ? p.serial + ":" + p.promptId : null; }
+function closePromptDialog() {
+  if (promptWin) { promptWin.remove(); promptWin = null; }
+  promptDialogKey = null;
+}
+function submitPromptDialog() {
+  if (!promptWin) return;
+  const text = promptWin._input.value;
+  promptSuppressKey = promptDialogKey;
+  closePromptDialog();
+  sendInput("prompt:" + text);
+}
+function cancelPromptDialog() {
+  if (!promptWin) return;
+  promptSuppressKey = promptDialogKey;
+  closePromptDialog();
+  sendInput("promptcancel");
+}
+function openPromptDialog(key) {
+  closePromptDialog();
+  promptDialogKey = key;
+  const el = document.createElement("div");
+  el.className = "gump-win prompt-win";
+  el.innerHTML = '<div class="gump-title"><span>Enter response</span><span class="gump-close">✕</span></div>'
+    + '<div class="gump-body prompt-body">'
+    + '<input type="text" class="prompt-input" maxlength="128">'
+    + '<div class="prompt-actions"><button class="dlg-btn prompt-ok">OK</button>'
+    + '<button class="dlg-btn prompt-cancel">Cancel</button></div>'
+    + '</div>';
+  document.body.appendChild(el);
+  const input = el.querySelector(".prompt-input");
+  promptWin = el;
+  promptWin._input = input;
+  el.querySelector(".prompt-ok").addEventListener("click", submitPromptDialog);
+  el.querySelector(".prompt-cancel").addEventListener("click", cancelPromptDialog);
+  el.querySelector(".gump-close").addEventListener("click", cancelPromptDialog);
+  // Keep Enter/Esc local to this window (stopPropagation, same pattern as the
+  // split-stack dialog) so the global game-input handler never also sees them —
+  // don't leak movement/hotkey keystrokes to the game while typing a reply.
+  el.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.code === "Enter" || e.code === "NumpadEnter") { e.preventDefault(); submitPromptDialog(); }
+    else if (e.code === "Escape") { e.preventDefault(); cancelPromptDialog(); }
+  });
+  input.focus();
+}
+// Open/rebuild the dialog whenever the pending prompt's IDENTITY (serial +
+// promptId) differs from the one the current dialog was built for — NOT on
+// the active flag's 0→1 edge. ServUO routinely chains prompts (the next
+// `Prompt` is set right inside `OnResponse`/OnCancel, e.g.
+// GuildCharterPrompt.cs, AdminGump.cs), so the server can go straight from
+// prompt A to prompt B without ever dipping through `active:0` — an edge-only
+// check would never see a transition and the dialog would never reopen for B.
+// Close it once the server reports no prompt pending (e.g. it timed out
+// server-side), and forget any suppressed key so a later, genuinely new
+// prompt reusing old ids isn't mistaken for the one we already answered.
+function refreshPrompt(s) {
+  const p = s && s.prompt && s.prompt.active === 1 ? s.prompt : null;
+  const key = keyOfPrompt(p);
+  if (key === null) {
+    closePromptDialog();
+    promptSuppressKey = null;
+    return;
+  }
+  if (key === promptSuppressKey) return; // we just answered/canceled this one — wait for the server to move on
+  if (key !== promptDialogKey) openPromptDialog(key); // new identity (fresh prompt or a chained one) — (re)build for it
 }
 
 function setupItemDnD() {

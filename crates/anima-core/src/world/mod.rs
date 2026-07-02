@@ -4,7 +4,7 @@
 //! renderer) only read it. Mirrors ClassicUO's `World` — player plus mobiles and
 //! items keyed by serial.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::net::login::LoginResult;
 use crate::types::{Position, Serial};
@@ -252,6 +252,22 @@ pub struct TargetCursor {
     pub cursor_flag: u8,
 }
 
+/// An outstanding server text prompt (from a 0xC2 UnicodePrompt request) — the
+/// mechanism behind ~38 ServUO flows (pet rename, house sign, guild abbreviation,
+/// …). The actual question text is *not* carried on this packet (ServUO sends it
+/// separately as a cliloc/system message just before opening the prompt — it
+/// already lands in [`World::journal`]); this only carries the two ids the
+/// response must echo. Cleared when we answer (see
+/// [`crate::agent::Action::PromptResponse`]/[`crate::agent::Action::PromptCancel`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptState {
+    /// The prompt's sender serial (usually our own) — echoed back verbatim.
+    pub sender_serial: u32,
+    /// Opaque id identifying which `Prompt` subclass the server is waiting on
+    /// (ServUO `Prompt.TypeId`); echoed back verbatim so it can resume the right one.
+    pub prompt_id: u32,
+}
+
 /// The player's party (0xBF/0x06). `members` are the current member serials in
 /// server order — `members[0]` is the leader (`leader` mirrors it for convenience).
 /// `pending_invite` is the serial of a party leader who invited us (sub-sub 0x07)
@@ -364,6 +380,56 @@ pub struct World {
     /// The serial last sent in an Attack (0x05) — UO's "last target" for the
     /// auto-attack / attack-last combat loop. `None` until the player attacks.
     pub last_attack: Option<u32>,
+    /// The server's authoritative current combat opponent (0xAA ChangeCombatant,
+    /// `Mobile.Combatant` — Mobile.cs ~2213), distinct from [`World::last_attack`]
+    /// (which is just the last serial *we* sent an Attack request for): the server
+    /// can also change combatant on its own (e.g. it retargets who's actually
+    /// swinging at us). `None` when combat has ended (wire serial 0).
+    pub combatant: Option<u32>,
+    /// Maps a corpse item's serial to the mobile that died to create it (0xAF
+    /// DisplayDeath). AI-facing only ("is this the corpse of what I killed") — no
+    /// renderer change needed (a corpse already carries its own body/hue/direction).
+    /// Pruned when the corpse item is removed (0x1D → [`World::remove`]) and capped
+    /// defensively by [`World::set_corpse_of`] (a delete we somehow missed must
+    /// never pin this map's growth for the rest of the session).
+    pub corpse_of: HashMap<u32, u32>,
+    /// A corpse's worn-item layout (0x89 CorpseEquip): `(layer, item serial)` pairs,
+    /// keyed by corpse serial. `layer` is the real (un-shifted) wear layer — the
+    /// wire format sends `layer + 1` with a `0` terminator (ServUO
+    /// `Scripts/Items/Corpses/Packets.cs` `CorpseEquip`); we undo that shift so it
+    /// matches [`Item::layer`]'s convention everywhere else. No renderer change
+    /// needed — the loot window already lists a corpse's contents flatly via 0x3C.
+    /// Pruned/capped the same way as [`World::corpse_of`].
+    pub corpse_equip: HashMap<u32, Vec<(u8, u32)>>,
+    /// Recent lift-rejection events (0x27 LiftRej), each `(seq, reason)`, newest
+    /// last, capped to the most recent few (like `recent_damage`/`recent_sounds`).
+    /// The server refused our last pickup (0x07) — the item never left its source.
+    /// `reason` (ClassicUO `ServerErrorMessages`, indexed by this packet id; any
+    /// code 5 or higher reads the same message as 4): 0 CannotLift, 1 OutOfRange,
+    /// 2 OutOfSight, 3 BelongsToAnother, 4 AlreadyHolding, 5 generic/Inspecific.
+    /// The renderer clears the drag-ghost (without sending a drop — nothing ever
+    /// moved) and shows the reason as a system journal line for each `seq` it
+    /// hasn't shown yet.
+    pub recent_lift_rejects: Vec<(u64, u8)>,
+    /// Monotonic counter assigning each lift-rejection event a unique `seq`.
+    pub lift_reject_seq: u64,
+    /// An outstanding server text prompt (0xC2 UnicodePrompt), if one is pending.
+    /// See [`PromptState`].
+    pub prompt: Option<PromptState>,
+    /// Current facet/map index (0xBF/0x08 MapChange): 0=Felucca, 1=Trammel,
+    /// 2=Ilshenar, 3=Malas, 4=Tokuno, 5=TerMur (ServUO `Map.MapID`). AI-facing state
+    /// only — `anima_assets::MapData` currently only ever opens facet 0
+    /// (`map0LegacyMUL.uop`/`staidx0.mul`/`statics0.mul`, with the fixed
+    /// `MAP_WIDTH`/`MAP_HEIGHT` consts baked into bounds checks + block math).
+    /// Making it open an arbitrary facet needs a constructor arg PLUS per-facet
+    /// dimensions (ClassicUO `MapLoader.MapsDefaultSize`: Felucca/Trammel 7168×4096,
+    /// Ilshenar 2304×1600, Malas 2560×2048, Tokuno 1448×1448, TerMur 1280×4096)
+    /// threaded through every `MAP_WIDTH`/`MAP_HEIGHT` use (bounds checks + block
+    /// math in `anima_assets::map`, and `render_worldmap` in `anima_net::scene`) —
+    /// a multi-file change, not attempted here. This field is stored/exposed so a
+    /// consumer at least *knows* the facet changed. Set via [`World::on_map_change`]
+    /// (never assign directly — that's what purges the old facet's entities).
+    pub map_index: u8,
 }
 
 /// Notoriety values treated as hostile for auto-attack selection:
@@ -379,6 +445,12 @@ const MAX_RECENT_SOUNDS: usize = 16;
 const MAX_RECENT_DAMAGE: usize = 16;
 /// How many recent effect events [`World::push_effect`] keeps.
 const MAX_RECENT_EFFECTS: usize = 32;
+/// How many recent lift-rejection events [`World::push_lift_reject`] keeps.
+const MAX_RECENT_LIFT_REJECTS: usize = 16;
+/// Defensive cap on [`World::corpse_of`]/[`World::corpse_equip`] — both are pruned
+/// on delete (0x1D), so this only guards against a delete we somehow missed
+/// pinning the map's growth for the rest of a long session.
+const MAX_CORPSE_LINKS: usize = 256;
 
 impl World {
     pub fn new() -> Self {
@@ -532,6 +604,43 @@ impl World {
         }
     }
 
+    /// Record a lift-rejection event (0x27 LiftRej): the server refused our last
+    /// pickup with the given `reason` byte. Assigns the next monotonic `seq` and
+    /// keeps only the most recent [`MAX_RECENT_LIFT_REJECTS`].
+    pub fn push_lift_reject(&mut self, reason: u8) {
+        self.lift_reject_seq += 1;
+        self.recent_lift_rejects.push((self.lift_reject_seq, reason));
+        let overflow = self.recent_lift_rejects.len().saturating_sub(MAX_RECENT_LIFT_REJECTS);
+        if overflow > 0 {
+            self.recent_lift_rejects.drain(0..overflow);
+        }
+    }
+
+    /// Record a corpse→killed-mobile link (0xAF DisplayDeath). Upserts by
+    /// `corpse_serial`; defensively evicts an arbitrary entry (not LRU — this is a
+    /// rare safety net, not a hot path) once at [`MAX_CORPSE_LINKS`], since a
+    /// missed 0x1D delete would otherwise pin this map's growth forever.
+    pub fn set_corpse_of(&mut self, corpse_serial: u32, killed_serial: u32) {
+        if self.corpse_of.len() >= MAX_CORPSE_LINKS && !self.corpse_of.contains_key(&corpse_serial) {
+            if let Some(&k) = self.corpse_of.keys().next() {
+                self.corpse_of.remove(&k);
+            }
+        }
+        self.corpse_of.insert(corpse_serial, killed_serial);
+    }
+
+    /// Record a corpse's worn-item layout (0x89 CorpseEquip). Replaces any prior
+    /// entries for `corpse` (the server sends the full list each time); capped the
+    /// same defensive way as [`World::set_corpse_of`].
+    pub fn set_corpse_equip(&mut self, corpse: u32, entries: Vec<(u8, u32)>) {
+        if self.corpse_equip.len() >= MAX_CORPSE_LINKS && !self.corpse_equip.contains_key(&corpse) {
+            if let Some(&k) = self.corpse_equip.keys().next() {
+                self.corpse_equip.remove(&k);
+            }
+        }
+        self.corpse_equip.insert(corpse, entries);
+    }
+
     /// The light level the renderer should use: the brighter (lower) of the
     /// overall level and the player's personal light, when a personal light is
     /// active. Lower = brighter, so `min` picks the brighter of the two.
@@ -581,12 +690,90 @@ impl World {
     }
 
     /// Remove an entity (mobile or item) by serial. Returns true if it was a mobile.
+    /// A deleted corpse item also drops its [`World::corpse_of`]/
+    /// [`World::corpse_equip`] entries (corpses despawn, so these must not outlive
+    /// the item they describe).
     pub fn remove(&mut self, serial: u32) -> bool {
         let was_mobile = self.mobiles.remove(&serial).is_some();
         self.items.remove(&serial);
         self.opl.remove(&serial);
         self.opl_revision.remove(&serial);
+        self.corpse_of.remove(&serial);
+        self.corpse_equip.remove(&serial);
         was_mobile
+    }
+
+    /// Whether `serial`'s container chain (item → the container item holding it
+    /// → …) ultimately bottoms out at `root` — i.e. `serial` is worn by `root`
+    /// or sits somewhere inside a container `root` is holding (backpack
+    /// contents, a nested pouch, …). Mirrors ClassicUO `Item.RootContainer`.
+    /// Capped so a malformed/cyclic container chain can't loop forever.
+    fn item_rooted_at(&self, serial: u32, root: u32) -> bool {
+        let mut current = match self.items.get(&serial) {
+            Some(it) => it.container,
+            None => return false,
+        };
+        for _ in 0..32 {
+            match current {
+                Some(c) if c == root => return true,
+                Some(c) => match self.items.get(&c) {
+                    Some(parent) => current = parent.container,
+                    None => return false, // container is a mobile (not `root`) or already gone
+                },
+                None => return false, // lying on the ground — no container at all
+            }
+        }
+        false
+    }
+
+    /// Apply a facet switch (0xBF/0x08 MapChange). The server never sends 0x1D
+    /// deletes for the facet we're leaving — a moongate/recall just drops us
+    /// straight into a new world with a fresh view — so without this the old
+    /// facet's mobiles/items would linger as phantoms forever. Mirrors
+    /// ClassicUO `World.MapIndex`'s setter, which calls
+    /// `InternalMapChangeClear(noplayer: true)`: keep the player mobile and
+    /// everything the player is holding (worn equipment + backpack contents,
+    /// however deeply nested — see [`World::item_rooted_at`]), drop every
+    /// other mobile/item, and prune the serial-keyed state that would
+    /// otherwise still point at a dropped entity. A same-index call (the
+    /// server re-affirming the current facet) is a no-op — real 0x08 traffic
+    /// can and does repeat the current facet.
+    pub fn on_map_change(&mut self, new_index: u8) {
+        if new_index == self.map_index {
+            return;
+        }
+        self.map_index = new_index;
+        let Some(player) = self.player.map(|s| s.0) else {
+            // Not actually in the world yet — shouldn't happen for a real
+            // MapChange, but with no player nothing has an owner either way.
+            self.mobiles.clear();
+            self.items.clear();
+            self.corpse_of.clear();
+            self.corpse_equip.clear();
+            self.opl.clear();
+            self.opl_revision.clear();
+            self.popup = None;
+            return;
+        };
+        self.mobiles.retain(|&serial, _| serial == player);
+        let keep_items: HashSet<u32> = self
+            .items
+            .keys()
+            .copied()
+            .filter(|&serial| self.item_rooted_at(serial, player))
+            .collect();
+        self.items.retain(|serial, _| keep_items.contains(serial));
+        // Anything still indexed by a serial that just got dropped above is now
+        // dangling — prune it the same way `World::remove` does for a single
+        // delete, just batched over every purged serial.
+        let alive = |serial: &u32| *serial == player || keep_items.contains(serial);
+        self.corpse_of.retain(|corpse, _| alive(corpse));
+        self.corpse_equip.retain(|corpse, _| alive(corpse));
+        self.opl.retain(|serial, _| alive(serial));
+        self.opl_revision.retain(|serial, _| alive(serial));
+        if self.popup.as_ref().is_some_and(|p| !alive(&p.serial)) {
+            self.popup = None;
+        }
     }
 }
 

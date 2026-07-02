@@ -92,6 +92,8 @@ fn main() {
                 Action::PartyAccept { leader } => format!("partyaccept(0x{leader:08X})"),
                 Action::PartyDecline { leader } => format!("partydecline(0x{leader:08X})"),
                 Action::PartyLeave => "partyleave".into(),
+                Action::PromptResponse { text } => format!("prompt({text:?})"),
+                Action::PromptCancel => "promptcancel".into(),
             })
             .collect();
         println!(

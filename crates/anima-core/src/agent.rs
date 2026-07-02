@@ -10,7 +10,7 @@
 //! native/WASM backends all plug into the same interface (see DESIGN.md §3).
 
 use crate::types::Position;
-use crate::world::{JournalEntry, TargetCursor, World};
+use crate::world::{JournalEntry, PromptState, TargetCursor, World};
 
 /// A skill value, in human units (50.0 == GM-half). Derived from [`crate::world::Skill`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,6 +85,10 @@ pub struct Observation {
     /// Open server gumps/dialogs (0xB0/0xDD) — e.g. a craft menu. Answer with
     /// [`Action::GumpResponse`].
     pub gumps: Vec<GumpView>,
+    /// An outstanding server text prompt (0xC2 UnicodePrompt — pet rename, house
+    /// sign, guild abbreviation, …), if one is pending. Answer with
+    /// [`Action::PromptResponse`]/[`Action::PromptCancel`].
+    pub prompt: Option<PromptState>,
 }
 
 /// A read-only view of an open server gump/dialog.
@@ -212,6 +216,15 @@ pub enum Action {
     PartyDecline { leader: u32 },
     /// Leave the current party (0xBF/0x06/0x02); the driver fills our own serial.
     PartyLeave,
+    /// Answer a pending server text prompt (0xC2 UnicodePrompt — pet rename, house
+    /// sign, guild abbreviation, …) with typed `text`. The driver echoes the
+    /// prompt's `sender_serial`/`prompt_id` from [`crate::world::World::prompt`]
+    /// (cleared once answered); a no-op if nothing is pending.
+    PromptResponse { text: String },
+    /// Cancel a pending server text prompt (Esc): the server aborts whatever
+    /// needed the response instead of leaving it dangling; a no-op if nothing is
+    /// pending.
+    PromptCancel,
 }
 
 fn chebyshev(a: Position, b: Position) -> u32 {
@@ -309,6 +322,7 @@ impl World {
             pending_target: self.pending_target,
             skills,
             gumps,
+            prompt: self.prompt,
         }
     }
 }

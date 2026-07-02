@@ -1523,9 +1523,37 @@ pub fn build_scene(
     // so the client can show a war indicator and highlight the attacked mobile.
     let war = s.world.war;
     let last_attack = s.world.last_attack.unwrap_or(0);
+    // The server's authoritative combat opponent (0xAA ChangeCombatant, 0 = none)
+    // — distinct from `lastAttack` (the serial WE last sent an Attack request
+    // for): the server can retarget on its own.
+    let combatant = s.world.combatant.unwrap_or(0);
     // AOS expansion (SupportedFeatures 0xB9): gates AOS-only UI like the weapon
     // special-ability bar. T2A servers don't advertise it → the client hides it.
     let aos = s.world.aos;
+    // An outstanding server text prompt (0xC2 UnicodePrompt), or null. The
+    // question text itself already arrived as a journal line (see
+    // `World::prompt`'s doc) — the client just needs to know a response is due.
+    // `promptId` is included alongside `serial` so the client can tell a fresh,
+    // server-chained prompt (ServUO commonly sets the next `Prompt` right inside
+    // `OnResponse`) apart from a re-poll of the one it's already showing — the
+    // two ids together are the prompt's identity, not just `active`'s edge.
+    let prompt = match s.world.prompt {
+        Some(p) => format!("{{\"active\":1,\"serial\":{},\"promptId\":{}}}", p.sender_serial, p.prompt_id),
+        None => "{\"active\":0}".to_string(),
+    };
+    // Recent lift-rejection events (0x27 LiftRej): the client clears the drag-ghost
+    // (without sending a drop — the item never left its source) and shows `reason`
+    // as a system journal line, for each `seq` newer than the last it handled.
+    let lift_rejects: Vec<Value> = s
+        .world
+        .recent_lift_rejects
+        .iter()
+        .map(|&(seq, reason)| json!({ "seq": seq, "reason": reason }))
+        .collect();
+    let lift_rejects = serde_json::to_string(&lift_rejects).unwrap_or_else(|_| "[]".into());
+    // Current facet/map index (0xBF/0x08 MapChange); see `World::map_index`'s doc
+    // for what a real per-facet `MapData` reload would additionally require.
+    let facet = s.world.map_index;
     format!(
         "{{\"player\":{player},\
          \"map\":{{\"cx\":{px},\"cy\":{py},\"radius\":{RADIUS},\"tiles\":[{tiles}],\"maxZ\":{max_z},\"dbg\":{dbg}}},\
@@ -1533,7 +1561,8 @@ pub fn build_scene(
          \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"tanims\":{tanims},\"damage\":{damage},\"effects\":{effects},\"music\":{music},\
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
          \"popup\":{popup},\"book\":{book},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
-         \"war\":{war},\"lastAttack\":{last_attack},\"aos\":{aos},\
+         \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
+         \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"facet\":{facet},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",
         s.confirms, s.denies
     )

@@ -443,6 +443,53 @@ pub fn build_use_skill(skill_id: u16) -> Vec<u8> {
     data
 }
 
+/// UnicodePromptResponse `0xC2` (variable) — answer (or cancel) a pending server
+/// text prompt (0xC2 UnicodePrompt: pet rename, house sign, guild abbreviation, …).
+///
+/// Echoes the server's `serial`/`prompt_id` (ServUO matches by exact sender
+/// serial + `Prompt.TypeId` — see `PacketHandlers.UnicodePromptResponse`).
+/// `cancel = true` sends `type = 0` (fires `Prompt.OnCancel`) with no text;
+/// otherwise `type = 1` and `text` follows as **UTF-16 LE** (unlike almost all the
+/// rest of the protocol, which is big-endian — ClassicUO
+/// `Send_UnicodePromptResponse` writes it via `WriteUnicodeLE`). `lang` is fixed
+/// to `"ENU"` (English), NUL-padded to 4 bytes, matching ClassicUO's default.
+/// Layout: `[0xC2][len:u16][serial:u32][promptId:u32][type:u32][lang:4][text:utf16-LE]`.
+pub fn build_prompt_response(serial: u32, prompt_id: u32, text: &str, cancel: bool) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xC2).u16(0); // id + length placeholder
+    w.u32(serial).u32(prompt_id);
+    w.u32(if cancel { 0 } else { 1 });
+    w.bytes(b"ENU").u8(0); // language, NUL-padded to 4 bytes
+    if !cancel {
+        // ServUO rejects the whole response if `text.Length > 128`
+        // (PacketHandlers.cs `UnicodePromptResponse`) — and .NET `string.Length`
+        // counts **UTF-16 code units**, not chars. Clamping by `.chars().take(128)`
+        // would let an astral (non-BMP) char — 2 units each — slip through and
+        // push the unit count past 128, so ServUO would silently drop the whole
+        // reply. Walk whole chars, tracking the running UTF-16 unit count, and
+        // stop before a char would push it over 128; a char's units are only
+        // ever added as a pair, so a surrogate pair is never split.
+        let mut clamped = String::new();
+        let mut units = 0usize;
+        for ch in text.trim().chars() {
+            let ch_units = ch.len_utf16();
+            if units + ch_units > 128 {
+                break;
+            }
+            units += ch_units;
+            clamped.push(ch);
+        }
+        for unit in clamped.encode_utf16() {
+            w.u16(unit.swap_bytes()); // UTF-16 LE (the writer is BE, so swap first)
+        }
+    }
+    let mut data = w.into_vec();
+    let len = data.len() as u16;
+    data[1] = (len >> 8) as u8;
+    data[2] = (len & 0xFF) as u8;
+    data
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,6 +726,56 @@ mod tests {
         assert_eq!(u16::from_be_bytes([g[13], g[14]]), 2000);
         assert_eq!(g[15..17], (-5i16 as u16).to_be_bytes());
         assert_eq!(u16::from_be_bytes([g[17], g[18]]), 0x01A4);
+    }
+
+    #[test]
+    fn prompt_response_layout() {
+        // Reply "Rex" to prompt (serial 0xDEADBEEF, promptId 0x2A): type=1, lang
+        // "ENU\0", text as UTF-16 LE (note: byte order reversed vs the rest of the
+        // protocol).
+        let p = build_prompt_response(0xDEAD_BEEF, 0x2A, "Rex", false);
+        assert_eq!(p[0], 0xC2);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(&p[3..7], &[0xDE, 0xAD, 0xBE, 0xEF]); // serial (BE)
+        assert_eq!(u32::from_be_bytes([p[7], p[8], p[9], p[10]]), 0x2A); // promptId
+        assert_eq!(u32::from_be_bytes([p[11], p[12], p[13], p[14]]), 1); // type = reply
+        assert_eq!(&p[15..19], b"ENU\0"); // language
+        // "Rex" as UTF-16 LE: R=0x52, e=0x65, x=0x78.
+        assert_eq!(&p[19..], &[0x52, 0x00, 0x65, 0x00, 0x78, 0x00]);
+
+        // Cancel: type=0, no text bytes at all.
+        let c = build_prompt_response(0x01, 0x02, "ignored", true);
+        assert_eq!(
+            c,
+            vec![0xC2, 0x00, 0x13, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, b'E', b'N', b'U', 0]
+        );
+    }
+
+    #[test]
+    fn prompt_response_clamps_by_utf16_units_not_chars() {
+        // 70 astral (non-BMP) chars, each 2 UTF-16 units — 140 units total, well
+        // over the 128-unit limit ServUO enforces (`PacketHandlers.cs`
+        // `UnicodePromptResponse`: `text.Length > 128`, and .NET `string.Length`
+        // counts UTF-16 code units, not chars). A naive `.chars().take(128)`
+        // clamp would keep all 70 *chars* (140 units) and ServUO would silently
+        // drop the whole reply; clamping by running UTF-16 unit count must stop
+        // at exactly 64 chars (64 × 2 = 128 units) and never emit half of a
+        // surrogate pair.
+        let text: String = "\u{1F600}".repeat(70);
+        let p = build_prompt_response(0xDEAD_BEEF, 0x2A, &text, false);
+        let payload = &p[19..]; // same 19-byte header as `prompt_response_layout`
+        assert_eq!(payload.len() % 2, 0); // whole u16 units only — no stray half-unit
+        let unit_count = payload.len() / 2;
+        assert_eq!(unit_count, 128); // 64 whole chars, none split off
+
+        // Reassemble as UTF-16 LE: a split surrogate pair would fail to decode.
+        let units: Vec<u16> = payload
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let decoded = String::from_utf16(&units).expect("must not split a surrogate pair");
+        assert_eq!(decoded.chars().count(), 64);
+        assert!(decoded.chars().all(|c| c == '\u{1F600}'));
     }
 
     #[test]

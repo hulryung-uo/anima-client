@@ -1196,7 +1196,8 @@ fn content_type(path: &str) -> &'static str {
 /// ground) · `equip:<serial>[:<layer>]` (layer 0 = derive from tiledata) ·
 /// `war:<0|1>` · `cast:<spellId>` · `target:<serial>` · `targetxy:<x>:<y>:<z>:<graphic>` ·
 /// `gump:<serial>:<gumpId>:<button>[:sw=1,2][:e=<id>=<text>,…]` (gump reply; text
-/// entries can't contain `:`, `,`, or `=`).
+/// entries can't contain `:`, `,`, or `=`) · `prompt:<text>` / `promptcancel`
+/// (answer/cancel a pending server text prompt, 0xC2 UnicodePrompt).
 fn parse_command(body: &str) -> Option<Action> {
     let body = body.trim();
     let (cmd, arg) = body.split_once(':').unwrap_or((body, ""));
@@ -1342,6 +1343,11 @@ fn parse_command(body: &str) -> Option<Action> {
                 graphic: p.next().and_then(|s| s.parse().ok()).unwrap_or(0),
             })
         }
+        // prompt:<text> — answer a pending server text prompt (0xC2 UnicodePrompt:
+        // pet rename, house sign, guild abbreviation, …).
+        "prompt" => Some(Action::PromptResponse { text: arg.to_string() }),
+        // promptcancel — cancel a pending server text prompt (Esc).
+        "promptcancel" => Some(Action::PromptCancel),
         _ => None,
     }
 }

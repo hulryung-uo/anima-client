@@ -9,7 +9,9 @@
 //! [`crate::net::movement`].
 
 use super::packet::{PacketReader, Result as PResult};
-use crate::world::{Effect, Gump, JournalEntry, PopupEntry, PopupMenu, Skill, TargetCursor, World};
+use crate::world::{
+    Effect, Gump, JournalEntry, PopupEntry, PopupMenu, PromptState, Skill, TargetCursor, World,
+};
 
 /// Decode one framed game packet (id byte included) into `world`.
 /// Returns `true` if the packet id was recognized.
@@ -68,6 +70,11 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x93 => open_book(world, frame)?,
         0xD4 => open_book_new(world, frame)?,
         0x66 => book_data(world, frame)?,
+        0xAF => display_death(world, frame)?,
+        0xAA => change_combatant(world, frame)?,
+        0x27 => lift_reject(world, frame)?,
+        0x89 => corpse_equip(world, frame)?,
+        0xC2 => unicode_prompt(world, frame)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -1022,6 +1029,91 @@ fn read_nul_ascii(r: &mut PacketReader) -> String {
     s
 }
 
+/// 0xAF DisplayDeath — `[id][killedSerial:u32][corpseSerial:u32][unused:u32=0]`
+/// (13 bytes, ServUO `DeathAnimation : base(0xAF, 13)`). Sent on every mobile
+/// death; links the new corpse item to the mobile that died. AI-facing only (no
+/// death animation is modeled — no rendering in core); the renderer needs nothing
+/// from this (the corpse item already carries its own body/hue/direction).
+fn display_death(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let killed_serial = r.u32()?;
+    let corpse_serial = r.u32()?;
+    r.skip(4)?; // unused (ServUO always writes 0)
+    if corpse_serial != 0 {
+        world.set_corpse_of(corpse_serial, killed_serial);
+    }
+    Ok(())
+}
+
+/// 0xAA ChangeCombatant — `[id][serial:u32]` (5 bytes, ServUO `ChangeCombatant :
+/// base(0xAA, 5)`), sent whenever the server's `Mobile.Combatant` changes
+/// (Mobile.cs ~2213). `serial == 0` means combat ended.
+fn change_combatant(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let serial = r.u32()?;
+    world.combatant = if serial == 0 { None } else { Some(serial) };
+    Ok(())
+}
+
+/// 0x27 LiftRej — `[id][reason:u8]` (2 bytes). The server refused our last lift
+/// (0x07 PickUp): the item never left its source. See [`World::recent_lift_rejects`]
+/// for the reason-code table.
+fn lift_reject(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let reason = r.u8()?;
+    world.push_lift_reject(reason);
+    Ok(())
+}
+
+/// 0x89 CorpseEquip — a corpse's worn-item layout, so it can be "undressed"
+/// without opening its loot window first. Variable: `[id][len:u16][corpse:u32]`
+/// then repeated `[layer:u8][serial:u32]` until `layer == 0` (Layer.Invalid
+/// terminator). The wire layer is `real layer + 1` (ServUO
+/// `Scripts/Items/Corpses/Packets.cs` `CorpseEquip`, CUO `CorpseEquipment`); we
+/// store the un-shifted real layer. A truncated frame keeps whatever entries
+/// parsed cleanly before it ran out. Ported from ClassicUO `PacketHandlers.CorpseEquipment`.
+fn corpse_equip(world: &mut World, frame: &[u8]) -> PResult<()> {
+    if frame.len() < 7 {
+        return Ok(());
+    }
+    let mut r = PacketReader::new(&frame[3..]); // skip id + 2-byte length
+    let corpse = r.u32()?;
+    let mut entries = Vec::new();
+    // A read failure anywhere below (truncated frame) just stops early, keeping
+    // whatever entries parsed cleanly before it ran out.
+    while let Ok(layer) = r.u8() {
+        if layer == 0 {
+            break; // Layer.Invalid terminator
+        }
+        let Ok(serial) = r.u32() else {
+            break; // truncated — drop the dangling layer byte
+        };
+        entries.push((layer - 1, serial));
+    }
+    world.set_corpse_equip(corpse, entries);
+    Ok(())
+}
+
+/// 0xC2 UnicodePrompt — the server asks us to answer with typed text (pet rename,
+/// house sign, guild abbreviation, … — ~38 ServUO flows). Fixed 21 bytes as
+/// ServUO sends it: `[id][len:u16][senderSerial:u32][promptId:u32][type:u32=0]
+/// [language:u32=0][textLen:u16=0]` — the question text itself is NOT carried
+/// here (ServUO sends it separately as a cliloc/system message just before this,
+/// which already lands in [`World::journal`]); only the two ids the response must
+/// echo matter (mirrors ClassicUO `PacketHandlers.UnicodePrompt`, which reads just
+/// the leading 8 bytes as one `u64`). Answer with
+/// [`crate::agent::Action::PromptResponse`]/[`crate::agent::Action::PromptCancel`].
+fn unicode_prompt(world: &mut World, frame: &[u8]) -> PResult<()> {
+    if frame.len() < 11 {
+        return Ok(());
+    }
+    let mut r = PacketReader::new(&frame[3..]); // skip id + 2-byte length
+    let sender_serial = r.u32()?;
+    let prompt_id = r.u32()?;
+    world.prompt = Some(PromptState { sender_serial, prompt_id });
+    Ok(())
+}
+
 /// 0x1D Delete — entity removed from the world.
 fn delete(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
@@ -1145,7 +1237,8 @@ fn unicode_talk(world: &mut World, frame: &[u8]) -> PResult<()> {
 }
 
 /// 0xBF GeneralInfo — multiplexed subcommands. We handle the fast-walk key
-/// stack (sub 0x01 sets six keys, sub 0x02 pushes one); each walk consumes one.
+/// stack (sub 0x01 sets six keys, sub 0x02 pushes one; each walk consumes one),
+/// party (sub 0x06), the facet switch (sub 0x08), and the popup menu (sub 0x14).
 fn general_info(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[3..]); // variable
     let subcmd = r.u16()?;
@@ -1164,6 +1257,14 @@ fn general_info(world: &mut World, frame: &[u8]) -> PResult<()> {
             }
         }
         0x06 => parse_party(world, &mut r)?,
+        // 0x08 MapChange — `[mapId:u8]` (ServUO `MapChange`, CUO `PacketHandlers`
+        // `case 8: world.MapIndex = ...`). Facet switch (Felucca/Trammel/Ilshenar/
+        // Malas/Tokuno/TerMur). Routed through `on_map_change` (not a bare field
+        // assignment) so the facet we're leaving gets purged — ServUO never sends
+        // 0x1D deletes for it, so the old mobiles/items would otherwise become
+        // permanent phantoms. See [`World::map_index`] for what a real facet
+        // reload of `MapData` would additionally require.
+        0x08 => world.on_map_change(r.u8()?),
         0x14 => parse_popup(world, &mut r)?,
         _ => {}
     }
@@ -2132,5 +2233,204 @@ mod tests {
         let mut w = World::new();
         // 0x9B is fixed-len but not handled → recognized=false
         assert!(!apply_packet(&mut w, &[0x9B, 0, 0]));
+    }
+
+    #[test]
+    fn display_death_links_corpse_and_prunes_on_delete() {
+        let mut w = World::new();
+        // 0xAF: killed mobile 0xAAAA's corpse is item 0x4000_0001.
+        let mut p = PacketWriter::new();
+        p.u8(0xAF).u32(0xAAAA).u32(0x4000_0001).u32(0);
+        let frame = p.into_vec();
+        assert_eq!(frame.len(), 13); // ServUO DeathAnimation : base(0xAF, 13)
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.corpse_of.get(&0x4000_0001), Some(&0xAAAA));
+
+        // The corpse item despawns (0x1D Delete) — the link is pruned with it.
+        let mut d = PacketWriter::new();
+        d.u8(0x1D).u32(0x4000_0001);
+        assert!(apply_packet(&mut w, &d.into_vec()));
+        assert!(!w.corpse_of.contains_key(&0x4000_0001));
+    }
+
+    #[test]
+    fn change_combatant_sets_and_clears() {
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0xAA).u32(0xDEAD_BEEF);
+        let frame = p.into_vec();
+        assert_eq!(frame.len(), 5); // ServUO ChangeCombatant : base(0xAA, 5)
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.combatant, Some(0xDEAD_BEEF));
+
+        // serial 0 = combat ended.
+        let mut q = PacketWriter::new();
+        q.u8(0xAA).u32(0);
+        assert!(apply_packet(&mut w, &q.into_vec()));
+        assert_eq!(w.combatant, None);
+    }
+
+    #[test]
+    fn lift_reject_queues_event() {
+        let mut w = World::new();
+        // 0x27: reason 3 = BelongsToAnother.
+        let mut p = PacketWriter::new();
+        p.u8(0x27).u8(3);
+        let frame = p.into_vec();
+        assert_eq!(frame.len(), 2); // ServUO LiftRej : base(0x27, 2)
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.recent_lift_rejects.last(), Some(&(1, 3)));
+        assert_eq!(w.lift_reject_seq, 1);
+    }
+
+    #[test]
+    fn corpse_equip_parses_entries_and_terminator() {
+        let mut w = World::new();
+        // 0x89: corpse 0x4000_0002 wearing a shirt (layer 5 → wire 6, serial
+        // 0x4000_0003) and a hat (layer 7 → wire 8, serial 0x4000_0004), terminated
+        // by the layer==0 (Layer.Invalid) sentinel.
+        let mut p = PacketWriter::new();
+        p.u8(0x89).u16(0); // id, len placeholder
+        p.u32(0x4000_0002);
+        p.u8(6).u32(0x4000_0003);
+        p.u8(8).u32(0x4000_0004);
+        p.u8(0); // terminator
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &frame));
+        let entries = w.corpse_equip.get(&0x4000_0002).expect("corpse equip stored");
+        assert_eq!(entries, &vec![(5, 0x4000_0003), (7, 0x4000_0004)]);
+    }
+
+    #[test]
+    fn corpse_equip_truncated_frame_keeps_what_parsed() {
+        let mut w = World::new();
+        // 0x89: corpse 0x55, one full entry, then a dangling layer byte with no
+        // serial behind it (truncated mid-stream) — must not panic, and the
+        // complete entry before it is kept.
+        let mut p = PacketWriter::new();
+        p.u8(0x89).u16(0);
+        p.u32(0x55);
+        p.u8(3).u32(0x4000_0009); // one complete entry (real layer 2)
+        p.u8(4); // dangling layer byte, no serial follows
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &frame));
+        let entries = w.corpse_equip.get(&0x55).expect("corpse equip stored");
+        assert_eq!(entries, &vec![(2, 0x4000_0009)]);
+    }
+
+    #[test]
+    fn unicode_prompt_sets_pending_state() {
+        let mut w = World::new();
+        // 0xC2 UnicodePrompt (server→client): serial 0x0102_0304, promptId
+        // 0xDEAD_BEEF, plus the type/language/textLen fields ServUO always zeros.
+        let mut p = PacketWriter::new();
+        p.u8(0xC2).u16(0); // id, len placeholder
+        p.u32(0x0102_0304).u32(0xDEAD_BEEF).u32(0).u32(0).u16(0);
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        assert_eq!(len, 21); // ServUO UnicodePrompt EnsureCapacity(21)
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &frame));
+        let p = w.prompt.expect("prompt pending");
+        assert_eq!((p.sender_serial, p.prompt_id), (0x0102_0304, 0xDEAD_BEEF));
+    }
+
+    #[test]
+    fn general_info_map_change_sets_facet() {
+        let mut w = World::new();
+        assert_eq!(w.map_index, 0);
+        // 0xBF/0x08 MapChange: switch to facet 1 (Trammel).
+        let mut p = PacketWriter::new();
+        p.u8(0xBF).u16(0).u16(0x0008).u8(1);
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        assert_eq!(frame.len(), 6); // ServUO MapChange EnsureCapacity(6)
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.map_index, 1);
+    }
+
+    #[test]
+    fn map_change_purges_old_facet_but_keeps_player_and_holdings() {
+        let mut w = World::new();
+        let player = 0x1000_0001;
+        w.player = Some(crate::types::Serial(player));
+        w.mobile_mut(player).name = "Anima".into();
+
+        // Worn equip: container == the player's own serial directly.
+        let backpack = 0x4000_0001;
+        w.item_mut(backpack).container = Some(player);
+        // Backpack'd item: container == the backpack's serial (nested one level).
+        let potion = 0x4000_0002;
+        w.item_mut(potion).container = Some(backpack);
+
+        // A stranger mobile and a loose ground item from the OLD facet —
+        // neither is the player nor rooted at them, so both must be purged.
+        let stranger = 0x1000_0002;
+        w.mobile_mut(stranger).name = "Rat".into();
+        let ground_item = 0x4000_0003;
+        w.item_mut(ground_item);
+
+        // A corpse (and its worn-item layout) from the old facet — purged along
+        // with the links that index it, so nothing dangles afterward.
+        let corpse = 0x4000_0004;
+        w.item_mut(corpse);
+        w.set_corpse_of(corpse, stranger);
+        w.set_corpse_equip(corpse, vec![(1, 0x4000_0005)]);
+
+        // 0xBF/0x08 MapChange: switch facet 0 → 1 (Trammel).
+        let mut p = PacketWriter::new();
+        p.u8(0xBF).u16(0).u16(0x0008).u8(1);
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.map_index, 1);
+
+        // Survivors: only the player mobile, and only what's rooted at them.
+        assert_eq!(w.mobiles.keys().copied().collect::<Vec<_>>(), vec![player]);
+        let mut kept: Vec<u32> = w.items.keys().copied().collect();
+        kept.sort();
+        assert_eq!(kept, vec![backpack, potion]);
+
+        // Purged: the stranger, the ground item, and the now-dangling corpse links.
+        assert!(!w.items.contains_key(&ground_item));
+        assert!(!w.items.contains_key(&corpse));
+        assert!(w.corpse_of.is_empty());
+        assert!(w.corpse_equip.is_empty());
+    }
+
+    #[test]
+    fn map_change_same_facet_is_a_noop() {
+        let mut w = World::new();
+        let player = 0x1000_0001;
+        w.player = Some(crate::types::Serial(player));
+        w.mobile_mut(player);
+        let stranger = 0x1000_0002;
+        w.mobile_mut(stranger);
+        let ground_item = 0x4000_0003;
+        w.item_mut(ground_item);
+
+        // 0xBF/0x08 MapChange re-affirming the CURRENT facet (0) — must not
+        // purge anything (only an actual facet change does).
+        let mut p = PacketWriter::new();
+        p.u8(0xBF).u16(0).u16(0x0008).u8(0);
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.map_index, 0);
+        assert!(w.mobiles.contains_key(&stranger));
+        assert!(w.items.contains_key(&ground_item));
     }
 }

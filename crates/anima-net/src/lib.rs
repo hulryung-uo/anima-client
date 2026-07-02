@@ -19,9 +19,9 @@ use anima_core::net::outgoing::{
     build_drop, build_equip, build_gump_response, build_opl_request, build_party_accept,
     build_party_decline, build_party_invite, build_party_leave, build_party_message,
     build_pick_up,
-    build_popup_request, build_popup_select, build_say, build_sell, build_single_click,
-    build_skill_lock, build_status_request, build_target_response, build_unicode_say,
-    build_use_ability, build_use_skill, build_war_mode,
+    build_popup_request, build_popup_select, build_prompt_response, build_say, build_sell,
+    build_single_click, build_skill_lock, build_status_request, build_target_response,
+    build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
 };
 use anima_core::net::{
     apply_packet, build_client_version, FramingError, LoginConfig, LoginDirective, LoginError,
@@ -227,6 +227,8 @@ impl Session {
                 let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
                 self.send(&build_party_leave(serial))?;
             }
+            Action::PromptResponse { text } => self.respond_prompt(text, false)?,
+            Action::PromptCancel => self.respond_prompt("", true)?,
             // Auto-walk needs the terrain/map to pathfind + pace steps, which the
             // headless driver doesn't own. The play-server intercepts `WalkTo`
             // before it reaches here (see its game loop); this arm is a no-op so
@@ -288,6 +290,19 @@ impl Session {
         );
         self.send(&pkt)?;
         self.world.pending_target = None;
+        Ok(())
+    }
+
+    /// Answer (or cancel) the pending server text prompt (0xC2 UnicodePrompt),
+    /// echoing its `sender_serial`/`prompt_id`, and clear it locally. No-op when
+    /// nothing is pending (the brain raced the prompt away).
+    fn respond_prompt(&mut self, text: &str, cancel: bool) -> Result<(), DriverError> {
+        let Some(p) = self.world.prompt else {
+            return Ok(());
+        };
+        let pkt = build_prompt_response(p.sender_serial, p.prompt_id, text, cancel);
+        self.send(&pkt)?;
+        self.world.prompt = None;
         Ok(())
     }
 
