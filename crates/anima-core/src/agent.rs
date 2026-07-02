@@ -9,8 +9,12 @@
 //! Keeping this schema stable lets scripted / RL / LLM brains and the
 //! native/WASM backends all plug into the same interface (see DESIGN.md §3).
 
+use crate::gump_layout::GumpElement;
 use crate::types::Position;
-use crate::world::{JournalEntry, PromptState, TargetCursor, TradeState, World};
+use crate::world::{
+    Book, Buff, JournalEntry, Party, PopupMenu, PromptState, ShopBuy, ShopSell, TargetCursor,
+    TradeState, Weather, World,
+};
 
 /// A skill value, in human units (50.0 == GM-half). Derived from [`crate::world::Skill`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,6 +44,11 @@ pub struct PlayerView {
     pub intelligence: u16,
     pub gold: u32,
     pub weight: u16,
+    /// Carry-weight cap ([`crate::world::PlayerStats::weight_max`]) — the
+    /// natural companion to `weight` for "can I still pick this up".
+    pub weight_max: u16,
+    /// Armor rating (AR), [`crate::world::PlayerStats::armor`].
+    pub armor: i16,
 }
 
 /// A nearby creature.
@@ -97,6 +106,74 @@ pub struct Observation {
     /// [`Action::TradeAccept`]/[`Action::TradeCancel`]/[`Action::TradeGold`],
     /// each addressed to a specific session via its `my_container`.
     pub trades: Vec<TradeState>,
+    /// The player's active buffs/debuffs (0xDF). See [`Buff`].
+    pub buffs: Vec<Buff>,
+    /// The open vendor BUY window (0x74), if any. See [`ShopBuy`]. Answer with
+    /// [`Action::BuyItems`].
+    pub shop_buy: Option<ShopBuy>,
+    /// The open vendor SELL window (0x9E), if any. See [`ShopSell`]. Answer
+    /// with [`Action::SellItems`].
+    pub shop_sell: Option<ShopSell>,
+    /// The open context (right-click popup) menu (0xBF/0x14), if any. See
+    /// [`PopupMenu`]. Answer with [`Action::PopupSelect`].
+    pub popup: Option<PopupMenu>,
+    /// The currently open book (0x93/0xD4 + 0x66), if any. See [`Book`].
+    /// Request more pages with [`Action::BookRequest`].
+    pub book: Option<Book>,
+    /// The player's party (0xBF/0x06). See [`Party`]. An empty `members` means
+    /// we're not in a party. Answer a pending invite with
+    /// [`Action::PartyAccept`]/[`Action::PartyDecline`].
+    pub party: Party,
+    /// An on-screen quest arrow (0xBA) pointing at world tile `(x, y)`, or
+    /// `None` when hidden.
+    pub quest_arrow: Option<(u16, u16)>,
+    /// Current weather (0x65). See [`Weather`].
+    pub weather: Weather,
+    /// Current season (0xBC): 0=Spring, 1=Summer, 2=Fall, 3=Winter, 4=Desolation.
+    pub season: u8,
+    /// Effective light level a renderer would use (brighter of the overall and
+    /// personal light — see [`World::effective_light`]); 0 = brightest day,
+    /// ~0x1F darkest night.
+    pub light: u8,
+    /// Whether the player is in war mode (combat stance). Toggle with
+    /// [`Action::WarMode`].
+    pub war: bool,
+    /// The serial we last sent an Attack (0x05) request for — UO's "last
+    /// target" for the auto-attack loop ([`Action::AttackLast`]/
+    /// [`Action::AutoAttack`]). `None` until the player attacks.
+    pub last_attack: Option<u32>,
+    /// The server's authoritative current combat opponent (0xAA
+    /// ChangeCombatant), distinct from `last_attack` (which is only the last
+    /// serial *we* asked to attack — the server can retarget on its own).
+    /// `None` when combat has ended.
+    pub combatant: Option<u32>,
+    /// Corpse→killed-mobile links (0xAF DisplayDeath), each `(corpse_serial,
+    /// killed_mobile_serial)`, sorted by corpse serial. Lets a brain confirm
+    /// "this is the corpse of what I killed" before looting.
+    pub corpse_of: Vec<(u32, u32)>,
+    /// A corpse's worn-item layout (0x89 CorpseEquip), each `(corpse_serial,
+    /// [(layer, item_serial), …])`, sorted by corpse serial.
+    pub corpse_equip: Vec<(u32, Vec<(u8, u32)>)>,
+    /// Current facet/map index (0xBF/0x08 MapChange): 0=Felucca, 1=Trammel,
+    /// 2=Ilshenar, 3=Malas, 4=Tokuno, 5=TerMur.
+    pub map_index: u8,
+    /// Whether the server advertised the AOS expansion during login
+    /// ([`World::aos`]) — gates AOS-only mechanics (e.g. weapon special moves
+    /// via [`Action::UseAbility`]).
+    pub aos: bool,
+    /// Object Property Lists (0xD6 MegaCliloc) answering an [`Action::OplRequest`],
+    /// each `(serial, [(cliloc id, args), …])`, sorted by serial. Raw — the core
+    /// has no Cliloc table, so a brain wanting display text resolves it itself
+    /// (mirrors [`GumpView::layout`]'s cliloc-driven `html` elements). Line 0 is
+    /// the name; the rest are magic properties, in the order the server sent them.
+    pub opl: Vec<(u32, Vec<(u32, String)>)>,
+    /// Recent per-hit damage events (0x0B), each `(seq, serial, amount)`, oldest
+    /// first, capped to the most recent few — `serial` took `amount` HP. A combat
+    /// brain wants this: other mobiles' HP otherwise only arrives as a coarse
+    /// scaled percentage (0x17/0x77's damage bar). Dedupe on `seq` across polls
+    /// (like the renderer's scene bridge does) — this always carries the full
+    /// capped buffer, not just what's new since the last observation.
+    pub recent_damage: Vec<(u64, u32, u16)>,
 }
 
 /// A read-only view of an open server gump/dialog.
@@ -104,8 +181,14 @@ pub struct Observation {
 pub struct GumpView {
     pub serial: u32,
     pub gump_id: u32,
-    /// The raw UO gump layout string (`{ button … }{ gumppic … }…`).
+    /// The raw UO gump layout string (`{ button … }{ gumppic … }…`), kept as a
+    /// fallback for a brain that wants to parse it itself.
     pub layout: String,
+    /// `layout` parsed into typed elements (see [`crate::gump_layout`]) — the
+    /// normal way a brain reads a gump instead of re-implementing the grammar.
+    /// A cliloc-driven [`GumpElement::Html`] is left unresolved (the core has
+    /// no Cliloc table); a driver with one (`anima-net`) resolves it.
+    pub elements: Vec<GumpElement>,
 }
 
 /// A decision-maker that turns perception into intent. Scripted, RL, or LLM
@@ -136,7 +219,10 @@ pub enum Action {
     Walk { dir: u8, run: bool },
     /// Auto-walk (click-to-walk): pathfind to world tile `(x, y)` and drive the
     /// player there step-by-step. A new `WalkTo` or any manual [`Action::Walk`]
-    /// cancels an active route. The driver (play-server) owns the route + pacing.
+    /// cancels an active route. The driver owns the route + pacing — the
+    /// play-server paces it in its own loop; the headless `anima-net::Session`
+    /// does the same non-blockingly via `Session::advance_route` (call it once
+    /// per tick; `Session::navigate_to` remains for a blocking one-shot walk).
     WalkTo { x: u16, y: u16 },
     /// Speak in-game.
     Say { text: String },
@@ -278,6 +364,8 @@ impl World {
             intelligence: self.player_stats.intelligence,
             gold: self.player_stats.gold,
             weight: self.player_stats.weight,
+            weight_max: self.player_stats.weight_max,
+            armor: self.player_stats.armor,
         };
 
         let mut mobiles: Vec<MobileView> = self
@@ -336,8 +424,21 @@ impl World {
                 serial: g.serial,
                 gump_id: g.gump_id,
                 layout: g.layout.clone(),
+                elements: crate::gump_layout::parse(&g.layout, &g.text).elements,
             })
             .collect();
+
+        // HashMap iteration order isn't stable — sort so a brain sees a
+        // deterministic order run to run (like `skills`, sorted by id).
+        let mut corpse_of: Vec<(u32, u32)> = self.corpse_of.iter().map(|(&c, &k)| (c, k)).collect();
+        corpse_of.sort_by_key(|&(c, _)| c);
+        let mut corpse_equip: Vec<(u32, Vec<(u8, u32)>)> =
+            self.corpse_equip.iter().map(|(&c, v)| (c, v.clone())).collect();
+        corpse_equip.sort_by_key(|&(c, _)| c);
+
+        let mut opl: Vec<(u32, Vec<(u32, String)>)> =
+            self.opl.iter().map(|(&s, v)| (s, v.clone())).collect();
+        opl.sort_by_key(|&(s, _)| s);
 
         Observation {
             player,
@@ -349,6 +450,25 @@ impl World {
             gumps,
             prompt: self.prompt,
             trades: self.trades.clone(),
+            buffs: self.buffs.clone(),
+            shop_buy: self.shop_buy.clone(),
+            shop_sell: self.shop_sell.clone(),
+            popup: self.popup.clone(),
+            book: self.book.clone(),
+            party: self.party.clone(),
+            quest_arrow: self.quest_arrow,
+            weather: self.weather,
+            season: self.season,
+            light: self.effective_light(),
+            war: self.war,
+            last_attack: self.last_attack,
+            combatant: self.combatant,
+            corpse_of,
+            corpse_equip,
+            map_index: self.map_index,
+            aos: self.aos,
+            opl,
+            recent_damage: self.recent_damage.clone(),
         }
     }
 }

@@ -1,12 +1,14 @@
 //! `anima-agent` — run an autonomous brain on the live server.
 //!
-//! Usage: `anima-agent [host] [port] [user] [pass] [ticks]`
+//! Usage: `anima-agent [host] [port] [user] [pass] [ticks] [data_dir]`
 //! Connects, then each tick: pump the network, observe, let the brain decide,
-//! execute the actions. Logs perception + decisions so you can watch it live.
+//! execute the actions, advance any active [`Action::WalkTo`] route. Logs
+//! perception + decisions so you can watch it live.
 
 use std::time::Duration;
 
 use anima_agent::WanderBrain;
+use anima_assets::MapData;
 use anima_core::{Action, Brain};
 use anima_core::net::LoginConfig;
 use anima_net::{Endpoint, Session};
@@ -18,6 +20,18 @@ fn main() {
     let user = a.next().unwrap_or_else(|| "animaagent".into());
     let pass = a.next().unwrap_or_else(|| "animaagent".into());
     let ticks: u32 = a.next().and_then(|s| s.parse().ok()).unwrap_or(40);
+    let home = std::env::var("HOME").unwrap_or_default();
+    let data_dir = a.next().unwrap_or_else(|| format!("{home}/dev/uo/uo-resource"));
+    // `MapData` is the pathfinding terrain for `Session::advance_route` (see
+    // below) — a brain that never emits `Action::WalkTo` still runs fine
+    // without it (`advance_route` is a no-op with no active route); missing
+    // game data just means WalkTo silently can't path, like any other missing
+    // asset in this codebase.
+    let mut map = MapData::open(&data_dir).ok();
+    println!(
+        "agent: map data {}",
+        if map.is_some() { "loaded" } else { "not loaded (WalkTo actions won't path)" }
+    );
 
     let cfg = LoginConfig {
         username: user.clone(),
@@ -120,6 +134,14 @@ fn main() {
         if s.observe(Duration::from_millis(450)).is_err() {
             eprintln!("agent: connection closed");
             break;
+        }
+        // Pump any active `Action::WalkTo` route one step further (paced
+        // internally — most ticks this is a no-op). No-op entirely without map
+        // data.
+        if let Some(m) = map.as_mut() {
+            if let Err(e) = s.advance_route(m) {
+                eprintln!("agent: route error: {e}");
+            }
         }
     }
 

@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use anima_assets::{Anim, AnimData, Art, Cliloc, Image, MapData, RadarCol, MAP_HEIGHT, MAP_WIDTH};
+use anima_core::gump_layout::{self, GumpElement, HtmlText};
 use anima_core::World;
 use serde_json::{json, Value};
 
@@ -620,167 +621,71 @@ pub fn render_worldmap(map: &mut MapData, radar: &RadarCol, _step: u32) -> Vec<u
     Image { width: MAP_WIDTH, height: MAP_HEIGHT, rgba }.to_png()
 }
 
-/// Strip simple HTML tags from a gump html string (`<br>`, `<basefont …>`, etc.)
-/// and decode the few entities UO uses. Good enough for the labels servers put in
-/// `htmlgump` blocks; it is not a real HTML parser.
-fn strip_html(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
+/// Convert a core-parsed [`GumpElement`] into the renderer's positioned JSON
+/// shape (`t`/`x`/`y`/…). The grammar itself now lives in
+/// [`anima_core::gump_layout`] (it's protocol data, not rendering); this is
+/// just the JSON shaping plus cliloc resolution (which needs
+/// `anima_assets::Cliloc`, unavailable to the zero-dep core) — ported
+/// unchanged from the old inline `parse_gump_layout` so the scene JSON this
+/// produces is byte-for-byte identical to before the split.
+fn gump_element_json(e: &GumpElement, cliloc: Option<&Cliloc>) -> Value {
+    match e {
+        GumpElement::Background { x, y, w, h, page } => {
+            json!({"t":"bg","x":x,"y":y,"w":w,"h":h,"page":page})
+        }
+        // Decorative art — we draw a plain marker, so the gump id isn't needed.
+        GumpElement::Image { x, y, page, .. } => json!({"t":"bg","x":x,"y":y,"page":page}),
+        // `graphic` (the normal-state art) lets the client draw the real button
+        // art (a small gump) instead of the raw reply id as text.
+        GumpElement::Button { x, y, graphic, reply_id, pageflag, param, page } => json!({
+            "t":"button","x":x,"y":y,"g":graphic,"id":reply_id,"page":page,
+            "pageflag":pageflag,"param":param,
+        }),
+        GumpElement::Text { x, y, w: None, s, page } => {
+            json!({"t":"text","x":x,"y":y,"s":s,"page":page})
+        }
+        GumpElement::Text { x, y, w: Some(w), s, page } => {
+            json!({"t":"text","x":x,"y":y,"w":w,"s":s,"page":page})
+        }
+        // Resolve against the Cliloc table so NPC dialogs show real text, not #ids.
+        GumpElement::Html { x, y, w, text, page, .. } => {
+            let s = match text {
+                HtmlText::Literal(s) => s.clone(),
+                HtmlText::Cliloc { id, args: Some(args) } => cliloc
+                    .and_then(|c| c.format(*id, args))
+                    .unwrap_or_else(|| format!("#{id}")),
+                HtmlText::Cliloc { id, args: None } => cliloc
+                    .and_then(|c| c.get(*id).map(str::to_string))
+                    .unwrap_or_else(|| format!("#{id}")),
+            };
+            json!({"t":"text","x":x,"y":y,"w":w,"s":s,"page":page})
+        }
+        GumpElement::Check { x, y, id, on, page } => {
+            json!({"t":"check","x":x,"y":y,"id":id,"on":on,"page":page})
+        }
+        GumpElement::Radio { x, y, id, on, page } => {
+            json!({"t":"radio","x":x,"y":y,"id":id,"on":on,"page":page})
+        }
+        GumpElement::Entry { x, y, w, id, s, page } => {
+            json!({"t":"entry","x":x,"y":y,"w":w,"id":id,"s":s,"page":page})
         }
     }
-    out.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").replace("&nbsp;", " ")
 }
 
-/// Parse a UO gump `layout` command string into renderer elements (positions are
-/// gump-local px) plus the computed window `(w, h)`. Tokenizes into `{ cmd args }`
-/// groups; supports the common subset (resizepic/gumppic backgrounds, button,
-/// page, text/croppedtext, htmlgump/xmfhtmlgump, checkbox, radio, textentry).
-/// Unknown commands are ignored. `text` supplies the strings referenced by index.
-fn parse_gump_layout(layout: &str, text: &[String], cliloc: Option<&Cliloc>) -> (Vec<Value>, i64, i64) {
-    let mut elements: Vec<Value> = Vec::new();
-    let mut page = 0i64;
-    let mut win_w = 0i64; // from resizepic (x + w)
-    let mut win_h = 0i64;
-    let mut max_x = 0i64; // fallback extent from element positions
-    let mut max_y = 0i64;
-
-    let mut rest = layout;
-    while let Some(start) = rest.find('{') {
-        let after = &rest[start + 1..];
-        let Some(end) = after.find('}') else { break };
-        let group = &after[..end];
-        rest = &after[end + 1..];
-
-        let toks: Vec<&str> = group.split_whitespace().collect();
-        let Some(cmd) = toks.first() else { continue };
-        let cmd = cmd.to_ascii_lowercase();
-        let num = |i: usize| -> i64 { toks.get(i).and_then(|t| t.parse().ok()).unwrap_or(0) };
-        let get_text = |i: usize| -> String {
-            toks.get(i)
-                .and_then(|t| t.parse::<usize>().ok())
-                .and_then(|n| text.get(n))
-                .cloned()
-                .unwrap_or_default()
-        };
-
-        match cmd.as_str() {
-            "page" => page = num(1),
-            // resizepic x y gumpId w h — the sizing background panel.
-            "resizepic" => {
-                let (x, y, w, h) = (num(1), num(2), num(4), num(5));
-                win_w = win_w.max(x + w);
-                win_h = win_h.max(y + h);
-                elements.push(json!({"t":"bg","x":x,"y":y,"w":w,"h":h,"page":page}));
-            }
-            // gumppic x y gumpId [hue=…] — decorative art (we draw a plain marker).
-            "gumppic" => {
-                elements.push(json!({"t":"bg","x":num(1),"y":num(2),"page":page}));
-            }
-            // button x y up down pageflag param reply-id — pageflag 0 = local
-            // page-jump button (clicking switches to page `param`, no packet is
-            // sent to the server); pageflag 1 = reply button (clicking sends
-            // 0xB1 GumpResponse with `reply-id`). See ClassicUO Button.cs
-            // (ButtonAction.SwitchPage vs .Activate) — this mirrors that split.
-            // `up` (the normal-state gump graphic) lets the client draw the real
-            // button art (a small gump) instead of the raw reply id as text.
-            "button" => {
-                let (x, y, up, flag, param, id) = (num(1), num(2), num(3), num(5), num(6), num(7));
-                elements.push(json!({
-                    "t":"button","x":x,"y":y,"g":up,"id":id,"page":page,
-                    "pageflag":flag,"param":param,
-                }));
-                max_x = max_x.max(x + 32);
-                max_y = max_y.max(y + 24);
-            }
-            // text x y hue textId
-            "text" => {
-                let (x, y) = (num(1), num(2));
-                elements.push(json!({"t":"text","x":x,"y":y,"s":get_text(4),"page":page}));
-                max_x = max_x.max(x + 120);
-                max_y = max_y.max(y + 20);
-            }
-            // croppedtext x y w h hue textId
-            "croppedtext" => {
-                let (x, y, w) = (num(1), num(2), num(3));
-                elements.push(json!({"t":"text","x":x,"y":y,"w":w,"s":get_text(6),"page":page}));
-                max_x = max_x.max(x + w);
-                max_y = max_y.max(y + num(4).max(20));
-            }
-            // htmlgump x y w h textId background scrollbar
-            "htmlgump" => {
-                let (x, y, w, h) = (num(1), num(2), num(3), num(4));
-                let s = strip_html(&get_text(5));
-                elements.push(json!({"t":"text","x":x,"y":y,"w":w,"s":s,"page":page}));
-                max_x = max_x.max(x + w);
-                max_y = max_y.max(y + h.max(20));
-            }
-            // xmfhtmlgump/xmfhtmlgumpcolor put the cliloc id at index 5; xmfhtmltok puts
-            // it at index 8 (after background/scrollbar/color) followed by `@arg@…`.
-            // Resolve against the Cliloc table so NPC dialogs show real text, not #ids.
-            s if s.starts_with("xmfhtml") => {
-                let (x, y, w, h) = (num(1), num(2), num(3), num(4));
-                let cid = (if s == "xmfhtmltok" { num(8) } else { num(5) }) as u32;
-                let txt = if s == "xmfhtmltok" {
-                    let raw = toks.get(9..).map(|a| a.join(" ")).unwrap_or_default();
-                    let args = raw.trim_matches('@').replace('@', "\t"); // cliloc.format wants tabs
-                    cliloc.and_then(|c| c.format(cid, &args)).unwrap_or_else(|| format!("#{cid}"))
-                } else {
-                    cliloc.and_then(|c| c.get(cid).map(str::to_string)).unwrap_or_else(|| format!("#{cid}"))
-                };
-                elements.push(json!({"t":"text","x":x,"y":y,"w":w,"s":txt,"page":page}));
-                max_x = max_x.max(x + w);
-                max_y = max_y.max(y + h.max(20));
-            }
-            // checkbox x y up down state id
-            "checkbox" => {
-                let (x, y, state, id) = (num(1), num(2), num(5), num(6));
-                elements.push(json!({"t":"check","x":x,"y":y,"id":id,"on":state,"page":page}));
-                max_x = max_x.max(x + 24);
-                max_y = max_y.max(y + 24);
-            }
-            // radio x y up down state id
-            "radio" => {
-                let (x, y, state, id) = (num(1), num(2), num(5), num(6));
-                elements.push(json!({"t":"radio","x":x,"y":y,"id":id,"on":state,"page":page}));
-                max_x = max_x.max(x + 24);
-                max_y = max_y.max(y + 24);
-            }
-            // textentry x y w h hue id textId
-            "textentry" => {
-                let (x, y, w, h, id) = (num(1), num(2), num(3), num(4), num(6));
-                let s = get_text(7);
-                elements.push(json!({"t":"entry","x":x,"y":y,"w":w,"id":id,"s":s,"page":page}));
-                max_x = max_x.max(x + w);
-                max_y = max_y.max(y + h.max(20));
-            }
-            _ => {}
-        }
-    }
-
-    // Window size: prefer the resizepic extent; otherwise the element bounds.
-    // Clamp to a sane minimum so a degenerate gump is still draggable/closable.
-    let w = win_w.max(max_x + 16).max(80);
-    let h = win_h.max(max_y + 16).max(48);
-    (elements, w, h)
-}
-
-/// Build the `gumps` array for the scene: each open server gump (0xB0/0xDD) parsed
-/// into positioned elements (see [`parse_gump_layout`]).
+/// Build the `gumps` array for the scene: each open server gump (0xB0/0xDD),
+/// its layout parsed by [`gump_layout::parse`] into positioned elements (see
+/// [`gump_element_json`]).
 fn gumps_json(world: &World, cliloc: Option<&Cliloc>) -> String {
     let gumps: Vec<Value> = world
         .gumps
         .iter()
         .map(|g| {
-            let (elements, w, h) = parse_gump_layout(&g.layout, &g.text, cliloc);
+            let layout = gump_layout::parse(&g.layout, &g.text);
+            let elements: Vec<Value> =
+                layout.elements.iter().map(|e| gump_element_json(e, cliloc)).collect();
             json!({
                 "serial": g.serial, "gumpId": g.gump_id,
-                "x": g.x, "y": g.y, "w": w, "h": h,
+                "x": g.x, "y": g.y, "w": layout.width, "h": layout.height,
                 "elements": elements,
             })
         })
@@ -1615,11 +1520,12 @@ mod tests {
                       { text 20 20 0 0 }{ checkbox 20 50 210 211 1 3 }\
                       { textentry 20 65 120 18 0 4 1 }";
         let text = vec!["Accept the quest?".to_string(), "Name".to_string()];
-        let (els, w, h) = parse_gump_layout(layout, &text, None);
+        let parsed = gump_layout::parse(layout, &text);
+        let els: Vec<Value> = parsed.elements.iter().map(|e| gump_element_json(e, None)).collect();
         // Width comes straight from the resizepic; height grows to fit elements
         // that extend below it (the button at y=90 + padding).
-        assert_eq!(w, 200);
-        assert!(h >= 120, "h={h}");
+        assert_eq!(parsed.width, 200);
+        assert!(parsed.height >= 120, "h={}", parsed.height);
 
         // bg, button(id 7), text("Accept…"), check(id 3,on), entry(id 4,"Name").
         let kinds: Vec<&str> = els.iter().map(|e| e["t"].as_str().unwrap()).collect();
@@ -1648,7 +1554,8 @@ mod tests {
                       { page 2 }{ text 10 10 0 1 }\
                       { button 10 30 247 248 1 0 99 }";
         let text = vec!["Page one".to_string(), "Page two".to_string()];
-        let (els, _w, _h) = parse_gump_layout(layout, &text, None);
+        let parsed = gump_layout::parse(layout, &text);
+        let els: Vec<Value> = parsed.elements.iter().map(|e| gump_element_json(e, None)).collect();
 
         // bg(page0), text(page1), button(page1, pageflag0→page2), text(page2), button(page2, pageflag1, id99)
         let pages: Vec<i64> = els.iter().map(|e| e["page"].as_i64().unwrap()).collect();
@@ -1669,7 +1576,8 @@ mod tests {
     fn gump_layout_strips_html_and_handles_cliloc() {
         let layout = "{ htmlgump 5 5 180 40 0 0 0 }{ xmfhtmlgump 5 50 180 20 1015313 0 0 }";
         let text = vec!["<basefont color=#fff>Hello <b>world</b>".to_string()];
-        let (els, _w, _h) = parse_gump_layout(layout, &text, None);
+        let parsed = gump_layout::parse(layout, &text);
+        let els: Vec<Value> = parsed.elements.iter().map(|e| gump_element_json(e, None)).collect();
         assert_eq!(els[0]["s"], "Hello world");
         assert_eq!(els[1]["s"], "#1015313"); // cliloc placeholder (no table)
     }

@@ -13,17 +13,21 @@
 //! - [`world`] — the live game state (player, mobiles, items, journal)
 //! - [`path`] — pathfinding over the map (terrain via the [`path::Terrain`] trait)
 //! - [`agent`] — the Observation/Action contract (the brain/renderer seam)
+//! - [`gump_layout`] — parses a server gump's layout grammar into typed
+//!   elements (protocol data, not rendering — shared by the brain and renderers)
 //!
 //! `.mul`/`.uop` file reading lives in the sibling `anima-assets` crate (it needs
 //! zlib); it implements [`path::Terrain`]. Decision-making (the "brain": AI or a
 //! human's input) lives *above* this crate, never inside it.
 
 pub mod agent;
+pub mod gump_layout;
 pub mod net;
 pub mod path;
 pub mod types;
 pub mod world;
 
 pub use agent::{dir_toward, Action, Brain, ItemView, MobileView, Observation, PlayerView};
+pub use gump_layout::{GumpElement, GumpLayout, HtmlText};
 pub use types::{Direction, Position, Serial};
 pub use world::World;

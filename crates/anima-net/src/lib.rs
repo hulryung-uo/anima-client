@@ -6,6 +6,7 @@
 //! [`World`] from the server's game-packet stream. The browser build will have
 //! an analogous WebSocket driver; the core stays identical.
 
+use std::collections::HashSet;
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -85,6 +86,153 @@ const CONNECT_READ_TIMEOUT: Duration = Duration::from_secs(20);
 // when no packet is arriving, which throttled running down to walk speed.
 const PUMP_READ_TIMEOUT: Duration = Duration::from_millis(20);
 
+/// [`Action::WalkTo`] step cadence, mirroring the play-server's own
+/// click-to-walk pacing (`anima-net/src/bin/play.rs`'s `AUTO_WALK_STEP_MS`):
+/// ClassicUO's unmounted-walk step is 400ms.
+const ROUTE_STEP: Duration = Duration::from_millis(400);
+/// Give up a route after this many issued steps (runaway guard, mirrors
+/// `play.rs`'s `AUTO_WALK_MAX_STEPS`).
+const ROUTE_MAX_STEPS: u32 = 200;
+
+/// What [`Route::advance`] wants the caller ([`Session::advance_route`]) to do.
+/// Kept separate from the actual packet send so the state machine itself is
+/// network-free and unit-testable with a stubbed [`Terrain`].
+#[derive(Debug, PartialEq, Eq)]
+enum RouteStep {
+    /// Cadence hasn't elapsed since the last step attempt — do nothing.
+    Wait,
+    /// Walk one step in this direction next.
+    Walk(u8),
+    /// The goal is reached, or no path remains given what we've learned —
+    /// drop the route.
+    Done,
+}
+
+/// [`Action::WalkTo`] (click-to-walk) bookkeeping for the headless driver —
+/// the non-blocking analogue of [`Session::navigate_to`]. Mirrors the
+/// play-server's own click-to-walk loop (`anima-net/src/bin/play.rs`, its
+/// `auto_goal`/`auto_blocked`/… locals), just packaged as a struct so
+/// [`Session::advance_route`] can drive it one tick at a time instead of
+/// owning a bespoke loop. Deliberately network-free (no `Session`/socket
+/// access) so [`Route::advance`] is unit-testable with a stubbed [`Terrain`].
+/// A step `advance` has proposed but not yet confirmed sent. [`Route::step_sent`]
+/// only promotes this into the armed `pending_move`/`from`/`target` fields when
+/// the packet actually reached the wire — mirrors `play.rs`'s `auto_pending_move`,
+/// which is likewise only set inside `if session.walk(sd, false).unwrap_or(false)`.
+/// A gated attempt (the movement-prediction budget was exhausted, or
+/// `walking_failed` latched) must be dropped instead of armed, or the *next*
+/// `advance` would mistake "we never sent this" for "the server denied this"
+/// and wrongly blacklist a tile that was never attempted.
+#[derive(Debug, Clone, Copy)]
+struct Candidate {
+    from: (u16, u16),
+    target: (u32, u32),
+    is_move: bool,
+}
+
+#[derive(Debug)]
+struct Route {
+    goal: (u32, u32),
+    /// Tiles the server has *denied* (static map said walkable, a
+    /// building/dynamic blocker disagreed) — re-paths route around them, like
+    /// `navigate_to`'s `Avoiding`.
+    blocked: HashSet<(u32, u32)>,
+    /// Steps successfully issued so far (the runaway guard).
+    steps: u32,
+    last_step: Instant,
+    /// Whether the last *armed* (successfully sent) step was a real move (not
+    /// a turn) and, if so, where we were and which tile we aimed for — lets
+    /// the next `advance` detect a server deny (the tile didn't change) and
+    /// blacklist it. Only [`Route::step_sent`] arms these, from `candidate`.
+    pending_move: bool,
+    from: (u16, u16),
+    target: (u32, u32),
+    /// `advance`'s most recent proposed step, awaiting `step_sent` to say
+    /// whether it actually went out. See [`Candidate`].
+    candidate: Option<Candidate>,
+}
+
+impl Route {
+    fn new(gx: u32, gy: u32) -> Self {
+        Route {
+            goal: (gx, gy),
+            blocked: HashSet::new(),
+            steps: 0,
+            // Already "due" so the very first `advance` after a `WalkTo` steps
+            // immediately instead of waiting a full cadence.
+            last_step: Instant::now() - ROUTE_STEP,
+            pending_move: false,
+            from: (0, 0),
+            target: (0, 0),
+            candidate: None,
+        }
+    }
+
+    /// Decide the next move given the current player pose. Does not touch the
+    /// network or mutate `steps`/`last_step` for a [`RouteStep::Walk`] — the
+    /// caller reports back via [`Route::step_sent`] once it knows whether the
+    /// packet actually went out (a zero movement-prediction budget can mean it
+    /// didn't); only then does `step_sent` arm the deny-detection bookkeeping
+    /// below (see [`Candidate`]).
+    fn advance<T: Terrain>(&mut self, terrain: &mut T, pos: (u16, u16, i8), facing: u8) -> RouteStep {
+        let (px, py, pz) = pos;
+        if (px as u32, py as u32) == self.goal {
+            return RouteStep::Done;
+        }
+        if self.last_step.elapsed() < ROUTE_STEP {
+            return RouteStep::Wait;
+        }
+        // Did the previously *armed* move land? If our tile didn't change, the
+        // server denied that tile — blacklist it so the re-path detours (mirrors
+        // `navigate_to`/`play.rs`'s own deny detection).
+        if self.pending_move && (px, py) == self.from {
+            self.blocked.insert(self.target);
+        }
+        self.pending_move = false;
+
+        let path = {
+            let mut avoid = Avoiding { inner: terrain, blocked: &self.blocked };
+            find_path(&mut avoid, (px as u32, py as u32, pz as i32), self.goal, DEFAULT_MAX_EXPANSIONS)
+        };
+        match path {
+            Some(steps) if !steps.is_empty() => {
+                let step = steps[0];
+                // Not armed yet — just proposed. `step_sent` decides whether this
+                // becomes the next `advance`'s deny check.
+                self.candidate = Some(Candidate {
+                    from: (px, py),
+                    target: (step.x, step.y),
+                    is_move: facing == step.dir,
+                });
+                RouteStep::Walk(step.dir)
+            }
+            _ => RouteStep::Done, // no route given what we've learned
+        }
+    }
+
+    /// Record that `advance`'s proposed step attempt is done for this tick —
+    /// always resets the cadence clock (mirrors `play.rs`, which paces on
+    /// attempts, not just successful sends). Only `sent` arms the pending
+    /// candidate (see [`Candidate`]) into `pending_move`/`from`/`target` and
+    /// counts it toward the runaway guard; a gated send (`false`) discards the
+    /// candidate, so a tile that was never attempted can't be blacklisted as if
+    /// the server had denied it — the route just retries the same tile once
+    /// next due.
+    fn step_sent(&mut self, sent: bool) {
+        self.last_step = Instant::now();
+        if sent {
+            self.steps += 1;
+            if let Some(c) = self.candidate.take() {
+                self.from = c.from;
+                self.target = c.target;
+                self.pending_move = c.is_move;
+            }
+        } else {
+            self.candidate = None;
+        }
+    }
+}
+
 /// A live connection to a UO server: the game-phase socket plus the world state
 /// it feeds.
 pub struct Session {
@@ -95,6 +243,8 @@ pub struct Session {
     pub world: World,
     pub confirms: u32,
     pub denies: u32,
+    /// The active [`Action::WalkTo`] route, if any — see [`Session::advance_route`].
+    route: Option<Route>,
 }
 
 impl Session {
@@ -113,6 +263,7 @@ impl Session {
             world,
             confirms: 0,
             denies: 0,
+            route: None,
         };
         // ServUO doesn't push our stats/skills unsolicited — request them so the
         // first Observation carries them (ClassicUO does the same on login).
@@ -131,6 +282,9 @@ impl Session {
     pub fn apply_action(&mut self, action: &Action) -> Result<(), DriverError> {
         match action {
             Action::Walk { dir, run } => {
+                // A manual step cancels any active auto-walk route (mirrors
+                // play.rs's manual-key handling).
+                self.route = None;
                 self.walk(*dir, *run)?;
             }
             // ASCII stays on the classic 0x03 path; anything else (Korean/한글…)
@@ -265,11 +419,46 @@ impl Session {
                     }
                 }
             }
-            // Auto-walk needs the terrain/map to pathfind + pace steps, which the
-            // headless driver doesn't own. The play-server intercepts `WalkTo`
-            // before it reaches here (see its game loop); this arm is a no-op so
-            // a stray `WalkTo` through the generic path is simply ignored.
-            Action::WalkTo { .. } => {}
+            // Start (or replace) a non-blocking auto-walk route. This only
+            // records the goal — [`Session::advance_route`] (called once per
+            // tick by a runner that owns the terrain/map, e.g. `anima-agent`'s
+            // loop) does the actual pathfinding + pacing; the play-server's own
+            // HTTP loop instead intercepts `WalkTo` before it reaches here and
+            // paces its own equivalent `auto_goal`.
+            Action::WalkTo { x, y } => {
+                self.route = Some(Route::new(*x as u32, *y as u32));
+            }
+        }
+        Ok(())
+    }
+
+    /// Advance the active [`Action::WalkTo`] route by at most one step, paced
+    /// at [`ROUTE_STEP`] — call this once per tick (e.g. right after
+    /// [`Session::observe`]) so a headless brain's `WalkTo` actually walks. A
+    /// no-op if no route is active. `terrain` is the map + static walkability
+    /// oracle (the runner owns it, same as [`Session::navigate_to`]); dynamic
+    /// world blockers are the caller's `terrain` impl's concern, exactly like
+    /// `navigate_to`. Re-paths around a server deny, mirrors `navigate_to`'s
+    /// `Avoiding` for a tile the static map says is walkable but the server
+    /// disagreed with.
+    pub fn advance_route<T: Terrain>(&mut self, terrain: &mut T) -> Result<(), DriverError> {
+        let Some(mut route) = self.route.take() else { return Ok(()) };
+        let Some(p) = self.world.player_mobile() else {
+            self.route = Some(route); // not in the world yet — try again next tick
+            return Ok(());
+        };
+        let pos = (p.pos.x, p.pos.y, p.pos.z);
+        let facing = p.direction;
+        match route.advance(terrain, pos, facing) {
+            RouteStep::Wait => self.route = Some(route),
+            RouteStep::Done => {} // arrived, or no path left — drop the route
+            RouteStep::Walk(dir) => {
+                let sent = self.walk(dir, false)?;
+                route.step_sent(sent);
+                if route.steps <= ROUTE_MAX_STEPS {
+                    self.route = Some(route);
+                }
+            }
         }
         Ok(())
     }
@@ -559,4 +748,134 @@ fn connect(e: &Endpoint) -> Result<TcpStream, DriverError> {
     stream.set_nodelay(true).ok();
     stream.set_read_timeout(Some(CONNECT_READ_TIMEOUT)).ok();
     Ok(stream)
+}
+
+#[cfg(test)]
+mod route_tests {
+    //! [`Route`]'s state machine is deliberately network-free (see its doc), so
+    //! it's tested directly here with a stubbed [`Terrain`] — no socket needed.
+    //! `Session::apply_action`'s one-line cancel-on-`Walk`/replace-on-`WalkTo`
+    //! wiring around it isn't separately unit-tested: exercising it needs a
+    //! live `Session` (a connected `TcpStream`), which per this crate's testing
+    //! rules stays out of unit tests.
+    use super::*;
+
+    /// An unbounded, always-walkable grid — isolates the route bookkeeping
+    /// (cadence/blacklist/arrival) from pathfinding-around-obstacles, which
+    /// `anima-core::path` already covers.
+    struct OpenGrid;
+    impl Terrain for OpenGrid {
+        fn walkable_step(&mut self, _x: u32, _y: u32, _from_z: i32) -> Option<i32> {
+            Some(0)
+        }
+    }
+
+    /// Nothing is walkable — models an unreachable goal.
+    struct Sealed;
+    impl Terrain for Sealed {
+        fn walkable_step(&mut self, _x: u32, _y: u32, _from_z: i32) -> Option<i32> {
+            None
+        }
+    }
+
+    #[test]
+    fn advance_steps_toward_goal_when_due() {
+        let mut terrain = OpenGrid;
+        let mut route = Route::new(5, 5);
+        // `Route::new` starts already "due" so the very first tick steps
+        // immediately instead of waiting a full cadence.
+        match route.advance(&mut terrain, (0, 0, 0), 0) {
+            RouteStep::Walk(_) => {}
+            other => panic!("expected Walk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn advance_reports_done_on_arrival() {
+        let mut terrain = OpenGrid;
+        let mut route = Route::new(3, 3);
+        assert_eq!(route.advance(&mut terrain, (3, 3, 0), 0), RouteStep::Done);
+    }
+
+    #[test]
+    fn advance_reports_done_when_unreachable() {
+        let mut terrain = Sealed;
+        let mut route = Route::new(5, 5);
+        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 0), RouteStep::Done);
+    }
+
+    #[test]
+    fn advance_waits_out_the_cadence_between_steps() {
+        let mut terrain = OpenGrid;
+        let mut route = Route::new(5, 5);
+        assert!(matches!(route.advance(&mut terrain, (0, 0, 0), 0), RouteStep::Walk(_)));
+        route.step_sent(true);
+        assert_eq!(route.steps, 1);
+        // The cadence clock was just reset — immediately due again is a Wait,
+        // not a second step (mirrors play.rs's own `AUTO_WALK_STEP_MS` gate).
+        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 0), RouteStep::Wait);
+    }
+
+    #[test]
+    fn advance_blacklists_a_denied_tile_and_reroutes() {
+        let mut terrain = OpenGrid;
+        let mut route = Route::new(5, 0);
+        // Already facing east (2 — see `direction_delta`), so the proposed
+        // step is a real move, not a turn-first.
+        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::Walk(2));
+        // Only `step_sent(true)` arms the candidate — the send succeeded here.
+        route.step_sent(true);
+        assert_eq!(route.target, (1, 0));
+
+        // Force the cadence due again and simulate the server denying that
+        // step: the player is still at (0, 0) instead of having moved to (1, 0).
+        route.last_step = Instant::now() - ROUTE_STEP;
+        let next = route.advance(&mut terrain, (0, 0, 0), 2);
+        assert!(route.blocked.contains(&(1, 0)), "denied tile should be blacklisted");
+        assert!(matches!(next, RouteStep::Walk(_)), "should reroute, not give up");
+    }
+
+    #[test]
+    fn advance_does_not_blacklist_a_gated_send_and_retries_the_same_tile() {
+        // Regression for the case where a Walker gate (5 unacked steps in
+        // flight, or `walking_failed` latched) swallows the walk packet:
+        // `advance` must not treat "we never sent this" as a server deny.
+        let mut terrain = OpenGrid;
+        let mut route = Route::new(5, 0);
+        // Already facing east, so the proposed step is a real move.
+        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::Walk(2));
+        // The send was gated (e.g. `Session::walk` returned `false`) — nothing
+        // reached the wire, so nothing should be armed.
+        route.step_sent(false);
+        assert_eq!(route.steps, 0, "a gated send must not count toward the runaway guard");
+
+        // Force the cadence due again. The player never moved (no packet went
+        // out), so this must not be mistaken for a server deny on (1, 0).
+        route.last_step = Instant::now() - ROUTE_STEP;
+        let next = route.advance(&mut terrain, (0, 0, 0), 2);
+        assert!(route.blocked.is_empty(), "a never-sent step must not blacklist anything");
+        assert_eq!(next, RouteStep::Walk(2), "should simply retry the same tile, not give up");
+    }
+
+    #[test]
+    fn advance_gives_up_once_fully_boxed_in() {
+        // A single-width corridor along y=0: a complete path exists at first,
+        // but once its only first step is blacklisted (a denied "move") there
+        // is no detour (every other row is walled), so the route gives up.
+        struct Corridor;
+        impl Terrain for Corridor {
+            fn walkable_step(&mut self, _x: u32, y: u32, _from_z: i32) -> Option<i32> {
+                if y == 0 { Some(0) } else { None }
+            }
+        }
+        let mut terrain = Corridor;
+        let mut route = Route::new(5, 0);
+        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::Walk(2));
+        route.step_sent(true);
+
+        route.last_step = Instant::now() - ROUTE_STEP;
+        let next = route.advance(&mut terrain, (0, 0, 0), 2); // deny: still at (0,0)
+        assert!(route.blocked.contains(&(1, 0)));
+        assert_eq!(next, RouteStep::Done);
+    }
 }

@@ -8,6 +8,9 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 anima-core = { path = "../anima-core" }
 anima-net = { path = "../anima-net" }
+# Only for `MapData` (WalkTo pathfinding terrain) — the brain itself never
+# touches assets, just the runner in `main.rs`.
+anima-assets = { path = "../anima-assets" }
 
 [[bin]]
 name = "anima-agent"
