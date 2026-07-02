@@ -281,6 +281,71 @@ pub struct Party {
     pub pending_invite: Option<u32>,
 }
 
+/// An active secure trade session (player-to-player trade window, 0x6F).
+/// Trading is peer-initiated with no consent required (dropping an item on a
+/// player opens a trade with them, ServUO `Mobile.OpenTrade`/`OnDragDrop`,
+/// `Mobile.cs` ~10830), and ServUO tracks trades as a `List<SecureTrade>` per
+/// client (`NetState.Trades`) — nothing stops two DIFFERENT strangers from
+/// each opening a session with us at once. So [`World::trades`] is a `Vec`,
+/// one entry per opponent, not a single slot; see [`World::open_trade`]/
+/// [`World::trade_mut`]/[`World::close_trade`] for how sessions are
+/// found/updated/removed instead of assigning the field directly.
+///
+/// Each side of the trade is backed by an in-world container item — its
+/// contents arrive over the ordinary 0x25 AddToContainer / 0x3C
+/// ContainerContent path (ServUO's `SecureTradeEquip` packet literally *is*
+/// 0x25 with the same layout; see [`crate::net::game::secure_trade`]'s doc) —
+/// nothing filters them out, so [`World::items`] already has both sides'
+/// items keyed by `container == my_container` / `container ==
+/// their_container`, exactly like a normal backpack. `my_container` is the key
+/// every wire exchange addresses: ServUO always sends US our OWN side's
+/// container serial on every action (`SecureTrade.Close`/`Update` send
+/// `m_From.Container` to `m_From.Mobile`, never the opponent's), and
+/// ClassicUO's `TradingGump` only ever sends its own `ID1` outbound, never the
+/// opponent's `ID2` (`Game/UI/Gumps/TradingGump.cs`) — so it's also what every
+/// outgoing action (cancel/accept/gold) addresses.
+///
+/// Gold/platinum come in three independent flavors (ClassicUO
+/// `TradingGump.Gold`/`.Platinum` vs `.HisGold`/`.HisPlatinum` vs the local
+/// entry variable its text field sends from — `TradingGump.OnTextChanged`):
+/// - `my_offer_gold`/`my_offer_platinum` — what *we've* put up. The server
+///   never echoes our own offer back to us as such, so this is tracked
+///   optimistically the moment we send [`crate::agent::Action::TradeGold`]
+///   (mirrors the `SkillLock` action's optimistic local update) — it's our
+///   only record of it.
+/// - `their_offer_gold`/`their_offer_platinum` — the OPPONENT's offer, pushed
+///   to us as 0x6F action `3` UpdateGold (ClassicUO `HisGold`/`HisPlatinum`).
+/// - `balance_gold`/`balance_platinum` — OUR account's total available
+///   currency (ServUO `Account.TotalGold`/`TotalPlat`), pushed to us as action
+///   `4` UpdateLedger. This is an input CAP for our own offer, not a trade
+///   amount at all (ClassicUO clamps `my_gold_entry` to `Gold` before ever
+///   sending it) — the renderer should show it next to the entry field and
+///   clamp client-side, same as the reference client.
+///
+/// This whole AOS/TOL "virtual gold" feature only activates once both the
+/// client version and the server's `AccountGold.Enabled` (ServUO gates it on
+/// `Core.TOL`) agree; on a server/client pair that never negotiates it, all
+/// three gold flavors simply stay 0 and only items change hands.
+///
+/// Removed from [`World::trades`] when the session closes (0x6F action 1) —
+/// cancelled by either side or completed (both accepted) — which also purges
+/// its leftover container contents; see [`World::close_trade`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TradeState {
+    pub opponent_serial: u32,
+    pub opponent_name: String,
+    pub my_container: u32,
+    pub their_container: u32,
+    pub my_accept: bool,
+    pub their_accept: bool,
+    pub my_offer_gold: u32,
+    pub my_offer_platinum: u32,
+    pub their_offer_gold: u32,
+    pub their_offer_platinum: u32,
+    pub balance_gold: u32,
+    pub balance_platinum: u32,
+}
+
 /// The whole observable game state.
 #[derive(Debug, Default)]
 pub struct World {
@@ -430,6 +495,12 @@ pub struct World {
     /// consumer at least *knows* the facet changed. Set via [`World::on_map_change`]
     /// (never assign directly — that's what purges the old facet's entities).
     pub map_index: u8,
+    /// Active player-to-player secure trade sessions (0x6F) — normally 0 or 1,
+    /// but see [`TradeState`]'s doc for why concurrent sessions with
+    /// different opponents are possible. Use [`World::open_trade`]/
+    /// [`World::trade_mut`]/[`World::close_trade`] rather than indexing
+    /// directly.
+    pub trades: Vec<TradeState>,
 }
 
 /// Notoriety values treated as hostile for auto-attack selection:
@@ -679,6 +750,52 @@ impl World {
     /// Drop a gump by serial (the player answered/closed it). No-op if absent.
     pub fn close_gump(&mut self, serial: u32) {
         self.gumps.retain(|g| g.serial != serial);
+    }
+
+    /// Open (or refresh) a secure trade session (0x6F action 0 Display).
+    /// Upserts by `opponent_serial` — ServUO allows only one open trade per
+    /// mobile pair (`NetState.FindTradeContainer`/`AddTrade`, `Mobile.OpenTrade`
+    /// reuses the existing container instead of starting a second one), so a
+    /// repeat Display for the same opponent replaces rather than duplicates.
+    /// A *different* opponent is a genuinely separate concurrent session —
+    /// see [`TradeState`]'s doc.
+    pub fn open_trade(&mut self, trade: TradeState) {
+        if let Some(existing) = self.trades.iter_mut().find(|t| t.opponent_serial == trade.opponent_serial) {
+            *existing = trade;
+        } else {
+            self.trades.push(trade);
+        }
+    }
+
+    /// Look up an active trade session by our own container serial — every
+    /// client-bound 0x6F action (Update/UpdateGold/UpdateLedger/Close) and
+    /// every outgoing action we send addresses a session this way (see
+    /// [`TradeState`]'s doc). `None` if no session has that container (the
+    /// caller raced the session away — treat as a no-op).
+    pub fn trade_mut(&mut self, my_container: u32) -> Option<&mut TradeState> {
+        self.trades.iter_mut().find(|t| t.my_container == my_container)
+    }
+
+    /// Close a trade session by our own container serial (0x6F action 1, or a
+    /// locally-initiated cancel) and purge its leftover container contents.
+    /// ServUO bounces both sides' items back to their owners' backpacks on
+    /// close but sends NO removal packets for the opponent's side (our own
+    /// bounced items come back via ordinary 0x25 AddToContainer traffic
+    /// instead) — without this, anything still sitting in either trade
+    /// container at close time would linger in [`World::items`] forever,
+    /// keyed by a container serial nothing will ever reference again. No-op
+    /// if no session has that container.
+    pub fn close_trade(&mut self, my_container: u32) {
+        let Some(pos) = self.trades.iter().position(|t| t.my_container == my_container) else {
+            return;
+        };
+        let t = self.trades.remove(pos);
+        self.items.retain(|serial, item| {
+            *serial != t.my_container
+                && *serial != t.their_container
+                && item.container != Some(t.my_container)
+                && item.container != Some(t.their_container)
+        });
     }
 
     /// Store an entity's Object Property List (0xD6 MegaCliloc): the raw property

@@ -1197,7 +1197,13 @@ fn content_type(path: &str) -> &'static str {
 /// `war:<0|1>` · `cast:<spellId>` · `target:<serial>` · `targetxy:<x>:<y>:<z>:<graphic>` ·
 /// `gump:<serial>:<gumpId>:<button>[:sw=1,2][:e=<id>=<text>,…]` (gump reply; text
 /// entries can't contain `:`, `,`, or `=`) · `prompt:<text>` / `promptcancel`
-/// (answer/cancel a pending server text prompt, 0xC2 UnicodePrompt).
+/// (answer/cancel a pending server text prompt, 0xC2 UnicodePrompt) ·
+/// `tradeaccept:<mycont>:<0|1>` / `tradecancel:<mycont>` /
+/// `tradegold:<mycont>:<gold>:<platinum>` (answer the secure-trade session
+/// keyed by our own container serial `mycont`, 0x6F — multiple concurrent
+/// sessions with different opponents are addressed by their own `mycont`,
+/// from `scene.trades[].myCont`; items move via the normal `drop` command
+/// targeting that same container serial).
 fn parse_command(body: &str) -> Option<Action> {
     let body = body.trim();
     let (cmd, arg) = body.split_once(':').unwrap_or((body, ""));
@@ -1348,6 +1354,29 @@ fn parse_command(body: &str) -> Option<Action> {
         "prompt" => Some(Action::PromptResponse { text: arg.to_string() }),
         // promptcancel — cancel a pending server text prompt (Esc).
         "promptcancel" => Some(Action::PromptCancel),
+        // tradeaccept:<mycont>:<0|1> — toggle our accept checkbox on the secure
+        // trade session keyed by our own container serial (0x6F action 2).
+        "tradeaccept" => {
+            let mut p = arg.split(':');
+            let container = parse_serial(p.next()?)?;
+            let accept = p.next() == Some("1");
+            Some(Action::TradeAccept { container, accept })
+        }
+        // tradecancel:<mycont> — cancel the secure trade session keyed by our
+        // own container serial (0x6F action 1).
+        "tradecancel" => Some(Action::TradeCancel { container: parse_serial(arg)? }),
+        // tradegold:<mycont>:<gold>:<platinum> — set our virtual gold/platinum
+        // offer on the session keyed by our own container serial. Parsed as u64
+        // and saturated to u32::MAX rather than the usual `.ok()` "couldn't
+        // parse → 0" fallback — a fat-fingered over-range entry (e.g.
+        // 5000000000) must clamp, not silently become a 0-gold offer.
+        "tradegold" => {
+            let mut p = arg.split(':');
+            let container = parse_serial(p.next()?)?;
+            let gold = p.next().and_then(parse_saturating_u32).unwrap_or(0);
+            let platinum = p.next().and_then(parse_saturating_u32).unwrap_or(0);
+            Some(Action::TradeGold { container, gold, platinum })
+        }
         _ => None,
     }
 }
@@ -1377,4 +1406,12 @@ fn parse_serial(s: &str) -> Option<u32> {
     } else {
         s.parse().ok()
     }
+}
+
+/// Parse a decimal amount that may overflow `u32` (e.g. a mistyped gold
+/// entry), saturating to `u32::MAX` instead of the `.ok()` pattern's usual
+/// "couldn't parse → 0" fallback — a huge-but-real offer should clamp, not
+/// silently vanish to zero.
+fn parse_saturating_u32(s: &str) -> Option<u32> {
+    s.trim().parse::<u64>().ok().map(|v| v.min(u32::MAX as u64) as u32)
 }

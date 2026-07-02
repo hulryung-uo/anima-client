@@ -210,8 +210,11 @@ pub fn build_party_message(text: &str) -> Vec<u8> {
     data
 }
 
-/// Finalize a `0xBF` GeneralInfo packet: patch the big-endian length word at [1..3].
-fn finish_general_info(mut data: Vec<u8>) -> Vec<u8> {
+/// Finalize a variable-framed packet: patch the big-endian length word at
+/// `[1..3]` now that every field has been written. Used by any variable
+/// builder whose fields are all fixed-width (a batch/text builder that needs
+/// per-item length math inlines the patch itself instead).
+fn finish_variable(mut data: Vec<u8>) -> Vec<u8> {
     let len = data.len() as u16;
     data[1] = (len >> 8) as u8;
     data[2] = (len & 0xFF) as u8;
@@ -226,7 +229,7 @@ pub fn build_party_invite() -> Vec<u8> {
     let mut w = PacketWriter::new();
     w.u8(0xBF).u16(0).u16(0x0006);
     w.u8(0x01).u32(0);
-    finish_general_info(w.into_vec())
+    finish_variable(w.into_vec())
 }
 
 /// Leave the party (remove ourself). GeneralInfo `0xBF`, subcommand `0x0006`,
@@ -236,7 +239,7 @@ pub fn build_party_leave(self_serial: u32) -> Vec<u8> {
     let mut w = PacketWriter::new();
     w.u8(0xBF).u16(0).u16(0x0006);
     w.u8(0x02).u32(self_serial);
-    finish_general_info(w.into_vec())
+    finish_variable(w.into_vec())
 }
 
 /// Accept a party invitation. GeneralInfo `0xBF`, subcommand `0x0006`, sub-sub
@@ -246,7 +249,7 @@ pub fn build_party_accept(leader: u32) -> Vec<u8> {
     let mut w = PacketWriter::new();
     w.u8(0xBF).u16(0).u16(0x0006);
     w.u8(0x08).u32(leader);
-    finish_general_info(w.into_vec())
+    finish_variable(w.into_vec())
 }
 
 /// Decline a party invitation. GeneralInfo `0xBF`, subcommand `0x0006`, sub-sub
@@ -256,7 +259,7 @@ pub fn build_party_decline(leader: u32) -> Vec<u8> {
     let mut w = PacketWriter::new();
     w.u8(0xBF).u16(0).u16(0x0006);
     w.u8(0x09).u32(leader);
-    finish_general_info(w.into_vec())
+    finish_variable(w.into_vec())
 }
 
 /// BuyRequest `0x3B` (variable): buy `items` (each `(serial, amount)`) from the
@@ -488,6 +491,41 @@ pub fn build_prompt_response(serial: u32, prompt_id: u32, text: &str, cancel: bo
     data[1] = (len >> 8) as u8;
     data[2] = (len & 0xFF) as u8;
     data
+}
+
+/// SecureTrade `0x6F` (variable), action `1` Cancel — cancel the open trade
+/// window; items on both sides return to their owners. `my_container` is
+/// always the CALLER's own trade-container serial (ClassicUO `TradingGump`
+/// only ever sends its own `ID1`, never the opponent's `ID2`; ServUO's
+/// `PacketHandlers.SecureTrade` looks up the session from whichever
+/// container it's given, so either would technically work, but we mirror the
+/// reference client). Layout: `[0x6F][len:u16][0x01][myContainer:u32]`.
+pub fn build_trade_cancel(my_container: u32) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x6F).u16(0); // id + length placeholder
+    w.u8(0x01).u32(my_container);
+    finish_variable(w.into_vec())
+}
+
+/// SecureTrade `0x6F` (variable), action `2` Check — toggle our side's accept
+/// checkbox. Layout: `[0x6F][len:u16][0x02][myContainer:u32][accepted:u32]`.
+pub fn build_trade_accept(my_container: u32, accept: bool) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x6F).u16(0);
+    w.u8(0x02).u32(my_container).u32(accept as u32);
+    finish_variable(w.into_vec())
+}
+
+/// SecureTrade `0x6F` (variable), action `3` Update Gold — set the virtual
+/// gold/platinum amount we're offering (ServUO `SecureTrade.From.Gold`/
+/// `.Plat`; only visibly reflected to either side when the AOS/TOL "account
+/// gold" feature is negotiated — see [`crate::world::TradeState`]'s doc).
+/// Layout: `[0x6F][len:u16][0x03][myContainer:u32][gold:u32][platinum:u32]`.
+pub fn build_trade_gold(my_container: u32, gold: u32, platinum: u32) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x6F).u16(0);
+    w.u8(0x03).u32(my_container).u32(gold).u32(platinum);
+    finish_variable(w.into_vec())
 }
 
 #[cfg(test)]
@@ -786,5 +824,36 @@ mod tests {
         assert_eq!(len, p.len());
         assert_eq!(&p[3..p.len() - 1], b"7.0.102.3");
         assert_eq!(*p.last().unwrap(), 0);
+    }
+
+    #[test]
+    fn trade_cancel_shape() {
+        // action 1, 8 bytes total: [0x6F][len=8][0x01][myContainer].
+        assert_eq!(
+            build_trade_cancel(0xAABB_CCDD),
+            vec![0x6F, 0x00, 0x08, 0x01, 0xAA, 0xBB, 0xCC, 0xDD]
+        );
+    }
+
+    #[test]
+    fn trade_accept_shape() {
+        // action 2, 12 bytes: [0x6F][len=12][0x02][myContainer][accepted:u32].
+        let on = build_trade_accept(0x0102_0304, true);
+        assert_eq!(on, vec![0x6F, 0x00, 0x0C, 0x02, 1, 2, 3, 4, 0, 0, 0, 1]);
+        let off = build_trade_accept(0x0102_0304, false);
+        assert_eq!(off, vec![0x6F, 0x00, 0x0C, 0x02, 1, 2, 3, 4, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn trade_gold_shape() {
+        // action 3, 16 bytes: [0x6F][len=16][0x03][myContainer][gold:u32][platinum:u32].
+        let p = build_trade_gold(0xAABB_CCDD, 500, 2);
+        assert_eq!(p[0], 0x6F);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(p[3], 0x03);
+        assert_eq!(&p[4..8], &[0xAA, 0xBB, 0xCC, 0xDD]); // my container (BE)
+        assert_eq!(u32::from_be_bytes([p[8], p[9], p[10], p[11]]), 500); // gold
+        assert_eq!(u32::from_be_bytes([p[12], p[13], p[14], p[15]]), 2); // platinum
+        assert_eq!(p.len(), 16);
     }
 }

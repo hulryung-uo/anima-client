@@ -899,6 +899,41 @@ fn opl_json(world: &World, cliloc: Option<&Cliloc>) -> Value {
     Value::Object(map)
 }
 
+/// Build the `trades` array for the scene: every open secure-trade session
+/// (0x6F), or `[]` when none — see [`World::trades`]'s doc for why more than
+/// one can be open at once (concurrent sessions with different opponents).
+/// Items on each side are NOT duplicated here — the client already gets them
+/// from `contItems`, filtered by `myCont`/`theirCont` (the trade containers
+/// are ordinary container serials), exactly like a normal container window.
+/// `myOfferGold`/`myOfferPlat` is what we've offered, `theirOfferGold`/
+/// `theirOfferPlat` is the opponent's offer, and `balanceGold`/`balancePlat`
+/// is our account balance (an input cap for our own offer, not a trade
+/// amount) — see [`crate::world::TradeState`]'s doc for why these three are
+/// distinct.
+fn trades_json(world: &World) -> Value {
+    let trades: Vec<Value> = world
+        .trades
+        .iter()
+        .map(|t| {
+            json!({
+                "opponent": t.opponent_name,
+                "opponentSerial": t.opponent_serial,
+                "myCont": t.my_container,
+                "theirCont": t.their_container,
+                "myAccept": t.my_accept,
+                "theirAccept": t.their_accept,
+                "myOfferGold": t.my_offer_gold,
+                "myOfferPlat": t.my_offer_platinum,
+                "theirOfferGold": t.their_offer_gold,
+                "theirOfferPlat": t.their_offer_platinum,
+                "balanceGold": t.balance_gold,
+                "balancePlat": t.balance_platinum,
+            })
+        })
+        .collect();
+    Value::Array(trades)
+}
+
 /// Build the `book` object for the scene: the open book (0x93/0xD4 header + 0x66
 /// pages), or `null` when none. `pages` is an array of pages, each an array of its
 /// text lines (empty arrays until the page content arrives).
@@ -1554,6 +1589,8 @@ pub fn build_scene(
     // Current facet/map index (0xBF/0x08 MapChange); see `World::map_index`'s doc
     // for what a real per-facet `MapData` reload would additionally require.
     let facet = s.world.map_index;
+    // Every open secure-trade session (0x6F), or []. See `trades_json`'s doc.
+    let trades = serde_json::to_string(&trades_json(&s.world)).unwrap_or_else(|_| "[]".into());
     format!(
         "{{\"player\":{player},\
          \"map\":{{\"cx\":{px},\"cy\":{py},\"radius\":{RADIUS},\"tiles\":[{tiles}],\"maxZ\":{max_z},\"dbg\":{dbg}}},\
@@ -1562,7 +1599,7 @@ pub fn build_scene(
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
          \"popup\":{popup},\"book\":{book},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
-         \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"facet\":{facet},\
+         \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"facet\":{facet},\"trades\":{trades},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",
         s.confirms, s.denies
     )

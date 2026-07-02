@@ -949,6 +949,7 @@ async function poll() {
     refreshPopup(scene);  // right-click context menu (0xBF/0x14)
     refreshBook(scene);   // open book reader (0x93/0xD4 + 0x66)
     refreshPrompt(scene); // server text-prompt dialog (0xC2 UnicodePrompt)
+    refreshTrade(scene);  // secure trade window(s) (0x6F), one per session, auto-open/close
     updateTargetUI(); // reflect the server's target-cursor state (crosshair + banner)
     updateDeathUI(scene); // grayscale + "You are dead" banner while the player is a ghost
     playSounds(scene);   // play new sound effects (0x54)
@@ -3524,6 +3525,191 @@ function wireParty() {
     sendInput(btn.dataset.act + ":" + (btn.dataset.leader | 0));
   });
 }
+// --- secure trade windows (0x6F player-to-player trade, one per session) ---
+// scene.trades = [{ opponent, opponentSerial, myCont, theirCont, myAccept,
+// theirAccept, myOfferGold, myOfferPlat, theirOfferGold, theirOfferPlat,
+// balanceGold, balancePlat }, …] (see anima-net scene.rs trades_json). Items on
+// each side are ordinary scene.contItems keyed by container serial —
+// SecureTradeEquip reuses the 0x25 AddToContainer wire format server-side, so
+// filtering by myCont/theirCont is all a container window would do anyway.
+// Unlike the party panel (toggled by 'Y') or the backpack (toggled by 'I'), a
+// trade is something the SERVER opens — trading is peer-to-peer with no
+// consent required, so more than one stranger can have a session open with us
+// at once. One window per session, keyed by OUR OWN container serial
+// (`myCont`, the value every outgoing trade command addresses), built/torn
+// down the same way `containerWins`/`gumpWins` manage their multi-window
+// lifecycle: build on first sight, refresh in place while the signature is
+// unchanged, remove once the session drops off scene.trades.
+const tradeWins = new Map(); // myCont -> { el, sig, myCont, goldIn, platIn, balanceGold, balancePlat }
+let tradeCascade = 0;
+// Build one side's item grid from scene.contItems, reusing the exact `.cont-item`
+// markup/styling a normal container window uses. `readOnly` (the opponent's
+// side) skips the drag-arm data attribute so `setupItemDnD` won't let us lift
+// items we don't own; both sides still show the hover OPL tooltip (delegated
+// on `.cont-item[data-serial]` regardless of the `ro` flag).
+function renderTradeGrid(gridEl, cont, readOnly) {
+  const items = (scene && scene.contItems || []).filter((it) => (it.cont >>> 0) === (cont >>> 0));
+  gridEl.innerHTML = "";
+  if (!items.length) { gridEl.innerHTML = '<div class="cont-empty">(empty)</div>'; return; }
+  for (const it of items) {
+    const cell = document.createElement("div");
+    cell.className = "cont-item";
+    cell.title = readOnly ? "" : "drag to move";
+    cell.draggable = false;
+    cell.dataset.serial = it.serial >>> 0;
+    cell.dataset.g = it.g;
+    cell.dataset.amount = (it.amount | 0) || 1;
+    cell.dataset.st = it.st ? "1" : "0";
+    if (readOnly) cell.dataset.ro = "1";
+    const img = document.createElement("img");
+    img.className = "cont-icon";
+    img.src = `art/static/${stackGraphic(it.g, it.amount | 0)}.png`;
+    img.draggable = false;
+    img.onerror = () => { img.style.visibility = "hidden"; };
+    cell.appendChild(img);
+    if ((it.amount | 0) > 1) {
+      const a = document.createElement("span");
+      a.className = "cont-amt"; a.textContent = it.amount;
+      cell.appendChild(a);
+    }
+    gridEl.appendChild(cell);
+  }
+}
+function tradeInputFocused(win) {
+  const a = document.activeElement;
+  return a === win.goldIn || a === win.platIn;
+}
+// Send our gold/plat offer, clamped client-side to the account balance the
+// server last gave us (action-4 UpdateLedger, `win.balanceGold`/`balancePlat`)
+// — mirrors ClassicUO's TradingGump entry handler, which clamps rather than
+// letting the player type more than they have.
+function sendTradeGold(win) {
+  const gold = Math.max(0, Math.min(win.balanceGold, parseInt(win.goldIn.value, 10) || 0));
+  const plat = Math.max(0, Math.min(win.balancePlat, parseInt(win.platIn.value, 10) || 0));
+  sendInput("tradegold:" + win.myCont + ":" + gold + ":" + plat);
+}
+function closeTradeWindow(myCont) {
+  const win = tradeWins.get(myCont);
+  if (win) { win.el.remove(); tradeWins.delete(myCont); }
+}
+function buildTradeWindow(myCont) {
+  const el = document.createElement("div");
+  el.className = "gump-win trade-win";
+  const off = (tradeCascade++ % 6) * 24;
+  el.style.left = (340 + off) + "px";
+  el.style.top = (90 + off) + "px";
+  el.innerHTML =
+    '<div class="gump-title"><span>TRADE · <span class="tr-name"></span></span><span class="gump-close">✕</span></div>'
+    + '<div class="gump-body">'
+    + '<div class="tr-cols">'
+    + '<div class="tr-col">'
+    + '<div class="tr-col-title">You</div>'
+    + '<div class="tr-grid tr-mine-grid"></div>'
+    + '<label class="tr-accept"><input type="checkbox" class="tr-accept-cb"> I accept</label>'
+    + '<div class="tr-gold-row">'
+    + '<input class="tr-gold-in tr-gold" type="number" min="0" inputmode="numeric" placeholder="gold" autocomplete="off">'
+    + '<input class="tr-gold-in tr-plat" type="number" min="0" inputmode="numeric" placeholder="plat" autocomplete="off">'
+    + '</div>'
+    + '<div class="tr-balance"></div>'
+    + '</div>'
+    + '<div class="tr-col">'
+    + '<div class="tr-col-title tr-their-name">Them</div>'
+    + '<div class="tr-grid tr-theirs-grid"></div>'
+    + '<span class="tr-accept tr-their-accept">waiting…</span>'
+    + '<div class="tr-their-gold">0 gold / 0 plat</div>'
+    + '</div>'
+    + '</div>'
+    + '<button class="dlg-btn tr-cancel">Cancel Trade</button>'
+    + '</div>';
+  document.body.appendChild(el);
+  const win = {
+    el, sig: null, myCont,
+    goldIn: el.querySelector(".tr-gold"), platIn: el.querySelector(".tr-plat"),
+    balanceGold: 0, balancePlat: 0,
+  };
+  el.querySelector(".gump-close").addEventListener("click", () => {
+    sendInput("tradecancel:" + myCont);
+    closeTradeWindow(myCont); // close locally now — don't wait a poll for the server's echo
+  });
+  const cancelBtn = el.querySelector(".tr-cancel");
+  cancelBtn.addEventListener("click", () => {
+    sendInput("tradecancel:" + myCont);
+    closeTradeWindow(myCont);
+  });
+  el.querySelector(".tr-accept-cb").addEventListener("change", (e) => {
+    sendInput("tradeaccept:" + myCont + ":" + (e.target.checked ? "1" : "0"));
+    // A checkbox is an <input>, so isTypingTarget() treats it as a typing target
+    // while it holds focus — EVERY game key (not just letters) would silently
+    // die, and a stray Space would natively re-toggle it. Blur to release focus,
+    // matching how other windows (e.g. closeChat) avoid stealing the keyboard.
+    e.target.blur();
+  });
+  for (const inp of [win.goldIn, win.platIn]) {
+    inp.addEventListener("change", () => sendTradeGold(win));
+    // Keep Enter/Esc local to this field (same pattern as the split/prompt
+    // dialogs) so typing a gold amount never leaks a digit/movement key to
+    // the global game-input handler.
+    inp.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.code === "Enter" || e.code === "NumpadEnter") { e.preventDefault(); sendTradeGold(win); inp.blur(); }
+    });
+  }
+  makeDraggable(el, el.querySelector(".gump-title"));
+  tradeWins.set(myCont, win);
+  return win;
+}
+// Rebuild a session's window only when its data (or either side's items)
+// actually changed.
+function renderTradeWindow(win, t) {
+  win.el.querySelector(".tr-name").textContent = t.opponent || "someone";
+  win.el.querySelector(".tr-their-name").textContent = t.opponent || "Them";
+  renderTradeGrid(win.el.querySelector(".tr-mine-grid"), t.myCont, false);
+  renderTradeGrid(win.el.querySelector(".tr-theirs-grid"), t.theirCont, true);
+  win.el.querySelector(".tr-accept-cb").checked = !!t.myAccept;
+  const theirAccept = win.el.querySelector(".tr-their-accept");
+  theirAccept.textContent = t.theirAccept ? "✓ accepted" : "waiting…";
+  theirAccept.classList.toggle("yes", !!t.theirAccept);
+  win.el.querySelector(".tr-their-gold").textContent = `${t.theirOfferGold | 0} gold / ${t.theirOfferPlat | 0} plat`;
+  win.balanceGold = t.balanceGold | 0;
+  win.balancePlat = t.balancePlat | 0;
+  win.el.querySelector(".tr-balance").textContent = `balance: ${win.balanceGold} gold / ${win.balancePlat} plat`;
+  // Cap what can be typed to the account balance the server last gave us —
+  // mirrors ClassicUO's TradingGump clamping the entry to `Gold`/`Platinum`.
+  win.goldIn.max = win.balanceGold;
+  win.platIn.max = win.balancePlat;
+  // Don't clobber the field while the player is mid-keystroke in it.
+  if (!tradeInputFocused(win)) {
+    win.goldIn.value = t.myOfferGold | 0;
+    win.platIn.value = t.myOfferPlat | 0;
+  }
+}
+// Auto-open a window for each session in scene.trades, refresh the ones whose
+// data changed, and auto-close any window whose session dropped off the list
+// (cancelled, completed, or the opponent walked away).
+function refreshTrade(scene) {
+  const list = (scene && scene.trades) || [];
+  const seen = new Set();
+  for (const t of list) {
+    const myCont = t.myCont >>> 0;
+    seen.add(myCont);
+    const items = (scene.contItems || []).filter(
+      (it) => (it.cont >>> 0) === myCont || (it.cont >>> 0) === (t.theirCont >>> 0)
+    );
+    const sig = [
+      t.theirCont, t.opponent, t.myAccept, t.theirAccept,
+      t.myOfferGold, t.myOfferPlat, t.theirOfferGold, t.theirOfferPlat,
+      t.balanceGold, t.balancePlat,
+      items.map((it) => `${it.cont >>> 0}:${it.serial >>> 0}:${it.g}:${it.amount | 0}`).join(","),
+    ].join("|");
+    const win = tradeWins.get(myCont) || buildTradeWindow(myCont);
+    if (win.sig === sig) continue;
+    win.sig = sig;
+    renderTradeWindow(win, t);
+  }
+  for (const myCont of [...tradeWins.keys()]) {
+    if (!seen.has(myCont)) closeTradeWindow(myCont);
+  }
+}
 // The worn backpack is the equip entry on layer 21 (0x15).
 function backpackSerial() {
   const p = scene && scene.player;
@@ -4245,6 +4431,24 @@ function placeCursorItem(clientX, clientY) {
   if (!cursorItem) return false;
   const serial = cursorItem.serial;
   const el = document.elementFromPoint(clientX, clientY);
+  // Our own side of an open secure trade (.tr-mine-grid) is a drop target too —
+  // dropping there is a normal container drop targeting THAT WINDOW's own trade
+  // container serial (multiple sessions can be open at once, one window each,
+  // so the target comes from the enclosing .trade-win via `tradeWins`, not a
+  // single global session). The opponent's side (.tr-theirs-grid) is
+  // intentionally NOT a target here — we can't place items into their half.
+  const tradeGrid = el && el.closest && el.closest(".tr-mine-grid");
+  const tradeWinEl = tradeGrid && tradeGrid.closest(".trade-win");
+  if (tradeWinEl) {
+    let tgt = null;
+    for (const [s, w] of tradeWins) if (w.el === tradeWinEl) { tgt = s; break; }
+    if (tgt == null) return false;
+    const r = tradeGrid.getBoundingClientRect();
+    const gx = Math.max(0, Math.min(150, Math.round(clientX - r.left)));
+    const gy = Math.max(0, Math.min(120, Math.round(clientY - r.top)));
+    sendInput("drop:" + serial + ":" + gx + ":" + gy + ":0:" + tgt);
+    return true;
+  }
   const contWin = el && el.closest && el.closest(".container-win");
   if (contWin) {
     let tgt = null;
@@ -4482,6 +4686,11 @@ function setupItemDnD() {
     }
     const cell = e.target.closest && e.target.closest(".cont-item[data-serial]");
     if (cell) {
+      // The opponent's half of an open trade window renders with the same
+      // `.cont-item` markup (for the shared icon/tooltip styling) but is
+      // read-only — `data-ro` marks it so we never arm a lift of an item
+      // that isn't ours to move.
+      if (cell.dataset.ro === "1") return;
       e.preventDefault();
       groundDrag = { serial: (+cell.dataset.serial) >>> 0, g: +cell.dataset.g | 0,
                      amount: (+cell.dataset.amount) || 1, st: cell.dataset.st === "1",
@@ -5174,6 +5383,8 @@ function setupInput() {
   document.getElementById("pt-close").addEventListener("click", closeParty);
   makeDraggable(document.getElementById("party"), document.getElementById("pt-title"));
   wireParty();
+  // Trade windows are wired at build time (buildTradeWindow), one per session
+  // — there's no static #trade element to wire once at startup anymore.
   const pdb = document.getElementById("pd-body");
   pdb.addEventListener("click", (e) => {
     const row = e.target.closest(".eq-row");

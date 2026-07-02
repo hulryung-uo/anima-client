@@ -10,7 +10,7 @@
 //! native/WASM backends all plug into the same interface (see DESIGN.md §3).
 
 use crate::types::Position;
-use crate::world::{JournalEntry, PromptState, TargetCursor, World};
+use crate::world::{JournalEntry, PromptState, TargetCursor, TradeState, World};
 
 /// A skill value, in human units (50.0 == GM-half). Derived from [`crate::world::Skill`].
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -89,6 +89,14 @@ pub struct Observation {
     /// sign, guild abbreviation, …), if one is pending. Answer with
     /// [`Action::PromptResponse`]/[`Action::PromptCancel`].
     pub prompt: Option<PromptState>,
+    /// Active player-to-player secure trade sessions (0x6F), if any — normally
+    /// 0 or 1, but see [`crate::world::TradeState`]'s doc for why concurrent
+    /// sessions with different opponents are possible. Items on each side are
+    /// the [`ItemView`]s whose `container` matches a session's
+    /// `my_container`/`their_container`. Answer with
+    /// [`Action::TradeAccept`]/[`Action::TradeCancel`]/[`Action::TradeGold`],
+    /// each addressed to a specific session via its `my_container`.
+    pub trades: Vec<TradeState>,
 }
 
 /// A read-only view of an open server gump/dialog.
@@ -225,6 +233,23 @@ pub enum Action {
     /// needed the response instead of leaving it dangling; a no-op if nothing is
     /// pending.
     PromptCancel,
+    /// Toggle our side's accept checkbox on a secure trade (0x6F action 2).
+    /// `container` selects which session (its `my_container`, from
+    /// [`crate::world::World::trades`] — multiple can be open at once with
+    /// different opponents); a no-op if no session has that container (the
+    /// brain raced the session away). Both sides accepting completes the
+    /// trade server-side.
+    TradeAccept { container: u32, accept: bool },
+    /// Cancel a secure trade (0x6F action 1): items on both sides return to
+    /// their owners. `container` selects which session; the driver clears
+    /// just that session locally; a no-op if no session has that container.
+    TradeCancel { container: u32 },
+    /// Set the virtual gold/platinum amount we're offering on a secure trade
+    /// (0x6F action 3 UpdateGold). `container` selects which session; a no-op
+    /// if no session has that container. Only takes effect on a server/client
+    /// pair that negotiated the AOS/TOL "account gold" feature (see
+    /// [`crate::world::TradeState`]'s doc).
+    TradeGold { container: u32, gold: u32, platinum: u32 },
 }
 
 fn chebyshev(a: Position, b: Position) -> u32 {
@@ -323,6 +348,7 @@ impl World {
             skills,
             gumps,
             prompt: self.prompt,
+            trades: self.trades.clone(),
         }
     }
 }

@@ -94,6 +94,13 @@ fn main() {
                 Action::PartyLeave => "partyleave".into(),
                 Action::PromptResponse { text } => format!("prompt({text:?})"),
                 Action::PromptCancel => "promptcancel".into(),
+                Action::TradeAccept { container, accept } => {
+                    format!("tradeaccept(0x{container:08X},{accept})")
+                }
+                Action::TradeCancel { container } => format!("tradecancel(0x{container:08X})"),
+                Action::TradeGold { container, gold, platinum } => {
+                    format!("tradegold(0x{container:08X},{gold},{platinum})")
+                }
             })
             .collect();
         println!(

@@ -10,7 +10,8 @@
 
 use super::packet::{PacketReader, Result as PResult};
 use crate::world::{
-    Effect, Gump, JournalEntry, PopupEntry, PopupMenu, PromptState, Skill, TargetCursor, World,
+    Effect, Gump, JournalEntry, PopupEntry, PopupMenu, PromptState, Skill, TargetCursor, TradeState,
+    World,
 };
 
 /// Decode one framed game packet (id byte included) into `world`.
@@ -75,6 +76,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x27 => lift_reject(world, frame)?,
         0x89 => corpse_equip(world, frame)?,
         0xC2 => unicode_prompt(world, frame)?,
+        0x6F => secure_trade(world, frame)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -1111,6 +1113,100 @@ fn unicode_prompt(world: &mut World, frame: &[u8]) -> PResult<()> {
     let sender_serial = r.u32()?;
     let prompt_id = r.u32()?;
     world.prompt = Some(PromptState { sender_serial, prompt_id });
+    Ok(())
+}
+
+/// 0x6F SecureTrade — a player-to-player trade window (server→client
+/// variants; the client→server actions the driver sends live in
+/// [`crate::net::outgoing::build_trade_cancel`]/`build_trade_accept`/
+/// `build_trade_gold`). Variable: `[id][len:u16][action:u8]` then, per
+/// `action` (ServUO `Packets.cs` `DisplaySecureTrade`/`CloseSecureTrade`/
+/// `UpdateSecureTrade`, cross-checked against ClassicUO
+/// `PacketHandlers.SecureTrading` for the authoritative client-side
+/// interpretation of each byte):
+/// - `0` Display — opens a session: `[opponent:u32][myContainer:u32]
+///   [theirContainer:u32][hasName:bool][name:ascii*30]`. ServUO always writes
+///   `hasName = true` plus the full 30-byte (NUL-padded) name; we just skip
+///   the bool and read the fixed field (defensively defaulting to empty if
+///   the frame is short, rather than erroring the whole packet). Upserts by
+///   opponent — see [`World::open_trade`] (ServUO allows only one session per
+///   mobile pair, but a *different* opponent is a genuinely separate
+///   concurrent session, so this does NOT clobber unrelated trades).
+/// - `1` Close — `[container:u32]`: the trade ended (cancelled or completed).
+///   `container` is always OUR OWN container serial (ServUO addresses this
+///   packet per-mobile with that mobile's own `SecureTradeContainer`,
+///   `SecureTrade.Close` sends `m_From.Container` to `m_From.Mobile` and
+///   `m_To.Container` to `m_To.Mobile`) — [`World::close_trade`] removes just
+///   that one session (and purges its leftover items); any other concurrent
+///   session with a different opponent is untouched.
+/// - `2` Update — `[container:u32][myAccept:u32][theirAccept:u32]`: both
+///   sides' accept-checkbox state (ClassicUO `ImAccepting`/`HeIsAccepting`)
+///   for the session keyed by `container`.
+/// - `3` UpdateGold — `[container:u32][gold:u32][plat:u32]`: the OPPONENT's
+///   virtual gold/platinum offer (ClassicUO `HisGold`/`HisPlatinum`) for the
+///   session keyed by `container`.
+/// - `4` UpdateLedger — same shape as `3`, but it's OUR OWN account's total
+///   available currency (ClassicUO `Gold`/`Platinum` — an input CAP for our
+///   offer, not an offer itself) for the session keyed by `container`. This
+///   is the AOS/TOL "account gold" ledger (`TradeFlag.UpdateLedger`, gated on
+///   ServUO `AccountGold.Enabled`/`NetState.NewSecureTrading`); see
+///   [`crate::world::TradeState`]'s doc for how the three gold flavors (our
+///   offer / their offer / our balance) differ.
+///
+/// Items on either side are NOT carried here — they arrive as ordinary
+/// 0x25/0x3C container traffic against `my_container`/`their_container`
+/// (ServUO's `SecureTradeEquip` packet literally reuses 0x25's layout), which
+/// the existing container handlers already store with no special-casing.
+fn secure_trade(world: &mut World, frame: &[u8]) -> PResult<()> {
+    if frame.len() < 4 {
+        return Ok(());
+    }
+    let mut r = PacketReader::new(&frame[3..]); // skip id + 2-byte length
+    match r.u8()? {
+        0x00 => {
+            let opponent_serial = r.u32()?;
+            let my_container = r.u32()?;
+            let their_container = r.u32()?;
+            r.skip(1)?; // "hasName" bool — ServUO always writes true (1)
+            let opponent_name = if r.remaining() >= 30 { r.fixed_ascii(30)? } else { String::new() };
+            world.open_trade(TradeState {
+                opponent_serial,
+                opponent_name,
+                my_container,
+                their_container,
+                ..Default::default()
+            });
+        }
+        0x01 => world.close_trade(r.u32()?),
+        0x02 => {
+            let container = r.u32()?;
+            let my_accept = r.u32()? != 0;
+            let their_accept = r.u32()? != 0;
+            if let Some(t) = world.trade_mut(container) {
+                t.my_accept = my_accept;
+                t.their_accept = their_accept;
+            }
+        }
+        0x03 => {
+            let container = r.u32()?;
+            let gold = r.u32()?;
+            let plat = r.u32()?;
+            if let Some(t) = world.trade_mut(container) {
+                t.their_offer_gold = gold;
+                t.their_offer_platinum = plat;
+            }
+        }
+        0x04 => {
+            let container = r.u32()?;
+            let gold = r.u32()?;
+            let plat = r.u32()?;
+            if let Some(t) = world.trade_mut(container) {
+                t.balance_gold = gold;
+                t.balance_platinum = plat;
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -2340,6 +2436,184 @@ mod tests {
         assert!(apply_packet(&mut w, &frame));
         let p = w.prompt.expect("prompt pending");
         assert_eq!((p.sender_serial, p.prompt_id), (0x0102_0304, 0xDEAD_BEEF));
+    }
+
+    /// Patch the big-endian length word at `[1..3]` of a variable-framed test packet.
+    fn patch_len(mut frame: Vec<u8>) -> Vec<u8> {
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        frame
+    }
+
+    #[test]
+    fn secure_trade_display_opens_session() {
+        let mut w = World::new();
+        assert!(w.trades.is_empty());
+        // 0x6F action 0 (Display): opponent 0xBEEF, my container 0x4000_0001,
+        // their container 0x4000_0002, hasName=true, name "Bob" (NUL-padded to 30).
+        let mut p = PacketWriter::new();
+        p.u8(0x6F).u16(0); // id, len placeholder
+        p.u8(0x00).u32(0xBEEF).u32(0x4000_0001).u32(0x4000_0002);
+        p.u8(1).fixed_ascii("Bob", 30);
+        let frame = patch_len(p.into_vec());
+        assert_eq!(frame.len(), 47); // 3 header + 1 action + 3×4 serials + 1 bool + 30 name
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.trades.len(), 1);
+        let t = &w.trades[0];
+        assert_eq!(t.opponent_serial, 0xBEEF);
+        assert_eq!(t.my_container, 0x4000_0001);
+        assert_eq!(t.their_container, 0x4000_0002);
+        assert_eq!(t.opponent_name, "Bob");
+        assert!(!t.my_accept && !t.their_accept);
+    }
+
+    #[test]
+    fn secure_trade_display_same_opponent_replaces_not_duplicates() {
+        let mut w = World::new();
+        w.open_trade(TradeState { opponent_serial: 0xBEEF, my_container: 0x4000_0001, ..Default::default() });
+        // A second Display for the SAME opponent (ServUO's FindTradeContainer
+        // dedupe: only one session per mobile pair) must replace, not append.
+        let mut p = PacketWriter::new();
+        p.u8(0x6F).u16(0).u8(0x00).u32(0xBEEF).u32(0x4000_0003).u32(0x4000_0004);
+        p.u8(1).fixed_ascii("Bob", 30);
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        assert_eq!(w.trades.len(), 1);
+        assert_eq!(w.trades[0].my_container, 0x4000_0003);
+    }
+
+    #[test]
+    fn secure_trade_close_clears_only_matching_session() {
+        let mut w = World::new();
+        w.open_trade(TradeState { opponent_serial: 1, my_container: 0x4000_0001, ..Default::default() });
+        w.open_trade(TradeState { opponent_serial: 2, my_container: 0x4000_0002, ..Default::default() });
+        // 0x6F action 1 (Close): container 0x4000_0001 — only that session drops.
+        let mut p = PacketWriter::new();
+        p.u8(0x6F).u16(0).u8(0x01).u32(0x4000_0001);
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        assert_eq!(w.trades.len(), 1);
+        assert_eq!(w.trades[0].my_container, 0x4000_0002);
+    }
+
+    #[test]
+    fn secure_trade_close_purges_leftover_container_items() {
+        let mut w = World::new();
+        w.open_trade(TradeState {
+            opponent_serial: 1,
+            my_container: 0x4000_0001,
+            their_container: 0x4000_0002,
+            ..Default::default()
+        });
+        // Items sitting in either trade container at close time (ServUO sends no
+        // removal packet for the opponent's side — see `World::close_trade`'s doc).
+        w.item_mut(0x5000_0001).container = Some(0x4000_0001); // mine
+        w.item_mut(0x5000_0002).container = Some(0x4000_0002); // theirs
+        // An unrelated item elsewhere must survive the purge.
+        w.item_mut(0x5000_0003).container = Some(0x9999_0000);
+        let mut p = PacketWriter::new();
+        p.u8(0x6F).u16(0).u8(0x01).u32(0x4000_0001);
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        assert!(!w.items.contains_key(&0x5000_0001));
+        assert!(!w.items.contains_key(&0x5000_0002));
+        assert!(w.items.contains_key(&0x5000_0003));
+    }
+
+    #[test]
+    fn secure_trade_interleaved_two_sessions() {
+        let mut w = World::new();
+        // Open a session with B, then a second with C — two strangers can each
+        // open a trade with us concurrently (no consent required).
+        let mut open_b = PacketWriter::new();
+        open_b.u8(0x6F).u16(0).u8(0x00).u32(0xB0B).u32(0x4000_0001).u32(0x4000_0002);
+        open_b.u8(1).fixed_ascii("Bob", 30);
+        assert!(apply_packet(&mut w, &patch_len(open_b.into_vec())));
+
+        let mut open_c = PacketWriter::new();
+        open_c.u8(0x6F).u16(0).u8(0x00).u32(0xC0C).u32(0x4000_0003).u32(0x4000_0004);
+        open_c.u8(1).fixed_ascii("Carol", 30);
+        assert!(apply_packet(&mut w, &patch_len(open_c.into_vec())));
+        assert_eq!(w.trades.len(), 2);
+
+        // C accepts and offers gold — must land on C's session only.
+        let mut c_accept = PacketWriter::new();
+        c_accept.u8(0x6F).u16(0).u8(0x02).u32(0x4000_0003).u32(0).u32(1);
+        assert!(apply_packet(&mut w, &patch_len(c_accept.into_vec())));
+        let mut c_gold = PacketWriter::new();
+        c_gold.u8(0x6F).u16(0).u8(0x03).u32(0x4000_0003).u32(777).u32(3);
+        assert!(apply_packet(&mut w, &patch_len(c_gold.into_vec())));
+
+        // Close B (container 0x4000_0001) — C must survive untouched.
+        let mut close_b = PacketWriter::new();
+        close_b.u8(0x6F).u16(0).u8(0x01).u32(0x4000_0001);
+        assert!(apply_packet(&mut w, &patch_len(close_b.into_vec())));
+
+        assert_eq!(w.trades.len(), 1);
+        let c = &w.trades[0];
+        assert_eq!(c.opponent_serial, 0xC0C);
+        assert_eq!(c.my_container, 0x4000_0003);
+        assert!(c.their_accept);
+        assert_eq!((c.their_offer_gold, c.their_offer_platinum), (777, 3));
+    }
+
+    #[test]
+    fn secure_trade_update_accept_flags() {
+        let mut w = World::new();
+        w.open_trade(TradeState {
+            my_container: 0x4000_0001,
+            their_container: 0x4000_0002,
+            ..Default::default()
+        });
+        // 0x6F action 2 (Update): I accepted (1), they haven't (0).
+        let mut p = PacketWriter::new();
+        p.u8(0x6F).u16(0).u8(0x02).u32(0x4000_0001).u32(1).u32(0);
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        let t = &w.trades[0];
+        assert!(t.my_accept);
+        assert!(!t.their_accept);
+
+        // Both accept → both flags flip.
+        let mut q = PacketWriter::new();
+        q.u8(0x6F).u16(0).u8(0x02).u32(0x4000_0001).u32(1).u32(1);
+        assert!(apply_packet(&mut w, &patch_len(q.into_vec())));
+        let t = &w.trades[0];
+        assert!(t.my_accept && t.their_accept);
+    }
+
+    #[test]
+    fn secure_trade_update_gold_and_ledger() {
+        let mut w = World::new();
+        w.open_trade(TradeState {
+            my_container: 0x4000_0001,
+            their_container: 0x4000_0002,
+            ..Default::default()
+        });
+        // 0x6F action 3 (UpdateGold): the OPPONENT offered 500 gold / 2 plat.
+        let mut p = PacketWriter::new();
+        p.u8(0x6F).u16(0).u8(0x03).u32(0x4000_0001).u32(500).u32(2);
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        let t = &w.trades[0];
+        assert_eq!((t.their_offer_gold, t.their_offer_platinum), (500, 2));
+        assert_eq!((t.balance_gold, t.balance_platinum), (0, 0)); // untouched
+
+        // 0x6F action 4 (UpdateLedger): OUR account balance is 1000 gold / 5 plat
+        // (an input cap, not an offer — see `TradeState`'s doc).
+        let mut q = PacketWriter::new();
+        q.u8(0x6F).u16(0).u8(0x04).u32(0x4000_0001).u32(1000).u32(5);
+        assert!(apply_packet(&mut w, &patch_len(q.into_vec())));
+        let t = &w.trades[0];
+        assert_eq!((t.balance_gold, t.balance_platinum), (1000, 5));
+        assert_eq!((t.their_offer_gold, t.their_offer_platinum), (500, 2)); // untouched
+        assert_eq!((t.my_offer_gold, t.my_offer_platinum), (0, 0)); // untouched — we never sent one
+    }
+
+    #[test]
+    fn secure_trade_unrecognized_action_is_a_noop() {
+        let mut w = World::new();
+        w.open_trade(TradeState { my_container: 0x4000_0001, ..Default::default() });
+        let mut p = PacketWriter::new();
+        p.u8(0x6F).u16(0).u8(0xFF); // no such action — must not panic or touch state
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        assert_eq!(w.trades.len(), 1);
     }
 
     #[test]

@@ -21,7 +21,8 @@ use anima_core::net::outgoing::{
     build_pick_up,
     build_popup_request, build_popup_select, build_prompt_response, build_say, build_sell,
     build_single_click, build_skill_lock, build_status_request, build_target_response,
-    build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
+    build_trade_accept, build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability,
+    build_use_skill, build_war_mode,
 };
 use anima_core::net::{
     apply_packet, build_client_version, FramingError, LoginConfig, LoginDirective, LoginError,
@@ -229,6 +230,41 @@ impl Session {
             }
             Action::PromptResponse { text } => self.respond_prompt(text, false)?,
             Action::PromptCancel => self.respond_prompt("", true)?,
+            // No-op if no session has `container` (the brain raced it away — it
+            // may have just closed, or belongs to a session with a different
+            // opponent that never existed on our side).
+            Action::TradeAccept { container, accept } => {
+                if self.world.trades.iter().any(|t| t.my_container == *container) {
+                    self.send(&build_trade_accept(*container, *accept))?;
+                    // Optimistically reflect our own accept state locally (mirrors
+                    // `SkillLock`'s optimistic update) — the server also echoes a
+                    // 0x6F action-2 Update.
+                    if let Some(t) = self.world.trade_mut(*container) {
+                        t.my_accept = *accept;
+                    }
+                }
+            }
+            Action::TradeCancel { container } => {
+                if self.world.trades.iter().any(|t| t.my_container == *container) {
+                    self.send(&build_trade_cancel(*container))?;
+                    // The trade is over the moment we cancel — drop just this
+                    // session locally (and purge its leftover container contents,
+                    // see `World::close_trade`) so the renderer/brain stop seeing a
+                    // stale session; the server's own 0x6F Close echo would
+                    // otherwise lag a poll behind. Other concurrent sessions (a
+                    // different opponent) are untouched.
+                    self.world.close_trade(*container);
+                }
+            }
+            Action::TradeGold { container, gold, platinum } => {
+                if self.world.trades.iter().any(|t| t.my_container == *container) {
+                    self.send(&build_trade_gold(*container, *gold, *platinum))?;
+                    if let Some(t) = self.world.trade_mut(*container) {
+                        t.my_offer_gold = *gold;
+                        t.my_offer_platinum = *platinum;
+                    }
+                }
+            }
             // Auto-walk needs the terrain/map to pathfind + pace steps, which the
             // headless driver doesn't own. The play-server intercepts `WalkTo`
             // before it reaches here (see its game loop); this arm is a no-op so
