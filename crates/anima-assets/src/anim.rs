@@ -19,6 +19,21 @@
 //! human female wearing a "male-cut" robe graphic actually animates/paperdolls as
 //! the female graphic. Ported from ClassicUO `ProcessEquipConvDef`.
 //!
+//! `mobtypes.txt` carries a PURE type per body (monster/sea_monster/animal/
+//! human/equipment, collapsed to the 3-way `kind` [`Anim::anim_type`] returns)
+//! plus a flags word. Two things key off that pair independently, and must NOT
+//! be conflated (ClassicUO keeps them as two separate methods —
+//! `CalculateOffset` vs `GetGroupIndex`/`GetDeathAction` — for exactly this
+//! reason): which FILE SECTION a body's idx entries live in ([`Anim::offset_kind`],
+//! fed to [`Anim::block`]) can differ from the group-NUMBER semantics used to
+//! address them ([`Anim::anim_type`]/[`Anim::stand_group`]/[`Anim::death_group`]).
+//! E.g. an `ANIMAL` body with flag `0x20` (`CalculateOffsetLowGroupExtended`,
+//! set on ~20 bird/serpent bodies) still uses the animal group NUMBERS
+//! (Walk=0, Stand=2) but its bytes live in the monster/"high" SECTION of the
+//! file — reading it with the low section's base address decodes a
+//! completely different body's block (this was a confirmed rendering bug:
+//! body 6, a crow, rendered as a gray serpent statue before this split existed).
+//!
 //! ~300 bodies (`mobtypes.txt` flags bit `0x10000`, `UseUopAnimation`) don't
 //! animate from `anim*.mul` at all — their frames live in
 //! `AnimationFrame{1..4}.uop`, one `.bin` entry per (body, group) holding ALL 5
@@ -128,13 +143,30 @@ pub struct Anim {
 /// `.bin` bytes. See `Anim::uop_cache`'s doc comment.
 type UopCache = HashMap<(u16, u8), Arc<Vec<u8>>>;
 
-/// Parsed `mobtypes.txt` facts about one body: the group `kind` (0 =
-/// monster/high, 1 = animal/low, 2 = people — same 3-way split
-/// `Anim::anim_type` already exposed) plus two more bits the UOP animation
-/// path needs that the old `HashMap<u16, u8>` discarded:
+/// Parsed `mobtypes.txt` facts about one body: the PURE TYPE-derived group
+/// `kind` (0 = monster/sea_monster, 1 = animal, 2 = human/equipment — this is
+/// exactly ClassicUO `AnimationsLoader.GetAnimType`'s `AnimationGroupsType`,
+/// stored as-is with NO flag-based reinterpretation — see
+/// `AnimationsLoader.ProcessMobTypesDef`, which just does
+/// `Type = (AnimationGroupsType)i`), the raw `flags` word, and two more bits
+/// the UOP animation path needs that the old `HashMap<u16, u8>` discarded.
+///
+/// `kind` alone answers "what animation groups does this body have"
+/// ([`Anim::anim_type`]/[`Anim::stand_group`]). It is NOT the same thing as
+/// "which section of the idx file are this body's bytes in" — that's
+/// [`Anim::offset_kind`], which reinterprets `(kind, flags)` per ClassicUO
+/// `CalculateOffset`. Conflating the two (kind alone deciding the byte
+/// offset) was the root cause of a confirmed bug: an `ANIMAL` body flagged
+/// `CalculateOffsetLowGroupExtended` (0x20, e.g. body 6, a crow) needs the
+/// monster/high section for its bytes while keeping animal group numbers.
 #[derive(Debug, Clone, Copy)]
 struct MobTypeEntry {
     kind: u8,
+    /// The raw hex flags column. Needed (in addition to `kind`) by
+    /// [`Anim::offset_kind`] (bits `0x20`/`0x40`/`0x400`) and
+    /// [`Anim::death_group`] (bits `0x20`/`0x40`, ClassicUO `GetDeathAction`'s
+    /// own independent type reinterpretation).
+    flags: i64,
     /// `flags & 0x10000` (ClassicUO `AnimationFlags.UseUopAnimation`): this
     /// body's animation must be read from `AnimationFrame*.uop`, not
     /// `anim*.mul`.
@@ -235,8 +267,26 @@ impl Anim {
     /// `stand_group`/`resolveActionGroup` do elsewhere), so a sea monster's corpse
     /// plays the ordinary monster Die1 pose instead; a small, deliberate loss of
     /// fidelity consistent with that existing collapse.
+    ///
+    /// `GetDeathAction` also independently reinterprets the type from two of
+    /// the offset-flags BEFORE picking a die group — checked in this order, so
+    /// `0x20` wins if both happen to be set: `CalculateOffsetByLowGroup`
+    /// (`0x40`) forces Animal; `CalculateOffsetLowGroupExtended` (`0x20`)
+    /// forces Monster. This can disagree with [`Self::anim_type`]'s pure kind:
+    /// an `ANIMAL` body flagged `0x20` (e.g. body 6, a crow) dies with the
+    /// MONSTER Die1 pose, not the animal one — same idea as
+    /// [`Self::offset_kind`], applied to death groups instead of idx offsets.
     pub fn death_group(&self, body: u16) -> u8 {
-        match self.anim_type(body) {
+        let mut kind = self.anim_type(body);
+        if let Some(e) = self.mobtypes.get(&body) {
+            if e.flags & 0x40 != 0 {
+                kind = 1; // CalculateOffsetByLowGroup -> Animal
+            }
+            if e.flags & 0x20 != 0 {
+                kind = 0; // CalculateOffsetLowGroupExtended -> Monster
+            }
+        }
+        match kind {
             0 => MONSTER_DIE1,
             1 => ANIMAL_DIE1,
             _ => PEOPLE_DIE1,
@@ -303,15 +353,21 @@ impl Anim {
         Some(buf)
     }
 
-    /// Animation group kind for `body`: 0 = monster (high), 1 = animal (low), 2 =
-    /// people. Uses `mobtypes.txt` when it covers the body (authoritative), else the
-    /// graphic-range heuristic of the file the body resolves into. This is the SAME
-    /// kind the reader uses to pick the idx offset, so a renderer that fetches
-    /// animations by group number should derive its group numbers from this value
-    /// (not from the raw body range) to stay consistent with the file layout.
+    /// PURE type-derived animation group kind for `body`: 0 = monster/sea_monster
+    /// (high), 1 = animal (low), 2 = human/equipment (people). Uses `mobtypes.txt`'s
+    /// TYPE column when it covers the body (authoritative, no flag reinterpretation
+    /// — ClassicUO `GetAnimType`), else the graphic-range heuristic of the file the
+    /// body resolves into. This is the kind that determines group-NUMBER semantics
+    /// (walk/run/stand indices — ClassicUO `GetGroupIndex`, keyed on TYPE alone), so
+    /// a renderer picking group numbers (e.g. via [`Self::stand_group`]) should use
+    /// this value. It is NOT necessarily the same kind used to compute the idx byte
+    /// offset — see [`Self::offset_kind`] for that (and why they can differ).
     pub fn anim_type(&self, body: u16) -> u8 {
         let (fi, graphic) = self.resolve(body);
-        self.offset_kind(body, graphic, fi)
+        match self.mobtypes.get(&body) {
+            Some(e) => e.kind,
+            None => type_by_graphic(graphic, fi),
+        }
     }
 
     /// The default standing group for a body (varies by kind: monster 1, animal 2,
@@ -324,12 +380,53 @@ impl Anim {
         }
     }
 
-    /// Group kind (0/1/2) used to compute the idx offset: `mobtypes.txt` if it
-    /// covers the (Body.def-remapped) `body`, else the per-file graphic-range
-    /// heuristic. `graphic`/`file_index` come from [`Self::resolve`] (Bodyconv).
+    /// Section kind (0 = high, 1 = low, 2 = people) used to compute the idx BYTE
+    /// OFFSET (fed to [`Self::block`]) — ClassicUO `AnimationsLoader.CalculateOffset`.
+    /// When `mobtypes.txt` covers `body`, this reinterprets its PURE `kind`
+    /// ([`Self::anim_type`]) using the raw flags, per ClassicUO's table:
+    ///   - monster/sea_monster (kind 0): `ByPeopleGroup` (`0x400`) → people;
+    ///     `ByLowGroup` (`0x40`) → low; else high. (ClassicUO's `SeaMonster` proper
+    ///     always forces high regardless of flags — we don't distinguish it from
+    ///     `monster` here, same collapse [`Self::anim_type`] already makes.)
+    ///   - animal (kind 1): only reinterpreted at all when `CalculateOffsetLowGroupExtended`
+    ///     (`0x20`) is set — then the SAME `ByPeopleGroup`/`ByLowGroup` checks as
+    ///     monster apply, defaulting to HIGH (not low!) when neither is set. Without
+    ///     `0x20`, always low. This is the bug fix: an animal body flagged `0x20`
+    ///     (e.g. body 6, a crow) needs the monster/high section for its bytes.
+    ///   - human/equipment (kind 2): always people.
+    ///
+    /// When `mobtypes.txt` doesn't cover `body`, falls back to the per-file
+    /// graphic-range heuristic ([`type_by_graphic`]), which has no flags to
+    /// consult and so is identical to [`Self::anim_type`]'s fallback.
+    /// `graphic`/`file_index` come from [`Self::resolve`] (Bodyconv).
     fn offset_kind(&self, body: u16, graphic: u16, file_index: usize) -> u8 {
         match self.mobtypes.get(&body) {
-            Some(e) => e.kind,
+            Some(e) => match e.kind {
+                0 => {
+                    if e.flags & 0x400 != 0 {
+                        2 // CalculateOffsetByPeopleGroup
+                    } else if e.flags & 0x40 != 0 {
+                        1 // CalculateOffsetByLowGroup
+                    } else {
+                        0
+                    }
+                }
+                1 => {
+                    if e.flags & 0x20 != 0 {
+                        // CalculateOffsetLowGroupExtended
+                        if e.flags & 0x400 != 0 {
+                            2
+                        } else if e.flags & 0x40 != 0 {
+                            1
+                        } else {
+                            0 // HIGH — the ClassicUO quirk this bug fixes
+                        }
+                    } else {
+                        1
+                    }
+                }
+                _ => 2,
+            },
             None => type_by_graphic(graphic, file_index),
         }
     }
@@ -887,13 +984,16 @@ fn type_by_graphic(graphic: u16, file_index: usize) -> u8 {
 
 /// Parse `mobtypes.txt`: each data line is `id TYPE flags`, where TYPE is one of
 /// `monster`/`sea_monster`/`animal`/`human`/`equipment` and `flags` is hex. We map
-/// TYPE → group kind (0 monster/high, 1 animal/low, 2 people); `sea_monster` uses
-/// the high group like a monster, and `equipment` uses the people group like a
-/// human. For a monster, the offset-override flags apply (ClassicUO `CalculateOffset`):
-/// `CalculateOffsetByPeopleGroup` (0x400) → people, `CalculateOffsetByLowGroup`
-/// (0x40) → animal. `#` starts a comment; lines not beginning with a digit are skipped.
-/// Also records two more per-body facts the UOP path needs (see [`MobTypeEntry`]):
-/// the `UseUopAnimation` flag bit (`0x10000`) and whether TYPE was literally `equipment`.
+/// TYPE → the PURE group `kind` (0 monster/sea_monster, 1 animal, 2 human/equipment)
+/// with NO flag-based reinterpretation — ClassicUO's own loader
+/// (`ProcessMobTypesDef`) stores the TYPE column as-is too; the offset-override
+/// flags (`CalculateOffsetByPeopleGroup` 0x400, `CalculateOffsetByLowGroup` 0x40,
+/// `CalculateOffsetLowGroupExtended` 0x20) are consulted LATER, per-purpose, by
+/// [`Anim::offset_kind`] (idx byte offset) and [`Anim::death_group`] (die group) —
+/// see those for the (different) tables each applies. `#` starts a comment; lines
+/// not beginning with a digit are skipped. Also records two more per-body facts the
+/// UOP path needs (see [`MobTypeEntry`]): the `UseUopAnimation` flag bit (`0x10000`)
+/// and whether TYPE was literally `equipment`.
 fn parse_mob_types(text: &str) -> HashMap<u16, MobTypeEntry> {
     let mut map = HashMap::new();
     for line in text.lines() {
@@ -905,7 +1005,7 @@ fn parse_mob_types(text: &str) -> HashMap<u16, MobTypeEntry> {
         let Some(id) = toks.next().and_then(|t| t.parse::<u16>().ok()) else { continue };
         let Some(ty) = toks.next() else { continue };
         let equipment = ty.eq_ignore_ascii_case("equipment");
-        let mut kind = match ty.to_ascii_lowercase().as_str() {
+        let kind = match ty.to_ascii_lowercase().as_str() {
             "monster" | "sea_monster" => 0u8,
             "animal" => 1,
             "human" | "equipment" => 2,
@@ -918,15 +1018,8 @@ fn parse_mob_types(text: &str) -> HashMap<u16, MobTypeEntry> {
             .filter(|t| !t.is_empty())
             .and_then(|t| i64::from_str_radix(t, 16).ok())
             .unwrap_or(0);
-        if kind == 0 {
-            if flags & 0x400 != 0 {
-                kind = 2; // CalculateOffsetByPeopleGroup
-            } else if flags & 0x40 != 0 {
-                kind = 1; // CalculateOffsetByLowGroup
-            }
-        }
         let uop = flags & 0x1_0000 != 0; // AnimationFlags.UseUopAnimation
-        map.insert(id, MobTypeEntry { kind, uop, equipment });
+        map.insert(id, MobTypeEntry { kind, flags, uop, equipment });
     }
     map
 }
@@ -1103,18 +1196,24 @@ bad line without braces
         assert_eq!(map.get(&11).unwrap().0, 28);
     }
 
+    /// Build a `MobTypeEntry` for tests that only care about `kind` (flags 0,
+    /// not UOP-flagged, not literally `equipment`).
+    fn kind_entry(kind: u8) -> MobTypeEntry {
+        MobTypeEntry { kind, flags: 0, uop: false, equipment: false }
+    }
+
     /// Build an `Anim` with no backing files (`entry`/`frame` calls would fail),
     /// but enough of the def/mobtypes tables populated to exercise the pure
     /// remap/kind logic below (`remap_corpse`, `anim_type`, `death_group`).
-    fn test_anim(corpsedef: HashMap<u16, (u16, u16)>, mobtypes: HashMap<u16, u8>) -> Anim {
+    /// `mobtypes` takes fully-built entries (not just a bare kind) so tests can
+    /// also exercise flag-dependent behavior ([`Anim::offset_kind`]/
+    /// [`Anim::death_group`]'s flag reinterpretation).
+    fn test_anim(corpsedef: HashMap<u16, (u16, u16)>, mobtypes: HashMap<u16, MobTypeEntry>) -> Anim {
         Anim {
             files: Vec::new(),
             bodydef: HashMap::new(),
             bodyconv: HashMap::new(),
-            mobtypes: mobtypes
-                .into_iter()
-                .map(|(id, kind)| (id, MobTypeEntry { kind, uop: false, equipment: false }))
-                .collect(),
+            mobtypes,
             corpsedef,
             equipconv: HashMap::new(),
             uop_files: Vec::new(),
@@ -1148,11 +1247,31 @@ bad line without braces
         assert_eq!(anim.death_group(250), ANIMAL_DIE1);
         assert_eq!(anim.death_group(400), PEOPLE_DIE1);
 
-        // mobtypes.txt overrides the range heuristic, same as anim_type/stand_group.
+        // mobtypes.txt overrides the range heuristic, same as anim_type/stand_group
+        // (body 50's TYPE column is literally human/equipment → pure kind 2).
         let mut mobtypes = HashMap::new();
-        mobtypes.insert(50, 2); // a "monster" id remapped to people by flags upstream
+        mobtypes.insert(50, kind_entry(2));
         let anim = test_anim(HashMap::new(), mobtypes);
         assert_eq!(anim.death_group(50), PEOPLE_DIE1);
+
+        // GetDeathAction's OWN flag reinterpretation (independent of anim_type):
+        // an ANIMAL body flagged CalculateOffsetLowGroupExtended (0x20) dies with
+        // the MONSTER Die1 pose, not the animal one — see body 6 in
+        // mob_types_offset_selection_matches_classicuo_table for the same body
+        // affecting the idx offset too.
+        let mut mobtypes = HashMap::new();
+        mobtypes.insert(6, MobTypeEntry { kind: 1, flags: 0x28, uop: false, equipment: false });
+        let anim = test_anim(HashMap::new(), mobtypes);
+        assert_eq!(anim.death_group(6), MONSTER_DIE1);
+
+        // An ANIMAL body flagged ONLY CalculateOffsetByLowGroup (0x40, with no
+        // 0x20) dies with the animal Die1 pose (0x40 alone doesn't touch Animal's
+        // pure kind, and GetDeathAction's ByLowGroup check is a no-op when the
+        // type is already Animal).
+        let mut mobtypes = HashMap::new();
+        mobtypes.insert(7, MobTypeEntry { kind: 1, flags: 0x40, uop: false, equipment: false });
+        let anim = test_anim(HashMap::new(), mobtypes);
+        assert_eq!(anim.death_group(7), ANIMAL_DIE1);
     }
 
     #[test]
@@ -1255,15 +1374,26 @@ bad line
     }
 
     #[test]
-    fn mob_types_parses_and_applies_offset_flags() {
+    fn mob_types_parses_pure_type_with_no_flag_rewrite() {
+        // Renamed from `mob_types_parses_and_applies_offset_flags`: that name and
+        // its assertions dated from before this file split "which idx section a
+        // body's bytes live in" from "what TYPE the body is" (see the module docs
+        // and `Anim::offset_kind`'s doc comment for the bug this fixes). Parsing
+        // no longer rewrites `kind` from the offset-override flags at all — it
+        // stores the PURE TYPE column, exactly like ClassicUO's own loader
+        // (`ProcessMobTypesDef`: `Type = (AnimationGroupsType)i`, no flag
+        // consultation). The offset-override behavior these flags used to fold
+        // into `kind` here is now covered by
+        // `mob_types_offset_selection_matches_classicuo_table` below, via
+        // `Anim::offset_kind`.
         let def = "\
 # id  type  flags
 5\tANIMAL\t2A
 200\tMONSTER\t0
 400\tHUMAN\t0
 9\tMONSTER\t1008
-50\tMONSTER\t440    # ByPeopleGroup (0x400) → people
-60\tMONSTER\t48     # ByLowGroup (0x40) → animal
+50\tMONSTER\t440    # ByPeopleGroup (0x400) — no longer folded into `kind`
+60\tMONSTER\t48     # ByLowGroup (0x40) — no longer folded into `kind`
 70\tSEA_MONSTER\t0
 not a data line
 ";
@@ -1273,15 +1403,57 @@ not a data line
         assert_eq!(kind(200), Some(0)); // monster (range would say animal — mobtypes wins)
         assert_eq!(kind(400), Some(2)); // human → people
         assert_eq!(kind(9), Some(0)); // monster, unrelated flags
-        assert_eq!(kind(50), Some(2)); // monster + 0x400 → people
-        assert_eq!(kind(60), Some(1)); // monster + 0x40 → animal
+        assert_eq!(kind(50), Some(0)); // still monster — offset flags don't touch kind anymore
+        assert_eq!(kind(60), Some(0)); // still monster — offset flags don't touch kind anymore
         assert_eq!(kind(70), Some(0)); // sea_monster → high/monster
+        // Flags are retained verbatim (for offset_kind/death_group to consult later).
+        assert_eq!(map.get(&50).unwrap().flags, 0x440);
+        assert_eq!(map.get(&60).unwrap().flags, 0x48);
         // Only body 400's TYPE column is literally `equipment`... except none of
         // these are — spot check that an ordinary HUMAN/MONSTER line is not
         // mistaken for one, and that none of them set the UOP flag (all flags
         // here are far below 0x10000).
         assert!(!map.get(&400).unwrap().equipment);
         assert!(map.values().all(|e| !e.uop));
+    }
+
+    #[test]
+    fn mob_types_offset_selection_matches_classicuo_table() {
+        // The actual bug fix, per ClassicUO `AnimationsLoader.CalculateOffset`:
+        // body 6 (ANIMAL, flags 0x28 = CalculateOffsetLowGroupExtended 0x20 |
+        // an unrelated bit 0x08) is a crow. The OLD code fed its pure kind
+        // (animal/low) straight to the idx offset formula and read the LOW
+        // section's base address — landing on a completely different body's
+        // block (it rendered as a gray serpent statue). The fix: `offset_kind`
+        // reinterprets (kind, flags) separately from `anim_type`.
+        let def = "\
+6\tANIMAL\t28
+50\tMONSTER\t440
+60\tMONSTER\t48
+5\tANIMAL\t0
+";
+        let mobtypes = parse_mob_types(def);
+        let anim = test_anim(HashMap::new(), mobtypes);
+
+        // body 6: ANIMAL + LowGroupExtended(0x20), no 0x400/0x40 set → HIGH
+        // section (0), but still animal group NUMBERS (anim_type=1) and dies
+        // as a monster (see death_group_picks_primary_group_by_kind).
+        assert_eq!(anim.offset_kind(6, 6, 0), 0, "0x20 animal with no further override → high section");
+        assert_eq!(anim.anim_type(6), 1, "pure kind stays animal for group-number semantics");
+        assert_eq!(anim.death_group(6), MONSTER_DIE1);
+
+        // body 50: MONSTER + ByPeopleGroup(0x400) → people section (2); pure
+        // anim_type stays monster (0) — group numbers are unaffected.
+        assert_eq!(anim.offset_kind(50, 50, 0), 2);
+        assert_eq!(anim.anim_type(50), 0);
+
+        // body 60: MONSTER + ByLowGroup(0x40) → low section (1); anim_type stays 0.
+        assert_eq!(anim.offset_kind(60, 60, 0), 1);
+        assert_eq!(anim.anim_type(60), 0);
+
+        // body 5: plain ANIMAL, no flags → low section, same as always.
+        assert_eq!(anim.offset_kind(5, 5, 0), 1);
+        assert_eq!(anim.anim_type(5), 1);
     }
 
     #[test]
@@ -1303,10 +1475,14 @@ not a data line
         assert_eq!(e11.kind, 0);
         assert!(!e11.equipment);
         assert!(e11.uop);
-        // The UOP bit and an offset-override bit can be set at once: kind is
-        // still overridden to people (2) by 0x400, independent of the UOP flag.
+        // The UOP bit and an offset-override bit can be set at once: `kind`
+        // stays the PURE type (monster, 0) — 0x400 no longer rewrites it at
+        // parse time (see mob_types_parses_pure_type_with_no_flag_rewrite);
+        // it's `Anim::offset_kind` that reinterprets `(kind, flags)` into the
+        // people section later, independent of the UOP flag.
         let e12 = map.get(&12).unwrap();
-        assert_eq!(e12.kind, 2);
+        assert_eq!(e12.kind, 0);
+        assert_eq!(e12.flags, 0x10400);
         assert!(e12.uop);
         assert!(!e12.equipment);
     }
@@ -1375,6 +1551,52 @@ not a data line
         }
         println!("mobtypes: {} entries, {overridden} override the range heuristic", anim.mobtypes.len());
         assert!(overridden > 0, "mobtypes should correct some bodies the range heuristic gets wrong");
+    }
+
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource (real mobtypes.txt + anim.mul)
+    fn animal_low_group_extended_bird_resolves_high_section_stand_frame() {
+        // Real-data regression test for the confirmed bug: body 6 (a crow) is
+        // `6 ANIMAL 28` in mobtypes.txt — TYPE animal, flags 0x28 (0x20
+        // CalculateOffsetLowGroupExtended set, plus an unrelated bit). The OLD
+        // code fed animal's LOW section base straight through:
+        // `(6-200)*65+22000 = 9390`, which is body 85's MONSTER block — the
+        // rendered result was a gray serpent statue. `Anim::offset_kind` must
+        // now pick the HIGH section base (`6*110 = 660`) instead, while
+        // `Anim::anim_type`/`Anim::stand_group` still use animal group numbers
+        // (walk/run/stand), since that's how the mul data is actually authored.
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let anim = Anim::open(&dir).expect("open anim");
+
+        let e6 = anim.mobtypes.get(&6).expect("body 6 should be in mobtypes.txt");
+        assert_eq!(e6.kind, 1, "body 6 is TYPE ANIMAL");
+        assert_ne!(e6.flags & 0x20, 0, "body 6 should have CalculateOffsetLowGroupExtended set");
+
+        let group = anim.stand_group(6);
+        assert_eq!(group, ANIMAL_STAND, "group-number semantics stay animal (walk=0/run=1/stand=2)");
+        let (img, _cx, _cy) = anim
+            .frame(6, group, 4, 0)
+            .expect("body 6 stand frame should now decode via the high section");
+        println!("body 6 (crow) stand frame: {}x{}", img.width, img.height);
+        // A bird sprite is small. The old bug (reading the low-section base,
+        // landing on body 85's monster block) decoded a serpent-sized frame —
+        // this bound catches a regression back to that wrong section.
+        assert!(img.width < 60 && img.height < 60, "bird sprite should be small, got {}x{}", img.width, img.height);
+
+        // A plain animal (mobtypes-covered, no 0x20) still resolves via the LOW
+        // section, unaffected by this fix.
+        let plain = 95u16; // ANIMAL, flags 0 (no CalculateOffsetLowGroupExtended)
+        let e_plain = anim.mobtypes.get(&plain).expect("plain animal body should be in mobtypes.txt");
+        assert_eq!(e_plain.kind, 1);
+        assert_eq!(e_plain.flags & 0x20, 0, "must NOT have the extended flag, to exercise the low-section path");
+        let plain_group = anim.stand_group(plain);
+        assert!(
+            anim.frame_count(plain, plain_group, 4).unwrap_or(0) > 0,
+            "plain animal should still resolve a stand frame via the low section"
+        );
+
+        // Human (body 400) unaffected by any of this.
+        assert!(anim.frame(400, PEOPLE_STAND, 4, 0).is_some(), "human body 400 stand frame should still resolve");
     }
 
     #[test]
