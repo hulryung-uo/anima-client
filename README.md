@@ -31,7 +31,7 @@ pure logic and platform-agnostic.
 ## Stack
 
 - **Core:** Rust `anima-core` → native (agents, desktop) + WASM (browser)
-- **Renderer / UI:** TypeScript + PixiJS (2D isometric), WebGPU with WebGL2 fallback
+- **Renderer / UI:** plain JavaScript + PixiJS (2D isometric), WebGPU with WebGL2 fallback
 - **Networking:** desktop = direct TCP (Tauri/Rust); browser = thin WebSocket↔TCP relay
   - (browsers can't open raw TCP — this constraint drives the desktop/relay split)
 - **Packaging:** Tauri for standalone Win/Mac desktop; PWA/web for zero-install
@@ -41,45 +41,56 @@ pure logic and platform-agnostic.
 ```
 anima-client/
 ├── Cargo.toml                 # Rust workspace
-└── crates/
-    ├── anima-core/            # headless core: protocol, world, path, contract
-    │                          #   (sans-IO, zero external deps)
-    │   └── src/{lib,types,agent}.rs · net/ · world/ · path/
-    ├── anima-assets/          # .mul/.uop readers (map/statics/tiledata; dep: flate2)
-    └── anima-net/             # native TCP driver + `anima-login` bin
+├── crates/
+│   ├── anima-core/            # headless core: protocol, world, path, contract, gump layout
+│   │                          #   (sans-IO, near-zero-dep: one exception, miniz_oxide,
+│   │                          #   for the protocol-mandated 0xDD zlib)
+│   │   └── src/{lib,types,agent,gump_layout}.rs · net/ · world/ · path/ · tests/golden.rs
+│   ├── anima-assets/          # .mul/.uop readers: map/tiledata/anim/art/gump/hues/sound/…
+│   ├── anima-net/             # native TCP driver (Session) + `anima-login`/`play`/`scene`/`anima-agent`/`cmd` bins
+│   ├── anima-wasm/            # wasm-bindgen wrapper: WasmClient (feed bytes → Observation JSON)
+│   └── anima-agent/           # in-process autonomous brains (Brain trait, WanderBrain)
+└── web/                       # plain JavaScript + PixiJS renderer (outside the Cargo workspace)
 ```
-Planned siblings: `crates/anima-desktop` (Tauri), `crates/anima-agent` (AI driver),
-and `web/` (TypeScript frontend, outside the Cargo workspace).
+Planned sibling: `crates/anima-desktop` (Tauri, standalone desktop shell) — not yet
+started; everything else above is built.
 
-## Status — Phases 1–3 (core) COMPLETE ✅ (validated against a live ServUO)
+## Status — Phases 1–3 COMPLETE ✅, incl. the Phase 3 tail (validated against a live ServUO)
 
 The headless agent connects to a real UO server, logs in, builds a live `World`, and
 **navigates by A\* over real UO map data**. An **autonomous AI brain** (`WanderBrain`)
 consumes the same `Observation` and **plays the game live** (explores, greets, flees
-reds, grabs items) — the AI-native loop, the whole point. A **web/PixiJS renderer**
-draws a live minimap painted with **real UO terrain** (colors decoded from
-`artLegacyMUL.uop`) + HUD, and `anima-core` compiles to **WASM**. 39 tests, clippy clean.
+reds, grabs items) — the AI-native loop, the whole point. A human can also just
+**play**: the `play` HTTP server renders real UO terrain, full isometric sprites,
+resolved mobile/monster animation (legacy + UOP), gumps (paperdoll/containers/
+vendor/spellbook/books/party), audio, and secure trading in a **web/PixiJS
+renderer**; `anima-core` also compiles to **WASM**. 170 tests, clippy clean.
 
-Crates: `anima-core` (protocol/world/path/contract — sans-IO, zero-dep, WASM-ready),
-`anima-assets` (.mul/.uop + art readers), `anima-net` (TCP driver + `anima-login` /
-`scene` bins), `anima-wasm` (browser bindings), `anima-agent` (autonomous brains);
-plus `web/` (PixiJS). Full detail + decision history: [`docs/DESIGN.md`](docs/DESIGN.md).
+Crates: `anima-core` (protocol/world/path/contract — sans-IO, near-zero-dep: one
+exception (miniz_oxide, for the protocol-mandated 0xDD zlib), WASM-ready),
+`anima-assets` (.mul/.uop + art/anim/gump/sound readers), `anima-net` (TCP driver +
+`anima-login`/`play`/`scene`/`anima-agent`(NDJSON bridge)/`cmd` bins),
+`anima-wasm` (browser bindings), `anima-agent` (in-process autonomous brains); plus
+`web/` (PixiJS). Full detail + decision history: [`docs/DESIGN.md`](docs/DESIGN.md).
 
 ### Roadmap
 1. ✅ **Phase 1 — headless core:** protocol, world, perception, movement, assets,
    A\* pathfinding, Observation/Action contract.
 2. ✅ **Phase 2 — renderer + WASM:** `anima-core`→wasm32, `anima-wasm`, live PixiJS
    minimap/HUD fed by the scene bridge.
-3. ✅ **Phase 3 (core) — AI + real art:** `anima-agent` plays autonomously on the
-   contract; renderer paints real UO terrain from `artLegacyMUL.uop`.
-   *Tail:* iso sprite blitting, animations, gumps, audio; RL/LLM brains; WASM+relay/Tauri.
+3. ✅ **Phase 3 — AI + real art + human-playable polish:** `anima-agent` plays
+   autonomously on the contract; the `play` server is a full human-playable client
+   (real terrain/sprites/animation/gumps/audio/trading).
+   *Remaining:* richer/RL/LLM brains; browser WASM+relay; Tauri; `multi.mul` houses;
+   sitting; treasure maps. See [`docs/DESIGN.md`](docs/DESIGN.md) §6 for detail.
 
 ## Build & run
 
 ```bash
-cargo build && cargo test            # 39 tests
+cargo build && cargo test --workspace   # 170 tests (+16 ignored real-data-file tests)
 # boot a local ServUO (port 2594), then pick one:
-cargo run -p anima-net   -- 127.0.0.1 2594 <user> <pass>          # navigate demo
+cargo run -p anima-net --bin play -- 127.0.0.1 2594 <user> <pass>  # human-playable (open :8090)
+ANIMA_LOGIN=1 cargo run -p anima-net --bin play                    # same, but log in via the browser page
 cargo run -p anima-agent -- 127.0.0.1 2594 <user> <pass> 40       # autonomous AI brain
 # or the live web renderer (real terrain):
 cargo run -p anima-net --bin scene -- 127.0.0.1 2594 <user> <pass> web/scene.json &

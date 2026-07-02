@@ -1749,7 +1749,7 @@ mod tests {
         assert_eq!(pick.graphic, 0x0E86);
         assert_eq!(pick.container, Some(0x4000_0BA6));
         // The stale item (not in the refresh) is dropped.
-        assert!(w.items.get(&0x111).is_none());
+        assert!(!w.items.contains_key(&0x111));
     }
 
     #[test]

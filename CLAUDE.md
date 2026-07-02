@@ -11,18 +11,21 @@ Core-first: the headless Rust core (`crates/anima-core`) is the primary artifact
 renderers/agents/desktop sit on top. Companion to `../anima` (Python AI player).
 
 ## Current phase
-**Phases 1–3 core COMPLETE** (validated vs live ServUO). P1: login, perception,
-movement, assets, A* pathfinding, contract — agent navigates a tile on the server.
-P2: `anima-core`→wasm32 + `anima-wasm`; web/PixiJS renderer from `Observation` via
-the `scene` bridge. P3: `anima-agent` `WanderBrain` plays autonomously live
-(`cargo run -p anima-agent -- 127.0.0.1 2594 <u> <p>`); renderer paints **real UO
-terrain** decoded from `artLegacyMUL.uop`. 5 crates (core/assets/net/wasm/agent) +
-`web/`. **Remaining (Phase 3 tail):** iso sprite blitting, animations, gumps, audio;
-RL/LLM brains; browser WASM+relay/Tauri. See DESIGN.md §6.
+**Phases 1–3 COMPLETE, including the Phase 3 "human-playable polish" tail**
+(validated vs live ServUO). P1: login/perception/movement/assets/A*/contract. P2:
+`anima-core`→wasm32 + `anima-wasm`; web/PixiJS renderer. P3: `anima-agent`
+`WanderBrain` plays autonomously live; the human-playable `play` server (`cargo run
+-p anima-net --bin play -- 127.0.0.1 2594 <u> <p>`, open `:8090`) renders real
+terrain + full iso sprites, walk/attack/typed mobile animation (legacy + UOP,
+Body/Bodyconv/Corpse/Equipconv.def remap), gumps, audio, and secure trading. 5
+crates (core/assets/net/wasm/agent) + `web/`. **Remaining:** richer/RL/LLM brains,
+browser WASM+relay, Tauri, `multi.mul` houses, per-facet `MapData` reload, sitting,
+treasure maps, custom housing. See DESIGN.md §6.
 
 ## Conventions
-- **Rust**, edition 2021. Core stays **std-only / zero external deps** until there's
-  a concrete reason (keeps it small + WASM-clean). Justify any new dependency.
+- **Rust**, edition 2021. Core stays **near-zero-dep: one documented exception**
+  (`miniz_oxide`, for the protocol-mandated 0xDD zlib) until there's a concrete
+  reason for more (keeps it small + WASM-clean). Justify any new dependency.
 - **Big-endian** everywhere (UO wire protocol). Use `net::PacketReader/Writer`.
 - **World is the single source of truth.** Packet handlers mutate `World`; the brain
   and renderer only *read* it. The brain never parses bytes.
@@ -36,6 +39,6 @@ handler-by-handler, validate against captures (strangler migration).
 
 ## Build / test
 ```bash
-cargo build        # workspace
-cargo test         # anima-core unit tests (currently 3 passing)
+cargo build             # workspace
+cargo test --workspace  # currently 170 passing (+16 #[ignore]d real-data-file tests)
 ```

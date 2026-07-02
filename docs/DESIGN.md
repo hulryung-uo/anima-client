@@ -6,9 +6,13 @@
 > architecture, the current state, the roadmap, and the concrete protocol/asset
 > knowledge needed to implement Phase 1.
 
-Last updated: 2026-06-25 · Status: **Phases 1–3 (core threads) COMPLETE.** 5 crates
-(anima-core / anima-assets / anima-net / anima-wasm / anima-agent) + web/; 39 tests
-green; clippy clean; wasm32 builds.
+Last updated: 2026-07-02 · Status: **Phases 1–3 COMPLETE, including the Phase 3
+"human-playable polish" tail** (iso sprite blitting, walk/attack/typed animations
+incl. UOP + monster body remap, gumps, audio, secure trading, AI contract). 5 crates
+(anima-core / anima-assets / anima-net / anima-wasm / anima-agent) + web/; **170
+tests green** across the workspace (see §5 for the per-crate breakdown, incl. 7
+golden-packet regression tests replaying real `uo_proxy` captures, §7) + 16
+`#[ignore]`d real-data-file tests; clippy clean; wasm32 builds.
 - **Phase 1:** headless agent connects to a live ServUO, logs in (create + select),
   builds a World, and navigates to a target tile by A* over real UO map data.
 - **Phase 2:** `anima-core` → **wasm32** (sans-IO pays off); `anima-wasm` wraps it for
@@ -17,38 +21,63 @@ green; clippy clean; wasm32 builds.
 - **Phase 3:** (a) an **autonomous AI brain** (`anima-agent` `WanderBrain`) consumes
   `Observation` and emits `Action` — explores, greets speakers, flees reds, grabs
   items — verified playing live on the server (the AI-native loop, the project's
-  thesis). (b) the renderer now paints **real UO terrain** (avg colors decoded from
-  `artLegacyMUL.uop`: grass/dirt roads/water + buildings) — screenshot-verified.
-**Playable milestone:** a human can now actually play (top-down). `anima-net`'s `play`
-bin holds a live Session, serves `web/` + `/scene.json` over HTTP (tiny_http), and
-accepts `POST /input` (walk/say/use/attack/pickup/war) executed on the live session.
-The browser sends WASD/arrow + chat input → verified: keyed input walks and talks on
-the real server. Run: `cargo run -p anima-net --bin play -- 127.0.0.1 2594 <u> <p>`
-then open `http://127.0.0.1:8090/`.
+  thesis); `Session::advance_route` gives any headless driver a non-blocking
+  `Action::WalkTo` (click-to-walk) state machine, no sockets. (b) the renderer draws
+  **real UO terrain and full isometric sprites**, not just avg colors — see below.
+**Playable milestone:** a human can now actually play top-down UO end-to-end — move,
+fight, loot, trade, shop, cast, read books/spellbooks, work gumps (multi-page,
+stack-split, paperdoll), party, chat, hear sound/music. `anima-net`'s `play` bin
+holds a live Session, serves `web/` + `/scene.json` over HTTP (tiny_http, plus an SSE
+sound stream on its own thread so it can't starve the worker pool), and accepts
+`POST /input` executed on the live session. Run: `cargo run -p anima-net --bin play
+-- 127.0.0.1 2594 <u> <p>` then open `http://127.0.0.1:8090/` (all args are optional
+— omitted ones fall back to the baked-in defaults `127.0.0.1:2594`
+`animaplay`/`animaplay` and auto-login proceeds immediately; set `ANIMA_LOGIN=1` to
+instead serve a browser login page that collects server/account before
+connecting).
 
-**Isometric renderer:** the web client now draws **real UO tile sprites in iso
+**Isometric renderer:** the web client draws **real UO tile sprites in iso
 projection** — `anima-assets::art` decodes land (44×44 diamond) + static (RLE) art
 and PNG-encodes it (`Image::to_png`); the `play` server serves `/art/land/<g>.png`
 and `/art/static/<g>.png` (cached); the scene includes per-tile land graphic + a
 window static list; `web/main.js` streams those textures and draws the diamond
-field + statics (grass, New Haven roads, buildings), falling back to avg-color
-diamonds while textures load. Screenshot-verified.
+field + statics (grass, roads, water, buildings), falling back to avg-color diamonds
+while textures load. Multi-floor visibility (roof/upper-floor culling by the
+player's Z) is ported from ClassicUO — see `docs/RENDERING.md`. Screenshot-verified.
 
-**Mobile sprites:** `anima-assets::anim` decodes legacy `anim.mul`/`.idx` (palette +
-RLE frames; people base `(body-400)*175+35000`, monster `body*110`; groups Stand=4/
-Walk=0; 8→5 direction map + mirror). The `play` server serves `/anim/<body>/<dir>.png`
-(Stand frame, mirror baked) and the scene carries each mobile's `body`/`dir`; the
-renderer draws real body sprites (player + humans), markers as fallback. Known gaps to
-iterate on: only people bodies (400/401/…) resolve (no `body.def` remap yet → monsters
-fall back to markers); no walk-frame cycling yet (idle pose only); sprite foot-anchor
-is approximate (bottom-center, no centerX/Y offset).
+**Mobile sprites & animation (COMPLETE — legacy + UOP, remapped):**
+`anima-assets::anim` resolves a body's real animation through the full ClassicUO
+pipeline, not just the raw legacy math: **`Body.def`** remap (exotic body → real
+body + fallback hue), **`Bodyconv.def`** redirect (body → expansion file
+anim2..anim5), **`mobtypes.txt`** group kind (monster/animal/people, authoritative
+over the graphic-range heuristic), **`Corpse.def`** (a corpse item draws the dead
+creature's real death-pose sprite, not generic corpse art), and **`Equipconv.def`**
+(gender/body-specific worn-equipment animation + paperdoll gump). ~300 bodies are
+flagged `UseUopAnimation`; **`AnimationFrame1-4.uop`/`AnimationSequence.uop`** are
+read via a lazy, on-demand `LazyUopReader` (only the entry table + the one entry
+requested — the four files total ~500MB and must never load whole), with the legacy
+`anim.mul..anim5.mul` files as fallback. The `play` server serves
+`/anim/<body>/<group>/<dir>/<frame>.png`; the renderer plays walk/run/idle/combat/
+typed (0xE2 emotes/gestures) animation cycles timed to real step cadence, mounted
+riders show `Onmount*` groups with the mount's own body drawn under them
+(`anima_assets::mounts` table), and worn equipment/paperdoll pieces render
+gender-correctly.
 
-Remaining for full human-playable fidelity: walk/attack **animation cycling**, monster
-body remap (`body.def`/`mobtypes.txt`), **gumps**
-(paperdoll/backpack/vendor, `gumpartLegacyMUL.uop`), **click-to-interact** +
-targeting UI (the `0x6C` cursor + `build_target_response` + `TargetCursor` plumbing
-is in place; needs Action variants + browser wiring), audio. Then optionally a Tauri
-standalone shell. (Parallel track: `anima-net::json` + the `anima2` Python brain.)
+**Gumps (COMPLETE):** the gump layout grammar (`{ button … }{ text … }…`) is parsed
+into typed elements in `anima-core::gump_layout` (protocol data, not rendering, so a
+brain can consume it directly via `Observation`); `anima-net::scene` reuses the same
+parser for the web JSON. Multi-page gumps track a per-window local page (page-jump
+buttons never round-trip to the server, matching ClassicUO); buttons render their
+real `up`-state gump art instead of a numbered box; paperdoll/backpack/container/
+vendor buy-sell/spellbook/skills(sort + T2A/AOS grouping)/books/party/stack-split-
+on-drag are all implemented over `gumpartLegacyMUL.uop`.
+
+Everything above was previously listed as the Phase 3 "tail" — it is now done. What
+actually remains (see §6 Phase 3 for detail): richer/RL/LLM brains, browser WASM +
+WebSocket↔TCP relay (`anima-wasm` exists; the relay service doesn't), a Tauri
+standalone shell, per-facet `MapData` reload (only Felucca/facet 0 opens today),
+`multi.mul` dynamic house placement, sitting, treasure maps, delete-character
+(0x83), and custom housing.
 
 ### Verified end-to-end against ServUO (127.0.0.1:2594)
 - Two-phase login: account → server select → reconnect → game login → **char create**
@@ -78,8 +107,8 @@ A **new, from-scratch Ultima Online client**, designed **AI-native** and
 **cross-platform (Windows + macOS)**. It is the companion "body" for the
 [`anima`](../../anima) AI-player project. The central artifact is a **headless
 game core** (`anima-core`, Rust) that speaks the UO protocol and maintains world
-state with **no rendering/UI/audio**. A thin renderer (web: TypeScript + PixiJS)
-sits on top for humans. The same core serves three consumers: AI agents
+state with **no rendering/UI/audio**. A thin renderer (web: PixiJS — implemented as
+plain JS, no TS build step) sits on top for humans. The same core serves three consumers: AI agents
 (headless, many), a browser client (core compiled to WASM), and a desktop
 standalone app (Tauri, native TCP).
 
@@ -97,7 +126,7 @@ decision + the reasoning so a future session understands the constraints.
 | D3 | **Core ⊥ Renderer split; core-first** | ClassicUO is 152k LOC, ~40% of which (Game/UI gumps alone = 50k, ~33%) is throwaway for an AI. The AI-relevant core is ~40k LOC. Making the headless core the primary artifact is the whole reason to build new vs fork. |
 | D4 | **Build new instead of forking ClassicUO** | User wants a *serious* AI-native client where the headless core is first-class and reused across agents/browser/desktop. ClassicUO can't give that cleanly (human-first, GPU-coupled init). |
 | D5 | **Language = Rust for the core** | One codebase compiles to **native** (agents, desktop) *and* **WASM** (browser). No-GC perf + strong concurrency for many parallel agents. Graph-y world model handled via HashMap-by-serial now, `slotmap`/ECS later. |
-| D6 | **Frontend = Web (TypeScript + PixiJS), WebGPU + WebGL2 fallback** | User chose web. Cross-platform by definition; PixiJS is a battle-tested 2D isometric renderer that cuts rendering plumbing. WebGPU is Metal-backed on Mac (no Apple GPTK needed). |
+| D6 | **Frontend = Web (TypeScript + PixiJS), WebGPU + WebGL2 fallback** *(implemented as plain JS, no TS build step)* | User chose web. Cross-platform by definition; PixiJS is a battle-tested 2D isometric renderer that cuts rendering plumbing. WebGPU is Metal-backed on Mac (no Apple GPTK needed). |
 | D7 | **Standalone via Tauri (desktop) + optional browser (PWA)** | User wants standalone. See the TCP constraint (§4): only a native shell can open raw TCP, so desktop standalone is self-contained; pure browser needs a relay. Same web frontend ships both ways. |
 | D8 | **Apple Game Porting Toolkit is NOT used** | GPTK ports *existing Windows/DirectX* games to Mac (DXIL→Metal shader conversion, Wine-style eval env). For a new cross-platform build you target Metal natively via wgpu/WebGPU — there's no DirectX to translate. |
 | D9 | **`anima-core` is the name** (was tentatively `uocore`) | User's choice. It's the headless heart, not a separate product. |
@@ -124,7 +153,7 @@ decision + the reasoning so a future session understands the constraints.
 ```
 
 - **anima-core** — protocol, world state, asset (`.mul`/`.uop`) IO, pathfinding. Pure logic, platform-agnostic.
-- **Renderer** (web/TS/PixiJS) — the *only* place cross-platform graphics concerns live. Reads world state, draws; sends user intents back.
+- **Renderer** (web/PixiJS — implemented as plain JS) — the *only* place cross-platform graphics concerns live. Reads world state, draws; sends user intents back.
 - **Brain** — decision-making (AI or human input) lives *above* the core, never inside it.
 
 ### The Observation/Action contract (the Interface↔Brain boundary, D2)
@@ -159,42 +188,75 @@ standalone/relay split:
 
 ```
 anima-client/
-├── Cargo.toml                 # Rust workspace (anima-core, anima-net, anima-assets)
+├── Cargo.toml                 # Rust workspace (5 members, see below)
 ├── README.md · CLAUDE.md · .gitignore
-├── docs/DESIGN.md             # ← this file
+├── docs/DESIGN.md · RENDERING.md · MOVEMENT.md
 └── crates/
-    ├── anima-core/            # headless protocol + world + path + contract (zero-dep, sans-IO)
-    │   └── src/
+    ├── anima-core/            # headless protocol + world + path + contract (near-zero-dep —
+    │                          #   one exception: miniz_oxide, for the protocol-mandated 0xDD zlib — sans-IO)
+    │   ├── src/
     │       ├── lib.rs · types.rs        # Serial, Position, Direction
-    │       ├── agent.rs                 # Observation/Action contract + World::observe
+    │       ├── agent.rs                 # Observation/Action contract + World::observe + Brain trait
+    │       ├── gump_layout.rs           # gump layout grammar → typed GumpElements (brain-consumable)
     │       ├── net/
     │       │   ├── packet.rs            # big-endian reader/writer
     │       │   ├── lengths.rs           # packet-length framing table
     │       │   ├── framing.rs           # frame decoder + game-mode (Huffman) + StreamDecoder
     │       │   ├── huffman.rs           # server→client decompression
     │       │   ├── login.rs             # builders/parsers + LoginMachine (+ char create)
-    │       │   ├── game.rs              # game packet codec → World mutation
-    │       │   ├── movement.rs          # walk requests + Walker (seq/confirm/deny)
+    │       │   ├── game.rs              # game packet codec → World mutation (~50 incoming ids, §8)
+    │       │   ├── movement.rs          # walk requests + Walker (seq/confirm/deny) + 0x21/0x22
     │       │   └── outgoing.rs          # client version + action builders
-    │       ├── world/mod.rs             # World/Mobile/Item/PlayerStats/journal/fastwalk
+    │       ├── world/mod.rs             # World/Mobile/Item/PlayerStats/journal/gumps/trades/…
     │       └── path/mod.rs              # A* + Terrain trait
-    ├── anima-assets/          # .mul/.uop readers (dep: flate2); impls path::Terrain
-    │   └── src/{lib,uop,tiledata,map}.rs
+    │   └── tests/golden.rs              # golden-packet regression tests (real `uo_proxy` captures, §7)
+    ├── anima-assets/          # .mul/.uop readers (deps: flate2, png); impls path::Terrain
+    │   └── src/
+    │       ├── lib.rs · map.rs · tiledata.rs · uop.rs   # UOP container (+ lazy on-demand reader), map, tiledata
+    │       ├── anim.rs        # legacy + UOP mobile animation; Body/Bodyconv/Corpse/Equipconv.def, mobtypes.txt
+    │       ├── art.rs         # artLegacyMUL.uop: land/static tile art → RGBA/PNG
+    │       ├── animdata.rs    # animdata.mul: animated-static frame sequences
+    │       ├── cliloc.rs      # Cliloc.enu: cliloc id → localized text
+    │       ├── gump.rs        # gumpartLegacyMUL.uop: gump art
+    │       ├── hues.rs        # hues.mul: sprite recoloring
+    │       ├── mounts.rs      # mount item graphic → ridden-animal body table
+    │       ├── radarcol.rs    # radarcol.mul: world-map colors
+    │       ├── sound.rs       # soundLegacyMUL.uop: sound effects → WAV
+    │       └── texmap.rs      # texidx/texmaps.mul: sloped-land seamless textures
     ├── anima-net/             # native TCP driver: Session (login, pump, walk, navigate, actions)
-    │   └── src/lib.rs · main.rs (`anima-login`) · bin/scene.rs (`scene` → web/scene.json)
+    │   └── src/
+    │       ├── lib.rs         # Session + Route/advance_route (non-blocking WalkTo state machine)
+    │       ├── json.rs        # Observation/Action ⇄ JSON (the Python `anima2` brain's IPC contract)
+    │       ├── scene.rs       # build_scene: World + assets → the web renderer's JSON
+    │       ├── main.rs        # `anima-login` bin (login-only smoke test)
+    │       └── bin/
+    │           ├── play.rs    # `play`: human-playable HTTP server (web/ + /scene.json + /input + SSE sound)
+    │           ├── scene.rs   # `scene`: AI-patrol bridge → web/scene.json (Phase 2 demo)
+    │           ├── agent.rs   # `anima-agent`: NDJSON stdin/stdout bridge for the out-of-process Python brain
+    │           ├── cmd.rs     # `cmd`: drive a running `play` server from the shell
+    │           └── find_water.rs
     ├── anima-wasm/            # wasm-bindgen wrapper: WasmClient (feed bytes → Observation JSON)
     │   └── src/lib.rs         # build: `wasm-pack build crates/anima-wasm --target web`
-    └── anima-agent/           # autonomous brains on the contract
-        └── src/lib.rs (Brain, WanderBrain) · main.rs (`anima-agent` runner bin)
-web/                          # Phase 2 renderer (outside the Cargo workspace)
-├── index.html · main.js      # PixiJS minimap + HUD, polls scene.json
+    └── anima-agent/           # in-process autonomous brains on the contract
+        └── src/lib.rs (Brain, WanderBrain) · main.rs (`anima-agent` runner bin — NOTE: this bin
+            name collides with anima-net's `bin/agent.rs`, also named `anima-agent`; cargo warns
+            but builds both — disambiguate with `-p anima-agent` / `-p anima-net`)
+web/                          # Phase 2+ renderer (outside the Cargo workspace)
+├── index.html · main.js      # PixiJS iso renderer: terrain, sprites, gumps, sound, chat, HUD
 └── vendor/pixi.min.js        # vendored PixiJS v8 (standalone, no CDN)
 ```
 
-### Running the Phase 2 renderer
+### Running the human-playable client (current primary way to use this repo)
 ```
 cd ~/dev/uo/servuo && MONO_GAC_PREFIX=/opt/homebrew nohup mono ServUO.exe -noconsole &
 cd ~/dev/uo/anima-client
+cargo run -p anima-net --bin play -- 127.0.0.1 2594 <user> <pass>
+# open http://127.0.0.1:8090/ — or omit all args to auto-login with the defaults
+# above, or set ANIMA_LOGIN=1 for an in-browser login page instead
+```
+
+### Running the Phase 2 AI-patrol scene bridge (older demo path, still works)
+```
 cargo run -p anima-net --bin scene -- 127.0.0.1 2594 <user> <pass> web/scene.json &
 ( cd web && python3 -m http.server 8011 )      # open http://127.0.0.1:8011/
 ```
@@ -202,9 +264,11 @@ The scene bridge logs in, patrols, and rewrites `web/scene.json` ~2×/s; the pag
 polls it. (Future: swap the JSON bridge for `anima-wasm` in-browser + a
 WebSocket↔TCP relay so the browser runs the core directly — §4.)
 
-**Done:** all three crates build, clippy clean, `cargo test` = 36 passing (+1
-ignored real-data asset test). Validated end-to-end against a live ServUO (see the
-status block at the top).
+**Done:** all 5 crates build, clippy clean,
+`cargo test --workspace` = **170 tests passing** across the workspace (anima-core:
+107 unit + 7 golden-packet regression in `tests/golden.rs`, §7; anima-assets: 28
+unit + 16 `#[ignore]`d real-data-file tests; anima-net: 25 unit; anima-agent: 3
+unit). Validated end-to-end against a live ServUO (see the status block at the top).
 
 ### Sans-IO contract (how a driver uses the login flow)
 ```
@@ -238,16 +302,30 @@ The driver is the only code that knows about sockets — write it once for nativ
 3. ✅ Native TCP driver (`anima-net::Session`) — connects to ServUO end-to-end.
 4. ✅ Character create + select (`build_create_character`, `CharacterAppearance`).
    (Delete deferred — format documented in `anima`, not needed for the goal.)
-5. ✅ Game packet codec → World mutation (`net/game.rs`): 0x20/0x77/0x78/0x1A/0x1D/
-   0x11/0xA1-3/0x1C/0xAE/0xBF.
-6. ✅ Movement (`net/movement.rs`): walk 0x02 + seq + confirm/deny + resync + fastwalk.
-7. ✅ Asset readers (`anima-assets`): UOP map, tiledata.mul (HS), statics — real data verified.
+5. ✅ Game packet codec → World mutation (`net/game.rs`): originally 0x20/0x77/0x78/
+   0x1A/0x1D/0x11/0xA1-3/0x1C/0xAE/0xBF; now **~50 incoming ids** dispatched (count
+   the match arms in `dispatch()`) covering combat/damage/effects, containers,
+   gumps (incl. packed/compressed 0xDD), targeting, vendors, skills, books,
+   party, buffs, quest arrows, weather/season/light, corpses (0xAF/0x89),
+   prompts (0xC2), combatant (0xAA), secure trading (0x6F), facet change
+   (0xBF/0x08) — see §8.
+6. ✅ Movement (`net/movement.rs`): walk 0x02 + seq + confirm/deny + resync +
+   fastwalk; `Session::advance_route` adds a non-blocking `Action::WalkTo`
+   (click-to-walk) driver for headless brains.
+7. ✅ Asset readers (`anima-assets`): UOP map, tiledata.mul (HS), statics — real data
+   verified; plus animation (legacy + UOP, Body/Bodyconv/Corpse/Equipconv.def,
+   mobtypes.txt), art, gump art, hues, sound, cliloc, texmap, radar colors, mounts.
 8. ✅ Pathfinding (`path/`): A* + `Terrain` trait, Z-aware, diagonal-safe.
 9. ✅ Observation/Action contract (`agent.rs`) + `Session::apply_action` / `navigate_to`.
+   `agent.rs`'s `Action` enum now has 36 variants; `anima-net::json` mirrors the
+   full `Observation`/`Action` surface as versioned JSON for the out-of-process
+   Python brain (`anima2`), table-tested for every variant.
 
-**Remaining tail (optional, deferred):** delete-character; broader packet coverage
-(combat 0x0B, containers 0x24/0x25/0x3C, gumps 0xB0/0xDD, targeting 0x6C, vendors);
-fastwalk is consumed but most shards send 0 keys.
+**Remaining tail (optional, deferred):** delete-character (0x83, format documented
+in `anima`, not needed for the goal); fastwalk is consumed but most shards send 0
+keys; 0x24 DrawContainer (incoming) is unhandled — the renderer instead opens a
+container window client-side off the item's own container-tiledata flag, which
+covers the same UX without needing the packet.
 
 ### Phase 2 — renderer (web) + WASM. ✅ COMPLETE.
 - ✅ `anima-core` compiles to `wasm32-unknown-unknown`; `anima-wasm` (wasm-bindgen)
@@ -260,19 +338,47 @@ fastwalk is consumed but most shards send 0 keys.
 WebSocket↔TCP relay (so the browser runs the core, not a JSON bridge); a Tauri
 shell for a true standalone desktop app.
 
-### Phase 3 — AI brains + real art. ✅ CORE THREADS COMPLETE.
+### Phase 3 — AI brains + real art + human-playable polish. ✅ COMPLETE (incl. the tail).
 - ✅ `anima-agent`: `Brain` trait (`decide(&Observation)->Vec<Action>`) + `WanderBrain`
   (explore/greet/flee/grab) — runs live: `cargo run -p anima-agent -- 127.0.0.1 2594
   <u> <p> [ticks]`. The full perception→decision→action loop on the real server.
 - ✅ `anima-assets::art`: decodes `artLegacyMUL.uop` (land diamond + static RLE,
-  ARGB1555→RGBA) + per-land-graphic average color; the scene bridge sends real tile
-  colors and the renderer paints actual UO terrain. (Note: art UOP paths use a
-  `.tga` extension, unlike the map's `.dat`.)
+  ARGB1555→RGBA); the `play`/`scene` servers PNG-encode and cache it per graphic.
+  (Note: art UOP paths use a `.tga` extension, unlike the map's `.dat`.)
+- ✅ **Full isometric sprite blitting**: real land diamonds (flat + sloped/texmap
+  `PIXI.Mesh`) and static art in a persistent tile pool (absolute world-iso
+  coordinates; only edge tiles added/removed as the camera slides) — see
+  `docs/RENDERING.md` §5 for the roof/upper-floor Z-culling this depends on.
+- ✅ **Mobile/monster animation, fully resolved** (not just people): legacy
+  `anim.mul..anim5.mul` + UOP `AnimationFrame1-4.uop`/`AnimationSequence.uop`
+  (`anima_assets::uop::LazyUopReader`, on-demand — the four UOP files total
+  ~500MB and are never loaded whole), `Body.def`/`Bodyconv.def`/`mobtypes.txt`
+  remap+group-kind resolution, `Corpse.def` death-pose corpses, `Equipconv.def`
+  gendered equipment/paperdoll, mount body-under-rider, walk/run/idle/combat/
+  typed (0xE2) animation cycling timed to real step cadence.
+- ✅ **Gumps**: layout grammar parsed into typed elements shared by the brain
+  (`anima-core::gump_layout`) and the web renderer (`anima-net::scene`);
+  multi-page + real button art; paperdoll/backpack/containers (incl. stack-split
+  drag)/vendor buy-sell/spellbook/skills/books/party, all over
+  `gumpartLegacyMUL.uop`.
+- ✅ **Audio**: `anima-assets::sound` decodes `soundLegacyMUL.uop` → WAV; the
+  `play` server pushes each sound over an SSE stream (`GET /sounds`, on its own
+  thread so it can't starve the HTTP worker pool) the instant it fires, plus
+  music (0x6D) and positional (x,y) panning in the browser.
+- ✅ **AI contract completeness**: `Observation` audited field-by-field (buffs,
+  shop, popup, book, party, quest arrow, weather/season/light, war, combat
+  attribution, corpse links, OPL, map_index, …); `anima-net::json` mirrors the
+  full `Observation`/`Action` surface as versioned JSON for the out-of-process
+  Python brain; `Session::advance_route` gives any driver a non-blocking
+  `Action::WalkTo`.
 
-**Remaining tail (human-playable polish):** full isometric sprite blitting (draw the
-44×44 land diamonds + static/animation sprites, not just avg colors), mobile
-animations (`AnimationFrame*.uop`), gumps (`gumpartLegacyMUL.uop`), audio; richer
-brains (RL/LLM over the contract); browser WASM + WebSocket↔TCP relay, or a Tauri shell.
+**Remaining tail:** `multi.mul` house/multi resolution (no reader exists yet —
+placed/custom housing today only renders whatever ordinary statics the server
+sends, not a resolved multi-component structure); per-facet `MapData` reload (only
+Felucca/facet 0 opens — see `World::map_index`'s doc for what a real per-facet
+open needs); sitting; treasure maps; richer brains (RL/LLM over the contract);
+browser WASM + WebSocket↔TCP relay (`anima-wasm` itself is done — the relay
+service and its browser wiring aren't); a Tauri standalone shell.
 
 ---
 
@@ -281,7 +387,18 @@ brains (RL/LLM over the contract); browser WASM + WebSocket↔TCP relay, or a Ta
 All present on the same machine under `~/dev/uo/`:
 
 - **`~/dev/uo/anima`** — the Python AI-player. Its `anima/client/` (packet codec, `packets.py`, `parser.py`), `anima/perception/` (WorldState), `anima/pathfinding.py`, `anima/map.py`, `anima/uop.py` are a **partial port of exactly this core in Python**. Use as the **spec/oracle** for porting. Its `CLAUDE.md` has concise protocol notes (mirrored in §8).
-- **`~/dev/uo/anima/uo_proxy`** — a packet-logging proxy. Capture real packet streams and turn them into **golden tests** for the Rust codec (port handler-by-handler, validate against capture = strangler migration, low risk).
+- **`~/dev/uo/anima/uo_proxy`** — a packet-logging proxy (MITM between ClassicUO and
+  the server; see its `README.md` for the JSONL schema). Its captures under
+  `~/dev/uo/anima/data/trajectories/*.jsonl` (schema `uo_proxy.packet.v1`) ARE now
+  used as **golden tests**: `crates/anima-core/tests/golden.rs` replays real captured
+  frames (from `demo-20260419-114417.jsonl`, session `1776566669-e86360f4`) through
+  `apply_packet` and asserts the resulting `World` (0x11/0x78/0x20/0xF3/0x3C/0x1D —
+  provenance cited per test). To record more: `cd ~/dev/uo/anima && uv run python -m
+  uo_proxy --upstream <host:port> --listen 127.0.0.1:2593 --out
+  data/trajectories/demo-<name>.jsonl`, point ClassicUO (or `/etc/hosts`) at the
+  listen address, play, then grep the JSONL for the `pid`(s) you want and copy the
+  `hex` field into a new `#[test]` in `golden.rs` (S→C game-phase lines are already
+  Huffman-decompressed by the proxy for logging — exactly what `apply_packet` wants).
 - **`~/dev/uo/classicuo`** — the C# reference client (your fork, `.NET 10`). Authoritative for packet handlers (`Network/PacketHandlers.cs` ~119 handlers, `Network/OutgoingPackets.cs` ~80), world model (`Game/World.cs`, `Game/GameObjects/`), file formats (`ClassicUO.Assets`, `ClassicUO.IO`), pathfinding (`Game/Pathfinder.cs`), and the login flow (`Game/Scenes/LoginScene.cs`). **Read these when implementing the equivalent Rust.**
 - **ServUO** (`~/dev/uo/servuo`) and **ModernUO** — server-side view of the protocol for cross-checking. ModernUO is a clean modern .NET rewrite, good for world-model reference.
 - **`~/dev/uo/uowiki`** — companion knowledge base (game facts). Also exposed as an MCP server (`wiki_search`, `wiki_read_page`) in sessions here.
@@ -308,7 +425,23 @@ Distilled from `anima/CLAUDE.md` — verify against ClassicUO/captures while imp
   - Server replies `ConfirmWalk (0x22)` or `DenyWalk (0x21)` (deny → resync to server position).
   - Throttle: ~400ms walk, ~200ms run, ~100ms mounted run.
   - Direction low 3 bits = facing; `0x80` = running flag (see `types::Direction`).
-- **Key packet ids** (start set): `0x1B` EnterWorld, `0x55` LoginComplete, `0x11` CharacterStatus, `0x20` UpdatePlayer, `0x78` UpdateObject, `0x1A` UpdateItem, `0x25` UpdateContainedItem, `0x2E` EquipItem, `0x3A` UpdateSkills, `0x1C`/`0xAE` Talk/UnicodeTalk, `0xB0` OpenGump, `0x6C` Target. (Full list: ClassicUO `PacketHandlers.cs`.)
+- **Key packet ids** (login phase): `0x1B` EnterWorld, `0x55` LoginComplete.
+  (Full incoming-packet handler list: ClassicUO `PacketHandlers.cs`.)
+- **Game-phase incoming coverage (current, verified by counting `net::game::dispatch`'s
+  match arms):** **50** packet ids handled in `net/game.rs` — `0x20` MobileUpdate,
+  `0x77`/`0x78` mobile moving/incoming, `0x2E` EquipItem, `0x1A`/`0xF3` world item
+  (legacy/HS), `0x1D` Delete, `0x11` CharacterStatus, `0xA1-3` vitals, `0x1C`/`0xAE`
+  Talk/UnicodeTalk, `0xBF` general-info subcommands (facet change, party, …), `0x6C`
+  Target, `0x3A` UpdateSkills, `0x3C`/`0x25` container content/add, `0xC1`/`0xCC`
+  cliloc message/affix, `0x0B` damage, `0x70`/`0xC0`/`0xC7` graphic effects, `0x54`
+  sound, `0x6E`/`0xE2` character/typed animation, `0x6D` music, `0x72` war mode,
+  `0x4F`/`0x4E` light, `0x65`/`0xBC` weather/season, `0x74`/`0x9E` vendor buy/sell,
+  `0xDF` buff, `0xB0`/`0xDD` gumps (incl. zlib-packed), `0xBA` quest arrow, `0xD6`/
+  `0xDC` OPL, `0x93`/`0xD4`/`0x66` books, `0xAF` corpse-of-death, `0xAA` combatant,
+  `0x27` lift-reject, `0x89` corpse equip, `0xC2` prompt, `0x6F` secure trade — plus
+  `0x21`/`0x22` (confirm/deny walk), owned separately by `net::movement::Walker`,
+  for **52** total. Deliberately still unhandled: `0x83` delete-character, `0x24`
+  DrawContainer (see §6 Phase 1's "remaining tail").
 
 ---
 
@@ -319,9 +452,10 @@ Distilled from `anima/CLAUDE.md` — verify against ClassicUO/captures while imp
 
 ```bash
 cd ~/dev/uo/anima-client
-cargo build      # build workspace
-cargo test       # run anima-core unit tests
-cargo doc --open # browse the core API docs
+cargo build             # build workspace
+cargo test --workspace  # 170 passing (+16 ignored real-data-file tests)
+cargo clippy --workspace --all-targets   # clean
+cargo doc --open        # browse the core API docs
 ```
 
 - **macOS / Apple Silicon note:** the core is pure logic, no native graphics deps, so no arm64 friction (unlike ClassicUO's SDL/FNA). Friction only appears at the renderer/Tauri stage — prefer arm64-native deps, WebGL2 fallback for WKWebView WebGPU gaps.
@@ -334,4 +468,8 @@ cargo doc --open # browse the core API docs
 - **WASM binding strategy** — `wasm-bindgen` + a JS API surface vs a message/snapshot protocol mirroring the Observation/Action contract.
 - **World model data structure at scale** — HashMap-by-serial now; move to `slotmap`/ECS (or Bevy ECS if Bevy becomes the renderer) if entity churn/perf demands.
 - **Relay implementation** — standalone tiny Rust/Go service, or bundle into the same dev server. Only needed for the browser path.
-- **How the AI brain attaches** — in-process (link `anima-core` as a Rust lib + Rust brain) vs out-of-process (brain in Python/anima over the Observation/Action contract via IPC). The existing `anima` is Python, so an IPC contract may be the pragmatic bridge.
+- **How the AI brain attaches** — ~~in-process vs out-of-process~~ **resolved: both,
+  not either/or.** In-process: `anima-agent` links `anima-core`/`anima-net` directly
+  (`Brain` trait, `WanderBrain`, Rust). Out-of-process: `anima-net::json` +
+  `anima-net`'s `bin/agent.rs` speak versioned JSON over NDJSON stdin/stdout so the
+  existing Python `anima2` brain can drive a session without any Rust brain code.

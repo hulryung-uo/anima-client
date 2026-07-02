@@ -856,6 +856,54 @@ fn book_json(world: &World) -> Value {
     }
 }
 
+/// Shallow-merge `fields`'s keys into `v` (both must be JSON objects). Used to
+/// splice a pure per-item helper's output into the item loop's `json!` value
+/// below without duplicating field names on both sides.
+fn merge_obj(v: &mut Value, fields: Value) {
+    if let (Value::Object(vm), Value::Object(fm)) = (v, fields) {
+        vm.extend(fm);
+    }
+}
+
+/// Stack/amount fields for a non-corpse ground item's scene JSON entry (see the
+/// item loop in [`build_scene`]): `amount` always, `st:1` only when the tile is
+/// Stackable — so the renderer's drag-split dialog only offers items the server
+/// would actually accept a partial lift from (ClassicUO `GameActions.PickUp`'s
+/// `IsStackable` gate). Pure (no Session/MapData), so it's unit-testable directly.
+fn stack_fields(amount: u16, stackable: bool) -> Value {
+    let mut v = json!({ "amount": amount });
+    if stackable {
+        v["st"] = json!(1);
+    }
+    v
+}
+
+/// Corpse (graphic 0x2006) scene fields: the dead creature's BODY id rides in the
+/// item's `amount` (see `Item::amount`'s doc) and its facing in `direction`;
+/// `body`/`hue` here are already Corpse.def-remapped and `death_group` is the
+/// primary death-pose animation group. Pure (no Session/MapData), so it's
+/// unit-testable directly — see [`build_scene`]'s item loop for the remap/
+/// death-group resolution that feeds it.
+fn corpse_fields(body: u16, hue: u16, direction: u8, death_group: u8) -> Value {
+    json!({ "body": body, "dir": direction, "dg": death_group, "hue": hue })
+}
+
+/// Build the `prompt` object for the scene: an outstanding server text prompt
+/// (0xC2 UnicodePrompt), or `{"active":0}` when none. The question text itself
+/// already arrived as a journal line (see `World::prompt`'s doc) — the client
+/// just needs to know a response is due. `promptId` is included alongside
+/// `serial` so the client can tell a fresh, server-chained prompt (ServUO
+/// commonly sets the next `Prompt` right inside `OnResponse`) apart from a
+/// re-poll of the one it's already showing — the two ids together are the
+/// prompt's identity, not just `active`'s edge. Pure (no Session), so it's
+/// unit-testable directly.
+fn prompt_json(world: &World) -> Value {
+    match world.prompt {
+        Some(p) => json!({ "active": 1, "serial": p.sender_serial, "promptId": p.prompt_id }),
+        None => json!({ "active": 0 }),
+    }
+}
+
 /// Serialize the current world + a map window (walkability/Z + real terrain
 /// color) + entities + journal to the JSON the web renderer consumes.
 pub fn build_scene(
@@ -1021,12 +1069,7 @@ pub fn build_scene(
             // creature's BODY id below, not a real stack size, and a corpse can't
             // be picked up/split like an ordinary item anyway.
             if it.graphic != 0x2006 {
-                v["amount"] = json!(it.amount);
-                // Mark stackable so the renderer's split dialog only offers to split
-                // items the server would actually accept a partial amount from.
-                if item_stackable(it.graphic) {
-                    v["st"] = json!(1);
-                }
+                merge_obj(&mut v, stack_fields(it.amount, item_stackable(it.graphic)));
             }
             // A corpse (graphic 0x2006): the dead creature's BODY id rides in
             // `amount` (see `Item::amount`'s doc comment) and its facing in
@@ -1035,10 +1078,8 @@ pub fn build_scene(
             // death-pose sprite instead of the generic corpse art.
             if it.graphic == 0x2006 {
                 let (body, hue) = remap_corpse(it.amount, it.hue);
-                v["body"] = json!(body);
-                v["dir"] = json!(it.direction);
-                v["dg"] = json!(anim.map_or(0, |a| a.death_group(body)));
-                v["hue"] = json!(hue);
+                let dg = anim.map_or(0, |a| a.death_group(body));
+                merge_obj(&mut v, corpse_fields(body, hue, it.direction, dg));
             }
             v
         })
@@ -1470,17 +1511,9 @@ pub fn build_scene(
     // AOS expansion (SupportedFeatures 0xB9): gates AOS-only UI like the weapon
     // special-ability bar. T2A servers don't advertise it → the client hides it.
     let aos = s.world.aos;
-    // An outstanding server text prompt (0xC2 UnicodePrompt), or null. The
-    // question text itself already arrived as a journal line (see
-    // `World::prompt`'s doc) — the client just needs to know a response is due.
-    // `promptId` is included alongside `serial` so the client can tell a fresh,
-    // server-chained prompt (ServUO commonly sets the next `Prompt` right inside
-    // `OnResponse`) apart from a re-poll of the one it's already showing — the
-    // two ids together are the prompt's identity, not just `active`'s edge.
-    let prompt = match s.world.prompt {
-        Some(p) => format!("{{\"active\":1,\"serial\":{},\"promptId\":{}}}", p.sender_serial, p.prompt_id),
-        None => "{\"active\":0}".to_string(),
-    };
+    // An outstanding server text prompt (0xC2 UnicodePrompt), or `{"active":0}`.
+    // See [`prompt_json`]'s doc.
+    let prompt = serde_json::to_string(&prompt_json(&s.world)).unwrap_or_else(|_| "{\"active\":0}".into());
     // Recent lift-rejection events (0x27 LiftRej): the client clears the drag-ghost
     // (without sending a drop — the item never left its source) and shows `reason`
     // as a system journal line, for each `seq` newer than the last it handled.
@@ -1600,6 +1633,183 @@ mod tests {
         assert_eq!(equip_conv_gump(401, 50_684), 60_684);
         // Elf female body (606) is EVEN — must not fall out via a parity test.
         assert_eq!(equip_conv_gump(606, 538), 60_538);
+    }
+
+    // ---- build_scene coverage -------------------------------------------------
+    //
+    // `build_scene` itself takes `&mut Session`, and `Session` can only be built
+    // via `connect_and_login` (a live `TcpStream`) — per this crate's testing
+    // convention (see `route_tests`'s doc in `lib.rs`), unit tests don't spin up
+    // a live Session/socket. `tile_walkable`/`can_walk` similarly need a real
+    // `anima_assets::MapData`, which only opens actual UO data files (no in-memory
+    // constructor) — this crate has no `#[ignore]`d real-data tests today (unlike
+    // `anima-assets`), so these two currently have NO automated coverage. Adding
+    // one would need either a `MapData` test constructor (a real seam, not
+    // attempted here) or an `#[ignore]`d test gated on a local UO install.
+    //
+    // What *is* both pure (`&World`/primitives in, `Value`/`bool` out) and where
+    // most of the shaping logic actually lives has been tested directly below:
+    // the `*_json` helpers `build_scene` calls, plus the two little pieces
+    // (`stack_fields`/`corpse_fields`) pulled out of its item loop so the
+    // corpse/stackable shaping is unit-testable without a live Session.
+
+    use anima_core::types::{Position, Serial};
+    use anima_core::world::{Book, PopupEntry, PopupMenu, PromptState, TradeState};
+
+    #[test]
+    fn player_is_ghost_true_only_for_human_ghost_bodies() {
+        let mut w = World::default();
+        assert!(!player_is_ghost(&w), "no player yet");
+
+        w.player = Some(Serial(1));
+        w.mobile_mut(1).body = 400; // ordinary human male
+        assert!(!player_is_ghost(&w));
+
+        w.mobile_mut(1).body = 402; // human ghost (male)
+        assert!(player_is_ghost(&w));
+        w.mobile_mut(1).body = 403; // human ghost (female)
+        assert!(player_is_ghost(&w));
+    }
+
+    #[test]
+    fn trades_json_empty_when_no_sessions_reflects_when_open() {
+        let mut w = World::default();
+        assert_eq!(trades_json(&w), json!([]), "no trades → empty array");
+
+        w.open_trade(TradeState {
+            opponent_serial: 0x1001,
+            opponent_name: "Bob".to_string(),
+            my_container: 0x2001,
+            their_container: 0x2002,
+            my_accept: true,
+            their_accept: false,
+            my_offer_gold: 50,
+            my_offer_platinum: 0,
+            their_offer_gold: 0,
+            their_offer_platinum: 1,
+            balance_gold: 500,
+            balance_platinum: 2,
+        });
+        let v = trades_json(&w);
+        let arr = v.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        let t = &arr[0];
+        assert_eq!(t["opponent"], "Bob");
+        assert_eq!(t["opponentSerial"], 0x1001);
+        assert_eq!(t["myCont"], 0x2001);
+        assert_eq!(t["theirCont"], 0x2002);
+        assert_eq!(t["myAccept"], true);
+        assert_eq!(t["theirAccept"], false);
+        assert_eq!(t["myOfferGold"], 50);
+        assert_eq!(t["theirOfferPlat"], 1);
+        assert_eq!(t["balanceGold"], 500);
+    }
+
+    #[test]
+    fn prompt_json_reports_active_and_ids_or_inactive() {
+        let mut w = World::default();
+        assert_eq!(prompt_json(&w), json!({ "active": 0 }), "no prompt pending");
+
+        w.prompt = Some(PromptState { sender_serial: 0x77, prompt_id: 42 });
+        assert_eq!(
+            prompt_json(&w),
+            json!({ "active": 1, "serial": 0x77, "promptId": 42 })
+        );
+    }
+
+    #[test]
+    fn stack_fields_marks_stackable_only_when_flagged() {
+        // A stack of reagents (Stackable tiledata flag set): "amount" + "st":1 so
+        // the renderer offers the split-stack dialog.
+        assert_eq!(stack_fields(40, true), json!({ "amount": 40, "st": 1 }));
+        // A non-stackable item (e.g. a sword) never gets "st", even with
+        // amount > 1 (shouldn't normally happen, but the field must still be
+        // omitted so the renderer doesn't offer to split it).
+        assert_eq!(stack_fields(1, false), json!({ "amount": 1 }));
+        assert_eq!(stack_fields(5, false), json!({ "amount": 5 }));
+    }
+
+    #[test]
+    fn corpse_fields_carries_remapped_body_dir_and_death_group() {
+        // Values here are already Corpse.def-remapped/resolved by the caller
+        // (`build_scene`'s item loop) — this just checks the shaping.
+        let v = corpse_fields(/* body */ 26, /* hue */ 1102, /* dir */ 3, /* dg */ 8);
+        assert_eq!(v, json!({ "body": 26, "dir": 3, "dg": 8, "hue": 1102 }));
+    }
+
+    #[test]
+    fn party_json_reports_members_leader_and_pending_invite() {
+        let mut w = World::default();
+        // Not in a party: empty members, leader 0, no invite.
+        assert_eq!(
+            party_json(&w),
+            json!({ "leader": 0, "members": [], "invite": 0 })
+        );
+
+        w.party.leader = 0x100;
+        w.party.members = vec![0x100, 0x101];
+        w.party.pending_invite = Some(0x200);
+        // Member 0x101 is in view (has a Mobile); 0x100 (the leader) isn't, so it
+        // falls back to the "Member"/0/0 placeholder.
+        w.mobile_mut(0x101).name = "Alice".to_string();
+        w.mobile_mut(0x101).hits = 80;
+        w.mobile_mut(0x101).hits_max = 100;
+        let v = party_json(&w);
+        assert_eq!(v["leader"], 0x100);
+        assert_eq!(v["invite"], 0x200);
+        let members = v["members"].as_array().unwrap();
+        assert_eq!(members[0]["name"], "Member"); // 0x100 not in view
+        assert_eq!(members[1]["name"], "Alice");
+        assert_eq!(members[1]["hits"], 80);
+        assert_eq!(members[1]["hitsMax"], 100);
+    }
+
+    #[test]
+    fn popup_json_null_when_absent_resolves_entries_when_open() {
+        let mut w = World::default();
+        assert_eq!(popup_json(&w, None), Value::Null);
+
+        w.popup = Some(PopupMenu {
+            serial: 0x555,
+            entries: vec![PopupEntry { index: 0, cliloc: 3000123, flags: 0 }],
+        });
+        let v = popup_json(&w, None);
+        assert_eq!(v["serial"], 0x555);
+        // No Cliloc table available → falls back to "#<id>".
+        assert_eq!(v["entries"][0]["text"], "#3000123");
+        assert_eq!(v["entries"][0]["index"], 0);
+    }
+
+    #[test]
+    fn book_json_null_when_absent_full_when_open() {
+        let mut w = World::default();
+        assert_eq!(book_json(&w), Value::Null);
+
+        w.book = Some(Book {
+            serial: 0x900,
+            title: "Notes".to_string(),
+            author: "Anon".to_string(),
+            writable: true,
+            page_count: 2,
+            pages: vec![vec!["hello".to_string()], vec![]],
+        });
+        let v = book_json(&w);
+        assert_eq!(v["title"], "Notes");
+        assert_eq!(v["writable"], true);
+        assert_eq!(v["pageCount"], 2);
+        assert_eq!(v["pages"][0][0], "hello");
+    }
+
+    #[test]
+    fn map_index_defaults_to_felucca_and_updates_via_on_map_change() {
+        // Feeds `build_scene`'s "facet" field directly (`s.world.map_index`, no
+        // further shaping) — see `World::map_index`'s doc.
+        let mut w = World::default();
+        assert_eq!(w.map_index, 0, "facet defaults to Felucca (0)");
+        w.player = Some(Serial(1));
+        w.mobile_mut(1).pos = Position { x: 100, y: 100, z: 0 };
+        w.on_map_change(2); // Ilshenar
+        assert_eq!(w.map_index, 2);
     }
 }
 
