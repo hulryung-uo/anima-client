@@ -12,6 +12,12 @@
 //! ([`Anim::remap_corpse`]) is the same idea applied to a dead creature's corpse
 //! body (which travels in the corpse item's `amount` field), used with
 //! [`Anim::death_group`] to pick the death-pose sprite for a corpse on the ground.
+//!
+//! Some worn equipment also looks different per wearer: `Equipconv.def`
+//! ([`Anim::equip_conv`]) maps (wearer body, item's tiledata AnimID) → a
+//! replacement anim graphic + explicit paperdoll gump id + fallback hue — e.g. a
+//! human female wearing a "male-cut" robe graphic actually animates/paperdolls as
+//! the female graphic. Ported from ClassicUO `ProcessEquipConvDef`.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -40,6 +46,17 @@ struct AnimFile {
     mul: Mutex<File>,
 }
 
+/// One `Equipconv.def` conversion (ClassicUO `EquipConvData`): the replacement
+/// anim graphic to draw instead of the item's own tiledata AnimID, an explicit
+/// paperdoll gump id, and a fallback hue. See [`Anim::equip_conv`] for the lookup
+/// contract and how `gump`'s 0/-1 special cases are resolved at parse time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EquipConv {
+    pub graphic: u16,
+    pub gump: u16,
+    pub hue: u16,
+}
+
 pub struct Anim {
     /// Animation files indexed by ClassicUO file index: `[0]` = `anim.mul`, `[1]`
     /// = `anim2.mul`, … `[4]` = `anim5.mul`. `Bodyconv.def` redirects a body into
@@ -56,6 +73,9 @@ pub struct Anim {
     /// `mobtypes.txt` type: body id → group kind (0 = monster/high, 1 = animal/low,
     /// 2 = people). Authoritative over the graphic-range heuristic when present.
     mobtypes: HashMap<u16, u8>,
+    /// `Equipconv.def`: (wearer body, item's tiledata AnimID) → conversion. See
+    /// [`Self::equip_conv`].
+    equipconv: HashMap<(u16, u16), EquipConv>,
 }
 
 impl Anim {
@@ -91,6 +111,10 @@ impl Anim {
             mobtypes: std::fs::read_to_string(dir.join("mobtypes.txt"))
                 .map(|t| parse_mob_types(&t))
                 .unwrap_or_default(),
+            // Equipconv.def is optional (older shards lack it); absent → no conversions.
+            equipconv: std::fs::read_to_string(dir.join("Equipconv.def"))
+                .map(|t| parse_equip_conv(&t))
+                .unwrap_or_default(),
         })
     }
 
@@ -109,6 +133,15 @@ impl Anim {
     /// only a fallback. Unmapped → `(body, 0)`.
     pub fn remap_corpse(&self, body: u16) -> (u16, u16) {
         self.corpsedef.get(&body).copied().unwrap_or((body, 0))
+    }
+
+    /// Look up `Equipconv.def`'s conversion for `(wearer body, item's tiledata
+    /// AnimID)` — ClassicUO `EquipConversions[body][item.AnimID]`, the SAME two
+    /// keys `MobileView`/`ItemView`/`PaperDollInteractable.GetAnimID` use. `body`
+    /// must already be [`Self::remap`]-ed (ClassicUO looks this up AFTER
+    /// `ConvertBodyIfNeeded`). `None` when this pair has no conversion.
+    pub fn equip_conv(&self, body: u16, item_anim: u16) -> Option<EquipConv> {
+        self.equipconv.get(&(body, item_anim)).copied()
     }
 
     /// The primary ("first") death-pose animation group for `body` (already
@@ -425,6 +458,58 @@ fn parse_body_conv(text: &str) -> HashMap<u16, (u8, u16)> {
     map
 }
 
+/// Parse `Equipconv.def`: each data line is `body graphic newGraphic gump hue`
+/// (ClassicUO `ProcessEquipConvDef`, a `DefReader` with `minsize = 5`). `gump`'s
+/// special cases are resolved right here, at parse time, exactly like ClassicUO:
+/// a value over `u16::MAX` drops the WHOLE line (the entry is never inserted);
+/// `0` means "use the item's own graphic"; `0xFFFF`/`-1` means "use newGraphic";
+/// any other value is used as-is (it may already be a fully-baked gump id, e.g.
+/// `61250` — see [`Anim::equip_conv`]'s caller for how that's turned into an
+/// absolute paperdoll gump). `#` starts a comment; malformed lines are skipped.
+fn parse_equip_conv(text: &str) -> HashMap<(u16, u16), EquipConv> {
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut toks = line.split_whitespace();
+        let (Some(body), Some(graphic), Some(new_graphic), Some(gump)) = (
+            toks.next().and_then(parse_def_int),
+            toks.next().and_then(parse_def_int),
+            toks.next().and_then(parse_def_int),
+            toks.next().and_then(parse_def_int),
+        ) else {
+            continue;
+        };
+        if gump > 0xFFFF {
+            continue; // ClassicUO: out-of-range gump silently drops the whole entry.
+        }
+        let gump = if gump == 0 {
+            graphic
+        } else if gump == 0xFFFF || gump == -1 {
+            new_graphic
+        } else {
+            gump
+        };
+        let Some(hue) = toks.next().and_then(parse_def_int) else { continue };
+        if !(0..=0xFFFF).contains(&body) || !(0..=0xFFFF).contains(&graphic) || !(0..=0xFFFF).contains(&new_graphic) {
+            continue;
+        }
+        map.insert(
+            (body as u16, graphic as u16),
+            EquipConv {
+                graphic: new_graphic as u16,
+                // `gump` was already range-checked (<= 0xFFFF) or replaced above with
+                // `graphic`/`new_graphic`, both already validated — always in range.
+                gump: gump as u16,
+                hue: hue.clamp(0, 0xFFFF) as u16,
+            },
+        );
+    }
+    map
+}
+
 /// Graphic-range group kind (0 = monster/high, 1 = animal/low, 2 = people) for a
 /// file — ClassicUO `CalculateTypeByGraphic`. `anim2` splits monster/animal at 200;
 /// `anim3` is animal <300, monster 300..400, people ≥400; the base file and
@@ -594,6 +679,7 @@ bad line without braces
             bodyconv: HashMap::new(),
             mobtypes,
             corpsedef,
+            equipconv: HashMap::new(),
         }
     }
 
@@ -650,6 +736,57 @@ bad
         assert_eq!(map.get(&300), Some(&(2, 5)));
         // Columns 3 and 4 both valid → the later (higher) column wins: anim5 (4).
         assert_eq!(map.get(&900), Some(&(4, 7)));
+    }
+
+    #[test]
+    fn equip_conv_parses_gump_special_cases() {
+        let def = "\
+# 15th Anniversary Robes: gump given explicitly (already a baked female gump id)
+401\t1249\t1250\t61250\t0\t#\tHuman M to F
+# gump 0 → use the item's own graphic (female chain substitution)
+401\t538\t986\t0\t0\t#\tfemale chain substitution
+# gump -1 → use newGraphic
+606\t968\t977\t-1\t0\t#\thide chest
+# gump 0xFFFF (equivalent to -1) → use newGraphic
+605\t1\t2\t65535\t7\t#\tsynthetic 0xFFFF case
+# out-of-range gump (> u16::MAX) → the WHOLE line is dropped
+700\t9\t10\t100000\t0
+bad line
+";
+        let map = parse_equip_conv(def);
+        assert_eq!(map.get(&(401, 1249)), Some(&EquipConv { graphic: 1250, gump: 61250, hue: 0 }));
+        assert_eq!(map.get(&(401, 538)), Some(&EquipConv { graphic: 986, gump: 538, hue: 0 }));
+        assert_eq!(map.get(&(606, 968)), Some(&EquipConv { graphic: 977, gump: 977, hue: 0 }));
+        assert_eq!(map.get(&(605, 1)), Some(&EquipConv { graphic: 2, gump: 2, hue: 7 }));
+        // Dropped entirely — never inserted under any key.
+        assert_eq!(map.get(&(700, 9)), None);
+        assert_eq!(map.len(), 4);
+    }
+
+    #[test]
+    fn equip_conv_lookup_is_keyed_by_wearer_body_and_item_anim() {
+        let def = "401\t1249\t1250\t61250\t0\n606\t1249\t1252\t61252\t0\n";
+        let mut anim = test_anim(HashMap::new(), HashMap::new());
+        anim.equipconv = parse_equip_conv(def);
+        // Same item AnimID (1249), different wearer body → different conversion.
+        assert_eq!(anim.equip_conv(401, 1249), Some(EquipConv { graphic: 1250, gump: 61250, hue: 0 }));
+        assert_eq!(anim.equip_conv(606, 1249), Some(EquipConv { graphic: 1252, gump: 61252, hue: 0 }));
+        // Unmapped (body, item) pair → None.
+        assert_eq!(anim.equip_conv(400, 1249), None);
+    }
+
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource (real Equipconv.def)
+    fn equip_conv_real_data_sanity() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let anim = Anim::open(&dir).expect("open anim");
+        assert!(!anim.equipconv.is_empty(), "Equipconv.def should have loaded entries");
+        // Every stored gump is a valid u16 (parse-time range checks held) and every
+        // entry is reachable through the public lookup under its own keys.
+        for (&(body, graphic), ec) in &anim.equipconv {
+            assert_eq!(anim.equip_conv(body, graphic), Some(*ec));
+        }
+        println!("Equipconv.def: {} entries", anim.equipconv.len());
     }
 
     #[test]

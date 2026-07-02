@@ -21,6 +21,33 @@ fn mount_anim_for(graphic: u16, item_anim: &impl Fn(u16) -> u16) -> u16 {
     }
 }
 
+/// Paperdoll gender-gump offsets (ClassicUO `Constants.MALE_GUMP_OFFSET` /
+/// `FEMALE_GUMP_OFFSET`): a worn item's paperdoll art lives at `animID + offset`,
+/// one offset per gender.
+const MALE_GUMP_OFFSET: u32 = 50_000;
+const FEMALE_GUMP_OFFSET: u32 = 60_000;
+
+/// Turn an `Equipconv.def` gump column ([`anima_assets::EquipConv::gump`], already
+/// 0/-1-substituted by the parser) into an absolute paperdoll gump id for
+/// `wearer_body`. Mirrors ClassicUO `PaperDollInteractable.GetAnimID`: a value
+/// above [`MALE_GUMP_OFFSET`] is already a baked gump id for SOME gender — strip
+/// whichever offset it carries and re-add the offset for the wearer's ACTUAL
+/// gender; a bare graphic id (below the offset) just gets that offset added.
+/// UO's female people bodies are exactly 401/403 (human), 606 (elf), 667
+/// (gargoyle) — 606 is even, so this is NOT a parity test (ClassicUO
+/// `Mobile.CheckGraphicChange`).
+fn equip_conv_gump(wearer_body: u16, gump: u16) -> u16 {
+    let gump = gump as u32;
+    let base = if gump > MALE_GUMP_OFFSET {
+        if gump >= FEMALE_GUMP_OFFSET { gump - FEMALE_GUMP_OFFSET } else { gump - MALE_GUMP_OFFSET }
+    } else {
+        gump
+    };
+    let female = matches!(wearer_body, 401 | 403 | 606 | 667);
+    let offset = if female { FEMALE_GUMP_OFFSET } else { MALE_GUMP_OFFSET };
+    (base + offset) as u16
+}
+
 /// Is tile (x, y) walkable for a body at `current_z`? Combines the static map
 /// (land + statics, via [`MapData::walkable_z`]) with **dynamic world items** —
 /// an impassable placed object (e.g. a crate) blocks too. Both the renderer's
@@ -923,6 +950,26 @@ pub fn build_scene(
     // on the map. `map` is consumed by the tile loop below, so resolve anims through
     // this shared-borrow helper while it's still available (0 when there's no map).
     let item_anim = |g: u16| map.as_deref().map_or(0u16, |m| m.item_anim(g));
+    // `Equipconv.def` override (ClassicUO `EquipConversions[body][item.AnimID]`,
+    // consulted by `MobileView`/`ItemView` for the world sprite and
+    // `PaperDollInteractable.GetAnimID` for the paperdoll): given the wearer's
+    // REMAPPED `body` and an item's tiledata `base_anim`, return the replacement
+    // `(anim graphic, paperdoll gump id, hue)`. `anim` is always overridden when a
+    // conversion exists (ClassicUO's unconditional `graphic = data.Graphic`);
+    // `gump` is `Some` only then (`None` ⇒ caller keeps its own `anim + gender
+    // offset` paperdoll convention); `hue` is the item's own hue, falling back to
+    // the conversion's hue only when the item has none (ClassicUO:
+    // `if (hue == 0 && _equipConvData.HasValue) hue = _equipConvData.Value.Color`).
+    let equip_conv = |body: u16, base_anim: u16, item_hue: u16| -> (u16, Option<u16>, u16) {
+        match anim.and_then(|a| a.equip_conv(body, base_anim)) {
+            Some(ec) => (
+                ec.graphic,
+                Some(equip_conv_gump(body, ec.gump)),
+                if item_hue != 0 { item_hue } else { ec.hue },
+            ),
+            None => (base_anim, None, item_hue),
+        }
+    };
     // Does an item graphic emit light (torch/lamp/brazier)? Resolved through the
     // shared borrow before `map` is consumed by the tile loop below.
     let item_is_light = |g: u16| map.as_deref().is_some_and(|m| m.item_is_light(g));
@@ -963,10 +1010,15 @@ pub fn build_scene(
                     .values()
                     .filter(|it| it.container == Some(m.serial) && it.layer != 0)
                     .map(|it| {
-                        json!({
+                        let (a, gump, hue) = equip_conv(body, item_anim(it.graphic), it.hue);
+                        let mut v = json!({
                             "serial": it.serial, "layer": it.layer, "g": it.graphic,
-                            "anim": item_anim(it.graphic), "hue": it.hue
-                        })
+                            "anim": a, "hue": hue
+                        });
+                        if let Some(g) = gump {
+                            v["gump"] = json!(g);
+                        }
+                        v
                     })
                     .collect()
             } else {
@@ -1042,16 +1094,24 @@ pub fn build_scene(
     }
     // The player's worn items (container == us, on a real layer) drive the
     // paperdoll. Layer 0 = not equipped; the backpack itself is layer 0x15.
+    // `Equipconv.def` is keyed by the wearer's REMAPPED body (same as the mobiles
+    // loop above), computed once here for every worn item.
+    let (equip_body, _) = remap(p.body, p.hue);
     let equip: Vec<Value> = s
         .world
         .items
         .values()
         .filter(|it| it.container == Some(p.serial) && it.layer != 0)
         .map(|it| {
-            json!({
+            let (a, gump, hue) = equip_conv(equip_body, item_anim(it.graphic), it.hue);
+            let mut v = json!({
                 "serial": it.serial, "g": it.graphic, "layer": it.layer,
-                "anim": item_anim(it.graphic), "hue": it.hue
-            })
+                "anim": a, "hue": hue
+            });
+            if let Some(g) = gump {
+                v["gump"] = json!(g);
+            }
+            v
         })
         .collect();
     // The player's mount item (layer 25) AnimID — the animal body to draw under the
@@ -1479,6 +1539,26 @@ mod tests {
         let (els, _w, _h) = parse_gump_layout(layout, &text, None);
         assert_eq!(els[0]["s"], "Hello world");
         assert_eq!(els[1]["s"], "#1015313"); // cliloc placeholder (no table)
+    }
+
+    #[test]
+    fn equip_conv_gump_resolves_bare_and_baked_ids() {
+        // A bare graphic id (below MALE_GUMP_OFFSET) just gets the wearer's gender
+        // offset added — e.g. Equipconv.def's "0 → equipmentID" / "-1 → newGraphic"
+        // cases store a plain item graphic like 538 or 977.
+        assert_eq!(equip_conv_gump(400, 538), 50_538); // male wearer
+        assert_eq!(equip_conv_gump(401, 538), 60_538); // female wearer (401)
+        // A value already baked with SOME gender's offset gets that offset
+        // stripped and the wearer's ACTUAL gender's offset re-added (ClassicUO
+        // `GetAnimID`) — here the def literally stores the female-baked 61250 for
+        // a female (401) wearer, so it round-trips unchanged...
+        assert_eq!(equip_conv_gump(401, 61_250), 61_250);
+        // ...but a MALE wearer (400) re-bases it onto the male offset instead.
+        assert_eq!(equip_conv_gump(400, 61_250), 51_250);
+        // A male-baked id (50xxx) re-based onto a female wearer.
+        assert_eq!(equip_conv_gump(401, 50_684), 60_684);
+        // Elf female body (606) is EVEN — must not fall out via a parity test.
+        assert_eq!(equip_conv_gump(606, 538), 60_538);
     }
 }
 

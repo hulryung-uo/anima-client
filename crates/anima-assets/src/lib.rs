@@ -19,7 +19,7 @@ pub mod texmap;
 pub mod tiledata;
 pub mod uop;
 
-pub use anim::Anim;
+pub use anim::{Anim, EquipConv};
 pub use animdata::AnimData;
 pub use art::{Art, Image};
 pub use cliloc::Cliloc;

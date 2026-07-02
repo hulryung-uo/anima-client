@@ -3540,14 +3540,21 @@ function refreshPaperdoll() {
     const e = byLayer[layer];
     if (!e) continue;
     const hueQ = e.hue ? `?hue=${e.hue}` : "";
+    // Equipconv.def override: the server already resolved a gender-correct
+    // absolute gump id (anima-net `equip_conv_gump`) when this item's (wearer
+    // body, AnimID) has a conversion — use it as-is. Otherwise fall back to the
+    // plain AnimID + gender-offset convention.
+    const gid = e.gump != null ? e.gump : e.anim + gOff;
     // Hide any item whose paperdoll gump is missing rather than show a broken "?".
-    // Female items may lack a female gump → fall back to the male offset first.
+    // Female items (no explicit override) may lack a female gump → fall back to
+    // the male offset first; an explicit `gump` is already gender-resolved, so it
+    // just hides on error instead of guessing another id.
     const hide = "this.onerror=null;this.style.display='none'";
-    const onerr = female
+    const onerr = (e.gump == null && female)
       ? `this.onerror=function(){${hide}};this.src='gump/${e.anim + MALE_GUMP_OFFSET}.png${hueQ}'`
       : hide;
     // Tag each layer so hovering the figure (per-pixel hit-test) can resolve the item.
-    h += `<img src="gump/${e.anim + gOff}.png${hueQ}" alt="" crossorigin="anonymous" draggable="false"`
+    h += `<img src="gump/${gid}.png${hueQ}" alt="" crossorigin="anonymous" draggable="false"`
       + ` data-serial="${e.serial >>> 0}" data-layer="${e.layer}" data-g="${e.g}" data-hue="${e.hue | 0}" onerror="${onerr}">`;
   }
   h += "</div>";
