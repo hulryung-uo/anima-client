@@ -906,6 +906,14 @@ pub fn build_scene(
             |a| a.anim_type(body),
         )
     };
+    // `Corpse.def` remap (ClassicUO ReplaceCorpse): the SAME idea as `remap` above,
+    // but a separate table applied to a corpse item's body (which travels in the
+    // item's `amount` field — ClassicUO `Item.GetGraphicForAnimation`'s `IsCorpse`
+    // special case). The corpse's own hue still wins over Corpse.def's fallback.
+    let remap_corpse = |body: u16, hue: u16| -> (u16, u16) {
+        let (rbody, rhue) = anim.map_or((body, 0), |a| a.remap_corpse(body));
+        (rbody, if hue != 0 { hue } else { rhue })
+    };
     let p = s.world.player_mobile().cloned().unwrap_or_default();
     let st = &s.world.player_stats;
     let mounted = s.world.player_mounted();
@@ -1000,6 +1008,18 @@ pub fn build_scene(
             // Mark containers so double-click opens a loot window (doors don't).
             if item_is_cont(it.graphic) {
                 v["c"] = json!(1);
+            }
+            // A corpse (graphic 0x2006): the dead creature's BODY id rides in
+            // `amount` (see `Item::amount`'s doc comment) and its facing in
+            // `direction`. Remap through Corpse.def, resolve the primary death-pose
+            // group, and hand the renderer everything it needs to draw the real
+            // death-pose sprite instead of the generic corpse art.
+            if it.graphic == 0x2006 {
+                let (body, hue) = remap_corpse(it.amount, it.hue);
+                v["body"] = json!(body);
+                v["dir"] = json!(it.direction);
+                v["dg"] = json!(anim.map_or(0, |a| a.death_group(body)));
+                v["hue"] = json!(hue);
             }
             v
         })

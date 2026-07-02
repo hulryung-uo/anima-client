@@ -8,7 +8,10 @@
 //! Body coverage: people bodies (human 400/401, elf, gargoyle) use the high
 //! formula; everything else uses the monster formula. `Body.def` remapping
 //! ([`Anim::remap`]) redirects exotic body ids to a real animation body (+ a
-//! fallback hue) so they resolve instead of falling back to a marker.
+//! fallback hue) so they resolve instead of falling back to a marker. `Corpse.def`
+//! ([`Anim::remap_corpse`]) is the same idea applied to a dead creature's corpse
+//! body (which travels in the corpse item's `amount` field), used with
+//! [`Anim::death_group`] to pick the death-pose sprite for a corpse on the ground.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -25,6 +28,11 @@ pub const PEOPLE_STAND: u8 = 4;
 pub const ANIMAL_STAND: u8 = 2;
 /// Monster/"high" groups (22 groups × 5 = 110 entries/body): Walk=0, Stand=1.
 pub const MONSTER_STAND: u8 = 1;
+/// Primary death-pose group per kind (ClassicUO `HighAnimationGroup`/
+/// `LowAnimationGroup`/`PeopleAnimationGroup`'s `Die1`), used by [`Anim::death_group`].
+pub const MONSTER_DIE1: u8 = 2;
+pub const ANIMAL_DIE1: u8 = 8;
+pub const PEOPLE_DIE1: u8 = 21;
 
 /// One legacy animation file pair (`animN.idx` + `animN.mul`).
 struct AnimFile {
@@ -39,6 +47,10 @@ pub struct Anim {
     files: Vec<Option<AnimFile>>,
     /// `Body.def` remap: exotic body id → (real animation body, fallback hue).
     bodydef: HashMap<u16, (u16, u16)>,
+    /// `Corpse.def` remap: same idea as `bodydef` but applied to a corpse item's
+    /// body (ClassicUO `ReplaceCorpse`) — a SEPARATE table, since a creature's
+    /// corpse doesn't always animate from the same body id as the living creature.
+    corpsedef: HashMap<u16, (u16, u16)>,
     /// `Bodyconv.def` redirect: body id → (file index 1..=4, graphic in that file).
     bodyconv: HashMap<u16, (u8, u16)>,
     /// `mobtypes.txt` type: body id → group kind (0 = monster/high, 1 = animal/low,
@@ -68,6 +80,11 @@ impl Anim {
             bodydef: std::fs::read_to_string(dir.join("Body.def"))
                 .map(|t| parse_body_def(&t))
                 .unwrap_or_default(),
+            // Corpse.def is the exact same line format as Body.def (ClassicUO
+            // `ProcessCorpseDef` reuses the identical parse); also optional.
+            corpsedef: std::fs::read_to_string(dir.join("Corpse.def"))
+                .map(|t| parse_body_def(&t))
+                .unwrap_or_default(),
             bodyconv: std::fs::read_to_string(dir.join("Bodyconv.def"))
                 .map(|t| parse_body_conv(&t))
                 .unwrap_or_default(),
@@ -83,6 +100,33 @@ impl Anim {
     /// that hue only when the mobile has none of its own. Unmapped → `(body, 0)`.
     pub fn remap(&self, body: u16) -> (u16, u16) {
         self.bodydef.get(&body).copied().unwrap_or((body, 0))
+    }
+
+    /// Apply `Corpse.def` remapping (ClassicUO `ReplaceCorpse`): return the real
+    /// animation `(body, hue)` for a *corpse's* body (which travels in the ground
+    /// item's `amount` field — see `World::Item::amount`'s doc comment). Same
+    /// caller contract as [`Self::remap`]: the corpse's own hue wins; this hue is
+    /// only a fallback. Unmapped → `(body, 0)`.
+    pub fn remap_corpse(&self, body: u16) -> (u16, u16) {
+        self.corpsedef.get(&body).copied().unwrap_or((body, 0))
+    }
+
+    /// The primary ("first") death-pose animation group for `body` (already
+    /// Corpse.def-remapped — see [`Self::remap_corpse`]), following ClassicUO
+    /// `GetDeathAction`: monster/high Die1 = 2, animal/low Die1 = 8, people Die1 =
+    /// 21. ClassicUO also offers a "second" Die2 variant selected by a running-flag
+    /// bit in the corpse's direction byte; we always draw the primary pose. It also
+    /// gives `SeaMonster` its own fixed group (8) instead of Die1/Die2 — our 3-way
+    /// `anim_type` collapses `sea_monster` into the monster kind (same as
+    /// `stand_group`/`resolveActionGroup` do elsewhere), so a sea monster's corpse
+    /// plays the ordinary monster Die1 pose instead; a small, deliberate loss of
+    /// fidelity consistent with that existing collapse.
+    pub fn death_group(&self, body: u16) -> u8 {
+        match self.anim_type(body) {
+            0 => MONSTER_DIE1,
+            1 => ANIMAL_DIE1,
+            _ => PEOPLE_DIE1,
+        }
     }
 
     /// Resolve `Bodyconv.def`: return the `(file index, graphic)` to read `body`
@@ -540,6 +584,51 @@ bad line without braces
         assert_eq!(map.get(&11).unwrap().0, 28);
     }
 
+    /// Build an `Anim` with no backing files (`entry`/`frame` calls would fail),
+    /// but enough of the def/mobtypes tables populated to exercise the pure
+    /// remap/kind logic below (`remap_corpse`, `anim_type`, `death_group`).
+    fn test_anim(corpsedef: HashMap<u16, (u16, u16)>, mobtypes: HashMap<u16, u8>) -> Anim {
+        Anim {
+            files: Vec::new(),
+            bodydef: HashMap::new(),
+            bodyconv: HashMap::new(),
+            mobtypes,
+            corpsedef,
+        }
+    }
+
+    #[test]
+    fn corpse_def_reuses_body_def_format_and_remaps() {
+        // Corpse.def is parsed with the exact same reader as Body.def.
+        let def = "\
+# a single-id group → group[0], hue carried through
+99 {77} 0
+# 3+ ids → group[2]
+5 {1, 2, 3} 555
+";
+        let anim = test_anim(parse_body_def(def), HashMap::new());
+        assert_eq!(anim.remap_corpse(99), (77, 0));
+        assert_eq!(anim.remap_corpse(5), (3, 555));
+        // Unmapped body passes through unchanged with hue 0 (caller's own hue wins).
+        assert_eq!(anim.remap_corpse(12345), (12345, 0));
+    }
+
+    #[test]
+    fn death_group_picks_primary_group_by_kind() {
+        // No mobtypes entries → falls back to the graphic-range heuristic (monster
+        // <200, animal 200..400, people >=400) for the base file.
+        let anim = test_anim(HashMap::new(), HashMap::new());
+        assert_eq!(anim.death_group(100), MONSTER_DIE1);
+        assert_eq!(anim.death_group(250), ANIMAL_DIE1);
+        assert_eq!(anim.death_group(400), PEOPLE_DIE1);
+
+        // mobtypes.txt overrides the range heuristic, same as anim_type/stand_group.
+        let mut mobtypes = HashMap::new();
+        mobtypes.insert(50, 2); // a "monster" id remapped to people by flags upstream
+        let anim = test_anim(HashMap::new(), mobtypes);
+        assert_eq!(anim.death_group(50), PEOPLE_DIE1);
+    }
+
     #[test]
     fn body_conv_parses_columns_and_last_valid_wins() {
         let def = "\
@@ -632,6 +721,26 @@ not a data line
         }
         println!("Body.def: {} entries, {} bodies gained a sprite via remap", anim.bodydef.len(), gained);
         assert!(gained > 0, "remap should resolve sprites that the raw body id could not");
+    }
+
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource (real Corpse.def + anim.mul)
+    fn corpse_def_remap_and_death_group_resolve_real_frames() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let anim = Anim::open(&dir).expect("open anim");
+        assert!(!anim.corpsedef.is_empty(), "Corpse.def should have loaded entries");
+        // For every remap, the death-pose frame of the *target* body should resolve
+        // (facing south, dir 4) — the same sprite the renderer will draw for a
+        // corpse of that creature.
+        let mut resolved = 0;
+        for &(target, _) in anim.corpsedef.values() {
+            let dg = anim.death_group(target);
+            if anim.frame_count(target, dg, 4).unwrap_or(0) > 0 {
+                resolved += 1;
+            }
+        }
+        println!("Corpse.def: {} entries, {} death poses resolved", anim.corpsedef.len(), resolved);
+        assert!(resolved > 0, "death_group should resolve real death-pose frames via Corpse.def");
     }
 
     #[test]

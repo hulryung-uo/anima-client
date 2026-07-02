@@ -34,6 +34,11 @@ pub struct Mobile {
 pub struct Item {
     pub serial: u32,
     pub graphic: u16,
+    /// Stack count for a normal item; for a corpse (`graphic == 0x2006`) the server
+    /// overloads this field with the dead creature's BODY id instead (ServUO
+    /// `Corpse.Amount = owner.Body`; ClassicUO `Item.GetGraphicForAnimation`
+    /// special-cases `IsCorpse` to return `Amount`). The renderer, not this crate,
+    /// interprets which meaning applies.
     pub amount: u16,
     pub pos: Position,
     /// Container serial, or `None` when lying on the ground.
@@ -42,6 +47,11 @@ pub struct Item {
     pub layer: u8,
     pub hue: u16,
     pub name: String,
+    /// Facing (low 3 bits, 0..7), sent as a per-item byte on 0x1A/0xF3 — only
+    /// meaningful for a corpse (graphic `0x2006`), where it orients the death-pose
+    /// sprite (ClassicUO stores this same wire byte as both `Item.Direction` and,
+    /// reused, `Item.LightID`/`Layer`; we only need the facing).
+    pub direction: u8,
 }
 
 /// Self-only fields that don't live on the player's [`Mobile`].

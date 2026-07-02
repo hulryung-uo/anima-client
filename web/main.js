@@ -1120,14 +1120,43 @@ function syncWorld(s) {
     const key = it.serial;
     seenI.add(key);
     const iz = it.z | 0;
+    // A corpse (graphic 0x2006) carries the dead creature's Corpse.def-remapped
+    // body, facing and death-pose group from the server (see scene.rs). Once that
+    // anim's frame count AND the last frame's texture have both loaded, draw the
+    // held death-pose frame instead of the generic corpse art; until then (or if
+    // the anim is absent) `corpseUrl` stays null and we fall through to the static
+    // art below, same as any other item.
+    let corpseUrl = null, corpseFrame = -1, corpseTex = null;
+    if (it.g === 0x2006 && it.body != null) {
+      const dir = it.dir & 7, dg = it.dg | 0;
+      framesFor(it.body, dg, dir); // kick the animinfo (frame-count/centers) load
+      const fk = `${it.body}/${dg}/${dir}`;
+      const loaded = frameCount.has(fk) ? frameCount.get(fk) : 0;
+      if (loaded > 0) {
+        corpseFrame = loaded - 1; // the death pose's final (held) frame
+        const url = `anim/${it.body}/${dg}/${dir}/${corpseFrame}.png` + (it.hue ? `?hue=${it.hue}` : "");
+        const t = texFor(url);
+        if (t) { corpseUrl = url; corpseTex = t; }
+      }
+    }
     const e = itemPool.get(key);
-    if (e && e.g === it.g && e.x === it.x && e.y === it.y && e.z === iz) continue; // unchanged
-    const tex = texFor(`art/static/${it.g}.png`);
+    if (e && e.g === it.g && e.x === it.x && e.y === it.y && e.z === iz && e.corpseUrl === corpseUrl) continue; // unchanged
+    const tex = corpseTex || texFor(`art/static/${it.g}.png`);
     if (!tex) continue; // await art, retry next poll
     if (e) { world.removeChild(e.sp); e.sp.destroy(); }
     const sp = new PIXI.Sprite(tex);
-    sp.anchor.set(0.5, 1.0);
-    sp.x = isoX(it.x, it.y); sp.y = isoY(it.x, it.y, iz) + HALF;
+    const x = isoX(it.x, it.y), y = isoY(it.x, it.y, iz);
+    // A resolved death-pose frame anchors by its draw-center, same as a mobile's
+    // anim frames (see drawMobs' `part()`); otherwise (loading, or a non-corpse
+    // item) foot-anchor like any static.
+    const c = corpseUrl ? centerFor(it.body, it.dg | 0, it.dir & 7, corpseFrame) : null;
+    if (c) {
+      sp.anchor.set(0, 0);
+      sp.x = x - c[0]; sp.y = (y - 3) - tex.height - c[1];
+    } else {
+      sp.anchor.set(0.5, 1.0);
+      sp.x = x; sp.y = y + HALF;
+    }
     sp.zIndex = depthZ(it.x, it.y, it.pz ?? iz, 5); // bias 5: just above same-tile statics
     // Tile + foliage flag for the transparency pass (circle-of-transparency / foliage fade).
     sp._tx = it.x; sp._ty = it.y; sp._foliage = !!it.f;
@@ -1137,7 +1166,7 @@ function syncWorld(s) {
     sp.on("pointerover", () => { hoverEntity(serial); targetHighlightOn(sp); });
     sp.on("pointerout", () => { hoverOut(serial); targetHighlightOff(sp); });
     world.addChild(sp);
-    itemPool.set(key, { sp, g: it.g, x: it.x, y: it.y, z: iz });
+    itemPool.set(key, { sp, g: it.g, x: it.x, y: it.y, z: iz, corpseUrl });
     markDirty();
   }
   for (const [k, e] of itemPool) {

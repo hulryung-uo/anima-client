@@ -141,8 +141,12 @@ fn put_in_container(world: &mut World, rec: (u32, u16, u16, u16, u16, u32, u16))
 
 /// 0xF3 WorldItemHS — a ground item, the modern form ServUO sends to 7.0.9+
 /// clients (supersedes 0x1A). `[id][unk:u16][type:u8][serial:u32][graphic:u16]
-/// [inc:u8][amount:u16][amount2:u16][x:u16][y:u16][z:i8][light:u8][hue:u16][flags:u8]`.
-/// `type == 2` is a multi (house/boat), not a normal item — skipped.
+/// [inc:u8][amount:u16][amount2:u16][x:u16][y:u16][z:i8][direction:u8][hue:u16][flags:u8]`.
+/// `type == 2` is a multi (house/boat), not a normal item — skipped. The
+/// `direction` byte only matters for a corpse (`graphic == 0x2006`), which uses it
+/// to orient the death-pose sprite (ClassicUO `UpdateItemSA`/`Item.Direction`;
+/// same wire byte it also reuses as `LightID` for non-corpse items, which we don't
+/// model).
 fn world_item_hs(world: &mut World, frame: &[u8]) -> PResult<()> {
     if frame.len() < 24 {
         return Ok(());
@@ -158,7 +162,7 @@ fn world_item_hs(world: &mut World, frame: &[u8]) -> PResult<()> {
     let x = r.u16()?;
     let y = r.u16()?;
     let z = r.i8()?;
-    r.skip(1)?; // light / direction
+    let direction = r.u8()?;
     let hue = r.u16()?;
     if data_type == 0x02 {
         return Ok(()); // multi — not a pickable item
@@ -172,6 +176,7 @@ fn world_item_hs(world: &mut World, frame: &[u8]) -> PResult<()> {
     it.amount = amount.max(1);
     it.container = None;
     it.layer = 0;
+    it.direction = direction & 0x07;
     Ok(())
 }
 
@@ -408,9 +413,13 @@ fn world_item(world: &mut World, frame: &[u8]) -> PResult<()> {
 
     let mut x = r.u16()?;
     let mut y = r.u16()?;
+    // The direction byte is only present when this flag bit is set (ClassicUO
+    // `UpdateItem`); absent → facing stays 0. Only meaningful for a corpse
+    // (`graphic == 0x2006`), which uses it to orient the death-pose sprite.
+    let mut direction = 0u8;
     if x & 0x8000 != 0 {
         x &= 0x7FFF;
-        r.skip(1)?; // direction
+        direction = r.u8()?;
     }
     let z = r.i8()?;
     let mut hue = 0u16;
@@ -431,6 +440,7 @@ fn world_item(world: &mut World, frame: &[u8]) -> PResult<()> {
     it.hue = hue;
     it.amount = if amount == 0 { 1 } else { amount };
     it.container = None; // on the ground
+    it.direction = direction & 0x07;
     Ok(())
 }
 
@@ -1560,6 +1570,60 @@ mod tests {
         assert_eq!(it.graphic, 0x0FB1);
         assert_eq!((it.pos.x, it.pos.y), (2566, 493));
         assert_eq!(it.container, None);
+    }
+
+    #[test]
+    fn world_item_hs_corpse_carries_body_and_direction() {
+        let mut w = World::new();
+        // 0xF3: a corpse (graphic 0x2006) — the dead creature's body (400 = human
+        // male) rides in `amount`, its facing (south = 5) in the direction byte.
+        let mut p = PacketWriter::new();
+        p.u8(0xF3).u16(0x0001).u8(0x00); // id, unk, data_type=item
+        p.u32(0x4000_2000).u16(0x2006).u8(0); // serial, graphic, inc
+        p.u16(400).u16(400); // amount (body id), amount2 (repeated)
+        p.u16(1500).u16(1600).u8(10i8 as u8); // x, y, z
+        p.u8(5).u16(0x0044).u8(0); // direction, hue, flags
+        apply_packet(&mut w, &p.into_vec());
+        let it = w.items.get(&0x4000_2000).expect("corpse item added");
+        assert_eq!(it.graphic, 0x2006);
+        assert_eq!(it.amount, 400); // dead creature's body id
+        assert_eq!(it.direction, 5);
+        assert_eq!(it.hue, 0x0044);
+    }
+
+    #[test]
+    fn world_item_legacy_corpse_direction_only_when_flagged() {
+        let mut w = World::new();
+        // 0x1A: a corpse (graphic 0x2006), body 0x00EE in `amount`, direction byte
+        // present (x's 0x8000 flag) and hue present (y's 0x8000 flag).
+        let mut p = PacketWriter::new();
+        p.u8(0x1A).u16(0); // id, len (unused — frame is read from offset 3)
+        p.u32(0x8000_0000 | 0x4000_1234); // serial | has_amount flag
+        p.u16(0x2006); // graphic (corpse, no inc-flag bit)
+        p.u16(0x00EE); // amount = body id
+        p.u16(0x8000 | 1234); // x | direction-present flag
+        p.u16(0x8000 | 5678); // y | hue-present flag
+        p.u8(5); // direction (present because the x flag was set)
+        p.u8((-2i8) as u8); // z
+        p.u16(0x0033); // hue (present because the y flag was set)
+        apply_packet(&mut w, &p.into_vec());
+        let it = w.items.get(&0x4000_1234).expect("corpse item added");
+        assert_eq!(it.graphic, 0x2006);
+        assert_eq!(it.amount, 0x00EE);
+        assert_eq!(it.direction, 5);
+        assert_eq!(it.hue, 0x0033);
+        assert_eq!((it.pos.x, it.pos.y, it.pos.z), (1234, 5678, -2));
+
+        // A plain item (no direction/hue flags) leaves direction at its default 0.
+        let mut w2 = World::new();
+        let mut p2 = PacketWriter::new();
+        p2.u8(0x1A).u16(0);
+        p2.u32(0x4000_5555); // no has_amount flag
+        p2.u16(0x0EED); // gold graphic, no inc
+        p2.u16(100).u16(200).u8(0i8 as u8); // x, y (no flags), z
+        apply_packet(&mut w2, &p2.into_vec());
+        let it2 = w2.items.get(&0x4000_5555).expect("plain item added");
+        assert_eq!(it2.direction, 0);
     }
 
     #[test]
