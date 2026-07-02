@@ -678,12 +678,19 @@ fn parse_gump_layout(layout: &str, text: &[String], cliloc: Option<&Cliloc>) -> 
             "gumppic" => {
                 elements.push(json!({"t":"bg","x":num(1),"y":num(2),"page":page}));
             }
-            // button x y up down type param id — type 1 = page-less reply button.
+            // button x y up down pageflag param reply-id — pageflag 0 = local
+            // page-jump button (clicking switches to page `param`, no packet is
+            // sent to the server); pageflag 1 = reply button (clicking sends
+            // 0xB1 GumpResponse with `reply-id`). See ClassicUO Button.cs
+            // (ButtonAction.SwitchPage vs .Activate) — this mirrors that split.
             // `up` (the normal-state gump graphic) lets the client draw the real
             // button art (a small gump) instead of the raw reply id as text.
             "button" => {
-                let (x, y, up, id) = (num(1), num(2), num(3), num(7));
-                elements.push(json!({"t":"button","x":x,"y":y,"g":up,"id":id,"page":page}));
+                let (x, y, up, flag, param, id) = (num(1), num(2), num(3), num(5), num(6), num(7));
+                elements.push(json!({
+                    "t":"button","x":x,"y":y,"g":up,"id":id,"page":page,
+                    "pageflag":flag,"param":param,
+                }));
                 max_x = max_x.max(x + 32);
                 max_y = max_y.max(y + 24);
             }
@@ -1526,10 +1533,44 @@ mod tests {
         let kinds: Vec<&str> = els.iter().map(|e| e["t"].as_str().unwrap()).collect();
         assert_eq!(kinds, ["bg", "button", "text", "check", "entry"]);
         assert_eq!(els[1]["id"], 7);
+        // pageflag 1 (reply) — this is what makes the button send a GumpResponse
+        // instead of jumping pages locally.
+        assert_eq!(els[1]["pageflag"], 1);
         assert_eq!(els[2]["s"], "Accept the quest?");
         assert_eq!((els[3]["id"].as_i64(), els[3]["on"].as_i64()), (Some(3), Some(1)));
         assert_eq!(els[4]["id"], 4);
         assert_eq!(els[4]["s"], "Name");
+    }
+
+    #[test]
+    fn gump_layout_tracks_pages_and_button_pageflag() {
+        // Elements before the first "page" token are page 0 (always visible,
+        // e.g. the background + a "next"/"prev" nav button that must show no
+        // matter which page is active). "page 1" then "page 2" bracket the two
+        // navigable sections; the pageflag-0 button on page 1 jumps to page 2
+        // locally (no server round-trip), while the pageflag-1 button on page 2
+        // is a real reply button.
+        let layout = "{ resizepic 0 0 5054 200 200 }\
+                      { page 1 }{ text 10 10 0 0 }\
+                      { button 10 30 4005 4007 0 2 0 }\
+                      { page 2 }{ text 10 10 0 1 }\
+                      { button 10 30 247 248 1 0 99 }";
+        let text = vec!["Page one".to_string(), "Page two".to_string()];
+        let (els, _w, _h) = parse_gump_layout(layout, &text, None);
+
+        // bg(page0), text(page1), button(page1, pageflag0→page2), text(page2), button(page2, pageflag1, id99)
+        let pages: Vec<i64> = els.iter().map(|e| e["page"].as_i64().unwrap()).collect();
+        assert_eq!(pages, [0, 1, 1, 2, 2]);
+
+        let jump_btn = &els[2];
+        assert_eq!(jump_btn["t"], "button");
+        assert_eq!(jump_btn["pageflag"], 0);
+        assert_eq!(jump_btn["param"], 2); // switches to page 2, contacts no server
+
+        let reply_btn = &els[4];
+        assert_eq!(reply_btn["t"], "button");
+        assert_eq!(reply_btn["pageflag"], 1);
+        assert_eq!(reply_btn["id"], 99); // reply id sent to the server on click
     }
 
     #[test]

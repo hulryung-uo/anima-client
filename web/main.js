@@ -3717,13 +3717,18 @@ function refreshContainers() { for (const serial of containerWins.keys()) refres
 
 // --- generic server gumps / dialogs (0xB0 / 0xDD) ------------------------
 // Each scene.gumps entry is a server dialog (quest/NPC menu/confirm box) parsed
-// (server-side) into positioned elements. We mirror one draggable .gump-win per
-// serial: build on first sight, rebuild when its content signature changes, and
-// remove when it's gone from scene.gumps. A button click collects the on-state of
-// all checkboxes/radios + text-entry values and sends a `gump:` reply, then closes
-// locally; the ✕ sends button 0 (cancel). These are normal windows — they don't
-// block the rest of the game.
-const gumpWins = new Map(); // serial -> { el, sig }
+// (server-side) into positioned elements, each tagged with its gump "page"
+// (0 = always visible; see scene.rs parse_gump_layout). We mirror one draggable
+// .gump-win per serial: build on first sight, rebuild when its content signature
+// changes, and remove when it's gone from scene.gumps. Every window tracks its
+// own current page (starts at 1); "page-jump" buttons (pageflag 0) just flip
+// that locally via applyGumpPage() — no packet is ever sent for those. A real
+// reply button (pageflag 1) collects the on-state of all checkboxes/radios +
+// text-entry values (across every page, not just the visible one — they stay
+// in the DOM, just hidden) and sends a `gump:` reply, then closes locally; the
+// ✕ sends button 0 (cancel). These are normal windows — they don't block the
+// rest of the game.
+const gumpWins = new Map(); // serial -> { el, sig, page, nodes, … }
 let gumpCascade = 0;
 function gumpSignature(g) {
   return JSON.stringify([g.gumpId >>> 0, g.w | 0, g.h | 0, g.elements || []]);
@@ -3737,8 +3742,15 @@ function refreshGumps(scene) {
     const sig = gumpSignature(g);
     const existing = gumpWins.get(serial);
     if (existing && existing.sig === sig) continue; // unchanged
+    // Preserve the locally-selected page across a content refresh (the server
+    // resending the same gump shouldn't kick the player back to page 1) — but
+    // clamp it to the new layout's highest real page, in case the refreshed
+    // gump has fewer pages than before (else the window would show only the
+    // page-0 chrome, no page ever matching).
+    const maxPage = (g.elements || []).reduce((m, e) => Math.max(m, e.page | 0), 0);
+    const page = existing ? Math.min(existing.page, maxPage || 1) : 1;
     if (existing) existing.el.remove();             // content changed → rebuild
-    buildGumpWindow(serial, g, sig);
+    buildGumpWindow(serial, g, sig, page);
   }
   // Drop windows whose gump the server closed.
   for (const serial of [...gumpWins.keys()]) {
@@ -3785,7 +3797,7 @@ function refreshPopup(scene) {
   popupEl = el;
 }
 
-function buildGumpWindow(serial, g, sig) {
+function buildGumpWindow(serial, g, sig, page) {
   const gumpId = g.gumpId >>> 0;
   const el = document.createElement("div");
   el.className = "gump-win dialog-win";
@@ -3808,11 +3820,21 @@ function buildGumpWindow(serial, g, sig) {
   body.appendChild(canvas);
   el.appendChild(body);
 
-  // Only page 0/1 elements are shown (page changes aren't tracked locally).
+  // `page` is this window's *local* current page (the server never sees it —
+  // UO pages are a pure client-side layout concept, ClassicUO's Gump.ActivePage).
+  // Page 1 is shown initially. Every element is built once and stays in the DOM
+  // (so checkbox/text-entry state on a page you navigate away from survives);
+  // applyGumpPage() just toggles which ones are visible. Elements with no
+  // "page" token before them in the layout parsed to page 0 and are shown on
+  // every page.
+  const win = { el, sig, serial, gumpId, canvas, page: page || 1, nodes: [] };
   for (const e of (g.elements || [])) {
-    if ((e.page | 0) > 1) continue;
-    canvas.appendChild(buildGumpElement(serial, gumpId, e));
+    const node = buildGumpElement(win, e);
+    node.dataset.page = e.page | 0;
+    win.nodes.push(node);
+    canvas.appendChild(node);
   }
+  applyGumpPage(win);
 
   // ✕ → cancel (button 0).
   title.querySelector(".gump-close").addEventListener("click", () => {
@@ -3821,9 +3843,21 @@ function buildGumpWindow(serial, g, sig) {
   });
   makeDraggable(el, title);
   document.body.appendChild(el);
-  gumpWins.set(serial, { el, sig });
+  gumpWins.set(serial, win);
 }
-function buildGumpElement(serial, gumpId, e) {
+// Show/hide this window's elements for its current local page: page-0
+// elements are always visible; everything else only shows while it's the
+// active page. Called on first build and again whenever a pageflag-0 button
+// flips `win.page` — that's a pure local redraw, no packet goes to the server
+// (ClassicUO Button.ButtonAction.SwitchPage).
+function applyGumpPage(win) {
+  for (const node of win.nodes) {
+    const p = Number(node.dataset.page) || 0;
+    node.style.display = (p === 0 || p === win.page) ? "" : "none";
+  }
+}
+function buildGumpElement(win, e) {
+  const { serial, gumpId } = win;
   const node = document.createElement(e.t === "button" ? "button" : "div");
   node.className = "dlg-el";
   node.style.left = (e.x | 0) + "px";
@@ -3853,8 +3887,16 @@ function buildGumpElement(serial, gumpId, e) {
     } else {
       node.textContent = (e.id | 0) || "?";
     }
-    node.title = "reply " + (e.id | 0);
-    node.addEventListener("click", () => submitGump(serial, gumpId, e.id | 0));
+    // pageflag 0 = local page-jump (switch to page `param`, never touches the
+    // network); pageflag 1 (or absent, for callers that never set it) = a real
+    // reply button that sends 0xB1 GumpResponse with this element's reply id.
+    if ((e.pageflag | 0) === 0) {
+      node.title = "page " + (e.param | 0);
+      node.addEventListener("click", () => { win.page = e.param | 0; applyGumpPage(win); });
+    } else {
+      node.title = "reply " + (e.id | 0);
+      node.addEventListener("click", () => submitGump(serial, gumpId, e.id | 0));
+    }
   } else if (e.t === "check" || e.t === "radio") {
     const input = document.createElement("input");
     input.type = e.t === "check" ? "checkbox" : "radio";
