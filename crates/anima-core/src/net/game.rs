@@ -1334,7 +1334,8 @@ fn unicode_talk(world: &mut World, frame: &[u8]) -> PResult<()> {
 
 /// 0xBF GeneralInfo — multiplexed subcommands. We handle the fast-walk key
 /// stack (sub 0x01 sets six keys, sub 0x02 pushes one; each walk consumes one),
-/// party (sub 0x06), the facet switch (sub 0x08), and the popup menu (sub 0x14).
+/// party (sub 0x06), the facet switch (sub 0x08), the popup menu (sub 0x14),
+/// and spellbook content (sub 0x1B).
 fn general_info(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[3..]); // variable
     let subcmd = r.u16()?;
@@ -1362,8 +1363,33 @@ fn general_info(world: &mut World, frame: &[u8]) -> PResult<()> {
         // reload of `MapData` would additionally require.
         0x08 => world.on_map_change(r.u8()?),
         0x14 => parse_popup(world, &mut r)?,
+        0x1B => parse_spellbook_content(world, &mut r)?,
         _ => {}
     }
+    Ok(())
+}
+
+/// 0xBF/0x1B NewSpellbookContent — `[unk:u16=0x0001][serial:u32][graphic:u16]
+/// [offset:u16][content:u64]` (23 bytes total with the id/len/subcmd header,
+/// matching ServUO `NewSpellbookContent`'s `EnsureCapacity(23)`). Sent only when
+/// a spellbook is actually opened (ServUO `Spellbook.DisplayTo`, gated on
+/// `NetState.NewSpellbook`). Unlike the rest of this packet's fields, `content`
+/// is written **byte-by-byte LSB-first** (ServUO: `Write((byte)(content >> (i *
+/// 8)))` for `i` 0..8) rather than big-endian like everything else on the wire —
+/// ClassicUO's handler (`PacketHandlers.cs` case 0x1B) reconstructs it the same
+/// way, one byte at a time. See [`crate::world::SpellbookContent`] for what the
+/// fields mean.
+fn parse_spellbook_content(world: &mut World, r: &mut PacketReader) -> PResult<()> {
+    r.skip(2)?; // unknown, always 0x0001
+    let serial = r.u32()?;
+    let graphic = r.u16()?;
+    let offset = r.u16()?;
+    let bytes = r.bytes(8)?;
+    let mut content: u64 = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        content |= (b as u64) << (i * 8);
+    }
+    world.set_spellbook_content(serial, graphic, offset, content);
     Ok(())
 }
 
@@ -1668,6 +1694,41 @@ mod tests {
         let menu = w.popup.as_ref().expect("popup set");
         assert_eq!(menu.serial, 0x0102_0304);
         assert_eq!(menu.entries, vec![PopupEntry { index: 7, cliloc: 3_000_122, flags: 0 }]);
+    }
+
+    #[test]
+    fn spellbook_content_parses_and_prunes_on_delete() {
+        let mut w = World::new();
+        // 0xBF/0x1B NewSpellbookContent: magery book (graphic 0x0EFA, ServUO
+        // BookOffset 0 -> offset 1) knows spells 1 (Clumsy) and 4 (Heal) — bits
+        // 0 and 3 of the mask, content = 0b1001 = 0x9. `content` is written
+        // byte-by-byte LSB-first (see `parse_spellbook_content`'s doc), unlike
+        // the rest of the wire (big-endian).
+        let mut p = PacketWriter::new();
+        p.u8(0xBF).u16(0); // id + len placeholder
+        p.u16(0x001B) // subcommand
+            .u16(0x0001) // unknown, always 1
+            .u32(0x4000_0010) // book serial
+            .u16(0x0EFA) // graphic (magery book ItemID)
+            .u16(1) // offset = BookOffset(0) + 1
+            .bytes(&[0x09, 0, 0, 0, 0, 0, 0, 0]); // content mask, LSB-first
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        assert_eq!(frame.len(), 23); // ServUO NewSpellbookContent EnsureCapacity(23)
+        assert!(apply_packet(&mut w, &frame));
+
+        let sb = w.spellbooks.get(&0x4000_0010).expect("spellbook content stored");
+        assert_eq!(sb.graphic, 0x0EFA);
+        assert_eq!(sb.offset, 1);
+        assert_eq!(sb.content, 0x9);
+
+        // The book is destroyed/despawned (0x1D Delete) — the entry is pruned with it.
+        let mut d = PacketWriter::new();
+        d.u8(0x1D).u32(0x4000_0010);
+        assert!(apply_packet(&mut w, &d.into_vec()));
+        assert!(!w.spellbooks.contains_key(&0x4000_0010));
     }
 
     fn party_frame(body: &[u8]) -> Vec<u8> {

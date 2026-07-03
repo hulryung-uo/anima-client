@@ -345,6 +345,13 @@
       .sp-name { font-size: 12px; color: #e8ecf2; font-weight: 600; }
       .sp-words { font-size: 11px; color: #c8b06a; font-style: italic; }   /* power words (mantra) */
       .sp-reags { font-size: 10px; color: #8a929c; }                       /* reagents */
+      /* A spell we KNOW is missing from the currently-open book (0xBF/0x1B
+         content, scene.spellbooks) — dimmed but still clickable (the server
+         just refuses the cast). Only applied when we actually have that
+         school's book content; otherwise every row stays full-brightness. */
+      .sp-row.sp-missing { opacity: .35; }
+      .sp-row.sp-missing .sp-icon { filter: grayscale(1); }
+      .sp-row.sp-missing .sp-name { color: #9098a4; }
       /* ---- skills window (0x3A) ---- */
       #skills { top: 60px; right: 16px; width: 280px; display: none; }
       #statusbar { top: 60px; left: 210px; width: 170px; display: none; }

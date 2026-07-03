@@ -939,7 +939,7 @@ async function poll() {
     if (wmOn) drawWorldmap();  // keep the open world map tracking the player
     if (scene.player) hud(scene);
     refreshPaperdoll();   // keep the paperdoll live (equip/stats change)
-    if (spellbookOn) refreshSpellMana(); // keep the spellbook's mana readout live
+    if (spellbookOn) { refreshSpellMana(); refreshSpellbookContent(); } // keep the spellbook live (mana + book content)
     if (skillsOn) refreshSkills();  // keep the skills window live (values/locks change)
     checkSkillGains(scene);  // announce skill base changes as journal system messages
     refreshParty();   // keep the party panel live + surface incoming invites (0xBF/0x06)
@@ -2989,15 +2989,23 @@ const MAGERY_INFO = {
   "Fire Elemental": ["Kal Vas Xen Flam", "Bloodmoss, Mandrake Root, Spider's Silk, Sulfurous Ash"],
   "Water Elemental": ["Kal Vas Xen An Flam", "Bloodmoss, Mandrake Root, Spider's Silk"],
 };
+// `graphic` = the school's spellbook ITEM id (world/equip/backpack graphic, as
+// opposed to `book`'s GUMP art id above) — ServUO `Spellbook` subclass
+// constructors. Used to match a known 0xBF/0x1B content entry (scene.spellbooks)
+// to its school, and to find the player's own book of that school among their
+// equip/backpack items (see `knownSpellbookFor`/`findOwnSpellbook`). Mastery has
+// none: Skill Masteries aren't cast from a real spellbook's bit-mask content in
+// the same way (ServUO `BookOfMasteries` uses its own gump), so that school
+// always renders at full brightness regardless of `scene.spellbooks`.
 const SPELL_SCHOOLS = [
-  { key: "magery", label: "Magery", book: 0x08AC, iconStart: 0x08C0, spells: MAGERY_PAIRS },
-  { key: "necromancy", label: "Necro", book: 0x2B00, iconStart: 0x5000, spells: NECROMANCY_SPELLS },
-  { key: "chivalry", label: "Chivalry", book: 0x2B01, iconStart: 0x5100, spells: CHIVALRY_SPELLS },
-  { key: "bushido", label: "Bushido", book: 0x2B07, iconStart: 0x5400, spells: BUSHIDO_SPELLS },
-  { key: "ninjitsu", label: "Ninjitsu", book: 0x2B06, iconStart: 0x5300, spells: NINJITSU_SPELLS },
-  { key: "spellweaving", label: "Weaving", book: 0x2B2F, iconStart: 0x59D8, spells: SPELLWEAVING_SPELLS },
-  { key: "mysticism", label: "Mysticism", book: 0x2B32, iconStart: 0x5DC0, spells: MYSTICISM_SPELLS },
-  { key: "mastery", label: "Mastery", book: 0x08AC, iconStart: 0x0945, spells: MASTERY_SPELLS },
+  { key: "magery", label: "Magery", book: 0x08AC, graphic: 0x0EFA, iconStart: 0x08C0, spells: MAGERY_PAIRS },
+  { key: "necromancy", label: "Necro", book: 0x2B00, graphic: 0x2253, iconStart: 0x5000, spells: NECROMANCY_SPELLS },
+  { key: "chivalry", label: "Chivalry", book: 0x2B01, graphic: 0x2252, iconStart: 0x5100, spells: CHIVALRY_SPELLS },
+  { key: "bushido", label: "Bushido", book: 0x2B07, graphic: 0x238C, iconStart: 0x5400, spells: BUSHIDO_SPELLS },
+  { key: "ninjitsu", label: "Ninjitsu", book: 0x2B06, graphic: 0x23A0, iconStart: 0x5300, spells: NINJITSU_SPELLS },
+  { key: "spellweaving", label: "Weaving", book: 0x2B2F, graphic: 0x2D50, iconStart: 0x59D8, spells: SPELLWEAVING_SPELLS },
+  { key: "mysticism", label: "Mysticism", book: 0x2B32, graphic: 0x2D9D, iconStart: 0x5DC0, spells: MYSTICISM_SPELLS },
+  { key: "mastery", label: "Mastery", book: 0x08AC, graphic: 0, iconStart: 0x0945, spells: MASTERY_SPELLS },
 ];
 // T2A (The Second Age, pre-AOS) era: only Magery exists — Necromancy, Chivalry,
 // Bushido, Ninjitsu, Spellweaving, Mysticism and Mastery are all later expansions.
@@ -3021,10 +3029,63 @@ let spellPage = 0;            // current spread index (0-based)
 // Render the spell list (no book art): each spell shows its name, power words
 // (mantra) and reagents — the classic in-fiction spellbook info. Magery is grouped
 // by its 8 circles. Click a row to cast.
+// Find the scene.spellbooks entry for `school` (matched by the book's ITEM
+// graphic), or null if we don't know that school's content yet (book never
+// opened this session, or `school.graphic` is 0 — Mastery). Callers must treat
+// null as "unknown", NOT "empty book", and leave that school's rendering as
+// it was before this feature existed (every spell at full brightness).
+function knownSpellbookFor(school) {
+  if (!school.graphic) return null;
+  const list = (scene && scene.spellbooks) || [];
+  return list.find((b) => ((b.graphic | 0) & 0xffff) === school.graphic) || null;
+}
+// Is global spell id `id` ABSENT from `book`'s 64-bit content mask? `content`
+// arrives from anima-net split into two u32 halves, `lo` (bits 0..31) and `hi`
+// (bits 32..63) — see `build_scene`'s doc for why (JS Number precision).
+function spellMissing(book, id) {
+  const bit = id - book.offset;
+  if (bit < 0 || bit > 63) return true; // outside this book's range entirely
+  const half = bit < 32 ? (book.lo >>> 0) : (book.hi >>> 0);
+  return ((half >>> (bit % 32)) & 1) === 0;
+}
+// Find the player's own spellbook item of the given ITEM graphic: worn on the
+// one-handed slot (Layer.OneHanded == 1) or sitting in any container we know
+// the contents of (usually the backpack). null if we don't currently see one.
+function findOwnSpellbook(graphic) {
+  const p = scene && scene.player;
+  if (p && p.equip) {
+    const worn = p.equip.find((e) => (e.layer | 0) === 1 && ((e.g | 0) & 0xffff) === graphic);
+    if (worn) return worn.serial >>> 0;
+  }
+  const items = (scene && scene.contItems) || [];
+  const it = items.find((i) => ((i.g | 0) & 0xffff) === graphic);
+  return it ? (it.serial >>> 0) : null;
+}
+// ServUO only ever sends 0xBF/0x1B spellbook content in reply to actually
+// opening the book (Spellbook.OnDoubleClick → DisplayTo). So when the K window
+// opens, double-click (via the existing use:<serial> plumbing) every VISIBLE
+// school's book we haven't already asked about. The container dblclick handler
+// already treats a spellbook specially (toggles this same window instead of
+// opening a container view — see `isSpellbook`), and DisplayTo's other traffic
+// (a repeat world/equip/container-slot packet, plus a 0x24 DisplaySpellbook we
+// don't even parse) is otherwise a harmless no-op, so this has no visible side
+// effect beyond the content arriving. Sent at most once per book serial ever,
+// so reopening K repeatedly doesn't re-spam the request.
+const spellbookContentRequested = new Set();
+function requestUnknownSpellbookContents() {
+  for (const school of VISIBLE_SCHOOLS) {
+    if (!school.graphic || knownSpellbookFor(school)) continue; // Mastery, or already known
+    const serial = findOwnSpellbook(school.graphic);
+    if (serial == null || spellbookContentRequested.has(serial)) continue;
+    spellbookContentRequested.add(serial);
+    sendInput("use:" + serial);
+  }
+}
 function renderSpellSchool() {
   const book = document.getElementById("sb-book");
   const school = VISIBLE_SCHOOLS.find((s) => s.key === spellSchool) || VISIBLE_SCHOOLS[0];
   const isMagery = school.key === "magery";
+  const known = knownSpellbookFor(school); // null = content not known → don't dim anything
   let html = "", lastCircle = 0;
   school.spells.forEach(([id, name], idx) => {
     if (isMagery) {
@@ -3033,8 +3094,12 @@ function renderSpellSchool() {
     }
     const info = isMagery ? MAGERY_INFO[name] : null;
     const iconId = school.iconStart + idx;           // k-th spell icon = iconStart + k
+    // A spell the book doesn't actually contain is dimmed but still clickable —
+    // there's no local rule enforcement, the server just refuses the cast.
+    const missing = known != null && spellMissing(known, id);
+    const title = missing ? `Cast ${name} (not in this book)` : `Cast ${name}`;
     // The icon is draggable out onto the screen → a floating quick-cast button.
-    html += `<div class="sp-row" data-id="${id}" data-icon="${iconId}" data-name="${name}" title="Cast ${name}">`
+    html += `<div class="sp-row${missing ? " sp-missing" : ""}" data-id="${id}" data-icon="${iconId}" data-name="${name}" title="${title}">`
       + `<img class="sp-icon" src="gump/${iconId}.png" alt="" draggable="true" crossorigin="anonymous"`
       + ` onerror="this.onerror=null;this.style.visibility='hidden'">`
       + `<div class="sp-txt"><div class="sp-name">${name}</div>`;
@@ -3047,6 +3112,19 @@ function renderSpellSchool() {
   book.innerHTML = html;
   for (const t of document.querySelectorAll("#sb-tabs .sb-tab"))
     t.classList.toggle("sel", t.dataset.school === spellSchool);
+}
+// Re-render the current school once new spellbook content arrives (scene.
+// spellbooks changed) so the K window doesn't stay frozen at whatever it knew
+// the moment it opened. Signature-gated: an unrelated scene poll (nothing
+// spellbook-related changed) must not rebuild the list and reset scroll
+// position for no reason.
+let sbSpellbooksSig = null;
+function refreshSpellbookContent() {
+  if (!spellbookOn) return;
+  const sig = JSON.stringify((scene && scene.spellbooks) || []);
+  if (sig === sbSpellbooksSig) return;
+  sbSpellbooksSig = sig;
+  renderSpellSchool();
 }
 function buildSpellbook() {
   const tabs = document.getElementById("sb-tabs");
@@ -3078,7 +3156,7 @@ function toggleSpellbook() {
   spellbookOn = !spellbookOn;
   const sb = document.getElementById("spellbook");
   sb.classList.toggle("on", spellbookOn);
-  if (spellbookOn) { buildSpellbook(); refreshSpellMana(); }
+  if (spellbookOn) { buildSpellbook(); refreshSpellMana(); requestUnknownSpellbookContents(); }
 }
 function closeSpellbook() {
   spellbookOn = false;

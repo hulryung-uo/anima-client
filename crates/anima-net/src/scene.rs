@@ -1491,6 +1491,27 @@ pub fn build_scene(
     let popup = serde_json::to_string(&popup_json(&s.world, cliloc)).unwrap_or_else(|_| "null".into());
     // The open book (0x93/0xD4 + 0x66), or null.
     let book = serde_json::to_string(&book_json(&s.world)).unwrap_or_else(|_| "null".into());
+    // Known spellbook contents (0xBF/0x1B), one entry per book we've been told
+    // about this session (see `World::spellbooks`'s doc — populated only once a
+    // book is actually opened). `content` is a 64-bit mask; split into two u32
+    // halves (`lo` = bits 0..31, `hi` = bits 32..63) rather than sent whole,
+    // because a JS `Number` only carries 53 bits of integer precision and a full
+    // 64-spell Magery book can set bits past that — the renderer tests a bit
+    // with plain 32-bit ops on whichever half it falls in, no BigInt needed.
+    // Sorted by serial for a stable order (the source is a HashMap).
+    let mut spellbooks: Vec<(&u32, &anima_core::world::SpellbookContent)> =
+        s.world.spellbooks.iter().collect();
+    spellbooks.sort_by_key(|&(serial, _)| *serial);
+    let spellbooks: Vec<Value> = spellbooks
+        .iter()
+        .map(|&(serial, sb)| {
+            json!({
+                "serial": serial, "graphic": sb.graphic, "offset": sb.offset,
+                "lo": (sb.content & 0xFFFF_FFFF) as u32, "hi": (sb.content >> 32) as u32
+            })
+        })
+        .collect();
+    let spellbooks = serde_json::to_string(&spellbooks).unwrap_or_else(|_| "[]".into());
     // Object Property Lists / tooltips (0xD6), resolved to display lines, capped.
     let opl = serde_json::to_string(&opl_json(&s.world, cliloc)).unwrap_or_else(|_| "{}".into());
     // The on-screen quest arrow target tile (0xBA), or null.
@@ -1535,7 +1556,7 @@ pub fn build_scene(
          \"statics\":[{statics}],\"mobiles\":{mobiles},\"items\":{items},\"contItems\":{cont_items},\
          \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"tanims\":{tanims},\"damage\":{damage},\"effects\":{effects},\"music\":{music},\
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
-         \"popup\":{popup},\"book\":{book},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
+         \"popup\":{popup},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"facet\":{facet},\"trades\":{trades},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",

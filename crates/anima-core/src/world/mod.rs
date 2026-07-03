@@ -239,6 +239,27 @@ pub struct Book {
     pub pages: Vec<Vec<String>>,
 }
 
+/// One school spellbook's known contents (0xBF/0x1B NewSpellbookContent), sent
+/// only when the book is actually opened (double-click) — ServUO
+/// `Spellbook.DisplayTo`, gated on `NetState.NewSpellbook` (negotiated for any
+/// client version >= 4.0.0a, which anima-client's reported version always
+/// satisfies — see `anima_net::CLIENT_VERSION`). An owned-but-unopened book
+/// simply has no entry in [`World::spellbooks`] yet.
+///
+/// `graphic` is the book's ItemID (school identifier — ServUO `Spellbook`
+/// subclass constructors): 0x0EFA magery, 0x2253 necromancy, 0x2252 chivalry,
+/// 0x238C bushido, 0x23A0 ninjitsu, 0x2D50 spellweaving, 0x2D9D mysticism.
+/// `offset` is the wire-sent `BookOffset + 1` (ServUO `Spellbook.BookOffset`):
+/// the absolute spell id of `content`'s bit 0 — magery 1, necromancy 101,
+/// chivalry 201, bushido 401, ninjitsu 501, spellweaving 601, mysticism 678.
+/// `content` is a 64-bit mask; bit N set iff spell `offset + N` is in the book.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpellbookContent {
+    pub graphic: u16,
+    pub offset: u16,
+    pub content: u64,
+}
+
 /// An outstanding target cursor the server is waiting on (from a 0x6C request).
 /// The brain answers it with `Action::TargetObject`/`TargetGround`; the response
 /// must echo `cursor_id`, `cursor_flag`, and `target_type`.
@@ -418,6 +439,15 @@ pub struct World {
     /// The currently open book (0x93/0xD4 header + 0x66 page content), or `None`.
     /// See [`Book`].
     pub book: Option<Book>,
+    /// Spellbook contents we've been told about (0xBF/0x1B), keyed by the book
+    /// item's serial. Only ever populated for a book that's actually been
+    /// opened this session (see [`SpellbookContent`]'s doc) — the K-key
+    /// spellbook UI dims spells for a school only when it has an entry here,
+    /// and otherwise renders that school as if every spell were owned (same
+    /// as before this field existed). Pruned like [`World::opl`]: dropped on
+    /// delete ([`World::remove`]) and on a facet purge ([`World::on_map_change`]).
+    /// Set via [`World::set_spellbook_content`].
+    pub spellbooks: HashMap<u32, SpellbookContent>,
     /// An on-screen quest arrow (0xBA) pointing at tile `(x, y)`, or `None` when
     /// hidden. The renderer draws an arrow toward this tile.
     pub quest_arrow: Option<(u16, u16)>,
@@ -815,15 +845,24 @@ impl World {
         self.opl.insert(serial, lines);
     }
 
+    /// Record a spellbook's known contents (0xBF/0x1B NewSpellbookContent).
+    /// Upserts by the book's own serial — a re-opened book simply replaces its
+    /// previous entry (the server always sends the current full mask, not a diff).
+    pub fn set_spellbook_content(&mut self, serial: u32, graphic: u16, offset: u16, content: u64) {
+        self.spellbooks.insert(serial, SpellbookContent { graphic, offset, content });
+    }
+
     /// Remove an entity (mobile or item) by serial. Returns true if it was a mobile.
     /// A deleted corpse item also drops its [`World::corpse_of`]/
     /// [`World::corpse_equip`] entries (corpses despawn, so these must not outlive
-    /// the item they describe).
+    /// the item they describe). A deleted spellbook likewise drops its
+    /// [`World::spellbooks`] entry.
     pub fn remove(&mut self, serial: u32) -> bool {
         let was_mobile = self.mobiles.remove(&serial).is_some();
         self.items.remove(&serial);
         self.opl.remove(&serial);
         self.opl_revision.remove(&serial);
+        self.spellbooks.remove(&serial);
         self.corpse_of.remove(&serial);
         self.corpse_equip.remove(&serial);
         was_mobile
@@ -878,6 +917,7 @@ impl World {
             self.corpse_equip.clear();
             self.opl.clear();
             self.opl_revision.clear();
+            self.spellbooks.clear();
             self.popup = None;
             return;
         };
@@ -891,12 +931,16 @@ impl World {
         self.items.retain(|serial, _| keep_items.contains(serial));
         // Anything still indexed by a serial that just got dropped above is now
         // dangling — prune it the same way `World::remove` does for a single
-        // delete, just batched over every purged serial.
+        // delete, just batched over every purged serial. A spellbook rooted at
+        // the player (worn or in the backpack, the common case) survives here
+        // same as its item entry does — only a stray entry for some OTHER
+        // book gets dropped.
         let alive = |serial: &u32| *serial == player || keep_items.contains(serial);
         self.corpse_of.retain(|corpse, _| alive(corpse));
         self.corpse_equip.retain(|corpse, _| alive(corpse));
         self.opl.retain(|serial, _| alive(serial));
         self.opl_revision.retain(|serial, _| alive(serial));
+        self.spellbooks.retain(|serial, _| alive(serial));
         if self.popup.as_ref().is_some_and(|p| !alive(&p.serial)) {
             self.popup = None;
         }
