@@ -235,10 +235,45 @@
       .gump-body { padding: 10px; }
       /* ---- generic server gump/dialog (0xB0/0xDD) windows ---- */
       .dialog-win .gump-body { padding: 0; }
-      .dialog-canvas { position: relative; }
+      /* The server sends this gump's own w/h and lays every element out against
+         it (a 491x440 admin dialog really is 491x440) — .gump-win's generic
+         min-width:180 (below) would stretch a *narrower* server dialog wider
+         than the server intended, so cancel it here; .dialog-canvas is then
+         clipped to exactly w x h so nothing (an unclipped plain-text run, a
+         wide unstyled entry, oversized art) can bleed past the window's own
+         border and make it look bigger than the server's w x h. */
+      .dialog-win { min-width: 0; }
+      .dialog-canvas { position: relative; overflow: hidden; }
       .dlg-el { position: absolute; font-size: 12px; line-height: 1.25; }
+      /* UO gump text is single-line by construction — croppedtext (the "w"
+         carrying variant) CLIPS to its box, it never wraps; plain text (no
+         "w") has no box at all and just runs on past its start point. Real UO
+         gump-font layouts assume a narrow, ~6.5-7px-average-advance font: a
+         12-char label like "Access Level" is laid out to fit an 81px box by
+         design. The page's default font (ui-monospace/SF Mono/Menlo, falling
+         back through Apple SD Gothic Neo / Malgun Gothic for Hangul) is too
+         wide for that even before folding in the CJK-fallback risk (on a
+         system where Malgun Gothic — a proportional Hangul UI face, not a
+         monospace one — resolves ahead of the trailing generic "monospace",
+         ASCII text renders far wider still). Measured with each font's own
+         hmtx advance-width table (ui-monospace resolves to one of these on
+         mac/most platforms) for "Access Level" (12 chars):
+           12px: Menlo ~86.7px, SF Mono ~89.0px   (already over the 81px box)
+           11px: Menlo ~79.5px, SF Mono ~81.6px   (SF Mono still over/on the line)
+           10px: Menlo ~72.3px, SF Mono ~74.2px   (fits, ~7-9px margin)
+         so gump text/check/radio/entry labels get their own compact, CJK-
+         fallback-free monospace stack at 10px — scoped to .dialog-win so
+         non-gump UI (journal, tooltips, the trade window's shared .dlg-btn,
+         etc.) keeps the page's regular font. */
+      .dialog-win .dlg-el {
+        font-size: 10px;
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+      }
       .dlg-bg { background: rgba(28, 32, 40, .5); border: 1px solid #2a2f37; border-radius: 6px; }
-      .dlg-text { color: #d6dae0; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .dlg-text { color: #d6dae0; white-space: nowrap; }
+      /* croppedtext only: clip to the "w" box set inline (see buildGumpElement) —
+         a clip box, not a wrap box. */
+      .dlg-text-crop { overflow: hidden; }
       .dlg-btn {
         cursor: pointer; min-width: 22px; height: 20px; padding: 0 8px;
         background: #1b2530; color: #8ab4f8; border: 1px solid #2a3a4a; border-radius: 4px;
@@ -253,7 +288,8 @@
       .dlg-btn-img { display: block; image-rendering: pixelated; pointer-events: none; }
       .dlg-entry {
         background: rgba(0, 0, 0, .35); color: #e6eaf0; border: 1px solid #2a3a4a;
-        border-radius: 4px; height: 20px; padding: 0 6px; font-size: 12px;
+        border-radius: 4px; height: 20px; padding: 0 6px; font-size: 10px;
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       }
       .dlg-el input[type=checkbox], .dlg-el input[type=radio] { margin: 0; cursor: pointer; }
       #paperdoll { top: 60px; left: 210px; width: 280px; display: none; }

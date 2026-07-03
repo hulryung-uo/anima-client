@@ -4093,7 +4093,12 @@ function buildGumpElement(win, e) {
     if (e.h) node.style.height = (e.h | 0) + "px";
   } else if (e.t === "text") {
     node.classList.add("dlg-text");
-    if (e.w) node.style.width = (e.w | 0) + "px";
+    // croppedtext (w present) gets a clip box (.dlg-text-crop: overflow
+    // hidden at exactly w px) — it never wraps, it clips. Plain text (no w,
+    // scene.rs's parse_gump_layout never emits one for it) gets no width and
+    // no clip, just runs on past its start point; both are single-line
+    // (.dlg-text: white-space: nowrap, in index.html).
+    if (e.w) { node.classList.add("dlg-text-crop"); node.style.width = (e.w | 0) + "px"; }
     node.textContent = e.s || "";
   } else if (e.t === "button") {
     node.classList.add("dlg-btn");
