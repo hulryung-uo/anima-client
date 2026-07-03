@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -30,6 +30,7 @@ use anima_core::Action;
 use include_dir::{include_dir, Dir};
 use tiny_http::{Header, Method, Response, Server};
 
+use crate::regions::GuardRect;
 use crate::scene::{build_scene, calculate_new_z, can_walk, render_worldmap, tile_walkable, WORLDMAP_STEP};
 use crate::{Endpoint, Session};
 
@@ -134,6 +135,10 @@ pub struct PlayServer {
     rx: mpsc::Receiver<Option<Action>>,
     login_rx: mpsc::Receiver<(String, u16, String, String)>,
     sse_hub: SseHub,
+    /// Current session facet (`World::map_index`), kept in step with the game
+    /// loop so the `/regions.json` HTTP thread can filter guard-zone rects to
+    /// the facet the player is actually on without touching `scene`'s JSON.
+    facet: Arc<AtomicU8>,
 }
 
 /// Load assets, bind the HTTP server (workers included), and return a
@@ -206,6 +211,26 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     let sse_hub: SseHub = Arc::new(Mutex::new(Vec::new()));
     // World-map POIs (towns/shops/dungeons/…), parsed once from the embedded data.
     let pois: Arc<String> = Arc::new(parse_pois());
+    // Guard-zone rectangles: parsed once from a local ServUO `Regions.xml` if one
+    // is reachable (`$ANIMA_REGIONS` or `$HOME/dev/uo/servuo/Data/Regions.xml` —
+    // see `regions::resolve_path`). This is server-local data with no packet
+    // equivalent, so a remote server with no local copy just gets no overlay
+    // (never fails the server).
+    let regions_path = crate::regions::resolve_path();
+    let guard_rects: Arc<Vec<GuardRect>> = Arc::new(match std::fs::read_to_string(&regions_path) {
+        Ok(xml) => {
+            let rects = crate::regions::parse(&xml);
+            println!("play: regions loaded ({} guarded rects from {})", rects.len(), regions_path.display());
+            rects
+        }
+        Err(_) => {
+            println!("regions: not loaded");
+            Vec::new()
+        }
+    });
+    // Current session facet, kept current by the game loop each tick so the
+    // `/regions.json` HTTP thread can filter to the facet the player is on.
+    let facet: Arc<AtomicU8> = Arc::new(AtomicU8::new(0));
     // Login credentials submitted by the web login page (host, port, user, pass).
     let (login_tx, login_rx) = mpsc::channel::<(String, u16, String, String)>();
 
@@ -245,10 +270,12 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
             music,
             sse_hub: sse_hub.clone(),
             pois,
+            guard_rects,
+            facet: facet.clone(),
         },
     );
 
-    Ok(PlayServer { cfg, port, map: map.take(), art, anim, cliloc, animdata, tiledata, scene, rx, login_rx, sse_hub })
+    Ok(PlayServer { cfg, port, map: map.take(), art, anim, cliloc, animdata, tiledata, scene, rx, login_rx, sse_hub, facet })
 }
 
 impl PlayServer {
@@ -260,7 +287,7 @@ impl PlayServer {
     /// Log in (auto or via the served login page) and run the game loop.
     /// Blocks until the game connection closes.
     pub fn run(self) -> io::Result<()> {
-        let PlayServer { cfg, port, mut map, art, anim, cliloc, animdata, tiledata, scene, rx, login_rx, sse_hub } = self;
+        let PlayServer { cfg, port, mut map, art, anim, cliloc, animdata, tiledata, scene, rx, login_rx, sse_hub, facet } = self;
 
         // Starting city for a newly-created character (ServUO honors the selection):
         // 0=Magincia/New Haven list-dependent, 3=Britain, ... Override via ANIMA_CITY.
@@ -527,6 +554,11 @@ impl PlayServer {
                 }
             }
 
+            // Keep the shared facet in step so `/regions.json` can filter its
+            // guard-zone rects to wherever the player currently is (0xBF/0x08
+            // MapChange updates `world.map_index` directly; see its doc).
+            facet.store(session.world.map_index, Ordering::Relaxed);
+
             let obs = session.world.observe(&mut cursor);
             for j in &obs.new_journal {
                 journal_seq += 1;
@@ -689,11 +721,13 @@ struct SpawnHttp {
     music: Arc<HashMap<u16, PathBuf>>,
     sse_hub: SseHub,
     pois: Arc<String>,
+    guard_rects: Arc<Vec<GuardRect>>,
+    facet: Arc<AtomicU8>,
 }
 
 /// Spawn the worker-thread pool serving `server` (already bound by [`bind`]).
 fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
-    let SpawnHttp { web_dir, scene, tx, login, art, anim, gumps, hues, tiledata, texmaps, worldmap, sounds, music, sse_hub, pois } = args;
+    let SpawnHttp { web_dir, scene, tx, login, art, anim, gumps, hues, tiledata, texmaps, worldmap, sounds, music, sse_hub, pois, guard_rects, facet } = args;
     let tile_cache: TileCache = Arc::new(Mutex::new(HashMap::new()));
     let anim_cache: AnimCache = Arc::new(Mutex::new(HashMap::new()));
     let texmap_cache: TexmapCache = Arc::new(Mutex::new(HashMap::new()));
@@ -721,6 +755,8 @@ fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         let music = music.clone();
         let sse_hub = sse_hub.clone();
         let pois = pois.clone();
+        let guard_rects = guard_rects.clone();
+        let facet = facet.clone();
         thread::spawn(move || {
             while let Ok(req) = server.recv() {
                 handle_request(Ctx {
@@ -744,6 +780,8 @@ fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
                     music: &music,
                     sse_hub: &sse_hub,
                     pois: &pois,
+                    guard_rects: &guard_rects,
+                    facet: &facet,
                 });
             }
         });
@@ -772,13 +810,15 @@ struct Ctx<'a> {
     music: &'a Arc<HashMap<u16, PathBuf>>,
     sse_hub: &'a SseHub,
     pois: &'a Arc<String>,
+    guard_rects: &'a Arc<Vec<GuardRect>>,
+    facet: &'a Arc<AtomicU8>,
 }
 
 fn handle_request(ctx: Ctx) {
     REQ_COUNT.fetch_add(1, Ordering::Relaxed);
     let Ctx {
         mut req, web_dir, scene, tx, login, art, anim, gumps, hues, tiledata, texmaps, tile_cache,
-        anim_cache, texmap_cache, gump_cache, worldmap, sounds, music, sse_hub, pois,
+        anim_cache, texmap_cache, gump_cache, worldmap, sounds, music, sse_hub, pois, guard_rects, facet,
     } = ctx;
     let raw_url = req.url().to_string();
     // Parse the optional `?hue=<n>` query before stripping it. 0 = no hue.
@@ -880,6 +920,18 @@ fn handle_request(ctx: Ctx) {
         let mut r = Response::from_string(pois.as_str());
         r.add_header(ctype("application/json"));
         r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=3600"[..]).unwrap());
+        let _ = req.respond(r);
+    } else if url == "/regions.json" {
+        // Guard-zone (guarded-region) rectangles for the CURRENT facet only —
+        // `guard_rects` holds every facet's, so filter by the live `facet` the
+        // game loop keeps updated. No Cache-Control: unlike `/pois.json` this
+        // depends on server-side session state (the facet can change mid-session
+        // via a moongate/sewer), so the client must always get a fresh answer for
+        // whichever facet it's asking about "now".
+        let cur = facet.load(Ordering::Relaxed);
+        let body = regions_json(guard_rects, cur);
+        let mut r = Response::from_string(body);
+        r.add_header(ctype("application/json"));
         let _ = req.respond(r);
     } else if let Some(id) = parse_sound_url(&url) {
         serve_sound(sounds, id, req);
@@ -1256,6 +1308,23 @@ fn parse_pois() -> String {
         out.push(serde_json::json!({ "x": x, "y": y, "cat": cat, "name": name }));
     }
     serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
+}
+
+/// Build the `/regions.json` body: every guarded rect tagged for facet `cur`,
+/// as `[{"x":..,"y":..,"w":..,"h":..}, …]`. `facet` is omitted per-rect since
+/// the whole array is already filtered to one.
+fn regions_json(rects: &[GuardRect], cur: u8) -> String {
+    let mut out = String::from("[");
+    let mut first = true;
+    for r in rects.iter().filter(|r| r.facet == cur) {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        out.push_str(&format!("{{\"x\":{},\"y\":{},\"w\":{},\"h\":{}}}", r.x, r.y, r.w, r.h));
+    }
+    out.push(']');
+    out
 }
 
 /// Serve a `web/` static asset. A configured `web_dir` on disk wins when it has

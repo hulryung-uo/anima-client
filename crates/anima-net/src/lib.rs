@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 pub mod json;
 pub mod play_server;
+pub mod regions;
 pub mod scene;
 
 use anima_core::agent::{Action, Observation};

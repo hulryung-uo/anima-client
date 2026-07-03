@@ -125,7 +125,7 @@ function resolveTypedAnimGroup(typ, action, mode, body, atype, mounted) {
       return 0;
   }
 }
-let app, world, entLayer, mobs, overLayer, barLayer, itemLayer;
+let app, world, entLayer, mobs, overLayer, barLayer, itemLayer, guardLineLayer;
 let scene = null;
 // Render-on-demand: only re-draw the canvas when the scene changed. markDirty()
 // requests one redraw; movement/animation/polls set it. Starts true (first draw).
@@ -178,6 +178,7 @@ const SETTINGS_DEFAULTS = {
   damage: true,                  // floating damage numbers
   names: true,                   // overhead name labels
   abilities: true,               // weapon special-ability bar (also needs server AOS)
+  guardZones: false,             // guard-zone (guard line) boundary overlay — off by default
 };
 let settings = Object.assign({}, SETTINGS_DEFAULTS);
 try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}")); } catch (e) {}
@@ -200,7 +201,8 @@ function renderOptions() {
     + cb("names", "Overhead names")
     + cb("bars", "HP bars")
     + cb("damage", "Damage numbers")
-    + cb("abilities", "Weapon abilities");
+    + cb("abilities", "Weapon abilities")
+    + cb("guardZones", "Guard-zone lines (R)");
 }
 // Show/hide the Options panel (force=true open, false close, omitted = toggle).
 function toggleOptions(force) {
@@ -668,7 +670,11 @@ async function main() {
   // Invisible per-item click targets — kept BELOW `world` so a mobile sharing a
   // tile with an item wins the hit-test (mobiles are the priority).
   itemLayer = new PIXI.Container();
-  app.stage.addChild(itemLayer, world, entLayer, mobs, barLayer, overLayer);
+  // Guard-zone (guard line) overlay: above terrain/statics/items (`world`), below
+  // everything entity-related (`entLayer`'s fallback dots, `mobs`, `barLayer`,
+  // `overLayer`) — see the "guard-zone (guard line) boundary overlay" section.
+  guardLineLayer = new PIXI.Graphics();
+  app.stage.addChild(itemLayer, world, guardLineLayer, entLayer, mobs, barLayer, overLayer);
 
   poll();
   setInterval(poll, 150);
@@ -934,6 +940,7 @@ async function poll() {
     ingestLiftRejects(scene); // clear the held item + show a message (0x27 LiftRej)
     refreshTip(); // update the hover tooltip if its OPL just arrived/changed
     drawMinimap(scene);
+    updateGuardZones(scene); // guard-zone overlay: refetch on facet change, redraw clipped to view
     refreshBuffs(scene); // reconcile the buff/debuff bar with scene.buffs
     refreshAbilities(); // keep the weapon special-ability bar in sync with the equipped weapon
     if (wmOn) drawWorldmap();  // keep the open world map tracking the player
@@ -1909,6 +1916,90 @@ function tickBuffTimers() {
     const t = el.querySelector(".bt");
     if (t) t.textContent = buffTimeText(Number(el.dataset.icon));
   }
+}
+
+// ---- guard-zone (guard line) boundary overlay ----
+// UO town "guard zones" are areas where NPC guards protect you — a crime just
+// outside the line isn't. The client has no packet that carries a region's
+// rectangle; the boundary is server-only data (anima-net's `regions.rs`,
+// sourced from a local ServUO `Data/Regions.xml`), served at `/regions.json`
+// already filtered to the CURRENT facet. `guardLineLayer` is a dedicated PIXI
+// Graphics — a sibling of `world`/`entLayer`/`mobs`, added in `main()` right
+// above `world` (terrain/statics/items) but below `entLayer`/`mobs`/`barLayer`
+// /`overLayer` — so the lines read as ground markings and never cover a
+// mobile, its name, or its HP bar. It's a plain child of `app.stage` like the
+// others, so panning the camera (app.stage.position) moves it with everything
+// else for free; we only ever rebuild its geometry, never reposition it.
+let guardRects = [];        // [{x,y,w,h}, …] for the facet last successfully fetched
+let guardRectsFacet = -1;   // facet guardRects was successfully fetched for (-1 = never fetched)
+let guardRectsPending = -1; // facet currently in flight (-1 = no fetch in flight)
+// Toggle: 'R' key (setupInput) or the Options panel checkbox both flip
+// settings.guardZones — see renderOptions()/the opt-body "change" handler.
+function toggleGuardZones() {
+  settings.guardZones = !settings.guardZones;
+  saveSettings();
+  const cb = document.getElementById("opt-guardZones");
+  if (cb) cb.checked = settings.guardZones;
+  setStatus(settings.guardZones ? "guard-zone lines on" : "guard-zone lines off");
+  updateGuardZones(scene);
+}
+// Called once per poll (~150ms — the same cadence drawMinimap/refreshBuffs use
+// for their own per-tick redraws): (re)fetches `/regions.json` only when the
+// facet changed since the last successful fetch (and isn't already in
+// flight), then redraws the clipped-to-view lines so they track the player
+// as they walk. `guardRectsFacet` is only committed once the fetch actually
+// succeeds — committing it up front would mean a transient failure/empty
+// response latches in a blank overlay for the rest of that facet's lifetime,
+// since nothing would ever retry it. The in-flight response is also checked
+// against the (possibly-since-changed) *current* `scene.facet` before being
+// applied, so a rapid facet flip can't let a slow, stale response for the
+// old facet overwrite the new facet's rects.
+function updateGuardZones(s) {
+  if (!settings.guardZones) { drawGuardZones(); return; } // off → drawGuardZones() clears the layer
+  const facet = s && typeof s.facet === "number" ? s.facet : 0;
+  if (facet === guardRectsFacet || facet === guardRectsPending) { drawGuardZones(); return; }
+  guardRectsPending = facet;
+  fetch("regions.json?" + Date.now())
+    .then((r) => { if (!r.ok) throw new Error("regions.json " + r.status); return r.json(); })
+    .then((rects) => {
+      if (guardRectsPending === facet) guardRectsPending = -1;
+      const curFacet = scene && typeof scene.facet === "number" ? scene.facet : 0;
+      if (facet !== curFacet) return; // stale response for a facet we've since left — drop it
+      guardRects = Array.isArray(rects) ? rects : [];
+      guardRectsFacet = facet;
+      drawGuardZones();
+    })
+    .catch(() => {
+      if (guardRectsPending === facet) guardRectsPending = -1;
+      // leave guardRectsFacet/guardRects untouched so the next poll retries
+    });
+}
+// Rebuild the perimeter lines. Cheap even though a facet can carry ~90 guard
+// rects (Felucca/Trammel; the rest far fewer): only rects whose bounding box
+// overlaps the current visible tile window (scene.map.cx/cy ± radius, plus a
+// small margin so an edge just off-screen still pokes in) are drawn — most of
+// a facet's guard zones are nowhere near the player at any given moment.
+function drawGuardZones() {
+  if (!guardLineLayer) return;
+  guardLineLayer.clear();
+  if (settings.guardZones && scene && scene.map && guardRects.length) {
+    const m = scene.map, margin = 4;
+    const x0 = m.cx - m.radius - margin, x1 = m.cx + m.radius + margin;
+    const y0 = m.cy - m.radius - margin, y1 = m.cy + m.radius + margin;
+    for (const r of guardRects) {
+      const rx1 = r.x + r.w, ry1 = r.y + r.h;
+      if (rx1 < x0 || r.x > x1 || ry1 < y0 || r.y > y1) continue; // outside the view — skip
+      const pts = [[r.x, r.y], [rx1, r.y], [rx1, ry1], [r.x, ry1]]
+        .map(([tx, ty]) => [isoX(tx, ty), isoY(tx, ty, 0)]);
+      guardLineLayer.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) guardLineLayer.lineTo(pts[i][0], pts[i][1]);
+      guardLineLayer.closePath();
+      // Readable, not garish: a faint gold wash + a crisp ~2px gold edge.
+      guardLineLayer.fill({ color: 0xffcc33, alpha: 0.05 });
+      guardLineLayer.stroke({ width: 2, color: 0xffcc33, alpha: 0.65 });
+    }
+  }
+  markDirty();
 }
 
 // ---- minimap / radar (top-down, north-up) ----
@@ -5460,6 +5551,7 @@ function setupInput() {
     if (e.code === "KeyH") { e.preventDefault(); toggleStatus(); return; }          // H = status bar
     if (e.code === "KeyU") { e.preventDefault(); toggleHud(); return; }              // U = hide/show HUD status panel
     if (e.code === "KeyJ") { e.preventDefault(); toggleJournal(); return; }          // J = hide/show journal
+    if (e.code === "KeyR") { e.preventDefault(); toggleGuardZones(); return; }        // R = guard-zone lines
     // Esc while holding an item on the cursor → return it (backpack, else ground).
     // Takes priority over closing windows so a held item is never silently lost.
     if (e.code === "Escape" && cursorItem) { e.preventDefault(); returnCursorItem(); return; }
@@ -5650,6 +5742,7 @@ function setupInput() {
     settings[k] = e.target.checked; saveSettings(); applyAudioSettings();
     if (k === "tooltips" && !settings.tooltips) { tipSerial = null; hideTip(); }
     if (k === "abilities") refreshAbilities(true);
+    if (k === "guardZones") updateGuardZones(scene);
     markDirty();
   });
   optBody.addEventListener("input", (e) => {
