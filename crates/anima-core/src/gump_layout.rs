@@ -41,9 +41,14 @@ pub enum GumpElement {
     /// distinct from a Cliloc table). `w` is the wrap width for `croppedtext`,
     /// `None` for an unbounded `text`.
     Text { x: i64, y: i64, w: Option<i64>, s: String, page: i64 },
-    /// An HTML block: `htmlgump` (already resolved, HTML tags stripped) or
-    /// `xmfhtmlgump`/`xmfhtmlgumpcolor`/`xmfhtmltok` (cliloc-driven — see
-    /// [`HtmlText::Cliloc`]).
+    /// An HTML block: `htmlgump` (already resolved from the gump's own local
+    /// text table) or `xmfhtmlgump`/`xmfhtmlgumpcolor`/`xmfhtmltok`
+    /// (cliloc-driven — see [`HtmlText::Cliloc`]). Either way the string still
+    /// carries its raw UO gump-HTML tags/entities (`<CENTER>`, `<BASEFONT
+    /// COLOR=#rrggbb>`, `&amp;`, …) unresolved — same as [`GumpElement::Text`]
+    /// — because interpreting them is a *display* concern (alignment, bold,
+    /// color) that belongs to the renderer, not this protocol-data parser. See
+    /// `web/main.js`'s `renderGumpHtml`.
     Html { x: i64, y: i64, w: i64, h: i64, text: HtmlText, page: i64 },
     /// A checkbox (`checkbox`); `on` is the initial checked state (0/1).
     Check { x: i64, y: i64, id: i64, on: i64, page: i64 },
@@ -57,7 +62,8 @@ pub enum GumpElement {
 /// The text of a [`GumpElement::Html`] block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HtmlText {
-    /// Already-resolved text (an `htmlgump`'s local string, HTML-tag-stripped).
+    /// Already-resolved text (an `htmlgump`'s local string), tags/entities
+    /// still raw — see [`GumpElement::Html`]'s doc.
     Literal(String),
     /// A cliloc reference the core cannot resolve on its own (no Cliloc table
     /// here — see `anima_assets::Cliloc`). `id` is the cliloc id; `args`, when
@@ -156,11 +162,19 @@ pub fn parse(layout: &str, text: &[String]) -> GumpLayout {
                 max_x = max_x.max(x + w);
                 max_y = max_y.max(y + num(4).max(20));
             }
-            // htmlgump x y w h textId background scrollbar
+            // htmlgump x y w h textId background scrollbar — the raw local
+            // string is kept as-is (tags/entities un-stripped, un-decoded);
+            // see `GumpElement::Html`'s doc for why.
             "htmlgump" => {
                 let (x, y, w, h) = (num(1), num(2), num(3), num(4));
-                let s = strip_html(&get_text(5));
-                elements.push(GumpElement::Html { x, y, w, h, text: HtmlText::Literal(s), page });
+                elements.push(GumpElement::Html {
+                    x,
+                    y,
+                    w,
+                    h,
+                    text: HtmlText::Literal(get_text(5)),
+                    page,
+                });
                 max_x = max_x.max(x + w);
                 max_y = max_y.max(y + h.max(20));
             }
@@ -218,23 +232,6 @@ pub fn parse(layout: &str, text: &[String]) -> GumpLayout {
     let width = win_w.max(max_x + 16).max(80);
     let height = win_h.max(max_y + 16).max(48);
     GumpLayout { elements, width, height }
-}
-
-/// Strip simple HTML tags from a gump html string (`<br>`, `<basefont …>`, etc.)
-/// and decode the few entities UO uses. Good enough for the labels servers put
-/// in `htmlgump` blocks; it is not a real HTML parser.
-fn strip_html(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    out.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").replace("&nbsp;", " ")
 }
 
 #[cfg(test)]
@@ -327,12 +324,17 @@ mod tests {
     }
 
     #[test]
-    fn strips_html_and_carries_cliloc_refs() {
+    fn preserves_html_tags_and_carries_cliloc_refs() {
+        // Tags/entities are NOT interpreted here — that's the renderer's job
+        // (see `GumpElement::Html`'s doc) — so the local string round-trips
+        // byte-for-byte, same as a plain `text`/`croppedtext` element would.
         let layout = "{ htmlgump 5 5 180 40 0 0 0 }{ xmfhtmlgump 5 50 180 20 1015313 0 0 }";
         let text = vec!["<basefont color=#fff>Hello <b>world</b>".to_string()];
         let layout = parse(layout, &text);
         match &layout.elements[0] {
-            GumpElement::Html { text: HtmlText::Literal(s), .. } => assert_eq!(s, "Hello world"),
+            GumpElement::Html { text: HtmlText::Literal(s), .. } => {
+                assert_eq!(s, "<basefont color=#fff>Hello <b>world</b>")
+            }
             other => panic!("expected literal Html, got {other:?}"),
         }
         match &layout.elements[1] {

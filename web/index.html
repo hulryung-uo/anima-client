@@ -274,6 +274,22 @@
       /* croppedtext only: clip to the "w" box set inline (see buildGumpElement) —
          a clip box, not a wrap box. */
       .dlg-text-crop { overflow: hidden; }
+      /* UO gump-HTML tags (renderGumpHtml in main.js), scoped under .dialog-win
+         like the rest of this block so no other UI is affected. CENTER/LEFT/
+         RIGHT are block-level wrappers spanning the full width of whatever box
+         the caller set (croppedtext's "w") so text-align has something to
+         center within; B/I/U/BIG/SMALL are plain inline style toggles. */
+      .dialog-win .gh-center, .dialog-win .gh-left, .dialog-win .gh-right {
+        display: block; width: 100%;
+      }
+      .dialog-win .gh-center { text-align: center; }
+      .dialog-win .gh-left { text-align: left; }
+      .dialog-win .gh-right { text-align: right; }
+      .dialog-win .gh-b { font-weight: bold; }
+      .dialog-win .gh-i { font-style: italic; }
+      .dialog-win .gh-u { text-decoration: underline; }
+      .dialog-win .gh-big { font-size: 1.3em; }
+      .dialog-win .gh-small { font-size: .8em; }
       .dlg-btn {
         cursor: pointer; min-width: 22px; height: 20px; padding: 0 8px;
         background: #1b2530; color: #8ab4f8; border: 1px solid #2a3a4a; border-radius: 4px;

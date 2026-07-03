@@ -647,7 +647,13 @@ fn gump_element_json(e: &GumpElement, cliloc: Option<&Cliloc>) -> Value {
         GumpElement::Text { x, y, w: Some(w), s, page } => {
             json!({"t":"text","x":x,"y":y,"w":w,"s":s,"page":page})
         }
-        // Resolve against the Cliloc table so NPC dialogs show real text, not #ids.
+        // Resolve against the Cliloc table so NPC dialogs show real text, not
+        // #ids. Shaped as the SAME "t":"text" JSON as a plain Text element
+        // (deliberately — `w` is always `Some` for an html block, so the
+        // client's one `e.t === "text"` branch in `renderGumpHtml` handles
+        // both). Any UO gump-HTML tags/entities in `s` (`<CENTER>`, `&amp;`,
+        // …) are left as-is for the client to interpret — see
+        // `GumpElement::Html`'s doc.
         GumpElement::Html { x, y, w, text, page, .. } => {
             let s = match text {
                 HtmlText::Literal(s) => s.clone(),
@@ -1627,12 +1633,16 @@ mod tests {
     }
 
     #[test]
-    fn gump_layout_strips_html_and_handles_cliloc() {
+    fn gump_layout_preserves_html_tags_and_handles_cliloc() {
+        // Tags are no longer stripped here — the client's `renderGumpHtml`
+        // interprets them (CENTER/BASEFONT/etc.) for display; the scene JSON
+        // just carries the resolved string through unchanged, same as it
+        // always has for a cliloc-driven `html` element.
         let layout = "{ htmlgump 5 5 180 40 0 0 0 }{ xmfhtmlgump 5 50 180 20 1015313 0 0 }";
         let text = vec!["<basefont color=#fff>Hello <b>world</b>".to_string()];
         let parsed = gump_layout::parse(layout, &text);
         let els: Vec<Value> = parsed.elements.iter().map(|e| gump_element_json(e, None)).collect();
-        assert_eq!(els[0]["s"], "Hello world");
+        assert_eq!(els[0]["s"], "<basefont color=#fff>Hello <b>world</b>");
         assert_eq!(els[1]["s"], "#1015313"); // cliloc placeholder (no table)
     }
 

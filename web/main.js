@@ -4158,6 +4158,160 @@ function applyGumpPage(win) {
     node.style.display = (p === 0 || p === win.page) ? "" : "none";
   }
 }
+// ── UO gump HTML mini-parser ────────────────────────────────────────────
+// Servers embed a small HTML subset in gump text — both `text`/`croppedtext`
+// strings AND resolved `htmlgump`/`xmfhtml*` blocks arrive as the same "t":
+// "text" JSON shape (anima-core's gump_layout.rs keeps both raw; anima-net's
+// scene.rs shapes them identically — see those files' doc comments). E.g.
+// ServUO's CraftGump sends literal `<CENTER>ALCHEMY MENU</CENTER>`. This
+// turns that string into safe DOM nodes: CENTER/LEFT/RIGHT become a
+// block-level wrapper with the matching text-align (.gh-center/.gh-left/
+// .gh-right, scoped under .dialog-win in index.html), B/I/U/BIG/SMALL become
+// inline <span> classes, BASEFONT COLOR sets a running text color (sanitized
+// — #rrggbb/#rgb or a small named-color whitelist, never the raw attribute
+// text), BR is a line break, and any other tag (<A HREF>, <P>, …) is
+// stripped but its inner text kept.
+//
+// SAFETY: the string is tokenized by hand on '<'/'>' and every node is built
+// with createElement/createTextNode — never innerHTML/outerHTML and never a
+// tag name taken from the server — so a malicious server string (even
+// `<script>…</script>`) can only ever become inert text content, never a
+// real element, attribute, or executable markup.
+const GUMP_NAMED_COLORS = new Set([
+  "red", "cyan", "blue", "darkblue", "lightblue", "purple", "yellow", "lime",
+  "magenta", "white", "silver", "gray", "grey", "black", "orange", "brown",
+  "maroon", "green", "olive",
+]);
+// `raw` is whatever came after `color=` in a BASEFONT tag, already isolated
+// by a regex that stops at the first quote/space — validate it's an actual
+// #rrggbb/#rgb hex or one of the whitelisted names before it ever reaches
+// `style.color`; anything else (an attempted CSS/style-breakout string,
+// junk) is dropped (returns null, meaning "leave color unset").
+function gumpSanitizeColor(raw) {
+  const hex = (raw || "").trim().replace(/^#/, "");
+  if (/^[0-9a-fA-F]{6}$/.test(hex) || /^[0-9a-fA-F]{3}$/.test(hex)) return "#" + hex.toLowerCase();
+  const name = (raw || "").trim().toLowerCase();
+  return GUMP_NAMED_COLORS.has(name) ? name : null;
+}
+// Decode the handful of entities UO gump text actually uses. Deliberately a
+// fixed whitelist regex (not a generic &name; decoder) — only ever produces
+// plain characters, never re-introduces '<'/'>' as anything but literal text
+// (the result is inserted via createTextNode, so it can't become markup
+// even if it contains those characters).
+function gumpDecodeEntities(s) {
+  return s.replace(/&(amp|lt|gt|nbsp|quot|apos|#39);/gi, (m, name) => {
+    switch (name.toLowerCase()) {
+      case "amp": return "&";
+      case "lt": return "<";
+      case "gt": return ">";
+      case "nbsp": return "\u00A0";
+      case "quot": return '"';
+      case "apos": case "#39": return "'";
+      default: return m;
+    }
+  });
+}
+// Parse a gump text/html string into a DocumentFragment of safe DOM nodes.
+// `boxWidth` isn't consulted directly (an alignment wrapper is a `width:100%`
+// block div — it centers within whatever explicit CSS width the caller has
+// already set on the element, e.g. croppedtext's `w`); a `null`/absent width
+// (a plain unbounded `text`) still parses fine, it just has no box to center
+// within. Malformed input (unclosed tags, stray closes, no `>`) degrades
+// gracefully — it never throws and never drops trailing text.
+function renderGumpHtml(raw, boxWidth) {
+  const root = document.createDocumentFragment();
+  const str = String(raw == null ? "" : raw);
+  // One stack frame per currently-open recognized/unknown tag: `el` is where
+  // new nodes get appended (the fragment for the untouched root, or the
+  // span/div pushed for a recognized tag, or the PARENT's `el` again for an
+  // unknown tag — so it's tracked for matching but contributes no DOM node).
+  // `name` is the upper-cased tag name a closing tag must match.
+  const stack = [{ el: root, name: null }];
+  // BASEFONT's color is a running property, not a stack frame (real gump
+  // text rarely closes it) — applies to every later text run until changed
+  // or reset by a bare <basefont>.
+  let color = null;
+
+  const top = () => stack[stack.length - 1];
+  const appendText = (chunk) => {
+    if (!chunk) return;
+    const text = gumpDecodeEntities(chunk);
+    if (!text) return;
+    if (color) {
+      const span = document.createElement("span");
+      span.style.color = color; // already sanitized — see gumpSanitizeColor
+      span.appendChild(document.createTextNode(text));
+      top().el.appendChild(span);
+    } else {
+      top().el.appendChild(document.createTextNode(text));
+    }
+  };
+  const openBlock = (cls, name) => {
+    const div = document.createElement("div");
+    div.className = cls;
+    top().el.appendChild(div);
+    stack.push({ el: div, name });
+  };
+  const openInline = (cls, name) => {
+    const span = document.createElement("span");
+    span.className = cls;
+    top().el.appendChild(span);
+    stack.push({ el: span, name });
+  };
+  const closeTag = (name) => {
+    // Pop back to (and including) the nearest matching open frame; a stray
+    // close with no match (or one that would pop the implicit root) is
+    // simply ignored rather than throwing.
+    for (let i = stack.length - 1; i > 0; i--) {
+      if (stack[i].name === name) { stack.length = i; return; }
+    }
+  };
+
+  let i = 0;
+  while (i < str.length) {
+    const lt = str.indexOf("<", i);
+    if (lt === -1) { appendText(str.slice(i)); break; }
+    appendText(str.slice(i, lt));
+    const gt = str.indexOf(">", lt);
+    if (gt === -1) {
+      // Unterminated '<' — nothing left can parse as a tag; keep the rest
+      // as literal text instead of throwing or silently dropping it.
+      appendText(str.slice(lt));
+      break;
+    }
+    const body = str.slice(lt + 1, gt).trim();
+    i = gt + 1;
+    if (!body) continue;
+    const closing = body[0] === "/";
+    const rest = closing ? body.slice(1) : body;
+    const m = rest.match(/^[A-Za-z][A-Za-z0-9]*/);
+    if (!m) continue; // "<>", "</>", "<123>" — not a tag we can name; skip
+    const name = m[0].toUpperCase();
+
+    if (closing) { closeTag(name); continue; }
+
+    switch (name) {
+      case "CENTER": openBlock("gh-center", name); break;
+      case "LEFT": openBlock("gh-left", name); break;
+      case "RIGHT": openBlock("gh-right", name); break;
+      case "BR": top().el.appendChild(document.createElement("br")); break;
+      case "B": case "BOLD": openInline("gh-b", name); break;
+      case "I": case "EM": openInline("gh-i", name); break;
+      case "U": openInline("gh-u", name); break;
+      case "BIG": openInline("gh-big", name); break;
+      case "SMALL": openInline("gh-small", name); break;
+      case "BASEFONT": {
+        const cm = rest.match(/color\s*=\s*"?([^"\s>]+)"?/i);
+        color = cm ? gumpSanitizeColor(cm[1]) : null; // bare <basefont> resets
+        break;
+      }
+      // Unknown tag (<A HREF>, <P>, …): stripped, inner text kept — track it
+      // (so a later matching close pops cleanly) without adding a DOM node.
+      default: stack.push({ el: top().el, name }); break;
+    }
+  }
+  return root;
+}
 function buildGumpElement(win, e) {
   const { serial, gumpId } = win;
   const node = document.createElement(e.t === "button" ? "button" : "div");
@@ -4174,9 +4328,14 @@ function buildGumpElement(win, e) {
     // hidden at exactly w px) — it never wraps, it clips. Plain text (no w,
     // scene.rs's parse_gump_layout never emits one for it) gets no width and
     // no clip, just runs on past its start point; both are single-line
-    // (.dlg-text: white-space: nowrap, in index.html).
+    // (.dlg-text: white-space: nowrap, in index.html). This same shape also
+    // carries a resolved htmlgump/xmfhtml* block (anima-net's scene.rs shapes
+    // both identically, `w` always present for those) — either way `s` may
+    // carry raw UO gump-HTML (`<CENTER>…</CENTER>`, `<basefont color=…>`,
+    // …), which renderGumpHtml turns into safe, styled DOM nodes instead of
+    // literal tag text.
     if (e.w) { node.classList.add("dlg-text-crop"); node.style.width = (e.w | 0) + "px"; }
-    node.textContent = e.s || "";
+    node.appendChild(renderGumpHtml(e.s || "", e.w ? (e.w | 0) : null));
   } else if (e.t === "button") {
     node.classList.add("dlg-btn");
     node.type = "button";
