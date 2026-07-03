@@ -1991,12 +1991,21 @@ function drawGuardZones() {
       if (rx1 < x0 || r.x > x1 || ry1 < y0 || r.y > y1) continue; // outside the view — skip
       const pts = [[r.x, r.y], [rx1, r.y], [rx1, ry1], [r.x, ry1]]
         .map(([tx, ty]) => [isoX(tx, ty), isoY(tx, ty, 0)]);
-      guardLineLayer.moveTo(pts[0][0], pts[0][1]);
-      for (let i = 1; i < pts.length; i++) guardLineLayer.lineTo(pts[i][0], pts[i][1]);
-      guardLineLayer.closePath();
-      // Readable, not garish: a faint gold wash + a crisp ~2px gold edge.
-      guardLineLayer.fill({ color: 0xffcc33, alpha: 0.05 });
-      guardLineLayer.stroke({ width: 2, color: 0xffcc33, alpha: 0.65 });
+      const path = () => {
+        guardLineLayer.moveTo(pts[0][0], pts[0][1]);
+        for (let i = 1; i < pts.length; i++) guardLineLayer.lineTo(pts[i][0], pts[i][1]);
+        guardLineLayer.closePath();
+      };
+      // A visible gold wash so standing INSIDE a guard zone reads at a glance,
+      // then the boundary as a dark halo + bright gold core so the line stays
+      // legible on both bright grass and dark roads (a thin single-colour stroke
+      // vanished against the forest — the "not visible" report).
+      path();
+      guardLineLayer.fill({ color: 0xffcc33, alpha: 0.11 });
+      path();
+      guardLineLayer.stroke({ width: 5, color: 0x1a1205, alpha: 0.55 }); // dark halo
+      path();
+      guardLineLayer.stroke({ width: 2.5, color: 0xffd24a, alpha: 0.95 }); // bright core
     }
   }
   markDirty();
