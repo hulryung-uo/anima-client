@@ -2692,7 +2692,7 @@ const MALE_GUMP_OFFSET = 50000, FEMALE_GUMP_OFFSET = 60000;
 function bringToFront(el) { document.body.appendChild(el); }
 
 // Drag a window by its title bar; clamp so it never fully leaves the viewport.
-function makeDraggable(win, handle) {
+function makeDraggable(win, handle, onMove) {
   handle.addEventListener("mousedown", (e) => {
     if (e.target.classList.contains("gump-close")) return; // let the ✕ click through
     e.preventDefault();
@@ -2703,6 +2703,7 @@ function makeDraggable(win, handle) {
       const x = Math.max(0, Math.min(window.innerWidth - 40, ev.clientX - dx));
       const y = Math.max(0, Math.min(window.innerHeight - 24, ev.clientY - dy));
       win.style.left = x + "px"; win.style.top = y + "px"; win.style.right = "auto";
+      if (onMove) onMove(x, y);
     };
     const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
     window.addEventListener("mousemove", move);
@@ -4032,6 +4033,12 @@ function refreshContainers() { for (const serial of containerWins.keys()) refres
 // rest of the game.
 const gumpWins = new Map(); // serial -> { el, sig, page, nodes, … }
 let gumpCascade = 0;
+// Remembered screen position per gump KIND (gumpId), like ClassicUO's saved gump
+// locations. ServUO craft/menu gumps close and REOPEN with a fresh serial on every
+// selection, so keying position by serial (or cascading each build) walked the
+// window down-right across the screen. Reopening the same kind now lands where the
+// last one of that kind sat; a user drag updates the remembered spot.
+const gumpPos = new Map();       // gumpId → { left, top }
 function gumpSignature(g) {
   return JSON.stringify([g.gumpId >>> 0, g.w | 0, g.h | 0, g.elements || []]);
 }
@@ -4103,9 +4110,19 @@ function buildGumpWindow(serial, g, sig, page) {
   const gumpId = g.gumpId >>> 0;
   const el = document.createElement("div");
   el.className = "gump-win dialog-win";
-  const off = (gumpCascade++ % 8) * 24;
-  el.style.left = (160 + off) + "px";
-  el.style.top = (90 + off) + "px";
+  // Reopen at the remembered spot for this gump KIND; only a first-seen kind
+  // cascades (so distinct dialogs don't stack exactly). This keeps a craft/menu
+  // gump anchored across its close-and-reopen-with-a-new-serial cycle.
+  const saved = gumpPos.get(gumpId);
+  if (saved) {
+    el.style.left = saved.left + "px";
+    el.style.top = saved.top + "px";
+  } else {
+    const off = (gumpCascade++ % 8) * 24;
+    el.style.left = (160 + off) + "px";
+    el.style.top = (90 + off) + "px";
+    gumpPos.set(gumpId, { left: 160 + off, top: 90 + off });
+  }
   const w = Math.max(80, g.w | 0), h = Math.max(48, g.h | 0);
 
   const title = document.createElement("div");
@@ -4143,7 +4160,9 @@ function buildGumpWindow(serial, g, sig, page) {
     sendInput(`gump:${serial}:${gumpId}:0`);
     closeGump(serial);
   });
-  makeDraggable(el, title);
+  // Remember where the user drags this window, keyed by kind, so the next reopen
+  // (fresh serial) lands there too.
+  makeDraggable(el, title, (x, y) => gumpPos.set(gumpId, { left: x, top: y }));
   document.body.appendChild(el);
   gumpWins.set(serial, win);
 }
