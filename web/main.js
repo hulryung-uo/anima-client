@@ -3988,7 +3988,6 @@ function refreshContainer(serial) {
     const itemSerial = it.serial >>> 0;
     const cell = document.createElement("div");
     cell.className = "cont-item";
-    cell.title = "double-click to use / open · drag to move";
     cell.draggable = false;                // pointer-drag (held-on-cursor), not native HTML5 drag
     cell.dataset.serial = itemSerial;
     cell.dataset.g = it.g;
@@ -4548,11 +4547,44 @@ function placeCursorItem(clientX, clientY) {
     return true;
   }
   if (el && el.closest && el.closest("#map")) {
-    const gl = clientToGlobal(clientX, clientY), t = groundTileAt(gl.x, gl.y);
+    const gl = clientToGlobal(clientX, clientY);
+    // A held item released over a MOBILE's on-screen body (ourself or anyone
+    // else) is a server-level drop-on-mobile, same as ClassicUO's convention:
+    // x=y=0xFFFF (sentinel "no tile"), z=0, container=that mobile's serial.
+    // ServUO's Mobile.OnDragDrop then does the rest — AddToBackpack on
+    // ourself, OpenTrade on another player/NPC (the 0x6F reply pops the trade
+    // window buildTradeWindow() already builds). Checked before the plain
+    // ground drop so standing on/near someone doesn't just drop at their feet.
+    const mob = mobileAt(gl.x, gl.y);
+    if (mob != null) { sendInput("drop:" + serial + ":65535:65535:0:" + mob); return true; }
+    const t = groundTileAt(gl.x, gl.y);
     sendInput("drop:" + serial + ":" + t.x + ":" + t.y + ":" + t.z + ":4294967295");
     return true;
   }
   return false;   // other UI / empty space → keep holding
+}
+// Resolve which mobile (the player's own body, or another) sits under a
+// renderer-space point — used to target a held-item drop at a mobile instead
+// of the bare ground. `mobSprites` holds each entity's persistent part
+// sprites (see drawMobs); the "#body" part is the whole-character hit target.
+// Prefers an exact hit inside the body sprite's screen bounds; a nearby-center
+// fallback (~28px) covers thin/foreshortened facing frames near the edges.
+function mobileAt(gx, gy) {
+  const HIT_R = 28;
+  let best = null, bestD = Infinity;
+  const test = (id, serial) => {
+    const sp = mobSprites.get(id + "#body");
+    if (!sp || !sp.visible) return;
+    const b = sp.getBounds();
+    if (b.containsPoint(gx, gy)) { best = serial; bestD = -1; return; }
+    if (bestD === -1) return;                 // an exact hit already won
+    const d = Math.hypot(gx - (b.x + b.width / 2), gy - (b.y + b.height / 2));
+    if (d <= HIT_R && d < bestD) { best = serial; bestD = d; }
+  };
+  const pserial = scene && scene.player ? (scene.player.serial >>> 0) : 0;
+  if (pserial) test("self", pserial);
+  for (const m of (scene && scene.mobiles) || []) test("m" + (m.serial >>> 0), m.serial >>> 0);
+  return best;
 }
 // Esc while holding → return the item. Choice: drop it back into our own backpack
 // (the layer-21 worn pack) if we know its serial — that's the safe "undo" that won't
