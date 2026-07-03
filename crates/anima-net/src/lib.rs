@@ -334,7 +334,14 @@ impl Session {
             }
             Action::TargetCancel => self.cancel_target()?,
             Action::BuyItems { vendor, items } => self.send(&build_buy(*vendor, items))?,
-            Action::SellItems { vendor, items } => self.send(&build_sell(*vendor, items))?,
+            Action::SellItems { vendor, items } => {
+                self.send(&build_sell(*vendor, items))?;
+                // The sell list is consumed once we answer it — clear it
+                // locally so a later, unrelated sell trip can't accidentally
+                // re-answer this stale list (mirrors PopupSelect clearing
+                // world.popup below).
+                self.world.close_shop_sell();
+            }
             Action::GumpResponse { serial, gump_id, button, switches, entries } => {
                 self.send(&build_gump_response(*serial, *gump_id, *button, switches, entries))?;
                 // The gump is consumed once we answer it — drop it from the world so

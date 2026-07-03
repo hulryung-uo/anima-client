@@ -752,6 +752,15 @@ impl World {
         self.gumps.retain(|g| g.serial != serial);
     }
 
+    /// Drop the vendor SELL window (0x9E), if any. The window is consumed
+    /// once we answer it (or abandon it) — clearing it locally keeps a stale
+    /// list from being answered a second time by a later, unrelated sale
+    /// (its serials no longer refer to what's actually in the pack). Mirrors
+    /// [`World::close_gump`]; see [`crate::agent::Action::SellItems`].
+    pub fn close_shop_sell(&mut self) {
+        self.shop_sell = None;
+    }
+
     /// Open (or refresh) a secure trade session (0x6F action 0 Display).
     /// Upserts by `opponent_serial` — ServUO allows only one open trade per
     /// mobile pair (`NetState.FindTradeContainer`/`AddTrade`, `Mobile.OpenTrade`
@@ -908,6 +917,18 @@ mod tests {
         w.player = Some(me);
 
         assert_eq!(w.player_mobile().unwrap().name, "Anima");
+    }
+
+    #[test]
+    fn close_shop_sell_drops_a_stale_sell_window() {
+        // Regression: `Session::apply_action` (anima-net) used to send
+        // `SellItems` without ever clearing `world.shop_sell` — a second sell
+        // trip could then answer the *previous* SellList, whose serials no
+        // longer match anything in the pack (a silent failed sale).
+        let mut w = World::new();
+        w.shop_sell = Some(ShopSell { vendor: 0x1234, items: vec![] });
+        w.close_shop_sell();
+        assert!(w.shop_sell.is_none());
     }
 
     #[test]
