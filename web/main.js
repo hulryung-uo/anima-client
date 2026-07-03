@@ -4466,11 +4466,17 @@ let cursorItem = null;          // { serial, g, amount } | null — the held ite
 let liftDrag = false;           // true while the very press that lifted the item is still down
 let placedAt = 0;               // perf time of the last placement (debounces the trailing mousedown)
 // Pointer-drag arming (canvas sprites can't fire HTML5 dragstart): a left-press on a
-// draggable item arms `groundDrag`; once the cursor moves past DRAG_THRESHOLD px the
-// item lifts onto the cursor (held), and a release/next-click places it.
-let groundDrag = null;          // { serial, g, amount, st, sx, sy, started } or null
+// draggable item arms `groundDrag`; once the press becomes a real drag the item lifts
+// onto the cursor (held), and a release/next-click places it. A quick tap must NOT
+// promote to a drag — a click or double-click on a trackpad routinely drifts a few px
+// under the finger, and the old 5px-only rule turned every such tap into a pickup.
+// So a small drift only counts once the button has been held past the double-click
+// window (DRAG_HOLD_MS); a clearly-intentional larger motion (DRAG_FAR) lifts at once.
+let groundDrag = null;          // { serial, g, amount, st, sx, sy, started, t } or null
 let dragGhost = null;           // floating <img> glued to the cursor while an item is held
-const DRAG_THRESHOLD = 5;       // px the pointer must move before a press becomes a drag
+const DRAG_THRESHOLD = 6;       // min px of motion before a held press is even a drag candidate
+const DRAG_FAR = 22;            // px of motion that means "definitely a drag" regardless of hold time
+const DRAG_HOLD_MS = 180;       // a small drift only becomes a drag after the button's been held this long (> a tap)
 
 // Place/refresh the floating ghost image at the cursor (page coords).
 function moveGhost(clientX, clientY) {
@@ -4749,8 +4755,12 @@ function setupItemDnD() {
   // pending single-click for this item suppresses the name-request a plain click fires.
   window.addEventListener("mousemove", (e) => {
     if (groundDrag && !cursorItem && !groundDrag.started) {
-      if (Math.abs(e.clientX - groundDrag.sx) < DRAG_THRESHOLD &&
-          Math.abs(e.clientY - groundDrag.sy) < DRAG_THRESHOLD) return;
+      const moved = Math.max(Math.abs(e.clientX - groundDrag.sx), Math.abs(e.clientY - groundDrag.sy));
+      if (moved < DRAG_THRESHOLD) return;                 // hasn't moved enough to be a drag at all
+      // A small drift is a drag only if the button's been held past a tap; a big
+      // motion is unambiguously a drag and lifts immediately. This lets a click /
+      // double-click that wobbles a few px still resolve as a click.
+      if (moved < DRAG_FAR && (performance.now() - (groundDrag.t || 0)) < DRAG_HOLD_MS) return;
       groundDrag.started = true;
       if (clickPend && (clickPend.serial >>> 0) === groundDrag.serial) { clearTimeout(clickPend.timer); clickPend = null; }
       const { serial, g, amount, st } = groundDrag;
@@ -4809,7 +4819,7 @@ function setupItemDnD() {
       e.preventDefault();
       groundDrag = { serial: (+cell.dataset.serial) >>> 0, g: +cell.dataset.g | 0,
                      amount: (+cell.dataset.amount) || 1, st: cell.dataset.st === "1",
-                     sx: e.clientX, sy: e.clientY, started: false };
+                     sx: e.clientX, sy: e.clientY, started: false, t: performance.now() };
       return;
     }
     if (pdTarget == null) {       // own paperdoll only — can't move another mobile's gear
@@ -4817,7 +4827,7 @@ function setupItemDnD() {
       if (ic) {
         e.preventDefault();
         groundDrag = { serial: (+ic.dataset.serial) >>> 0, g: +ic.dataset.g | 0,
-                       amount: 1, sx: e.clientX, sy: e.clientY, started: false };
+                       amount: 1, sx: e.clientX, sy: e.clientY, started: false, t: performance.now() };
       }
     }
   }, true);
@@ -4967,7 +4977,7 @@ function onEntityPointerDown(serial, e, isItem) {
     if (isItem) {
       const it = (scene && scene.items || []).find((x) => (x.serial >>> 0) === (serial >>> 0));
       groundDrag = { serial: serial >>> 0, g: it ? it.g : 0, amount: (it && (it.amount | 0)) || 1,
-                     st: !!(it && it.st), sx: e.clientX, sy: e.clientY, started: false };
+                     st: !!(it && it.st), sx: e.clientX, sy: e.clientY, started: false, t: performance.now() };
     }
   }
 }
