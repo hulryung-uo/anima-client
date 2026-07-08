@@ -1564,13 +1564,22 @@ fn push_journal_cliloc(
     if text.is_empty() && cliloc == 0 {
         return;
     }
-    // msg_type 6 = single-click label: update the entity's name instead of logging.
-    if msg_type == 6 && cliloc == 0 {
-        if let Some(m) = world.mobiles.get_mut(&serial) {
-            m.name = text.clone();
-        }
-        if let Some(it) = world.items.get_mut(&serial) {
-            it.name = text.clone();
+    // msg_type 6 = single-click label: the entity's NAME, not chat — store it on the
+    // entity (so it drives the persistent overhead label / hover / all-names) and
+    // don't scroll it in the journal. ServUO sends it either as raw text (cliloc 0)
+    // or, the common case, as the localized "name" line (cliloc 1050045 = the OPL
+    // header `~1_val~`, Mobile.OnSingleClick) whose `text` is already the resolved
+    // name — the old `cliloc == 0`-only guard missed that path, so clicked names
+    // leaked into the chat log and never reached `Mobile::name`.
+    if msg_type == 6 && (cliloc == 0 || cliloc == 1050045) {
+        let nm = text.trim();
+        if !nm.is_empty() {
+            if let Some(m) = world.mobiles.get_mut(&serial) {
+                m.name = nm.to_string();
+            }
+            if let Some(it) = world.items.get_mut(&serial) {
+                it.name = nm.to_string();
+            }
         }
         return;
     }
@@ -1901,6 +1910,47 @@ mod tests {
         assert_eq!(e.cliloc, 1044625);
         assert_eq!(e.text, "iron");
         assert_eq!(e.name, "System");
+    }
+
+    #[test]
+    fn single_click_label_sets_mobile_name_not_journal() {
+        let mut w = World::new();
+        w.mobiles.insert(
+            0x1234,
+            crate::world::Mobile { serial: 0x1234, ..Default::default() },
+        );
+        // 0xC1 MessageLocalized as ServUO sends a single-click name: type 6 (Label),
+        // cliloc 1050045 (the OPL name header `~1_val~`), the name as the sole arg.
+        let mut p = PacketWriter::new();
+        p.u8(0xC1).u16(0);
+        p.u32(0x1234).u16(0).u8(6).u16(946).u16(3); // serial, graphic, type=6, hue, font
+        p.u32(1050045); // cliloc = name header
+        p.zeros(30); // name column (unused here)
+        for ch in "Zurghed".chars() {
+            p.u16((ch as u16).swap_bytes()); // LE-UTF16 arg
+        }
+        apply_packet(&mut w, &p.into_vec());
+        // Stored on the mobile (drives the overhead label / hover), NOT scrolled in chat.
+        assert_eq!(w.mobiles.get(&0x1234).unwrap().name, "Zurghed");
+        assert!(w.journal.is_empty(), "a single-click name must not scroll in the journal");
+    }
+
+    #[test]
+    fn regular_speech_still_journals_and_leaves_name_untouched() {
+        let mut w = World::new();
+        w.mobiles.insert(
+            0x55,
+            crate::world::Mobile { serial: 0x55, name: "Guard".into(), ..Default::default() },
+        );
+        // A normal (type 0) ascii talk from the same serial is chat, not a name.
+        let mut p = PacketWriter::new();
+        p.u8(0x1C).u16(0);
+        p.u32(0x55).u16(0).u8(0).u16(0).u16(3); // serial, graphic, type=0, hue, font
+        p.zeros(30); // name column
+        p.bytes(b"halt!\0");
+        apply_packet(&mut w, &p.into_vec());
+        assert_eq!(w.mobiles.get(&0x55).unwrap().name, "Guard"); // name unchanged
+        assert!(w.journal.iter().any(|e| e.text == "halt!"), "speech still journals");
     }
 
     #[test]
