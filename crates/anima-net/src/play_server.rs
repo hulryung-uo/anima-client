@@ -1514,8 +1514,11 @@ fn parse_command(body: &str) -> Option<Action> {
         }
         "run" => Some(Action::Walk { dir: arg.parse::<u8>().ok()? & 7, run: true }),
         // walkto:<x>,<y> — click-to-walk: pathfind to a ground tile and auto-walk.
+        // Accept either delimiter: the web client sends `x,y`, but the whole input
+        // line is already colon-split, so a hand-typed `walkto:x:y` (the natural
+        // guess, and what tripped up shell/GM testing) must not silently no-op.
         "walkto" => {
-            let (x, y) = arg.split_once(',')?;
+            let (x, y) = arg.split_once([',', ':'])?;
             Some(Action::WalkTo { x: x.trim().parse().ok()?, y: y.trim().parse().ok()? })
         }
         "say" => Some(Action::Say { text: arg.to_string() }),
