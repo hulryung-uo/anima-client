@@ -717,6 +717,24 @@ impl World {
         }
     }
 
+    /// Push a client-synthesized "System" journal line — no packet caused this; it's
+    /// the client informing the player of something the server never says itself
+    /// (e.g. a WalkTo the local pathfinder rejected). Reuses the exact mechanism a
+    /// real 0x1C/0xC1 system message uses (see `push_journal_cliloc` in
+    /// net/game.rs), so it renders identically in the client. Deliberate, narrow
+    /// exception to "packet handlers mutate World" — this is UX feedback about a
+    /// purely local (client-side) decision, not gameplay state.
+    pub fn push_system_note(&mut self, text: impl Into<String>) {
+        self.journal.push(JournalEntry {
+            serial: 0,
+            name: "System".to_string(),
+            text: text.into(),
+            msg_type: 0,
+            hue: 0,
+            cliloc: 0,
+        });
+    }
+
     /// Record a corpse→killed-mobile link (0xAF DisplayDeath). Upserts by
     /// `corpse_serial`; defensively evicts an arbitrary entry (not LRU — this is a
     /// rare safety net, not a hot path) once at [`MAX_CORPSE_LINKS`], since a

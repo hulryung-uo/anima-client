@@ -61,6 +61,87 @@ impl StaticTile {
     }
 }
 
+/// Why `walkable_z`'s candidate-scoring loop didn't return a standing Z —
+/// exposed so `[pathdbg]` diagnostics (ANIMA_DEBUG in play_server.rs) reuse the
+/// exact same scoring instead of a hand-rolled (and driftable) copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZReason {
+    /// Land is impassable and no non-impassable Surface static exists here at all.
+    NoSurface,
+    /// At least one candidate surface existed, but every one was farther than
+    /// the single-step climb limit from `current_z`. Carries the nearest one.
+    OutOfReach { nearest_z: i32 },
+    /// Every candidate within climb range was covered by an overlapping static
+    /// (occupies the body-height span). Carries the nearest blocked candidate
+    /// and the blocking static's graphic.
+    Blocked { candidate_z: i32, blocking_graphic: u16 },
+}
+
+/// Pure core of `walkable_z` (no I/O): given the land tile + statics already
+/// read for a tile, score standing-height candidates and report why none
+/// worked. Split out from `walkable_z` so this can be unit-tested with
+/// synthetic `LandTile`/`StaticTile` literals — no real map file needed.
+fn score_walkable_z(land: LandTile, statics: &[StaticTile], current_z: i32) -> Result<i32, ZReason> {
+    // Candidate standing heights: the land surface, plus any *standable* static
+    // surface. ServUO: a standable surface is `Surface && !Impassable` — a
+    // table is Impassable+Surface, so it is NOT standable.
+    let mut candidates: Vec<i32> = Vec::new();
+    if !land.impassable() {
+        candidates.push(land.z as i32);
+    }
+    for s in statics {
+        if s.surface() && !s.impassable() {
+            candidates.push(s.z as i32 + calc_height(s.flags, s.height));
+        }
+    }
+    if candidates.is_empty() {
+        return Err(ZReason::NoSurface);
+    }
+
+    // Pick the candidate nearest current_z, within one step, with head room:
+    // ServUO MovementImpl.IsOk — nothing that occupies space (Impassable OR
+    // Surface) may overlap the body span [z, z+CHAR_HEIGHT). The surface we
+    // stand on has its top exactly at z, so it never self-blocks. This is why
+    // a table (Impassable+Surface) over the land blocks the tile. While
+    // scoring, remember the nearest out-of-reach candidate and the nearest
+    // in-reach-but-blocked one, so a rejection can say which of the two
+    // happened instead of a bare `None`.
+    let mut best: Option<i32> = None;
+    let mut nearest_oor: Option<i32> = None;
+    let mut nearest_blocked: Option<(i32, u16)> = None;
+    for &z in &candidates {
+        if (z - current_z).abs() > MAX_STEP {
+            if nearest_oor.is_none_or(|b| (z - current_z).abs() < (b - current_z).abs()) {
+                nearest_oor = Some(z);
+            }
+            continue;
+        }
+        let our_top = z + CHAR_HEIGHT;
+        let blocker = statics.iter().find(|s| {
+            (s.impassable() || s.surface()) && {
+                let cz = s.z as i32;
+                cz + calc_height(s.flags, s.height) > z && our_top > cz
+            }
+        });
+        match blocker {
+            Some(s) if nearest_blocked.is_none_or(|(bz, _)| (z - current_z).abs() < (bz - current_z).abs()) => {
+                nearest_blocked = Some((z, s.graphic));
+            }
+            None if best.is_none_or(|b| (z - current_z).abs() < (b - current_z).abs()) => {
+                best = Some(z);
+            }
+            _ => {}
+        }
+    }
+    best.ok_or(match nearest_blocked {
+        Some((candidate_z, blocking_graphic)) => ZReason::Blocked { candidate_z, blocking_graphic },
+        None => match nearest_oor {
+            Some(nearest_z) => ZReason::OutOfReach { nearest_z },
+            None => ZReason::NoSurface, // unreachable: candidates non-empty but neither reason set
+        },
+    })
+}
+
 /// Reads UO map data on demand with per-block caching.
 pub struct MapData {
     uop: UopReader,
@@ -271,45 +352,18 @@ impl MapData {
         top > current_z && item_z < current_z + CHAR_HEIGHT
     }
 
-    pub fn walkable_z(&mut self, x: u32, y: u32, current_z: i32) -> Option<i32> {
+    /// Explain why the candidate-scoring loop did or didn't return a standing
+    /// Z, for `[pathdbg]` diagnostics (`ANIMA_DEBUG` in play_server.rs) —
+    /// reuses [`score_walkable_z`] so the two can never drift apart. See
+    /// [`ZReason`] for what each rejection means.
+    pub fn walkable_z_explain(&mut self, x: u32, y: u32, current_z: i32) -> Result<i32, ZReason> {
         let land = self.land(x, y);
         let statics = self.statics(x, y);
+        score_walkable_z(land, &statics, current_z)
+    }
 
-        // Candidate standing heights: the land surface, plus any *standable* static
-        // surface. ServUO: a standable surface is `Surface && !Impassable` — a
-        // table is Impassable+Surface, so it is NOT standable.
-        let mut candidates: Vec<i32> = Vec::new();
-        if !land.impassable() {
-            candidates.push(land.z as i32);
-        }
-        for s in &statics {
-            if s.surface() && !s.impassable() {
-                candidates.push(s.z as i32 + calc_height(s.flags, s.height));
-            }
-        }
-
-        // Pick the candidate nearest current_z, within one step, with head room:
-        // ServUO MovementImpl.IsOk — nothing that occupies space (Impassable OR
-        // Surface) may overlap the body span [z, z+CHAR_HEIGHT). The surface we
-        // stand on has its top exactly at z, so it never self-blocks. This is why
-        // a table (Impassable+Surface) over the land blocks the tile.
-        let mut best: Option<i32> = None;
-        for &z in &candidates {
-            if (z - current_z).abs() > MAX_STEP {
-                continue;
-            }
-            let our_top = z + CHAR_HEIGHT;
-            let blocked = statics.iter().any(|s| {
-                (s.impassable() || s.surface()) && {
-                    let cz = s.z as i32;
-                    cz + calc_height(s.flags, s.height) > z && our_top > cz
-                }
-            });
-            if !blocked && best.is_none_or(|b| (z - current_z).abs() < (b - current_z).abs()) {
-                best = Some(z);
-            }
-        }
-        best
+    pub fn walkable_z(&mut self, x: u32, y: u32, current_z: i32) -> Option<i32> {
+        self.walkable_z_explain(x, y, current_z).ok()
     }
 }
 
@@ -328,5 +382,45 @@ mod tests {
         let map = MapData::open(&dir).expect("open map data");
         assert_ne!(map.item_flags(0x0EED) & 0x800, 0, "gold coins should be stackable");
         assert_eq!(map.item_flags(0x0E75) & 0x800, 0, "a backpack should not be stackable");
+    }
+
+    // `score_walkable_z` is the pure core of `walkable_z` — these run against
+    // bare struct literals, no real map data needed.
+
+    #[test]
+    fn score_walkable_flat_land_is_allowed() {
+        let land = LandTile { graphic: 3, z: 0, flags: 0, tex_id: 0 };
+        assert_eq!(score_walkable_z(land, &[], 0), Ok(0));
+    }
+
+    #[test]
+    fn score_walkable_no_surface_at_all() {
+        // Impassable land, no statics: nothing to stand on.
+        let land = LandTile { graphic: 3, z: 0, flags: flags::IMPASSABLE, tex_id: 0 };
+        assert_eq!(score_walkable_z(land, &[], 0), Err(ZReason::NoSurface));
+    }
+
+    #[test]
+    fn score_walkable_out_of_reach() {
+        // Land impassable (not a candidate); one static surface far above the
+        // climb limit is the only candidate, so it's out of reach.
+        let land = LandTile { graphic: 3, z: 0, flags: flags::IMPASSABLE, tex_id: 0 };
+        let statics = [StaticTile { graphic: 0x0100, z: 40, height: 0, flags: flags::SURFACE }];
+        assert_eq!(
+            score_walkable_z(land, &statics, 0),
+            Err(ZReason::OutOfReach { nearest_z: 40 })
+        );
+    }
+
+    #[test]
+    fn score_walkable_blocked_by_overlapping_static() {
+        // Flat, walkable land at z=0, but an impassable pillar spans over it
+        // (z=-2, height=20) so the body span [0, 16) overlaps it.
+        let land = LandTile { graphic: 3, z: 0, flags: 0, tex_id: 0 };
+        let statics = [StaticTile { graphic: 0x0999, z: -2, height: 20, flags: flags::IMPASSABLE }];
+        assert_eq!(
+            score_walkable_z(land, &statics, 0),
+            Err(ZReason::Blocked { candidate_z: 0, blocking_graphic: 0x0999 })
+        );
     }
 }

@@ -179,6 +179,7 @@ const SETTINGS_DEFAULTS = {
   names: true,                   // overhead name labels
   abilities: true,               // weapon special-ability bar (also needs server AOS)
   guardZones: false,             // guard-zone (guard line) boundary overlay — off by default
+  debugMove: false,               // movement/Z debug HUD (WalkTo rejects, predicted vs server pos)
 };
 let settings = Object.assign({}, SETTINGS_DEFAULTS);
 try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}")); } catch (e) {}
@@ -202,7 +203,8 @@ function renderOptions() {
     + cb("bars", "HP bars")
     + cb("damage", "Damage numbers")
     + cb("abilities", "Weapon abilities")
-    + cb("guardZones", "Guard-zone lines (R)");
+    + cb("guardZones", "Guard-zone lines (R)")
+    + cb("debugMove", "Movement debug");
 }
 // Show/hide the Options panel (force=true open, false close, omitted = toggle).
 function toggleOptions(force) {
@@ -945,6 +947,7 @@ async function poll() {
     refreshAbilities(); // keep the weapon special-ability bar in sync with the equipped weapon
     if (wmOn) drawWorldmap();  // keep the open world map tracking the player
     if (scene.player) hud(scene);
+    updateMoveDebug(scene); // movement/Z debug HUD (Options → "Movement debug")
     refreshPaperdoll();   // keep the paperdoll live (equip/stats change)
     if (spellbookOn) { refreshSpellMana(); refreshSpellbookContent(); } // keep the spellbook live (mana + book content)
     if (skillsOn) refreshSkills();  // keep the skills window live (values/locks change)
@@ -2723,6 +2726,29 @@ function drawBars(now) {
   if (changed) markDirty(); // first appearance / value change → repaint once
 }
 
+// Movement/Z debug overlay (Options → "Movement debug", settings.debugMove).
+// Diagnoses: (a) a walkto that silently failed server-side — the server pushes
+// a "System: walkto ..." journal line on rejection/abandonment, which this
+// surfaces prominently; (b) stair/Z-transition weirdness — shows the
+// server-authoritative (x,y,z) next to the eased client-predicted (rx,ry,rz)
+// so a mismatch/lag is visible. Runs off the existing ~150ms poll cycle (not
+// per animation frame) and is a pure no-op when the setting is off.
+function updateMoveDebug(s) {
+  const el = document.getElementById("movedbg");
+  if (!el) return;
+  if (!settings.debugMove || !s || !s.player) { el.style.display = "none"; return; }
+  el.style.display = "block";
+  const p = s.player;
+  const self = anim.get("self"); // eased predicted state (see updateAnimStates)
+  const fmt = (v) => (typeof v === "number" ? v.toFixed(1) : "-");
+  const notes = (s.journal || [])
+    .filter((j) => j.name === "System" && (j.text || "").startsWith("walkto"))
+    .slice(-3);
+  let html = `<div>server (${p.x}, ${p.y}, ${p.z})</div>`
+    + `<div>eased (${fmt(self && self.rx)}, ${fmt(self && self.ry)}, ${fmt(self && self.rz)})</div>`;
+  for (const n of notes) html += `<div class="mdbg-note">${n.text}</div>`;
+  el.innerHTML = html;
+}
 function hud(s) {
   const p = s.player;
   // Show the *predicted* tile (what the avatar is visually standing on) so the

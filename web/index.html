@@ -78,6 +78,15 @@
       .buff.debuff { border-color: #6a2c2c; background: rgba(56, 20, 20, .82); color: #f0c2c2; }
       .buff .bn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .buff .bt { color: #e6e9ee; font-variant-numeric: tabular-nums; flex: none; }
+      /* Movement/Z debug overlay (Options → "Movement debug") — hidden by default,
+         toggled by updateMoveDebug() in main.js. */
+      #movedbg {
+        display: none; position: fixed; top: 260px; left: 12px; width: 180px;
+        padding: 6px 8px; border: 1px solid #2a2f37; border-radius: 8px;
+        background: rgba(11, 13, 16, .82); font: 10px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+        color: #9aa2ad; pointer-events: none; z-index: 14;
+      }
+      .mdbg-note { color: #e5a04d; }
       /* Weapon special-ability bar — bottom-left, interactive (click to arm). */
       #abilities {
         position: fixed; bottom: 12px; left: 12px; width: 200px;
@@ -599,6 +608,7 @@
     <canvas id="minimap" width="180" height="180"></canvas>
     <div id="minilabel">map · iso · M hide · B world</div>
     <div id="buffs"></div>
+    <div id="movedbg"></div>
     <!-- Weapon special-ability bar (bottom-left). Two buttons = the equipped
          weapon's primary/secondary moves; click arms/disarms (0xD7). -->
     <div id="abilities"></div>

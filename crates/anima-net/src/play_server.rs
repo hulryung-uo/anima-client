@@ -22,7 +22,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anima_assets::{
-    Anim, AnimData, Art, Cliloc, Gumps, Hues, MapData, RadarCol, Sounds, Texmaps, TileData,
+    Anim, AnimData, Art, Cliloc, Gumps, Hues, MapData, RadarCol, Sounds, Texmaps, TileData, ZReason,
 };
 use anima_core::net::LoginConfig;
 use anima_core::path::{find_path, Terrain};
@@ -31,7 +31,10 @@ use include_dir::{include_dir, Dir};
 use tiny_http::{Header, Method, Response, Server};
 
 use crate::regions::GuardRect;
-use crate::scene::{build_scene, calculate_new_z, can_walk, render_worldmap, tile_walkable, WORLDMAP_STEP};
+use crate::scene::{
+    build_scene, calculate_new_z, can_walk, explain_tile_walkable, render_worldmap, tile_walkable,
+    StepDeny, WORLDMAP_STEP,
+};
 use crate::{Endpoint, Session};
 
 /// Bundled copy of `web/` (renderer + PixiJS vendor lib), embedded at compile
@@ -87,6 +90,58 @@ impl Terrain for MapTerrain<'_> {
             return None;
         }
         self.map.walkable_z(x, y, from_z)
+    }
+}
+
+/// ANIMA_DEBUG-only: probe the player's 8 neighbor tiles and print one compact
+/// ALLOW/DENY line per direction, explaining exactly why a denied tile is
+/// denied (out-of-climb-range, blocked by an overlapping static, no surface at
+/// all, blocked by a placed world item, or already blacklisted by a previous
+/// auto-walk deny — `blocked` is play_server-local state, not part of the
+/// terrain check itself). Called from the WalkTo arm's no-path rejection so a
+/// silent "no path" has something to look at. Reuses [`explain_tile_walkable`]
+/// so this can never drift from the real walkability check.
+fn debug_probe_neighbors(
+    world: &anima_core::World,
+    map: &mut MapData,
+    blocked: &std::collections::HashSet<(u32, u32)>,
+    px: u32,
+    py: u32,
+    pz: i32,
+) {
+    for dir in 0u8..8 {
+        let (dx, dy) = anima_core::net::movement::direction_delta(dir);
+        let (nx, ny) = (px as i64 + dx as i64, py as i64 + dy as i64);
+        if nx < 0 || ny < 0 {
+            eprintln!("[pathdbg] dir={dir} ({nx},{ny}): DENY off-map");
+            continue;
+        }
+        let (ux, uy) = (nx as u32, ny as u32);
+        if blocked.contains(&(ux, uy)) {
+            eprintln!("[pathdbg] dir={dir} ({ux},{uy}): DENY blacklisted");
+            continue;
+        }
+        match explain_tile_walkable(world, map, nx, ny, pz) {
+            Ok(z) => eprintln!("[pathdbg] dir={dir} ({ux},{uy}): ALLOW z {pz}->{z}"),
+            Err(StepDeny::OffMap) => eprintln!("[pathdbg] dir={dir} ({ux},{uy}): DENY off-map"),
+            Err(StepDeny::Terrain(ZReason::NoSurface)) => {
+                eprintln!("[pathdbg] dir={dir} ({ux},{uy}): DENY no-surface");
+            }
+            Err(StepDeny::Terrain(ZReason::OutOfReach { nearest_z })) => {
+                eprintln!(
+                    "[pathdbg] dir={dir} ({ux},{uy}): DENY z-delta player_z={pz} cand_z={nearest_z} (Δ{})",
+                    (nearest_z - pz).abs()
+                );
+            }
+            Err(StepDeny::Terrain(ZReason::Blocked { candidate_z, blocking_graphic })) => {
+                eprintln!(
+                    "[pathdbg] dir={dir} ({ux},{uy}): DENY static g=0x{blocking_graphic:04X} cand_z={candidate_z} (player z={pz})"
+                );
+            }
+            Err(StepDeny::DynamicItem { graphic, item_z }) => {
+                eprintln!("[pathdbg] dir={dir} ({ux},{uy}): DENY dynamic g=0x{graphic:04X} item_z={item_z}");
+            }
+        }
     }
 }
 
@@ -431,21 +486,39 @@ impl PlayServer {
                         if let (Some((px, py, pz)), Some(m)) = (here, map.as_mut()) {
                             let (gx, gy) = (x as u32, y as u32);
                             let dist = px.abs_diff(gx).max(py.abs_diff(gy));
-                            // Verify a route exists before committing (fail fast).
-                            let reachable = dist <= AUTO_WALK_MAX_RANGE && {
-                                let empty = std::collections::HashSet::new();
-                                let mut terrain = MapTerrain { world: &session.world, map: m, blocked: &empty };
-                                find_path(&mut terrain, (px, py, pz), (gx, gy), AUTO_WALK_MAX_EXPANSIONS)
-                                    .is_some_and(|p| !p.is_empty())
-                            };
-                            if reachable {
-                                auto_goal = Some((gx, gy));
-                                auto_blocked.clear();
-                                auto_steps = 0;
-                                auto_pending_move = false;
-                                last_step = Instant::now() - Duration::from_millis(AUTO_WALK_STEP_MS);
-                            } else {
+                            if dist > AUTO_WALK_MAX_RANGE {
+                                // Always print — right now a walkto rejection is 100%
+                                // silent to both the log and the player; this is the fix.
+                                eprintln!("play: walkto ({gx},{gy}) rejected: out-of-range dist={dist}");
+                                session.world.push_system_note(format!(
+                                    "walkto ({gx},{gy}) rejected: out of range ({dist} tiles, max {AUTO_WALK_MAX_RANGE})"
+                                ));
                                 auto_goal = None;
+                            } else {
+                                // Verify a route exists before committing (fail fast).
+                                let empty = std::collections::HashSet::new();
+                                let mut terrain = MapTerrain { world: &session.world, map: &mut *m, blocked: &empty };
+                                let path =
+                                    find_path(&mut terrain, (px, py, pz), (gx, gy), AUTO_WALK_MAX_EXPANSIONS);
+                                if path.is_some_and(|p| !p.is_empty()) {
+                                    auto_goal = Some((gx, gy));
+                                    auto_blocked.clear();
+                                    auto_steps = 0;
+                                    auto_pending_move = false;
+                                    last_step = Instant::now() - Duration::from_millis(AUTO_WALK_STEP_MS);
+                                } else {
+                                    eprintln!("play: walkto ({gx},{gy}) rejected: no path from ({px},{py},{pz})");
+                                    session.world.push_system_note(format!(
+                                        "walkto ({gx},{gy}) rejected: no path found"
+                                    ));
+                                    if std::env::var("ANIMA_DEBUG").is_ok() {
+                                        // `empty`, not `auto_blocked`: this probe explains the
+                                        // reachability check that just ran above, which (as a
+                                        // fresh WalkTo, not an in-progress route) used no blacklist.
+                                        debug_probe_neighbors(&session.world, m, &empty, px, py, pz);
+                                    }
+                                    auto_goal = None;
+                                }
                             }
                         }
                     }
@@ -546,8 +619,17 @@ impl PlayServer {
                                 }
                                 last_step = Instant::now();
                             }
-                            // No route given what we've learned → stop.
-                            _ => auto_goal = None,
+                            // No route given what we've learned (boxed in by newly-
+                            // blacklisted denied tiles) → stop, and say so. This fires at
+                            // most once per abandoned route (clearing `auto_goal` stops
+                            // this block from running again), so no spam risk.
+                            _ => {
+                                eprintln!("play: walkto ({gx},{gy}) abandoned: boxed in");
+                                session
+                                    .world
+                                    .push_system_note(format!("walkto ({gx},{gy}) abandoned: boxed in"));
+                                auto_goal = None;
+                            }
                         }
                     }
                     _ => {}
@@ -614,6 +696,24 @@ impl PlayServer {
                         nz = z as i8;
                         if let Some(p) = session.world.player_mobile_mut() {
                             p.pos.z = nz;
+                        }
+                        // Stairs/ramps show up here as a Z change with the same (or a
+                        // 1-tile) X/Y — best-effort detail only (diagnostics, not
+                        // correctness-critical): name the static whose [z, z+height)
+                        // span covers the resolved Z if one is cheaply findable, else
+                        // just say the land surface accounts for it.
+                        if std::env::var("ANIMA_DEBUG").is_ok() && nz != last_pos.2 {
+                            let land_z = m.land(pos.0 as u32, pos.1 as u32).z;
+                            let static_note = m
+                                .statics(pos.0 as u32, pos.1 as u32)
+                                .into_iter()
+                                .find(|s| (s.z as i32) <= z && z <= s.z as i32 + s.height as i32)
+                                .map(|s| format!("static g=0x{:04X} top={}", s.graphic, s.z as i32 + s.height as i32))
+                                .unwrap_or_else(|| "land surface accounts for it".to_string());
+                            eprintln!(
+                                "play: step dir={dir} ({},{}) z {} -> {nz} (land z={land_z}, {static_note})",
+                                pos.0, pos.1, last_pos.2
+                            );
                         }
                     }
                 }

@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
-use anima_assets::{Anim, AnimData, Art, Cliloc, Image, MapData, RadarCol, MAP_HEIGHT, MAP_WIDTH};
+use anima_assets::{Anim, AnimData, Art, Cliloc, Image, MapData, RadarCol, ZReason, MAP_HEIGHT, MAP_WIDTH};
 use anima_core::gump_layout::{self, GumpElement, HtmlText};
 use anima_core::World;
 use serde_json::{json, Value};
@@ -49,26 +49,53 @@ fn equip_conv_gump(wearer_body: u16, gump: u16) -> u16 {
     (base + offset) as u16
 }
 
-/// Is tile (x, y) walkable for a body at `current_z`? Combines the static map
-/// (land + statics, via [`MapData::walkable_z`]) with **dynamic world items** —
-/// an impassable placed object (e.g. a crate) blocks too. Both the renderer's
-/// `w` flag and the play-server's pacing use this so we never try to step into
-/// an impassable object (it would just DenyWalk → snap back).
-pub fn tile_walkable(world: &World, map: &mut MapData, x: i64, y: i64, current_z: i32) -> bool {
+/// Why [`explain_tile_walkable`] would allow/deny a step onto `(x, y)` from
+/// `current_z` — the exact same checks, decomposed for `[pathdbg]`
+/// diagnostics. [`tile_walkable`] is now a thin wrapper over this
+/// (`.is_ok()`), so the two can never disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepDeny {
+    OffMap,
+    Terrain(ZReason),
+    DynamicItem { graphic: u16, item_z: i32 },
+}
+
+/// Is tile (x, y) walkable for a body at `current_z`, and if so what Z would it
+/// stand at? Combines the static map (land + statics, via
+/// [`MapData::walkable_z_explain`]) with **dynamic world items** — an
+/// impassable placed object (e.g. a crate) blocks too.
+pub fn explain_tile_walkable(
+    world: &World,
+    map: &mut MapData,
+    x: i64,
+    y: i64,
+    current_z: i32,
+) -> Result<i32, StepDeny> {
     if x < 0 || y < 0 {
-        return false;
+        return Err(StepDeny::OffMap);
     }
-    if map.walkable_z(x as u32, y as u32, current_z).is_none() {
-        return false;
-    }
+    let z = map.walkable_z_explain(x as u32, y as u32, current_z).map_err(StepDeny::Terrain)?;
     let ghost = player_is_ghost(world);
-    !world.items.values().any(|it| {
+    if let Some(it) = world.items.values().find(|it| {
         it.container.is_none()
             && it.pos.x as i64 == x
             && it.pos.y as i64 == y
             && map.item_blocks(it.graphic, it.pos.z as i32, current_z)
             && !(ghost && map.item_flags(it.graphic) & TILEFLAG_DOOR != 0)
-    })
+    }) {
+        return Err(StepDeny::DynamicItem { graphic: it.graphic, item_z: it.pos.z as i32 });
+    }
+    Ok(z)
+}
+
+/// Is tile (x, y) walkable for a body at `current_z`? Combines the static map
+/// (land + statics, via [`MapData::walkable_z`]) with **dynamic world items** —
+/// an impassable placed object (e.g. a crate) blocks too. Both the renderer's
+/// `w` flag and the play-server's pacing use this so we never try to step into
+/// an impassable object (it would just DenyWalk → snap back). Thin wrapper over
+/// [`explain_tile_walkable`] so the two can never drift apart.
+pub fn tile_walkable(world: &World, map: &mut MapData, x: i64, y: i64, current_z: i32) -> bool {
+    explain_tile_walkable(world, map, x, y, current_z).is_ok()
 }
 
 /// A dead player is a ghost (human ghost body 402/403). Ghosts walk through doors.

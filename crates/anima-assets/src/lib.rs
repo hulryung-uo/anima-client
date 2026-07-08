@@ -29,7 +29,7 @@ pub use radarcol::RadarCol;
 pub use sound::Sounds;
 pub use texmap::Texmaps;
 pub use tiledata::TileData;
-pub use map::{LandTile, MapData, StaticTile, MAP_HEIGHT, MAP_WIDTH};
+pub use map::{LandTile, MapData, StaticTile, ZReason, MAP_HEIGHT, MAP_WIDTH};
 
 use anima_core::path::Terrain;
 
