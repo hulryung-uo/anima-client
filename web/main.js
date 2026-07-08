@@ -615,6 +615,10 @@ const TURN_DELAY = 100;       // ClassicUO Constants.TURN_DELAY
 const MAX_STEPS = 5;          // ClassicUO Constants.MAX_STEP_COUNT
 // ClassicUO MovementSpeed.TimeToCompleteMovement: mounted halves, run halves again.
 const stepDelay = (run, mounted) => (mounted ? (run ? 100 : 200) : (run ? 200 : 400));
+// Vertical (rz) catch-up rate for the player's own step easing — see the doc at
+// its use in `processSteps`. Same constant/style already proven for the OTHER
+// mobiles' glide below (`st.rz += (tz - st.rz) * ... * 2.5`).
+const RZ_CATCHUP = 2.5;
 // Don't enqueue a step whose tile would sit more than this far ahead of the last
 // known server position — bounds how far the queue can lead (and thus the worst-
 // case correction) without stalling at tile boundaries between polls.
@@ -1369,10 +1373,11 @@ function enqueueSteps(now) {
 }
 
 // Interpolate the rendered position through the queue front (ClassicUO
-// Mobile.ProcessSteps): X/Y/Z advance together by the step's time fraction; a
-// completed step commits to the base and the next begins (carrying the time
-// remainder for continuous motion). Turns are consumed instantly (facing only).
-function processSteps(now) {
+// Mobile.ProcessSteps): X/Y advance by the step's time fraction; Z eases toward
+// the step's target at its own decoupled catch-up rate (see below); a completed
+// step commits to the base and the next begins (carrying the time remainder for
+// continuous motion). Turns are consumed instantly (facing only).
+function processSteps(now, dt) {
   if (!pred) return;
   let guard = 0;
   while (pred.steps.length && guard++ < MAX_STEPS + 2) {
@@ -1388,7 +1393,18 @@ function processSteps(now) {
     } else {
       pred.rx = pred.x + (s.x - pred.x) * prog;
       pred.ry = pred.y + (s.y - pred.y) * prog;
-      pred.rz = pred.z + (s.z - pred.z) * prog;
+      // Z is *not* locked to `prog` like x/y. Real UO staircases are built from
+      // unevenly-sized riser statics (each stair tile's standing Z is a Bridge
+      // tile's HALF height — see `calculate_new_z`'s doc), so consecutive steps'
+      // Z deltas genuinely differ (e.g. +2, +5, +3 units for the same fixed
+      // `dur`). Locking rz to `prog` (ClassicUO Mobile.ProcessSteps' literal
+      // `Offset.Z = (step.Z - Z) * prog`) makes the vertical speed visibly lurch
+      // at each tile boundary. Chasing it exponentially instead smooths that
+      // jump: with RZ_CATCHUP=2.5 the residual gap after one full `dur` is ~8%
+      // of the step's delta (same margin already proven below for other
+      // mobiles' rz), so it settles well within the step and never reads as
+      // desynced from x/y — this only softens the *feel*, not the resolved Z.
+      pred.rz += (s.z - pred.rz) * Math.min(1, (dt / dur) * RZ_CATCHUP);
       pred.dir = s.dir; pred.moving = true;
     }
     if (prog >= 1) {                       // step complete → commit base, carry remainder
@@ -1430,7 +1446,7 @@ function renderFrame(dt) {
   const me = anim.get("self");
   if (me && pred) {
     enqueueSteps(now);
-    processSteps(now);
+    processSteps(now, dt);
     me.rx = pred.rx; me.ry = pred.ry; me.rz = pred.rz; me.z = pred.z; me.dir = pred.dir;
     me.animMoving = pred.moving;
     me.stepDur = stepDelay(!!(moveIntent && moveIntent.run), mounted());

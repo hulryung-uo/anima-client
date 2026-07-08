@@ -339,7 +339,10 @@ const BLOCK_HEIGHT: i32 = 16;
 const OFF_X: [i64; 8] = [0, 1, 1, 1, 0, -1, -1, -1];
 const OFF_Y: [i64; 8] = [-1, -1, 0, 1, 1, 1, 0, -1];
 
-/// One walkable/blocking surface on a tile (ClassicUO `PathObject`).
+/// One walkable/blocking surface on a tile (ClassicUO `PathObject`). Plain data
+/// (all `Copy` fields) — derived so tests can build small synthetic tile lists
+/// (e.g. a staircase) without fighting the borrow checker over reused literals.
+#[derive(Clone, Copy)]
 struct PathObj {
     flags: u32,
     z: i32,
@@ -450,26 +453,21 @@ fn create_item_list(map: &mut MapData, x: i64, y: i64) -> Vec<PathObj> {
     list
 }
 
-/// ClassicUO `Pathfinder.CalculateMinMaxZ`: bound the step using the tile we
-/// came *from* (opposite of `direction`). Returns `(min_z, max_z)`.
-fn calc_min_max_z(
-    map: &mut MapData,
-    x: i64,
-    y: i64,
-    current_z: i32,
-    direction: u8,
-) -> (i32, i32) {
+/// Pure core of [`calc_min_max_z`] (ClassicUO `Pathfinder.CalculateMinMaxZ`'s
+/// scoring loop): given the tile-behind's already-built [`PathObj`] list and
+/// (for a stretched/sloped land tile) its direction-biased average Z, compute
+/// the step's `(min_z, max_z)` bound. Split out — like
+/// `anima_assets::map::score_walkable_z` — so a synthetic staircase (no real
+/// `MapData`) can unit-test the standing-Z math directly; see
+/// `resolve_standing_z` for the matching destination-tile half.
+fn bound_min_max_z(source: &[PathObj], current_z: i32, stretched_avg: i32) -> (i32, i32) {
     let mut min_z = -128i32;
     let mut max_z = current_z;
-    let back = (direction ^ 4) & 7;
-    let sx = x + OFF_X[back as usize];
-    let sy = y + OFF_Y[back as usize];
-    for obj in &create_item_list(map, sx, sy) {
+    for obj in source {
         let avg = obj.avg_z;
         if avg <= current_z && obj.land_stretched {
-            let a = calc_current_average_z(map, sx, sy, direction as i32);
-            min_z = min_z.max(a);
-            max_z = max_z.max(a);
+            min_z = min_z.max(stretched_avg);
+            max_z = max_z.max(stretched_avg);
         } else {
             if obj.flags & POF_IMPASS != 0 && avg <= current_z && min_z < avg {
                 min_z = avg;
@@ -483,21 +481,36 @@ fn calc_min_max_z(
     (min_z, max_z + 2)
 }
 
-/// ClassicUO `Pathfinder.CalculateNewZ`: the standing Z when stepping onto
-/// `(x, y)` from `current_z` heading `direction`. `None` when the tile has no
-/// valid surface to stand on (a real DenyWalk situation).
-pub fn calculate_new_z(
+/// ClassicUO `Pathfinder.CalculateMinMaxZ`: bound the step using the tile we
+/// came *from* (opposite of `direction`). Returns `(min_z, max_z)`.
+fn calc_min_max_z(
     map: &mut MapData,
     x: i64,
     y: i64,
     current_z: i32,
     direction: u8,
-) -> Option<i32> {
-    if x < 0 || y < 0 {
-        return None;
-    }
-    let (mut min_z, max_z) = calc_min_max_z(map, x, y, current_z, direction);
-    let mut list = create_item_list(map, x, y);
+) -> (i32, i32) {
+    let back = (direction ^ 4) & 7;
+    let sx = x + OFF_X[back as usize];
+    let sy = y + OFF_Y[back as usize];
+    let source = create_item_list(map, sx, sy);
+    // Only land can be "stretched" (sloped) — at most one land entry per tile,
+    // so this is computed at most once, matching the original inline call site.
+    let stretched_avg = if source.iter().any(|o| o.land_stretched) {
+        calc_current_average_z(map, sx, sy, direction as i32)
+    } else {
+        0
+    };
+    bound_min_max_z(&source, current_z, stretched_avg)
+}
+
+/// Pure core of [`calculate_new_z`] (ClassicUO `Pathfinder.CalculateNewZ`'s
+/// surface/bridge/headroom scoring loop): given the destination tile's
+/// already-built (unsorted) [`PathObj`] list and the step's `(min_z, max_z)`
+/// bound from [`bound_min_max_z`], resolve the standing Z. `None` when nothing
+/// in the list has clearance to stand on (a real DenyWalk situation). Split out
+/// so a synthetic staircase can unit-test this without a real `MapData`.
+fn resolve_standing_z(mut list: Vec<PathObj>, min_z: i32, max_z: i32, current_z: i32) -> Option<i32> {
     if list.is_empty() {
         return None;
     }
@@ -515,6 +528,7 @@ pub fn calculate_new_z(
     if z < min_z {
         z = min_z;
     }
+    let mut min_z = min_z;
     let mut result_z = -128i32;
     let mut best_delta = i32::MAX;
     let mut cur_z = -128i32;
@@ -554,6 +568,24 @@ pub fn calculate_new_z(
     } else {
         Some(result_z)
     }
+}
+
+/// ClassicUO `Pathfinder.CalculateNewZ`: the standing Z when stepping onto
+/// `(x, y)` from `current_z` heading `direction`. `None` when the tile has no
+/// valid surface to stand on (a real DenyWalk situation).
+pub fn calculate_new_z(
+    map: &mut MapData,
+    x: i64,
+    y: i64,
+    current_z: i32,
+    direction: u8,
+) -> Option<i32> {
+    if x < 0 || y < 0 {
+        return None;
+    }
+    let (min_z, max_z) = calc_min_max_z(map, x, y, current_z, direction);
+    let list = create_item_list(map, x, y);
+    resolve_standing_z(list, min_z, max_z, current_z)
 }
 
 /// Tiles per output pixel when rendering the full-world map. 1 = full resolution
@@ -1700,10 +1732,13 @@ mod tests {
     // convention (see `route_tests`'s doc in `lib.rs`), unit tests don't spin up
     // a live Session/socket. `tile_walkable`/`can_walk` similarly need a real
     // `anima_assets::MapData`, which only opens actual UO data files (no in-memory
-    // constructor) — this crate has no `#[ignore]`d real-data tests today (unlike
-    // `anima-assets`), so these two currently have NO automated coverage. Adding
-    // one would need either a `MapData` test constructor (a real seam, not
-    // attempted here) or an `#[ignore]`d test gated on a local UO install.
+    // constructor) — adding coverage for THOSE two would need either a `MapData`
+    // test constructor (a real seam, not attempted here) or an `#[ignore]`d test
+    // gated on a local UO install, so they currently have no automated coverage.
+    // `calculate_new_z` avoids this by testing its `bound_min_max_z`/
+    // `resolve_standing_z` pure cores directly with synthetic `PathObj` literals
+    // (see the staircase tests below), plus one `#[ignore]`d real-data test
+    // against an actual staircase for end-to-end confidence.
     //
     // What *is* both pure (`&World`/primitives in, `Value`/`bool` out) and where
     // most of the shaping logic actually lives has been tested directly below:
@@ -1868,6 +1903,139 @@ mod tests {
         w.mobile_mut(1).pos = Position { x: 100, y: 100, z: 0 };
         w.on_map_change(2); // Ilshenar
         assert_eq!(w.map_index, 2);
+    }
+
+    // ---- synthetic staircase tests for calculate_new_z's pure cores ----------
+    //
+    // A Bridge-flagged static (ClassicUO `ItemData.IsBridge`, ServUO
+    // `ItemData.Bridge`) stands at HALF height — `avg_z = z + height/2` — not
+    // its full top surface (`z + height`). This is intentional on BOTH
+    // references (ClassicUO `CreateItemList`'s `staticAverageZ /= 2`; ServUO
+    // `TileData.CalcHeight` halves for `Bridge` too), and it's what makes a
+    // staircase built from stacked Bridge tiles climb in the first place — a
+    // synthetic run of 5-tall stair statics based at z=0,5,10,15,20 (as this
+    // test was originally going to assert should read as its FULL top surface)
+    // would have been asserting the wrong behavior; these tests assert the
+    // *correct*, half-height one instead, and that a UNIFORMLY-built staircase
+    // (each tile based exactly at the half-height of the one before) climbs by
+    // an EVEN delta per tile — proving the unevenness on the real Britain-bank
+    // stair (+2, +5, +3) comes from THAT staircase's non-uniform geometry
+    // (mixed static heights/bases), not from the algorithm.
+    fn bridge_tile(z: i32, height: i32) -> PathObj {
+        PathObj { flags: POF_IMPASS | POF_SURFACE | POF_BRIDGE, z, avg_z: z + height / 2, height, land_stretched: false }
+    }
+
+    #[test]
+    fn bridge_tile_stands_at_half_height_not_top_surface() {
+        // A single 5-tall stair static at z=0 (top surface = 5): standing Z must
+        // be the half-height average (0 + 5/2 = 2), not the top (5).
+        let list = vec![bridge_tile(0, 5)];
+        let (min_z, max_z) = bound_min_max_z(&[bridge_tile(0, 5)], 0, 0);
+        let z = resolve_standing_z(list, min_z, max_z, 0).expect("stands on the bridge tile");
+        assert_eq!(z, 2, "Bridge standing Z is z + height/2, not the top surface (5)");
+    }
+
+    #[test]
+    fn synthetic_staircase_climbs_and_descends_evenly() {
+        // 5 tiles, each an 8-tall Bridge riser based exactly at the HALF-height
+        // (avg) of the tile before: bases 0,4,8,12,16 -> avgs 4,8,12,16,20. If
+        // this geometry is uniform, `calculate_new_z` (via its two pure cores)
+        // should climb by the SAME +4 delta every tile.
+        let tiles: Vec<PathObj> = (0..5).map(|i| bridge_tile(4 * i, 8)).collect();
+
+        // Start already standing on tile 0 (avg 4), then climb through 1..4.
+        let mut z = tiles[0].avg_z; // 4
+        let mut seq = vec![z];
+        for i in 1..tiles.len() {
+            let (min_z, max_z) = bound_min_max_z(&[tiles[i - 1]], z, 0);
+            z = resolve_standing_z(vec![tiles[i]], min_z, max_z, z).expect("climbs the next riser");
+            seq.push(z);
+        }
+        assert_eq!(seq, vec![4, 8, 12, 16, 20], "uniform risers climb by an even +4 delta each tile");
+
+        // Descend back down through 3..0 — must mirror the climb exactly.
+        let mut z = tiles[4].avg_z; // 20
+        let mut seq = vec![z];
+        for i in (0..4).rev() {
+            let (min_z, max_z) = bound_min_max_z(&[tiles[i + 1]], z, 0);
+            z = resolve_standing_z(vec![tiles[i]], min_z, max_z, z).expect("descends the next riser down");
+            seq.push(z);
+        }
+        assert_eq!(seq, vec![20, 16, 12, 8, 4], "descent mirrors the climb exactly");
+    }
+
+    // Real-data regression for the Britain West Bank staircase (facet 0, x=1495,
+    // y=1625..1629) — the tiles a live ANIMA_DEBUG capture flagged as "janky":
+    // climbing north the resolved Z went 10 -> 12 -> 17 -> 20 (deltas +2, +5,
+    // +3), and the first stair static's *top* surface (z+height) is 15 while the
+    // resolved standing Z is only 12 — 3 below it. That looked like a bug (stand
+    // ON the stair, not 3 below), so this test hand-derives what
+    // `calculate_new_z` + the REAL tile data (dumped via `MapData::land`/
+    // `statics`) should produce, to check whether 10,12,17,20 is actually right.
+    //
+    // Dumped real data (facet 0):
+    //   (1495,1627) land g=0x03eb z=10 flags=0            — flat, walkable
+    //     static g=0x0739 z=10 h=5  flags surf+bridge      (avg = z + h/2 = 12)
+    //   (1495,1626) land g=0x03ec z=10 flags=0
+    //     static g=0x0738 z=10 h=10 flags surf+bridge      (avg = 10 + 5 = 15)
+    //     static g=0x0739 z=15 h=5  flags surf+bridge      (avg = 15 + 2 = 17)
+    //   (1495,1625) land g=0x0401 z=10 flags=0
+    //     static g=0x04ab z=20 h=0  flags surf (not bridge) (avg = z + h = 20)
+    //     static g=0x04ba z=40 h=0  flags surf              (avg = 40)
+    //     static g=0x013a z=40 h=20 impassable only          (a wall, not standable)
+    //     (+ other impassable-only wall statics — none are candidate surfaces)
+    //   (1495,1628) land g=0x0401 z=10 flags=0, no statics  — flat, walkable
+    //   (1495,1629) land g=0x03ec z=10 flags=0, no statics  — flat, walkable (start)
+    //
+    // `Bridge` (stair) tiles stand at HALF height (ClassicUO
+    // `staticAverageZ /= 2` in `CreateItemList`; ServUO `ItemData.CalcHeight`
+    // does the identical halving) — by design, NOT the tile's raw top surface.
+    // Hand-running `calculate_new_z` (`CalculateMinMaxZ` bounds the step by the
+    // tile left behind, then the candidate nearest current Z with BLOCK_HEIGHT
+    // clearance wins):
+    //   1629(z10) -> 1628: flat both sides -> 10 (unchanged, trivial)
+    //   1628(z10) -> 1627: bound from 1628 (flat) gives min=10,max=12; land(10)
+    //     and static 0x0739(avg12) are candidates under the z=128 sky sentinel;
+    //     nearest to current_z=10 with clearance is avg=12 -> **12**
+    //   1627(z12) -> 1626: bound from 1627 (bridge avg12==current_z -> max
+    //     bumped to z+height=15) gives min=12,max=17; candidates land(10),
+    //     0x0738(avg15), 0x0739(avg17); nearest to 12 with clearance is 0x0739
+    //     avg=17 (0x0738's avg 15 fails the `tavg >= cur_z` ordering test) ->
+    //     **17**
+    //   1626(z17) -> 1625: bound from 1626 (bridge avg17==current_z -> max
+    //     bumped to z+height=20) gives min=15,max=22; only 0x04ab (avg20) has
+    //     clearance and fits within max=22 -> **20**
+    // So the captured sequence 10,12,17,20 IS the correct output of the ported
+    // algorithm on the real data — not a bug. The "3 below the top" the capture
+    // flagged is the Bridge half-height rule working as intended (see
+    // `calculate_new_z`'s doc); the real jank is client-side easing (fixed in
+    // `web/main.js`: see `RZ_CATCHUP`), not this Z resolution.
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn britain_bank_stair_z_sequence_matches_captured_climb() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let mut map = MapData::open(&dir).expect("open map data");
+        const X: i64 = 1495;
+        const NORTH: u8 = 0;
+        const SOUTH: u8 = 4;
+
+        // Climb north (y decreasing): 1629 -> 1628 -> 1627 -> 1626 -> 1625.
+        let mut z = 10i32;
+        let mut seq = vec![z];
+        for y in [1628i64, 1627, 1626, 1625] {
+            z = calculate_new_z(&mut map, X, y, z, NORTH).expect("stair climbs north");
+            seq.push(z);
+        }
+        assert_eq!(seq, vec![10, 10, 12, 17, 20], "climbing-north Z sequence (trivial 10->10 step included)");
+
+        // Descend south (y increasing), mirroring the climb exactly.
+        let mut z = 20i32;
+        let mut seq = vec![z];
+        for y in [1626i64, 1627, 1628, 1629] {
+            z = calculate_new_z(&mut map, X, y, z, SOUTH).expect("stair descends south");
+            seq.push(z);
+        }
+        assert_eq!(seq, vec![20, 17, 12, 10, 10], "descending-south Z sequence (trivial 10->10 step included)");
     }
 }
 
