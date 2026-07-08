@@ -3721,7 +3721,13 @@ function refreshParty() {
       const isLeader = (m.serial | 0) === (party.leader | 0);
       const max = m.hitsMax | 0;
       const pct = max > 0 ? Math.max(0, Math.min(100, Math.round((m.hits | 0) * 100 / max))) : 0;
-      const hp = max > 0 ? `${m.hits | 0}/${max}` : "—";
+      // Another player's HP is always NORMALIZED by the server (ServUO
+      // AttributeNormalizer, max 25) — nobody sees a stranger's real hit points in
+      // UO — so a full-health ally arrives as "25/25", which is meaningless to
+      // print. Show a percentage for other members; only our OWN entry carries the
+      // real hits/max (our unnormalized self status), so show true numbers there.
+      const isSelf = (m.serial | 0) === ((scene.player && scene.player.serial) | 0);
+      const hp = max <= 0 ? "—" : isSelf ? `${m.hits | 0}/${max}` : `${pct}%`;
       const name = (m.name || "Member").replace(/[<>&]/g, "");
       html += `<div class="pt-row${isLeader ? " leader" : ""}">`
         + `<div class="pt-head">`
