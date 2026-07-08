@@ -35,6 +35,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0xF3 => world_item_hs(world, frame)?,
         0x1D => delete(world, frame)?,
         0x11 => char_status(world, frame)?,
+        0x17 => health_bar_status(world, frame)?,
         0xA1 => vital(world, frame, Vital::Hits)?,
         0xA2 => vital(world, frame, Vital::Mana)?,
         0xA3 => vital(world, frame, Vital::Stam)?,
@@ -83,8 +84,11 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
 }
 
 /// Status-flags bit for "hidden" on the mobile-update packets (0x20/0x77/
-/// 0x78). ServUO `Mobile.cs GetPacketFlags`: 0x04 Poisoned, 0x08
-/// YellowHealth, 0x40 WarMode, 0x80 Hidden — we only need the Hidden bit.
+/// 0x78). ServUO `Mobile.cs GetPacketFlags`: 0x04 Flying, 0x08
+/// YellowHealth/Blessed, 0x40 WarMode, 0x80 Hidden — we only need the Hidden
+/// bit. NOTE: poison is NOT in this byte on a Stygian-Abyss+ client (which we
+/// report as); it arrives in the separate 0x17 health-bar packet — see
+/// [`health_bar_status`].
 const FLAG_HIDDEN: u8 = 0x80;
 
 /// 0x20 MobileUpdate — position/appearance reset. This is always about OUR
@@ -112,6 +116,31 @@ fn mobile_update(world: &mut World, frame: &[u8]) -> PResult<()> {
     m.pos.z = z;
     m.direction = direction;
     m.hidden = flags & FLAG_HIDDEN != 0;
+    Ok(())
+}
+
+/// 0x17 MobileHealthbarStatus (Stygian-Abyss+): `[id][len:u16][serial:u32]
+/// [count:u16]` then `count × [type:u16][flag:u8]`. Modern shards carry
+/// poison/blessed state HERE, not in the mobile-flags byte (which uses 0x04 for
+/// Flying). type 1 = poison bar (ServUO `HealthbarPoison` writes `level + 1`, so
+/// `flag > 0` means poisoned); type 2 = yellow/blessed (ignored for now). ServUO
+/// sends this after each `MobileIncoming` and whenever the state changes, so the
+/// poison flag re-derives naturally (a cure sends `flag == 0`).
+fn health_bar_status(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[3..]); // skip id + u16 length
+    let serial = r.u32()?;
+    let count = r.u16()?;
+    let mut poisoned = None;
+    for _ in 0..count {
+        let kind = r.u16()?;
+        let flag = r.u8()?;
+        if kind == 1 {
+            poisoned = Some(flag != 0);
+        }
+    }
+    if let Some(p) = poisoned {
+        world.mobile_mut(serial).poisoned = p;
+    }
     Ok(())
 }
 
@@ -385,7 +414,8 @@ fn mobile_incoming(world: &mut World, frame: &[u8]) -> PResult<()> {
         m.hue = hue;
         // Hidden is a visual flag like body/hue, not movement state — refresh it
         // for self too (the self-hidden feedback path also flows through 0x78,
-        // e.g. re-entering view after a facet change while hidden).
+        // e.g. re-entering view after a facet change while hidden). Poisoned is
+        // the same story: re-derive it for self too.
         m.hidden = flags & FLAG_HIDDEN != 0;
         if !is_self {
             m.pos.x = x;
@@ -2115,6 +2145,54 @@ mod tests {
 
         assert!(apply_packet(&mut w, &build(0x00)));
         assert!(!w.mobiles[&0x1001].hidden, "hidden must not be sticky");
+    }
+
+    #[test]
+    fn health_bar_status_poison_sets_and_clears() {
+        // 0x17 MobileHealthbarStatus: [id][len:u16][serial:u32][count:u16]
+        // then count × [type:u16][flag:u8]. type 1 = poison bar (ServUO
+        // HealthbarPoison writes `p.Level + 1`, i.e. > 0 while poisoned).
+        let build = |type_: u16, flag: u8| {
+            let mut p = PacketWriter::new();
+            p.u8(0x17).u16(0); // id + length placeholder
+            p.u32(0x0BAD).u16(1).u16(type_).u8(flag);
+            let mut v = p.into_vec();
+            let len = v.len() as u16;
+            v[1] = (len >> 8) as u8;
+            v[2] = (len & 0xFF) as u8;
+            v
+        };
+        let mut w = World::new();
+        // Poison level 2 → flag byte 3 (>0) → poisoned.
+        assert!(apply_packet(&mut w, &build(1, 3)));
+        assert!(w.mobiles[&0x0BAD].poisoned);
+        // Cured → flag 0 → not poisoned (not sticky).
+        assert!(apply_packet(&mut w, &build(1, 0)));
+        assert!(!w.mobiles[&0x0BAD].poisoned);
+        // A yellow-healthbar update (type 2) must NOT touch the poison flag.
+        assert!(apply_packet(&mut w, &build(1, 2))); // re-poison
+        assert!(apply_packet(&mut w, &build(2, 1))); // blessed/yellow, type 2
+        assert!(w.mobiles[&0x0BAD].poisoned, "type-2 update left poison alone");
+    }
+
+    #[test]
+    fn hidden_and_poison_are_independent() {
+        // Hidden rides the mobile-flags byte (0x80); poison rides the 0x17
+        // health-bar packet — setting one must not disturb the other.
+        let mut w = World::new();
+        assert!(apply_packet(&mut w, &mobile_moving_frame(0xF00D, FLAG_HIDDEN)));
+        assert!(w.mobiles[&0xF00D].hidden);
+        assert!(!w.mobiles[&0xF00D].poisoned);
+        let mut p = PacketWriter::new();
+        p.u8(0x17).u16(0);
+        p.u32(0xF00D).u16(1).u16(1).u8(2); // poison bar, level 1
+        let mut v = p.into_vec();
+        let len = v.len() as u16;
+        v[1] = (len >> 8) as u8;
+        v[2] = (len & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &v));
+        assert!(w.mobiles[&0xF00D].poisoned);
+        assert!(w.mobiles[&0xF00D].hidden, "poison update kept hidden");
     }
 
     #[test]

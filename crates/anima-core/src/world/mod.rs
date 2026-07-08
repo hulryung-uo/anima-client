@@ -37,6 +37,13 @@ pub struct Mobile {
     /// flags byte on every 0x20/0x77/0x78 (not sticky): a later update that
     /// omits the bit clears it back to `false`.
     pub hidden: bool,
+    /// Poisoned status — the mobile-update status-flags 0x04 bit (see
+    /// [`Mobile::hidden`]'s doc for the full bit layout). In UO the health bar
+    /// turns green while this is set, independent of the actual HP fraction —
+    /// it's how you tell a mobile is poisoned at a glance. Re-derived from the
+    /// flags byte on every 0x20/0x77/0x78 (not sticky): a later update that
+    /// omits the bit clears it back to `false` (e.g. Cure Poison).
+    pub poisoned: bool,
 }
 
 /// An item — on the ground, in a container, or equipped.

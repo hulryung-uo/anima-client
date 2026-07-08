@@ -2665,6 +2665,12 @@ const BAR_HEAD = 40;         // px above the feet anchor for the bar (below the 
 const BAR_FONT = 'ui-monospace, Menlo, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif';
 // Fill color by remaining health fraction (green → yellow → red), ClassicUO-style.
 function hpColor(f) { return f > 0.5 ? 0x46a758 : f > 0.25 ? 0xd9a441 : 0xe5484d; }
+// Poison overrides the fraction color entirely: in UO the health bar turns a
+// distinct bright green while poisoned, independent of remaining HP, so it
+// reads as "poisoned" rather than "healthy" even at a glance. Deliberately a
+// cleaner/brighter green than the >50% healthy green (0x46a758) so the two
+// don't get confused.
+const POISON_COLOR = 0x2fd44a;
 
 // Draw a name + HP bar above each OTHER mobile, anchored to its interpolated iso
 // position (like the overhead speech). Objects are cached per serial and only
@@ -2696,14 +2702,17 @@ function drawBars(now) {
       let g = hpBars.get(id);
       if (!g) { g = new PIXI.Graphics(); barLayer.addChild(g); hpBars.set(id, g); changed = true; }
       const frac = Math.max(0, Math.min(1, m.hits / m.hitsMax));
-      if (g._frac !== frac || g._noto !== m.noto || g._tgt !== tgt) {
+      const poisoned = !!m.poisoned;
+      if (g._frac !== frac || g._noto !== m.noto || g._tgt !== tgt || g._poisoned !== poisoned) {
         g.clear();
         // dark backing + notoriety-tinted border, then the health fill. The current
         // target gets a thicker bright-red border so it stands out.
         g.rect(-BAR_W / 2 - 1, -1, BAR_W + 2, BAR_H + 2).fill({ color: 0x000000, alpha: 0.6 })
          .stroke({ color: tgt ? 0xff2d2d : notoColor(m.noto), width: tgt ? 2 : 1 });
-        if (frac > 0) g.rect(-BAR_W / 2, 0, BAR_W * frac, BAR_H).fill(hpColor(frac));
-        g._frac = frac; g._noto = m.noto; g._tgt = tgt;
+        // Bar length still reflects the real HP fraction — only the color signals
+        // poison (a poisoned mobile at 20% HP still shows a short bar, just green).
+        if (frac > 0) g.rect(-BAR_W / 2, 0, BAR_W * frac, BAR_H).fill(poisoned ? POISON_COLOR : hpColor(frac));
+        g._frac = frac; g._noto = m.noto; g._tgt = tgt; g._poisoned = poisoned;
         changed = true;
       }
       g.x = x; g.y = barY; g.visible = true;

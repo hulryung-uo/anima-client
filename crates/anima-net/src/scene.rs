@@ -966,6 +966,19 @@ fn hidden_field(hidden: bool) -> Value {
     }
 }
 
+/// `poisoned` scene field for a mobile or the player (mobile-update status-flags
+/// 0x04 bit — see [`anima_core::world::Mobile::poisoned`]'s doc). Only emitted
+/// when true, same convention as [`hidden_field`], so the renderer's default
+/// (health bar colored by HP fraction alone) needs no key at all. Pure, so
+/// it's unit-testable directly.
+fn poisoned_field(poisoned: bool) -> Value {
+    if poisoned {
+        json!({ "poisoned": true })
+    } else {
+        json!({})
+    }
+}
+
 /// Build the `prompt` object for the scene: an outstanding server text prompt
 /// (0xC2 UnicodePrompt), or `{"active":0}` when none. The question text itself
 /// already arrived as a journal line (see `World::prompt`'s doc) — the client
@@ -1122,6 +1135,7 @@ pub fn build_scene(
                 "mounted": mount.is_some() as u8, "mountAnim": mount_anim
             });
             merge_obj(&mut v, hidden_field(m.hidden));
+            merge_obj(&mut v, poisoned_field(m.poisoned));
             v
         })
         .collect();
@@ -1464,6 +1478,7 @@ pub fn build_scene(
         "equip": equip,
     });
     merge_obj(&mut player, hidden_field(p.hidden));
+    merge_obj(&mut player, poisoned_field(p.poisoned));
     // Recent sound events (the client plays only seqs newer than its last) and the
     // current background music id. Both are read-only views of world audio state.
     let sounds: Vec<Value> = s
@@ -1844,6 +1859,15 @@ mod tests {
         // Not hidden → no key at all (not `"hidden": false`), so the renderer's
         // default (fully opaque) needs no per-mobile check.
         assert_eq!(hidden_field(false), json!({}));
+    }
+
+    #[test]
+    fn poisoned_field_present_only_when_true() {
+        assert_eq!(poisoned_field(true), json!({ "poisoned": true }));
+        // Not poisoned → no key at all (not `"poisoned": false`), so the
+        // renderer's default (HP-fraction-only bar color) needs no per-mobile
+        // check.
+        assert_eq!(poisoned_field(false), json!({}));
     }
 
     #[test]
