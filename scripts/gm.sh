@@ -20,6 +20,11 @@
 # crates/anima-net/src/play_server.rs::parse_command). No auth, loopback
 # only, by design (dev/test tool) — see docs/TESTING.md.
 #
+# THROTTLE: every "[" command rides a *speech* packet, and ServUO flood-protects
+# speech per connection — fire these faster than ~1/sec (esp. with `&`) and the
+# server drops you with "play: connection closed" (NOT a client/teleport bug; see
+# docs/TESTING.md §8). Keep >= ~0.8s between invocations in loops.
+#
 # Requires: curl. POSIX sh (works with bash/dash/zsh's sh mode).
 
 set -eu

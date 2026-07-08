@@ -346,7 +346,32 @@ scripts/gm.sh 8788 --raw 'autoattack'      # fight it (already-supported /input 
 
 ---
 
-## 8. Known gaps
+## 8. Troubleshooting: `play: connection closed` during rapid commands
+
+If a headless `play` session dies with `play: connection closed` while you're
+firing commands quickly (a `for` loop of `curl … /input` with short/no sleeps),
+**it is NOT a client bug and NOT a teleport bug** — it's ServUO's speech
+flood-protection.
+
+Every GM command goes out as a *speech* packet (`say:[go …]` → 0x03 AsciiSpeech
+→ ServUO `CommandSystem`). ServUO throttles speech per-connection
+(`Server/Network/MessagePump.cs` — a throttled `NetState` is paused, not
+processed); keep blasting while it's paused and the server-side receive buffer
+overflows and ServUO drops the connection. Measured on the bundled shard:
+
+- 15 `say` messages at **1/sec** → survives.
+- 40 `say` messages at **~7/sec** (or concurrent `curl &`) → `connection closed`.
+- 48 back-to-back `[go` teleports at ~1/1.2s (no other speech) → survives — so
+  the teleport is a red herring; the trigger is the *speech rate*, which
+  `[go` just happens to ride.
+
+A real human typing commands never approaches this rate. **Fix your harness, not
+the client:** put **≥ ~0.8s between commands**, and don't background the `curl`
+calls (`curl … &`) so they can't bunch up. `scripts/gm.sh` sends one command per
+invocation — space your invocations out. If you genuinely need to raise the
+limit for stress testing, that's a ServUO-side setting, not a client change.
+
+## 9. Known gaps
 
 - **No plumbing changes needed.** Everything above rides the existing
   `say:` chat path (`Action::Say` → normal 0x03/0x0D-family speech packet →
