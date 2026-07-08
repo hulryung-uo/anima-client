@@ -82,14 +82,22 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
     Ok(true)
 }
 
-/// 0x20 MobileUpdate — position/appearance reset.
+/// Status-flags bit for "hidden" on the mobile-update packets (0x20/0x77/
+/// 0x78). ServUO `Mobile.cs GetPacketFlags`: 0x04 Poisoned, 0x08
+/// YellowHealth, 0x40 WarMode, 0x80 Hidden — we only need the Hidden bit.
+const FLAG_HIDDEN: u8 = 0x80;
+
+/// 0x20 MobileUpdate — position/appearance reset. This is always about OUR
+/// OWN mobile (ServUO sends it only to the mobile itself), so its flags byte
+/// is the self-hidden feedback path: e.g. right after the Hiding skill
+/// succeeds, or a GM `[set Hidden true`.
 fn mobile_update(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     let serial = r.u32()?;
     let body = r.u16()?;
     r.skip(1)?; // graphic_inc
     let hue = r.u16()?;
-    r.skip(1)?; // flags
+    let flags = r.u8()?;
     let x = r.u16()?;
     let y = r.u16()?;
     r.skip(2)?; // server_id
@@ -103,6 +111,7 @@ fn mobile_update(world: &mut World, frame: &[u8]) -> PResult<()> {
     m.pos.y = y;
     m.pos.z = z;
     m.direction = direction;
+    m.hidden = flags & FLAG_HIDDEN != 0;
     Ok(())
 }
 
@@ -310,7 +319,7 @@ fn mobile_moving(world: &mut World, frame: &[u8]) -> PResult<()> {
     let z = r.i8()?;
     let direction = r.u8()? & 0x07;
     let hue = r.u16()?;
-    let _flags = r.u8()?;
+    let flags = r.u8()?;
     let notoriety = r.u8()?;
 
     // The Walker owns the player's own position/facing (prediction + ConfirmWalk).
@@ -329,6 +338,7 @@ fn mobile_moving(world: &mut World, frame: &[u8]) -> PResult<()> {
     m.direction = direction;
     m.hue = hue;
     m.notoriety = notoriety;
+    m.hidden = flags & FLAG_HIDDEN != 0;
     Ok(())
 }
 
@@ -363,7 +373,7 @@ fn mobile_incoming(world: &mut World, frame: &[u8]) -> PResult<()> {
     let z = r.i8()?;
     let direction = r.u8()? & 0x07;
     let hue = r.u16()?;
-    let _flags = r.u8()?;
+    let flags = r.u8()?;
     let notoriety = r.u8()?;
 
     // For self, the Walker owns position/facing — only refresh body/hue, never
@@ -373,6 +383,10 @@ fn mobile_incoming(world: &mut World, frame: &[u8]) -> PResult<()> {
         let m = world.mobile_mut(serial);
         m.body = body;
         m.hue = hue;
+        // Hidden is a visual flag like body/hue, not movement state — refresh it
+        // for self too (the self-hidden feedback path also flows through 0x78,
+        // e.g. re-entering view after a facet change while hidden).
+        m.hidden = flags & FLAG_HIDDEN != 0;
         if !is_self {
             m.pos.x = x;
             m.pos.y = y;
@@ -2005,6 +2019,102 @@ mod tests {
         assert_eq!((m.pos.x, m.pos.y, m.pos.z), (100, 200, 5));
         assert_eq!(m.body, 0x0190);
         assert_eq!(m.notoriety, 1);
+    }
+
+    /// A fixed 0x77 MobileMoving frame with a chosen status-flags byte
+    /// (`flags`), otherwise identical to `mobile_moving_updates_world`.
+    fn mobile_moving_frame(serial: u32, flags: u8) -> Vec<u8> {
+        let mut p = PacketWriter::new();
+        p.u8(0x77)
+            .u32(serial)
+            .u16(0x0190) // body
+            .u16(100) // x
+            .u16(200) // y
+            .u8(5i8 as u8) // z
+            .u8(0x03) // dir
+            .u16(0) // hue
+            .u8(flags)
+            .u8(1); // notoriety
+        p.into_vec()
+    }
+
+    #[test]
+    fn mobile_moving_hidden_flag_sets_and_clears() {
+        let mut w = World::new();
+        // Bit 0x80 set → hidden.
+        assert!(apply_packet(&mut w, &mobile_moving_frame(0xBEEF, FLAG_HIDDEN)));
+        assert!(w.mobiles[&0xBEEF].hidden);
+
+        // A later update that omits the bit clears it back — not sticky.
+        assert!(apply_packet(&mut w, &mobile_moving_frame(0xBEEF, 0x00)));
+        assert!(!w.mobiles[&0xBEEF].hidden);
+    }
+
+    #[test]
+    fn mobile_moving_no_hidden_flag_stays_false() {
+        let mut w = World::new();
+        assert!(apply_packet(&mut w, &mobile_moving_frame(0xCAFE, 0x00)));
+        assert!(!w.mobiles[&0xCAFE].hidden);
+    }
+
+    /// A variable-length 0x78 MobileIncoming frame (id + u16 length + fixed
+    /// fields, no worn-item records) with a chosen status-flags byte.
+    fn mobile_incoming_frame(serial: u32, flags: u8) -> Vec<u8> {
+        let mut p = PacketWriter::new();
+        p.u8(0x78).u16(0); // id + length placeholder
+        p.u32(serial)
+            .u16(0x0190) // body
+            .u16(100) // x
+            .u16(200) // y
+            .u8(5i8 as u8) // z
+            .u8(0x03) // dir
+            .u16(0) // hue
+            .u8(flags)
+            .u8(1); // notoriety
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        frame
+    }
+
+    #[test]
+    fn mobile_incoming_hidden_flag_sets_and_clears() {
+        let mut w = World::new();
+        assert!(apply_packet(&mut w, &mobile_incoming_frame(0xABCD, FLAG_HIDDEN)));
+        assert!(w.mobiles[&0xABCD].hidden);
+
+        // A fresh 0x78 without the bit flips it back — proves it's not sticky.
+        assert!(apply_packet(&mut w, &mobile_incoming_frame(0xABCD, 0x00)));
+        assert!(!w.mobiles[&0xABCD].hidden);
+    }
+
+    #[test]
+    fn mobile_update_hidden_flag_is_the_self_feedback_path() {
+        // 0x20 MobileUpdate is fixed-length, no length prefix: serial, body,
+        // graphic_inc, hue, flags, x, y, server_id, dir, z.
+        let mut w = World::new();
+        let build = |flags: u8| {
+            let mut p = PacketWriter::new();
+            p.u32(0x1001) // serial
+                .u16(0x0190) // body
+                .u8(0) // graphic_inc
+                .u16(0) // hue
+                .u8(flags)
+                .u16(100) // x
+                .u16(200) // y
+                .u16(0) // server_id
+                .u8(0x03) // dir
+                .u8(5i8 as u8); // z
+            let mut frame = p.into_vec();
+            frame.insert(0, 0x20);
+            frame
+        };
+        assert!(apply_packet(&mut w, &build(FLAG_HIDDEN)));
+        assert!(w.mobiles[&0x1001].hidden);
+
+        assert!(apply_packet(&mut w, &build(0x00)));
+        assert!(!w.mobiles[&0x1001].hidden, "hidden must not be sticky");
     }
 
     #[test]

@@ -953,6 +953,19 @@ fn corpse_fields(body: u16, hue: u16, direction: u8, death_group: u8) -> Value {
     json!({ "body": body, "dir": direction, "dg": death_group, "hue": hue })
 }
 
+/// `hidden` scene field for a mobile or the player (mobile-update status-flags
+/// 0x80 bit — see [`anima_core::world::Mobile::hidden`]'s doc). Only emitted
+/// when true (same small-payload convention as the item foliage `"f"` flag),
+/// so the renderer's default (not hidden) needs no key at all. Pure, so it's
+/// unit-testable directly.
+fn hidden_field(hidden: bool) -> Value {
+    if hidden {
+        json!({ "hidden": true })
+    } else {
+        json!({})
+    }
+}
+
 /// Build the `prompt` object for the scene: an outstanding server text prompt
 /// (0xC2 UnicodePrompt), or `{"active":0}` when none. The question text itself
 /// already arrived as a journal line (see `World::prompt`'s doc) — the client
@@ -1100,14 +1113,16 @@ pub fn build_scene(
                 .values()
                 .find(|it| it.container == Some(m.serial) && it.layer == 25);
             let mount_anim = mount.map_or(0u16, |it| mount_anim_for(it.graphic, &item_anim));
-            json!({
+            let mut v = json!({
                 "serial": m.serial,
                 "x": m.pos.x, "y": m.pos.y, "z": m.pos.z, "dir": m.direction,
                 "body": body, "at": atype(body), "noto": m.notoriety, "name": m.name,
                 "hits": m.hits, "hitsMax": m.hits_max,
                 "hue": hue, "equip": equip,
                 "mounted": mount.is_some() as u8, "mountAnim": mount_anim
-            })
+            });
+            merge_obj(&mut v, hidden_field(m.hidden));
+            v
         })
         .collect();
     let items: Vec<Value> = s
@@ -1438,7 +1453,7 @@ pub fn build_scene(
 
     // Small parts go through serde (cheap + handles string escaping for names).
     let (p_body, p_hue) = remap(p.body, p.hue);
-    let player = json!({
+    let mut player = json!({
         "serial": p.serial,
         "x": p.pos.x, "y": p.pos.y, "z": p.pos.z, "dir": p.direction, "body": p_body, "at": atype(p_body), "name": p.name,
         "hue": p_hue,
@@ -1448,6 +1463,7 @@ pub fn build_scene(
         "str": st.strength, "dex": st.dexterity, "int": st.intelligence, "gold": st.gold,
         "equip": equip,
     });
+    merge_obj(&mut player, hidden_field(p.hidden));
     // Recent sound events (the client plays only seqs newer than its last) and the
     // current background music id. Both are read-only views of world audio state.
     let sounds: Vec<Value> = s
@@ -1820,6 +1836,14 @@ mod tests {
         // omitted so the renderer doesn't offer to split it).
         assert_eq!(stack_fields(1, false), json!({ "amount": 1 }));
         assert_eq!(stack_fields(5, false), json!({ "amount": 5 }));
+    }
+
+    #[test]
+    fn hidden_field_present_only_when_true() {
+        assert_eq!(hidden_field(true), json!({ "hidden": true }));
+        // Not hidden → no key at all (not `"hidden": false`), so the renderer's
+        // default (fully opaque) needs no per-mobile check.
+        assert_eq!(hidden_field(false), json!({}));
     }
 
     #[test]

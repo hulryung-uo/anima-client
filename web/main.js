@@ -1695,6 +1695,11 @@ function drawMobs() {
     // 403→401) rendered translucent, equipment hidden (UO shows ghosts bare).
     const ghost = isGhostBody(st.body);
     const bodyAnim = ghost ? (st.body === 403 ? 401 : 400) : (st.body | 0);
+    // Hidden (mobile-update status-flags 0x80: Hiding/stealth skill, or a GM
+    // `[set Hidden true`). Seeing it at all means the server allows us to
+    // perceive this mobile (self, or an ally in Detect Hidden range) — UO
+    // gives visual feedback for that by rendering it semi-transparent.
+    const hidden = !!(ent && ent.hidden);
     // Authoritative animation type from the server (mobtypes.txt). A ghost is drawn
     // with a living human body, so it animates as people (2) regardless of st.at.
     const atype = ghost ? 2 : (st.at != null ? (st.at | 0) : null);
@@ -1855,9 +1860,12 @@ function drawMobs() {
           sp.x = x; sp.y = y - 3;
         }
         sp.visible = true;
-        // Dead humans render as translucent ghosts. Sprites are pooled/persistent, so
-        // we must reset alpha to 1 for non-ghost bodies (else a former ghost stays faint).
-        sp.alpha = isGhostBody(st.body) ? 0.45 : 1;
+        // Dead humans render as translucent ghosts; a hidden mobile (still visible to
+        // us, per the scene's `hidden` flag) renders semi-transparent too, so we know
+        // we're hidden even though we can see ourselves. Sprites are pooled/persistent,
+        // so alpha must be reset to 1 every frame for a body that is neither (else a
+        // former ghost/hidden mobile stays faint after it dies again/unhides).
+        sp.alpha = isGhostBody(st.body) ? 0.45 : (hidden ? 0.5 : 1);
         const z = zi + e.rank / 256;
         if (sp.zIndex !== z) sp.zIndex = z;
         seen.add(key);

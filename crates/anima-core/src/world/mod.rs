@@ -27,6 +27,16 @@ pub struct Mobile {
     pub mana_max: u16,
     pub stam: u16,
     pub stam_max: u16,
+    /// Hidden status — the mobile-update status-flags 0x80 bit (ServUO
+    /// `Mobile.cs GetPacketFlags`: 0x04 Poisoned, 0x08 YellowHealth, 0x40
+    /// WarMode, 0x80 Hidden). Set by the Hiding/stealth skills or a GM `[set
+    /// Hidden true`; the server only describes a hidden mobile to a client that
+    /// can actually perceive it (self, or an ally within Detect Hidden range),
+    /// so seeing this flag at all means we're allowed to see them — the
+    /// renderer draws them semi-transparent as feedback. Re-derived from the
+    /// flags byte on every 0x20/0x77/0x78 (not sticky): a later update that
+    /// omits the bit clears it back to `false`.
+    pub hidden: bool,
 }
 
 /// An item — on the ground, in a container, or equipped.
