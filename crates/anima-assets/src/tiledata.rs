@@ -137,6 +137,17 @@ impl TileData {
         self.item_flags(graphic) & flags::ANIMATION != 0
     }
 
+    /// Does the tile's name start with "nodraw"? ClassicUO's "hacky way" to cull
+    /// the void/placeholder tiles (`GameObject.cs`:
+    /// `data.Name.StartsWith("nodraw", OrdinalIgnoreCase)`) — e.g. static graphic
+    /// 8600, whose art is the literal "NO DRAW" bitmap. The 20-byte name field sits
+    /// at item-entry offset +21 (after flags..height); we compare the leading 6
+    /// bytes case-insensitively, matching ClassicUO's `StartsWith`.
+    pub fn item_is_nodraw(&self, graphic: u16) -> bool {
+        self.item_entry_off(graphic)
+            .is_some_and(|off| self.data[off + 21..off + 27].eq_ignore_ascii_case(b"nodraw"))
+    }
+
     /// Height of a static/item graphic (used for Z stacking/walkability).
     pub fn item_height(&self, graphic: u16) -> u8 {
         // height is the byte at entry offset +20 (after flags+the fixed fields).

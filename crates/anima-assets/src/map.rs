@@ -338,6 +338,13 @@ impl MapData {
         self.tiledata.item_is_animated(graphic)
     }
 
+    /// Is a static/item graphic a "nodraw" void placeholder (name starts "nodraw",
+    /// e.g. graphic 8600)? ClassicUO never renders these; the renderer skips them so
+    /// the "NO DRAW" placeholder bitmap doesn't show on the terrain.
+    pub fn item_is_nodraw(&self, graphic: u16) -> bool {
+        self.tiledata.item_is_nodraw(graphic)
+    }
+
     pub fn item_blocks(&self, graphic: u16, item_z: i32, current_z: i32) -> bool {
         let f = self.tiledata.item_flags(graphic);
         // Only impassable items block. A table is Impassable+Surface — you cannot

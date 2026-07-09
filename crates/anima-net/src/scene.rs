@@ -1401,6 +1401,14 @@ pub fn build_scene(
                 // or above max_z so a roof/upper floor over the player vanishes.
                 if n_statics < 4000 {
                     for s in &tstatics {
+                        // "nodraw" void placeholders (tiledata name starts "nodraw",
+                        // e.g. graphic 8600 whose art is a literal "NO DRAW" bitmap):
+                        // ClassicUO culls them (GameObject.cs) — if we drew them the
+                        // placeholder would show on the terrain. Detected by tiledata
+                        // NAME, not a flag (8600 carries no NoDraw flag bit).
+                        if map.item_is_nodraw(s.graphic) {
+                            continue;
+                        }
                         let is_roof = s.flags & 0x1000_0000 != 0;
                         if (s.z as i32) >= max_z || (under_cover && is_roof) {
                             continue;
