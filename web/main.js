@@ -2290,6 +2290,16 @@ function drawWorldmap() {
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(wmImg, -ipx, -ipy);          // player's pixel at the origin
   ctx.restore();
+  const wmLabelBoxes = []; // greedy de-collision: text labels skip drawing if they'd overlap an already-placed one (dots still draw). Places seed the list first (higher priority).
+  // AABB via measureText (uses current ctx.font) + fixed line height; push+true if clear (or forced), false if it collides.
+  const wmPlaceLabel = (x, y, align, str, force) => {
+    const wd = ctx.measureText(str).width, pad = 2, lh = 12;
+    const l = (align === "center" ? x - wd / 2 : x) - pad, r = l + wd + pad * 2;
+    const t = y - lh / 2 - pad, b = y + lh / 2 + pad;
+    if (!force) for (const q of wmLabelBoxes)
+      if (l < q.r && r > q.l && t < q.b && b > q.t) return false;
+    wmLabelBoxes.push({ l, r, t, b }); return true;
+  };
   // place-name labels (cull off-canvas; fade names when zoomed far out).
   if (s >= 0.6) {
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
@@ -2297,6 +2307,7 @@ function drawWorldmap() {
     for (const [lx, ly, name] of PLACES) {
       const [sx, sy] = wmWorldToScreen(lx, ly, w, h);
       if (sx < 0 || sy < 0 || sx > w || sy > h) continue;
+      wmPlaceLabel(sx, sy, "center", name, true);   // seed the box unconditionally; places always draw
       ctx.strokeStyle = "rgba(0,0,0,.85)"; ctx.strokeText(name, sx, sy);
       ctx.fillStyle = "#ffe08a"; ctx.fillText(name, sx, sy);
     }
@@ -2313,7 +2324,8 @@ function drawWorldmap() {
       if (sx < -8 || sy < -8 || sx > w + 8 || sy > h + 8) continue;
       ctx.fillStyle = poiColor(cat); ctx.strokeStyle = "#0a0e12"; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.arc(sx, sy, 3, 0, 7); ctx.fill(); ctx.stroke();
-      if (showLabels && p.name) {   // labels only when zoomed in + a name exists
+      // labels only when zoomed in, a name exists, and the box doesn't collide (first-come-wins).
+      if (showLabels && p.name && wmPlaceLabel(sx + 5, sy, "left", p.name)) {
         ctx.lineWidth = 2.5; ctx.strokeStyle = "rgba(0,0,0,.85)";
         ctx.strokeText(p.name, sx + 5, sy); ctx.fillStyle = "#dfe6ee"; ctx.fillText(p.name, sx + 5, sy);
       }
