@@ -529,18 +529,16 @@ pub struct World {
     /// See [`PromptState`].
     pub prompt: Option<PromptState>,
     /// Current facet/map index (0xBF/0x08 MapChange): 0=Felucca, 1=Trammel,
-    /// 2=Ilshenar, 3=Malas, 4=Tokuno, 5=TerMur (ServUO `Map.MapID`). AI-facing state
-    /// only — `anima_assets::MapData` currently only ever opens facet 0
-    /// (`map0LegacyMUL.uop`/`staidx0.mul`/`statics0.mul`, with the fixed
-    /// `MAP_WIDTH`/`MAP_HEIGHT` consts baked into bounds checks + block math).
-    /// Making it open an arbitrary facet needs a constructor arg PLUS per-facet
-    /// dimensions (ClassicUO `MapLoader.MapsDefaultSize`: Felucca/Trammel 7168×4096,
-    /// Ilshenar 2304×1600, Malas 2560×2048, Tokuno 1448×1448, TerMur 1280×4096)
-    /// threaded through every `MAP_WIDTH`/`MAP_HEIGHT` use (bounds checks + block
-    /// math in `anima_assets::map`, and `render_worldmap` in `anima_net::scene`) —
-    /// a multi-file change, not attempted here. This field is stored/exposed so a
-    /// consumer at least *knows* the facet changed. Set via [`World::on_map_change`]
-    /// (never assign directly — that's what purges the old facet's entities).
+    /// 2=Ilshenar, 3=Malas, 4=Tokuno, 5=TerMur (ServUO `Map.MapID`). The play server
+    /// watches this and reloads `anima_assets::MapData` for the matching facet via
+    /// `MapData::open_facet` (per-facet `map{N}`/`staidx{N}`/`statics{N}` files +
+    /// ClassicUO `MapsDefaultSize` dimensions: Felucca/Trammel 7168×4096, Ilshenar
+    /// 2304×1600, Malas 2560×2048, Tokuno 1448×1448, TerMur 1280×4096), so
+    /// terrain/statics follow the player across facets. (The facet-0 world-map
+    /// overlay in `anima_net::scene::render_worldmap` still uses the fixed
+    /// `MAP_WIDTH`/`MAP_HEIGHT` consts — it's only ever rendered for Felucca.) Set
+    /// via [`World::on_map_change`] (never assign directly — that's what purges the
+    /// old facet's entities).
     pub map_index: u8,
     /// Active player-to-player secure trade sessions (0x6F) — normally 0 or 1,
     /// but see [`TradeState`]'s doc for why concurrent sessions with

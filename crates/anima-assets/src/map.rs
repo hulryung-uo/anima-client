@@ -7,13 +7,25 @@ use std::path::{Path, PathBuf};
 use crate::tiledata::{flags, TileData};
 use crate::uop::UopReader;
 
-// Map0 (Felucca/Trammel) dimensions.
+// Facet-0 (Felucca/Trammel) dimensions — the default open() facet and what the facet-0 world-map renderer uses.
 pub const MAP_WIDTH: u32 = 7168;
 pub const MAP_HEIGHT: u32 = 4096;
 const BLOCK_SIZE: u32 = 8;
 const BLOCKS_PER_UOP_CHUNK: usize = 4096;
 const MAP_BLOCK_BYTES: usize = 196; // 4 header + 64 × 3
-const BLOCKS_Y: u32 = MAP_HEIGHT / BLOCK_SIZE; // 512
+
+/// Per-facet map dimensions in tiles (ClassicUO `MapLoader.MapsDefaultSize`):
+/// Felucca/Trammel 7168×4096, Ilshenar 2304×1600, Malas 2560×2048, Tokuno
+/// 1448×1448, Ter Mur 1280×4096. Unknown facets fall back to facet 0.
+fn facet_dims(facet: u8) -> (u32, u32) {
+    match facet {
+        2 => (2304, 1600),
+        3 => (2560, 2048),
+        4 => (1448, 1448),
+        5 => (1280, 4096),
+        _ => (7168, 4096), // 0 Felucca, 1 Trammel, and fallback
+    }
+}
 
 /// Character body height and max single-step climb (ClassicUO defaults).
 const CHAR_HEIGHT: i32 = 16;
@@ -153,33 +165,44 @@ pub struct MapData {
     // lookup is O(statics-on-this-cell), not O(whole-block). The whole-block
     // linear filter on every statics() call dominated scene-build time.
     statics_cache: HashMap<u32, Vec<Vec<StaticTile>>>,
+    facet: u8,
+    width: u32,
+    height: u32,
+    blocks_y: u32,
 }
 
 impl MapData {
-    /// Open the map from a UO data directory (containing `map0LegacyMUL.uop`,
-    /// `staidx0.mul`, `statics0.mul`, `tiledata.mul`).
-    ///
-    /// This always opens **facet 0** (Felucca) — hardcoded in the filenames above
-    /// and in the [`MAP_WIDTH`]/[`MAP_HEIGHT`] consts this module bounds-checks
-    /// against. `anima_core::World::map_index` (set from the server's 0xBF/0x08
-    /// MapChange) tracks which facet the *server* thinks we're on, but nothing
-    /// reloads `MapData` to match: a real per-facet open would need this
-    /// constructor to take a facet id, per-facet file names (`map{N}LegacyMUL.uop`
-    /// /`staidx{N}.mul`/`statics{N}.mul`), AND per-facet dimensions (ClassicUO
-    /// `MapLoader.MapsDefaultSize`: Felucca/Trammel 7168×4096, Ilshenar 2304×1600,
-    /// Malas 2560×2048, Tokuno 1448×1448, TerMur 1280×4096) threaded through every
-    /// `MAP_WIDTH`/`MAP_HEIGHT` use here AND in `anima_net::scene::render_worldmap`
-    /// — not attempted (see `World::map_index`'s doc for the full rationale).
+    /// Open **facet 0** (Felucca) from a UO data directory. Back-compat shorthand
+    /// for [`Self::open_facet`]`(dir, 0)` — most callers only ever touch facet 0.
     pub fn open(resource_dir: impl AsRef<Path>) -> std::io::Result<MapData> {
+        Self::open_facet(resource_dir, 0)
+    }
+
+    /// Open a specific facet's map from a UO data directory: `map{N}LegacyMUL.uop`,
+    /// `staidx{N}.mul`, `statics{N}.mul` with the facet's ClassicUO dimensions
+    /// (see [`facet_dims`]). `tiledata.mul` is shared across facets. The play server
+    /// reloads via this when the server moves the player to another facet.
+    pub fn open_facet(resource_dir: impl AsRef<Path>, facet: u8) -> std::io::Result<MapData> {
         let dir: PathBuf = resource_dir.as_ref().to_path_buf();
+        let (width, height) = facet_dims(facet);
         Ok(MapData {
-            uop: UopReader::open(&dir.join("map0LegacyMUL.uop"))?,
-            staidx: std::fs::read(dir.join("staidx0.mul"))?,
-            statics: std::fs::read(dir.join("statics0.mul"))?,
+            uop: UopReader::open(&dir.join(format!("map{facet}LegacyMUL.uop")))?,
+            staidx: std::fs::read(dir.join(format!("staidx{facet}.mul")))?,
+            statics: std::fs::read(dir.join(format!("statics{facet}.mul")))?,
             tiledata: TileData::open(&dir.join("tiledata.mul"))?,
             land_cache: HashMap::new(),
             statics_cache: HashMap::new(),
+            facet,
+            width,
+            height,
+            blocks_y: height / BLOCK_SIZE,
         })
+    }
+
+    /// Which facet this MapData was opened for (so the play server can tell when a
+    /// facet change means it must reload).
+    pub fn facet(&self) -> u8 {
+        self.facet
     }
 
     // Returns a *reference* into the block cache (no clone): callers copy out the
@@ -188,7 +211,7 @@ impl MapData {
     fn load_land_block(&mut self, bx: u32, by: u32) -> &Vec<(u16, i8)> {
         let key = (bx << 16) | by;
         if !self.land_cache.contains_key(&key) {
-            let block_num = (bx * BLOCKS_Y + by) as usize;
+            let block_num = (bx * self.blocks_y + by) as usize;
             let chunk_idx = block_num / BLOCKS_PER_UOP_CHUNK;
             let block_in_chunk = block_num % BLOCKS_PER_UOP_CHUNK;
 
@@ -214,7 +237,7 @@ impl MapData {
         if self.statics_cache.contains_key(&key) {
             return &self.statics_cache[&key];
         }
-        let block_num = (bx * BLOCKS_Y + by) as usize;
+        let block_num = (bx * self.blocks_y + by) as usize;
         let idx_off = block_num * 12;
         // One bucket per cell (cy*BLOCK_SIZE + cx), so statics(x,y) is a direct index.
         let mut out: Vec<Vec<StaticTile>> = vec![Vec::new(); (BLOCK_SIZE * BLOCK_SIZE) as usize];
@@ -254,7 +277,7 @@ impl MapData {
 
     /// Land tile at world (x, y). Off-map returns an impassable void.
     pub fn land(&mut self, x: u32, y: u32) -> LandTile {
-        if x >= MAP_WIDTH || y >= MAP_HEIGHT {
+        if x >= self.width || y >= self.height {
             return LandTile {
                 graphic: 0,
                 z: 0,
@@ -288,7 +311,7 @@ impl MapData {
 
     /// Statics at world (x, y).
     pub fn statics(&mut self, x: u32, y: u32) -> Vec<StaticTile> {
-        if x >= MAP_WIDTH || y >= MAP_HEIGHT {
+        if x >= self.width || y >= self.height {
             return Vec::new();
         }
         let (bx, by) = (x / BLOCK_SIZE, y / BLOCK_SIZE);
@@ -389,6 +412,22 @@ mod tests {
         let map = MapData::open(&dir).expect("open map data");
         assert_ne!(map.item_flags(0x0EED) & 0x800, 0, "gold coins should be stackable");
         assert_eq!(map.item_flags(0x0E75) & 0x800, 0, "a backpack should not be stackable");
+    }
+
+    /// Each facet opens with its ClassicUO dimensions and can read a land tile
+    /// inside its bounds (real data files; run with `--ignored`).
+    #[test]
+    #[ignore]
+    fn open_facet_dimensions_and_readable() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        for (facet, w, h) in [(0u8, 7168u32, 4096u32), (2, 2304, 1600), (3, 2560, 2048), (4, 1448, 1448), (5, 1280, 4096)] {
+            let mut map = MapData::open_facet(&dir, facet).expect("open facet");
+            assert_eq!(map.facet(), facet);
+            // land() near the facet's far corner must be in-bounds (non-void graphic possible, but no panic).
+            let _ = map.land(w / 2, h / 2);
+            let _ = map.statics(w / 2, h / 2);
+            assert!(w % 8 == 0 && h % 8 == 0);
+        }
     }
 
     // `score_walkable_z` is the pure core of `walkable_z` — these run against

@@ -640,6 +640,17 @@ impl PlayServer {
             // guard-zone rects to wherever the player currently is (0xBF/0x08
             // MapChange updates `world.map_index` directly; see its doc).
             facet.store(session.world.map_index, Ordering::Relaxed);
+            // Reload MapData when the server moves us to a different facet, so
+            // land/statics come from the right map files (Malas/Ilshenar/…) instead
+            // of staying on Felucca. Reload only on an actual change; if the new
+            // facet's files won't open, keep the current map rather than going blank.
+            let want_facet = session.world.map_index;
+            if map.as_ref().map(MapData::facet) != Some(want_facet) {
+                match MapData::open_facet(&cfg.data_dir, want_facet) {
+                    Ok(m) => map = Some(m),
+                    Err(e) => eprintln!("play: facet {want_facet} map load failed: {e} (keeping current map)"),
+                }
+            }
 
             let obs = session.world.observe(&mut cursor);
             for j in &obs.new_journal {
