@@ -19,7 +19,7 @@ renderers/agents/desktop sit on top. Companion to `../anima` (Python AI player).
 terrain + full iso sprites, walk/attack/typed mobile animation (legacy + UOP,
 Body/Bodyconv/Corpse/Equipconv.def remap), gumps, audio, and secure trading. 5
 crates (core/assets/net/wasm/agent) + `web/`. **Remaining:** richer/RL/LLM brains,
-browser WASM+relay, Tauri, `multi.mul` houses, per-facet `MapData` reload, sitting,
+browser WASM+relay, Tauri, `multi.mul` houses, sitting,
 treasure maps, custom housing. See DESIGN.md §6.
 
 ## Conventions

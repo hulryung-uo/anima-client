@@ -75,7 +75,7 @@ on-drag are all implemented over `gumpartLegacyMUL.uop`.
 Everything above was previously listed as the Phase 3 "tail" — it is now done. What
 actually remains (see §6 Phase 3 for detail): richer/RL/LLM brains, browser WASM +
 WebSocket↔TCP relay (`anima-wasm` exists; the relay service doesn't), a Tauri
-standalone shell, per-facet `MapData` reload (only Felucca/facet 0 opens today),
+standalone shell,
 `multi.mul` dynamic house placement, sitting, treasure maps, delete-character
 (0x83), and custom housing.
 
@@ -374,9 +374,7 @@ shell for a true standalone desktop app.
 
 **Remaining tail:** `multi.mul` house/multi resolution (no reader exists yet —
 placed/custom housing today only renders whatever ordinary statics the server
-sends, not a resolved multi-component structure); per-facet `MapData` reload (only
-Felucca/facet 0 opens — see `World::map_index`'s doc for what a real per-facet
-open needs); sitting; treasure maps; richer brains (RL/LLM over the contract);
+sends, not a resolved multi-component structure); sitting; treasure maps; richer brains (RL/LLM over the contract);
 browser WASM + WebSocket↔TCP relay (`anima-wasm` itself is done — the relay
 service and its browser wiring aren't); a Tauri standalone shell.
 
