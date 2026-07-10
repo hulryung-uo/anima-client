@@ -1036,6 +1036,16 @@ pub fn build_scene(
     let mounted = s.world.player_mounted();
     let (px, py, pz) = (p.pos.x as i64, p.pos.y as i64, p.pos.z as i32);
 
+    // Roof/ceiling cull bound (ClassicUO UpdateMaxDrawZ), computed up front so BOTH
+    // the ground-items and statics emissions can hide anything at/above it. Without
+    // this on items, a field/object sitting on the mountain surface above a cave
+    // (or furniture on a hidden upper floor) renders floating over the black void.
+    let mut map = map;
+    let max_z = match map {
+        Some(ref mut m) => max_draw_z(m, px, py, pz),
+        None => 127i32,
+    };
+
     // Worn equipment's AnimID (the sprite to fetch via `/anim`) comes from tiledata
     // on the map. `map` is consumed by the tile loop below, so resolve anims through
     // this shared-borrow helper while it's still available (0 when there's no map).
@@ -1147,7 +1157,11 @@ pub fn build_scene(
         .world
         .items
         .values()
-        .filter(|it| it.container.is_none() && !item_nodraw(it.graphic))
+        .filter(|it| {
+            // Same z-ceiling rule the statics loop applies: at/above max_z is
+            // hidden (roof lifted / cave ceiling), so no floating items.
+            it.container.is_none() && !item_nodraw(it.graphic) && (it.pos.z as i32) < max_z
+        })
         .map(|it| {
             let mut v = json!({
                 "x": it.pos.x, "y": it.pos.y, "z": it.pos.z, "g": it.graphic,
@@ -1312,12 +1326,11 @@ pub fn build_scene(
     let mut tiles = String::with_capacity(64 * 1024);
     let mut statics = String::with_capacity(16 * 1024);
     let mut n_statics = 0usize;
-    let mut max_z = 127i32;
     let mut dbg: Vec<Value> = Vec::new();
     if let Some(map) = map {
-        // Hide the roof / upper floors when the player is under cover (ClassicUO
-        // UpdateMaxDrawZ): statics at/above max_z aren't sent, revealing the interior.
-        max_z = max_draw_z(map, px, py, pz);
+        // `max_z` (computed up front, see the top of this fn) hides the roof /
+        // upper floors when the player is under cover (ClassicUO UpdateMaxDrawZ):
+        // statics at/above it aren't sent, revealing the interior.
         // Under cover? Then (like ClassicUO `_noDrawRoofs`) hide *every* roof tile
         // in view, not only those above max_z — so the whole roof lifts off.
         let under_cover = max_z < 127;
