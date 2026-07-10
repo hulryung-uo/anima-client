@@ -2621,10 +2621,17 @@ function ingestLiftRejects(s) {
 }
 
 function spawnEffect(ev, now) {
-  const frames = (ev.frames && ev.frames.length) ? ev.frames : [ev.g | 0];
+  let frames = (ev.frames && ev.frames.length) ? ev.frames : [ev.g | 0];
   const hue = ev.hue | 0;
   // animdata interval is a small tick count; clamp to a lively per-frame range.
-  const fm = (ev.interval | 0) > 0 ? Math.min(150, Math.max(50, (ev.interval | 0) * 50)) : 80;
+  let fm = (ev.interval | 0) > 0 ? Math.min(150, Math.max(50, (ev.interval | 0) * 50)) : 80;
+  // Lightning (kind 1) has no ART animation — its graphic arrives as 0. ClassicUO
+  // draws it as the 10-frame lightning GUMP strip (0x4E20..0x4E29, ~50ms/frame,
+  // additive); mirror that instead of drawing art tile 0 (the "UNUSED" placeholder).
+  if ((ev.kind | 0) === 1) {
+    frames = [20000, 20001, 20002, 20003, 20004, 20005, 20006, 20007, 20008, 20009];
+    fm = 50;
+  }
   const cycleMs = frames.length * fm;
   const pserial = (scene && scene.player) ? (scene.player.serial >>> 0) : 0;
 
@@ -2649,6 +2656,7 @@ function spawnEffect(ev, now) {
 
   const sprite = new PIXI.Sprite();
   sprite.anchor.set(0.5, 1.0); // foot-anchored like statics; hue baked via ?hue=
+  if ((ev.kind | 0) === 1) sprite.blendMode = "add"; // lightning: additive flash, like ClassicUO
   overLayer.addChild(sprite);
   fxEffects.push({ kind: ev.kind | 0, src: ev.src >>> 0, tgt: ev.tgt >>> 0,
     frames, fm, hue, born: now, totalMs, sprite, srcPos, tgtPos, pserial });
@@ -2683,7 +2691,9 @@ function drawEffects(now) {
 
     // Cycle the resolved ART frame list (hue baked server-side via ?hue=).
     const g = o.frames[Math.floor(age / o.fm) % o.frames.length] | 0;
-    const tex = texFor(`art/static/${g}.png` + (o.hue ? `?hue=${o.hue}` : ""));
+    // Lightning frames are GUMP art (0x4E20 strip); everything else is ART tiles.
+    const base = o.kind === 1 ? `gump/${g}.png` : `art/static/${g}.png`;
+    const tex = texFor(base + (o.hue ? `?hue=${o.hue}` : ""));
     if (tex && o.sprite.texture !== tex) o.sprite.texture = tex;
     o.sprite.visible = !!o.sprite.texture && o.sprite.texture !== PIXI.Texture.EMPTY;
 

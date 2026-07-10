@@ -1067,6 +1067,10 @@ pub fn build_scene(
     // can fade it when it would occlude the player. Resolved through the shared
     // borrow before `map` is consumed by the tile loop below.
     let item_foliage = |g: u16| map.as_deref().is_some_and(|m| m.item_flags(g) & FLAG_FOLIAGE != 0);
+    // "nodraw" void-placeholder items (name starts "nodraw", e.g. graphic 0x1 staff
+    // spawner/markers): ClassicUO culls these for items just like statics — without
+    // this the "NO DRAW" placeholder bitmap shows on the ground for GM characters.
+    let item_nodraw = |g: u16| map.as_deref().is_some_and(|m| m.item_is_nodraw(g));
     // Container (chest/bag/corpse 0x2006) → the client opens a loot window on
     // double-click; non-containers (doors, etc.) must NOT spawn an empty window.
     let item_is_cont = |g: u16| g == 0x2006 || map.as_deref().is_some_and(|m| m.item_is_container(g));
@@ -1143,7 +1147,7 @@ pub fn build_scene(
         .world
         .items
         .values()
-        .filter(|it| it.container.is_none())
+        .filter(|it| it.container.is_none() && !item_nodraw(it.graphic))
         .map(|it| {
             let mut v = json!({
                 "x": it.pos.x, "y": it.pos.y, "z": it.pos.z, "g": it.graphic,
