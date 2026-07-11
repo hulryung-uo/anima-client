@@ -81,7 +81,7 @@ pub fn explain_tile_walkable(
             && it.pos.x as i64 == x
             && it.pos.y as i64 == y
             && map.item_blocks(it.graphic, it.pos.z as i32, current_z)
-            && !(ghost && map.item_flags(it.graphic) & TILEFLAG_DOOR != 0)
+            && !(ghost && map.item_is_door(it.graphic))
     }) {
         return Err(StepDeny::DynamicItem { graphic: it.graphic, item_z: it.pos.z as i32 });
     }
@@ -98,12 +98,74 @@ pub fn tile_walkable(world: &World, map: &mut MapData, x: i64, y: i64, current_z
     explain_tile_walkable(world, map, x, y, current_z).is_ok()
 }
 
+/// Is tile (x, y) walkable for **click-to-walk route planning**, at
+/// `current_z`? Like [`explain_tile_walkable`], except a closed door never
+/// blocks: a closed door isn't a wall, it's a wall we're allowed to open, and
+/// ClassicUO's own pathfinder treats it the same way (`Pathfinder.CanWalk`'s
+/// `SmoothDoors`-style `dropFlags` for door items, plus its
+/// `PlayerMobile.TryOpenDoors` auto-open-as-you-approach convenience). The
+/// A* terrain adapter (`play_server::MapTerrain`) uses this so a route can be
+/// planned *through* a closed door; the executor then really opens it (see
+/// `play_server`'s auto-walk loop) before stepping onto its tile — so what
+/// gets planned and what gets walked never disagree about the real world.
+/// Manual walking (`can_walk`/`step_ok`) and the debug minimap overlay keep
+/// [`tile_walkable`]'s strict semantics: a closed door genuinely blocks a
+/// single committed step until something has actually opened it.
+pub fn tile_walkable_for_planning(world: &World, map: &mut MapData, x: i64, y: i64, current_z: i32) -> Option<i32> {
+    match explain_tile_walkable(world, map, x, y, current_z) {
+        Ok(z) => Some(z),
+        Err(StepDeny::DynamicItem { .. }) => {
+            // `explain_tile_walkable`'s `.find()` only reports the FIRST
+            // blocking dynamic item it happens to hit (`World::items` is a
+            // `HashMap` — iteration order isn't the same as "the" blocker).
+            // A door on the tile only makes it plannable-through if EVERY
+            // impassable dynamic item there is a door — a crate someone
+            // dropped in the same doorway must still deny, in either
+            // find-order (see the FIX 4 regression test).
+            let ghost = player_is_ghost(world);
+            let all_blockers_are_doors = world.items.values().all(|it| {
+                let blocks = it.container.is_none()
+                    && it.pos.x as i64 == x
+                    && it.pos.y as i64 == y
+                    && map.item_blocks(it.graphic, it.pos.z as i32, current_z)
+                    && !(ghost && map.item_is_door(it.graphic));
+                !blocks || map.item_is_door(it.graphic)
+            });
+            if all_blockers_are_doors {
+                // Every blocker on this tile is an openable door — recompute
+                // without dynamic items (the static base still applies).
+                map.walkable_z(x as u32, y as u32, current_z)
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+/// Serial of a **closed door** item sitting on (x, y) that's currently
+/// blocking a body at `current_z`, if any — used by the click-to-walk
+/// executor to know when it should open a door instead of giving up (see
+/// [`tile_walkable_for_planning`]'s doc for why this is safe to treat as
+/// "walkable, given we act on it").
+pub fn door_blocking_at(world: &World, map: &MapData, x: i64, y: i64, current_z: i32) -> Option<u32> {
+    world
+        .items
+        .values()
+        .find(|it| {
+            it.container.is_none()
+                && it.pos.x as i64 == x
+                && it.pos.y as i64 == y
+                && map.item_is_door(it.graphic)
+                && map.item_blocks(it.graphic, it.pos.z as i32, current_z)
+        })
+        .map(|it| it.serial)
+}
+
 /// A dead player is a ghost (human ghost body 402/403). Ghosts walk through doors.
 fn player_is_ghost(world: &World) -> bool {
     world.player_mobile().is_some_and(|m| matches!(m.body, 402 | 403))
 }
-/// `tiledata.mul` flag bit for a door (`TileFlag.Door`). Ghosts pass through these.
-const TILEFLAG_DOOR: u64 = 0x2000_0000;
 
 /// UO direction (0=N..7=NW) → (dx, dy) tile delta.
 fn delta(d: u8) -> (i64, i64) {
@@ -156,7 +218,7 @@ fn step_ok(world: &World, map: &mut MapData, fx: i64, fy: i64, fz: i32, dir: u8)
             && it.pos.x as i64 == tx
             && it.pos.y as i64 == ty
             && map.item_blocks(it.graphic, it.pos.z as i32, fz)
-            && !(ghost && map.item_flags(it.graphic) & TILEFLAG_DOOR != 0)
+            && !(ghost && map.item_is_door(it.graphic))
     })
 }
 
@@ -2109,6 +2171,119 @@ mod tests {
             seq.push(z);
         }
         assert_eq!(seq, vec![20, 17, 12, 10, 10], "descending-south Z sequence (trivial 10->10 step included)");
+    }
+
+    /// Root-cause regression for the live `walkto (1621,1588) rejected: no
+    /// path from (1620,1595,5)` bug: (1621,1588) sits behind a real, closed
+    /// "wooden door" (graphic 0x06A5/0x06A7, tiledata Door+Impassable) at
+    /// (1611,1591)/(1612,1591) — a genuine ServUO gate a live probe walked up
+    /// to (confirmed live: opening it with `use:<serial>` made the very same
+    /// `walkto` succeed). The strict check must still deny it (a closed door
+    /// really does block a live step); the planning check must not (so click-
+    /// to-walk can route through, and the executor can open it) — and
+    /// `door_blocking_at` must find its serial so the executor knows to.
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn closed_door_blocks_strictly_but_not_for_planning() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let mut map = MapData::open(&dir).expect("open map data");
+        assert!(map.item_is_door(0x06A5), "0x06A5 should be a real door graphic");
+
+        let mut world = anima_core::World::new();
+        let door_serial = 1_073_751_127;
+        world.items.insert(
+            door_serial,
+            anima_core::world::Item {
+                serial: door_serial,
+                graphic: 0x06A5,
+                amount: 1,
+                pos: anima_core::types::Position { x: 1611, y: 1591, z: 0 },
+                container: None,
+                layer: 0,
+                hue: 0,
+                name: String::new(),
+                direction: 0,
+            },
+        );
+
+        // Strict (manual-walk / minimap) check: the closed door really blocks.
+        match explain_tile_walkable(&world, &mut map, 1611, 1591, 5) {
+            Err(StepDeny::DynamicItem { graphic, .. }) => assert_eq!(graphic, 0x06A5),
+            other => panic!("expected a closed-door deny, got {other:?}"),
+        }
+        assert!(!tile_walkable(&world, &mut map, 1611, 1591, 5));
+
+        // Planning check: the same closed door does not block.
+        assert!(
+            tile_walkable_for_planning(&world, &mut map, 1611, 1591, 5).is_some(),
+            "click-to-walk planning must route through a closed (openable) door"
+        );
+
+        // The executor can find the door to open.
+        assert_eq!(door_blocking_at(&world, &map, 1611, 1591, 5), Some(door_serial));
+        assert_eq!(door_blocking_at(&world, &map, 1611, 1591 /* unrelated tile */ + 1, 5), None);
+    }
+
+    /// FIX 4 regression: a door AND a non-door blocker (e.g. a crate someone
+    /// dropped in the doorway) sitting on the SAME tile must still deny
+    /// planning. Before this fix, the door-recovery branch fired the moment
+    /// `explain_tile_walkable`'s `.find()` reported ANY door on the tile,
+    /// then recomputed with the STATIC-only `walkable_z` — silently ignoring
+    /// every OTHER dynamic item there too. Since `World::items` is a
+    /// `HashMap`, which blocker `.find()` hits first is iteration-order
+    /// dependent, not a real answer — this asserts under two different
+    /// serial-number arrangements for the pair (a `HashMap`'s iteration
+    /// order is a function of its keys, not insertion sequence) so the
+    /// fixed "every blocker must be a door" check can't quietly regress back
+    /// to a `.find()`-shaped bug that just happens to pass for one layout.
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn tile_walkable_for_planning_denies_a_door_tile_with_a_non_door_blocker_too() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let mut map = MapData::open(&dir).expect("open map data");
+        assert!(map.item_is_door(0x06A5), "0x06A5 should be a real door graphic");
+        assert!(!map.item_is_door(0x0E3D), "0x0E3D (crate) should not be a door");
+        assert!(
+            map.item_blocks(0x0E3D, 5, 5),
+            "0x0E3D (crate) should be an impassable blocker at these Zs"
+        );
+
+        for (door_serial, crate_serial) in [(1u32, 2u32), (2u32, 1u32)] {
+            let mut world = anima_core::World::new();
+            world.items.insert(
+                door_serial,
+                anima_core::world::Item {
+                    serial: door_serial,
+                    graphic: 0x06A5,
+                    amount: 1,
+                    pos: anima_core::types::Position { x: 1611, y: 1591, z: 0 },
+                    container: None,
+                    layer: 0,
+                    hue: 0,
+                    name: String::new(),
+                    direction: 0,
+                },
+            );
+            world.items.insert(
+                crate_serial,
+                anima_core::world::Item {
+                    serial: crate_serial,
+                    graphic: 0x0E3D,
+                    amount: 1,
+                    pos: anima_core::types::Position { x: 1611, y: 1591, z: 5 },
+                    container: None,
+                    layer: 0,
+                    hue: 0,
+                    name: String::new(),
+                    direction: 0,
+                },
+            );
+            assert!(
+                tile_walkable_for_planning(&world, &mut map, 1611, 1591, 5).is_none(),
+                "a crate blocking the same tile as an openable door must still deny planning \
+                 (door_serial={door_serial}, crate_serial={crate_serial})"
+            );
+        }
     }
 }
 

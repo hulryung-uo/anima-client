@@ -368,6 +368,12 @@ impl MapData {
         self.tiledata.item_is_nodraw(graphic)
     }
 
+    /// Is a static/item graphic a door? A closed door is impassable like a
+    /// wall, but — unlike a wall — it can be opened; see [`crate::tiledata::flags::DOOR`].
+    pub fn item_is_door(&self, graphic: u16) -> bool {
+        self.tiledata.item_is_door(graphic)
+    }
+
     pub fn item_blocks(&self, graphic: u16, item_z: i32, current_z: i32) -> bool {
         let f = self.tiledata.item_flags(graphic);
         // Only impassable items block. A table is Impassable+Surface — you cannot
@@ -456,6 +462,19 @@ mod tests {
             score_walkable_z(land, &statics, 0),
             Err(ZReason::OutOfReach { nearest_z: 40 })
         );
+    }
+
+    /// A real door graphic (0x06A5 "wooden door") is both Impassable and the
+    /// Door tile flag — a closed door blocks like a wall for
+    /// `score_walkable_z`'s strict game-accurate check (only the click-to-walk
+    /// planner treats it specially; see `scene::tile_walkable_for_planning`).
+    #[test]
+    #[ignore]
+    fn score_walkable_real_door_graphic_is_impassable_and_flagged_door() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let map = MapData::open(&dir).expect("open map data");
+        assert!(map.item_is_door(0x06A5), "0x06A5 (wooden door) should carry the Door flag");
+        assert_ne!(map.item_flags(0x06A5) & flags::IMPASSABLE, 0, "a closed door is impassable");
     }
 
     #[test]

@@ -24,6 +24,14 @@ pub mod flags {
     /// through frames from `animdata.mul` (flames, fountains, water wheels, magic
     /// flames, …). Used to drive animated-statics frame swapping in the renderer.
     pub const ANIMATION: u64 = 0x0100_0000;
+    /// ClassicUO `TileFlag.Door` (Game/Data/TileFlag.cs) — the item is a door.
+    /// A closed door is also `IMPASSABLE` (it really does block a live step),
+    /// but unlike a wall it can be *opened* — the click-to-walk planner treats
+    /// it specially (see `anima_net::scene::tile_walkable_for_planning`),
+    /// mirroring ClassicUO's `Pathfinder`'s `SmoothDoors`-style handling and
+    /// its `PlayerMobile.TryOpenDoors` auto-open convenience. Ghosts also use
+    /// this to phase through closed doors.
+    pub const DOOR: u64 = 0x2000_0000;
 }
 
 const LAND_ENTRY: usize = 30;
@@ -135,6 +143,11 @@ impl TileData {
     /// flames, etc.; the frame sequence comes from `animdata.mul`.
     pub fn item_is_animated(&self, graphic: u16) -> bool {
         self.item_flags(graphic) & flags::ANIMATION != 0
+    }
+
+    /// Is a static/item graphic a door? See [`flags::DOOR`].
+    pub fn item_is_door(&self, graphic: u16) -> bool {
+        self.item_flags(graphic) & flags::DOOR != 0
     }
 
     /// Does the tile's name start with "nodraw"? ClassicUO's "hacky way" to cull
