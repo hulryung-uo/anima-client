@@ -12,8 +12,8 @@
 use crate::gump_layout::GumpElement;
 use crate::types::Position;
 use crate::world::{
-    Book, Buff, JournalEntry, Party, PopupMenu, PromptState, ShopBuy, ShopSell, TargetCursor,
-    TradeState, Weather, World,
+    Book, Buff, JournalEntry, Party, PopupMenu, PromptState, ShopBuy, ShopSell, SpellbookContent,
+    TargetCursor, TradeState, Weather, World,
 };
 
 /// A skill value, in human units (50.0 == GM-half). Derived from [`crate::world::Skill`].
@@ -174,6 +174,14 @@ pub struct Observation {
     /// (like the renderer's scene bridge does) — this always carries the full
     /// capped buffer, not just what's new since the last observation.
     pub recent_damage: Vec<(u64, u32, u16)>,
+    /// Known spellbook contents (0xBF/0x1B NewSpellbookContent), each `(book
+    /// serial, content)`, sorted by serial — only ever populated for a book
+    /// that's actually been opened this session (see
+    /// [`crate::world::SpellbookContent`]'s doc). A brain deciding whether it
+    /// can cast a given spell checks the owning book's `content` bitmask
+    /// against `offset` (both carried in [`SpellbookContent`]) rather than
+    /// assuming every spell is known.
+    pub spellbooks: Vec<(u32, SpellbookContent)>,
 }
 
 /// A read-only view of an open server gump/dialog.
@@ -440,6 +448,11 @@ impl World {
             self.opl.iter().map(|(&s, v)| (s, v.clone())).collect();
         opl.sort_by_key(|&(s, _)| s);
 
+        // HashMap iteration order isn't stable — sorted by serial, like `opl`.
+        let mut spellbooks: Vec<(u32, SpellbookContent)> =
+            self.spellbooks.iter().map(|(&s, sb)| (s, *sb)).collect();
+        spellbooks.sort_by_key(|&(s, _)| s);
+
         Observation {
             player,
             mobiles,
@@ -469,6 +482,7 @@ impl World {
             aos: self.aos,
             opl,
             recent_damage: self.recent_damage.clone(),
+            spellbooks,
         }
     }
 }

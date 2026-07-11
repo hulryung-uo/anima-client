@@ -157,6 +157,19 @@ let lastEffectSeq = 0;         // highest effect event seq we've already spawned
 
 // ---- lift-rejection events (0x27 LiftRej) ----
 let lastLiftRejectSeq = 0;     // highest lift-reject event seq we've already handled
+
+// ---- server-initiated container opens (0x24 DrawContainer) ----
+let lastContainerOpenSeq = 0;  // highest container-open event seq we've already handled
+
+// ---- Swing events (0x2F): briefly face the attacker toward the defender ----
+let lastSwingSeq = 0;          // highest swing event seq we've already handled
+
+// ---- server-initiated paperdoll open/refresh (0x88 DisplayPaperdoll) ----
+let lastPaperdollSeq = 0;      // highest paperdoll-signal seq we've already handled
+// { serial, title, canLift } for whichever target the LAST server signal named —
+// read by refreshPaperdoll() to show the real title line instead of the plain
+// mobile name, when it matches the currently-displayed doll.
+let pdServerInfo = null;
 // ClassicUO ServerErrorMessages._pickUpErrors, indexed by the wire reason byte;
 // any reason >= 4 (including the "generic/Inspecific" 5) reads the same message
 // as 4 (ClassicUO clamps `code >= 5` to `code = 4`).
@@ -341,6 +354,12 @@ function connectSoundStream() {
     const seq = ev.seq | 0;
     if (seq <= lastSoundSeq) return;
     lastSoundSeq = seq;
+    // SSE connects before the first poll resolves, so on a page reload it can
+    // race `primeSeqRings` — a stale backlog sound could otherwise slip through
+    // here before priming bumps `lastSoundSeq` past it. Bumping the seq above
+    // (so poll's own replay-skip stays correct either way) without playing yet
+    // covers that window; once primed, everything past the baseline plays live.
+    if (!seqPrimed) return;
     if (audioMuted || !settings.sfx) return;
     playSfx(ev.id | 0, ev.x | 0, ev.y | 0);
   };
@@ -924,6 +943,41 @@ function hideLogin() {
   if (el && el.classList.contains("on")) el.classList.remove("on");
 }
 
+// ---- seq-ring priming (skip a stale backlog replay on page reload) ----
+// Every event "ring" above (character anims 0x6E/0xE2, damage 0x0B, effects
+// 0x70/0xC0/0xC7, lift-rejects 0x27, container-opens 0x24, swings 0x2F,
+// paperdoll 0x88, sounds 0x54) is keyed by a monotonic `seq` that lives in the
+// anima-net play server's `World`, NOT on this page: reloading the browser
+// resets every `lastXSeq` variable above to 0, but the live ServUO session
+// (and its already-fired backlog under those seqs) keeps running underneath —
+// it's tied to the server connection, not the tab. Left unprimed, the very
+// first poll after a reload would treat that whole backlog as "new": stale
+// animations/damage numbers/sounds replay once, and — worse — *sticky*
+// signals like the paperdoll and the last container-open pop their windows
+// back open even though nothing just happened.
+//
+// Fix: on the FIRST scene ingest after page load, bump every ring's last-seen
+// seq up to its current max WITHOUT running the per-event handler, then flip
+// `seqPrimed`. Every later poll runs ingestX()/playSounds() as normal, so a
+// genuinely new event (seq beyond this baseline) still fires immediately.
+let seqPrimed = false;
+function maxSeq(arr) {
+  let m = 0;
+  if (arr) for (const ev of arr) { const sq = ev.seq | 0; if (sq > m) m = sq; }
+  return m;
+}
+function primeSeqRings(s) {
+  lastAnimSeq = Math.max(lastAnimSeq, maxSeq(s.anims));
+  lastTypedAnimSeq = Math.max(lastTypedAnimSeq, maxSeq(s.tanims));
+  lastDamageSeq = Math.max(lastDamageSeq, maxSeq(s.damage));
+  lastEffectSeq = Math.max(lastEffectSeq, maxSeq(s.effects));
+  lastLiftRejectSeq = Math.max(lastLiftRejectSeq, maxSeq(s.liftRejects));
+  lastContainerOpenSeq = Math.max(lastContainerOpenSeq, maxSeq(s.containerOpens));
+  lastSwingSeq = Math.max(lastSwingSeq, maxSeq(s.swings));
+  lastSoundSeq = Math.max(lastSoundSeq, maxSeq(s.sounds));
+  if (s.paperdoll) lastPaperdollSeq = Math.max(lastPaperdollSeq, s.paperdoll.seq | 0);
+}
+
 async function poll() {
   const t0 = performance.now();
   try {
@@ -933,6 +987,7 @@ async function poll() {
     // Not in world yet (login-page mode): show the login form instead of rendering.
     if (scene && scene.auth) { showLogin(scene.auth, scene.msg); return; }
     hideLogin();
+    if (!seqPrimed) { primeSeqRings(scene); seqPrimed = true; }
     updateAnimStates(scene);
     const ts = performance.now();
     syncWorld(scene); // diffs only — no full rebuild
@@ -944,6 +999,9 @@ async function poll() {
     ingestDamage(scene); // float new combat damage numbers (0x0B)
     ingestEffects(scene); // spawn new graphical effects (0x70/0xC0/0xC7)
     ingestLiftRejects(scene); // clear the held item + show a message (0x27 LiftRej)
+    ingestContainerOpens(scene); // open a window for each server-initiated container open (0x24)
+    ingestSwings(scene); // briefly face the attacker toward the defender (0x2F Swing)
+    ingestPaperdoll(scene); // open/refresh a paperdoll the server told us to show (0x88)
     refreshTip(); // update the hover tooltip if its OPL just arrived/changed
     drawMinimap(scene);
     updateGuardZones(scene); // guard-zone overlay: refetch on facet change, redraw clipped to view
@@ -1000,6 +1058,10 @@ function updateAnimStates(s) {
       // exactly that time → continuous motion (no walk-one-tile-then-pause).
       if (st.prevMoveT) st.stepDur = Math.min(600, Math.max(120, now - st.prevMoveT));
       st.prevMoveT = now;
+      // A real committed step is always more authoritative than a cosmetic
+      // Swing-flash facing (see `ingestSwings`/`drawMobs`) — drop it now
+      // rather than waiting out its ~350ms timer.
+      st.faceOverride = null;
     }
     Object.assign(st, { tx: x, ty: y, z, dir, body, fallback: fb });
   };
@@ -1679,7 +1741,19 @@ function drawMobs() {
   for (const m of scene.mobiles || []) mobById.set("m" + m.serial, m);
   for (const [id, st] of anim) {
     diag.ents++;
-    const d = st.dir & 7;
+    // A cosmetic Swing (0x2F) flash (see `ingestSwings`) briefly overrides the
+    // DISPLAYED facing without touching `st.dir`/`pred.dir` — those stay 100%
+    // driven by the committed walk stream (server confirms / local prediction),
+    // which is what `enqueueSteps`' turn-vs-move split (mirroring anima-core
+    // `Walker::step`'s `is_turn = facing != dir`) reads. Expire it on time, or
+    // the instant `touch()` (in `updateAnimStates`) sees this entity actually
+    // move a tile — a real step is always more authoritative than the flash.
+    let faceDir = st.dir;
+    if (st.faceOverride) {
+      if (performance.now() < st.faceOverride.until) faceDir = st.faceOverride.dir;
+      else st.faceOverride = null;
+    }
+    const d = faceDir & 7;
     // We only know run/mount state for our own player; other mobiles walk/stand.
     const isSelf = id === "self";
     const moving = !!st.animMoving; // set in renderFrame (glide + held/mouse)
@@ -2618,6 +2692,98 @@ function ingestLiftRejects(s) {
     const reason = ev.reason | 0;
     addSysMessage(LIFT_REJECT_MSG[reason] || LIFT_REJECT_MSG[LIFT_REJECT_MSG.length - 1]);
   }
+}
+
+// The server itself opened a container we did NOT double-click ourselves (0x24
+// DrawContainer — a banker's "bank" speech, a GM `[bank`, a snoop pick, …).
+// Reuses the same openContainer() window our own double-clicks build.
+function ingestContainerOpens(s) {
+  if (!s || !s.containerOpens) return;
+  for (const ev of s.containerOpens) {
+    const seq = ev.seq | 0;
+    if (seq <= lastContainerOpenSeq) continue;
+    lastContainerOpenSeq = seq;
+    openContainer(ev.serial >>> 0);
+  }
+}
+
+// The 8-direction (dx,dy sign) -> UO facing lookup, inverting DIR_DELTA. `dx`/`dy`
+// MUST be integer TILE deltas (like ClassicUO's own facing math) — feeding it eased
+// render-position deltas (`rx`/`ry`) is wrong: sub-tile easing residue (e.g. rx a
+// hair ahead of ry while both are converging on the same tile) makes `Math.sign`
+// see a nonzero component on an axis that's actually settled, turning a true
+// cardinal facing into a diagonal.
+function dirToward(dx, dy) {
+  const sx = Math.sign(dx), sy = Math.sign(dy);
+  if (!sx && !sy) return null;
+  const d = DIR_DELTA.findIndex(([ddx, ddy]) => ddx === sx && ddy === sy);
+  return d < 0 ? null : d;
+}
+
+// Integer TILE coordinates for an anim-map id, for facing math (see `dirToward`'s
+// doc) — never the eased render position. "self" has no `tx`/`ty` on its anim
+// entry (only `pred` tracks its committed base tile; see `updateAnimStates`);
+// every other entity's anim entry carries the server's current tile as `tx`/`ty`.
+function tileOf(id) {
+  if (id === "self") return pred ? { x: pred.x, y: pred.y } : null;
+  const st = anim.get(id);
+  return st ? { x: st.tx, y: st.ty } : null;
+}
+
+// The server just told us `attacker` swung at `defender` (0x2F Swing) — purely
+// cosmetic feedback: briefly face the attacker toward the defender via a
+// render-layer-only override (see `drawMobs`'s `faceOverride` handling). Never
+// write `st.dir`/`pred.dir` here — those belong exclusively to the committed
+// walk stream (server confirms / local prediction), and `enqueueSteps`' turn-
+// vs-move split (mirroring anima-core `Walker::step`'s `is_turn = facing !=
+// dir`) reads `pred.dir` as "the player's actual current facing". Stomping it
+// with a combat-facing flash desyncs that split from the server's real state,
+// causing a one-tile mispredict (a phantom turn-then-move) the instant you walk
+// right after swinging — the server's real position then arrives and the
+// client rubber-bands to correct it.
+function ingestSwings(s) {
+  if (!s || !s.swings) return;
+  const now = performance.now();
+  const pserial = s.player ? (s.player.serial >>> 0) : 0;
+  for (const ev of s.swings) {
+    const seq = ev.seq | 0;
+    if (seq <= lastSwingSeq) continue;
+    lastSwingSeq = seq;
+    const attacker = ev.attacker >>> 0, defender = ev.defender >>> 0;
+    const isSelf = attacker === pserial;
+    const aId = isSelf ? "self" : "m" + attacker;
+    const dId = defender === pserial ? "self" : "m" + defender;
+    const a = anim.get(aId);
+    if (!a) continue;                               // attacker isn't in view
+    const at = tileOf(aId), dt = tileOf(dId);
+    if (!at || !dt) continue;                        // either lacks a known tile yet
+    const dir = dirToward(dt.x - at.x, dt.y - at.y);
+    if (dir == null) continue;
+    a.faceOverride = { dir, until: now + 350 }; // ~350ms flash; drawMobs expires/clears it
+  }
+}
+
+// The server just told us to show a paperdoll (0x88 DisplayPaperdoll) — sent on
+// every double-click of a mobile (ours or another's), even a re-click of the
+// same one after we'd closed its window; `seq` never repeats, so each request
+// (re)opens/refreshes regardless of local dismiss state. Prefer this over the
+// client-side body-range guess in onEntityPointerDown (kept as a fallback for
+// a shard that never sends this at all) — it's authoritative and carries the
+// real title line.
+function ingestPaperdoll(s) {
+  const p = s && s.paperdoll;
+  if (!p) return;
+  const seq = p.seq | 0;
+  if (seq <= lastPaperdollSeq) return;
+  lastPaperdollSeq = seq;
+  const serial = p.serial >>> 0;
+  const pserial = s.player ? (s.player.serial >>> 0) : 0;
+  pdServerInfo = { serial, title: p.title || "", canLift: !!p.canLift };
+  pdTarget = serial === pserial ? null : serial;
+  paperdollOn = true;
+  const pd = document.getElementById("paperdoll");
+  pd.classList.add("on"); pd._sig = null;
+  refreshPaperdoll();
 }
 
 function spawnEffect(ev, now) {
@@ -4035,14 +4201,18 @@ function refreshPaperdoll() {
     return;
   }
   const equip = (p.equip || []).slice().sort((a, b) => (a.layer | 0) - (b.layer | 0));
-  const sig = [isSelf ? "s" : pdTarget, p.name, p.str, p.dex, p.int, p.hits, p.hitsMax, p.mana, p.manaMax,
+  // Prefer the server's own title line (0x88 DisplayPaperdoll — e.g. "Anima the
+  // Adventurer") over the plain mobile name, when it's for THIS target.
+  const targetSerial = isSelf ? ((scene && scene.player && scene.player.serial) >>> 0) : (pdTarget >>> 0);
+  const serverTitle = (pdServerInfo && (pdServerInfo.serial >>> 0) === targetSerial) ? pdServerInfo.title : null;
+  const sig = [isSelf ? "s" : pdTarget, p.name, serverTitle, p.str, p.dex, p.int, p.hits, p.hitsMax, p.mana, p.manaMax,
     p.stam, p.stamMax, p.gold, p.body, p.hue,
     // Include each item's OPL name so the list re-renders (slot label → real name)
     // the moment its OPL arrives.
     equip.map((e) => `${e.layer}:${e.g}:${e.serial >>> 0}:${oplName(e.serial)}`).join(",")].join("|");
   if (pd._sig === sig) return;
   pd._sig = sig;
-  set("pd-name", p.name || (isSelf ? "(unnamed)" : "(mobile)"));
+  set("pd-name", serverTitle || p.name || (isSelf ? "(unnamed)" : "(mobile)"));
   // The paperdoll DOLL: the base body gump (male 0x0C / female 0x0D) hued by skin,
   // then each worn item's paperdoll gump (AnimID + gender offset, hued by item),
   // stacked back→front at the same origin (ClassicUO style). Held weapons included.

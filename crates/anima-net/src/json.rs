@@ -5,34 +5,42 @@
 //! shapes are the contract mirrored by `anima2/anima2/contract.py` — keep the
 //! two in lockstep.
 //!
-//! ## Schema (v3 — snake_case, versioned)
+//! ## Schema (v4 — snake_case, versioned)
 //!
 //! [`observation_to_json`] emits one object with these top-level keys, one per
 //! [`Observation`] field: `player`, `mobiles`, `items`, `new_journal`,
 //! `pending_target`, `skills`, `gumps`, `prompt`, `trades`, `buffs`,
 //! `shop_buy`, `shop_sell`, `popup`, `book`, `party`, `quest_arrow`, `weather`,
 //! `season`, `light`, `war`, `last_attack`, `combatant`, `corpse_of`,
-//! `corpse_equip`, `map_index`, `aos`, `opl`, `recent_damage`. A gump's
-//! `elements` are the structured [`anima_core::gump_layout::GumpElement`]s
+//! `corpse_equip`, `map_index`, `aos`, `opl`, `recent_damage`, `spellbooks`. A
+//! gump's `elements` are the structured [`anima_core::gump_layout::GumpElement`]s
 //! (see [`gump_element_json`]) — a cliloc-driven `html` element carries the
 //! raw `{"id":..,"args":..}` reference *unresolved* (no Cliloc table is
 //! threaded through this bridge; see that function's doc). `opl`'s property
 //! lines are unresolved the same way — `{"cliloc": id, "args": ".."}` per
-//! line, name first.
+//! line, name first. `spellbooks` entries carry `content` split into `lo`/`hi`
+//! u32 halves (see [`spellbook_json`]) rather than one 64-bit number, for the
+//! same reason the scene bridge splits it: a JS-side (or any float-backed
+//! JSON) consumer only keeps 53 bits of integer precision, which a full
+//! 64-spell Magery book's mask can exceed.
 //!
 //! Deliberately **excluded** (renderer/audio-only playback queues with no
 //! decision-relevant signal, and each would just add per-tick serialization
 //! cost to `observe()` for something a brain can't act on): `current_music`,
 //! `recent_sounds`, `recent_anims`/`recent_typed_anims`, `recent_effects`,
-//! `recent_lift_rejects`. `PlayerStats::is_female` is also excluded — purely
-//! cosmetic (paperdoll gump selection), never gameplay-relevant. `recent_damage`
-//! is *not* excluded — combat brains need per-hit attribution (another
-//! mobile's HP otherwise only arrives as a coarse scaled percentage); dedupe
-//! on `seq` across polls like the renderer's scene bridge does.
+//! `recent_lift_rejects`, `recent_container_opens` (0x24 — a window-opening UI
+//! signal), `recent_swings` (0x2F — cosmetic facing feedback), `paperdoll`
+//! (0x88 — a UI-open signal + display title, not something a brain decides
+//! from; equipment state is already in `items`/worn `layer`). `PlayerStats::
+//! is_female` is also excluded — purely cosmetic (paperdoll gump selection),
+//! never gameplay-relevant. `recent_damage` is *not* excluded — combat brains
+//! need per-hit attribution (another mobile's HP otherwise only arrives as a
+//! coarse scaled percentage); dedupe on `seq` across polls like the
+//! renderer's scene bridge does.
 //!
-//! Bump the "v3" marker above (and note the change here) whenever a key is
+//! Bump the "v4" marker above (and note the change here) whenever a key is
 //! renamed or removed — the Python side keys off these names verbatim. (v3:
-//! added `opl`, `recent_damage`.)
+//! added `opl`, `recent_damage`. v4: added `spellbooks`.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
@@ -44,7 +52,7 @@ use anima_core::gump_layout::{GumpElement, HtmlText};
 use anima_core::types::Position;
 use anima_core::world::{
     Book, Buff, JournalEntry, Party, PopupEntry, PopupMenu, PromptState, ShopBuy, ShopSell,
-    ShopSellItem, TargetCursor, TradeState, Weather,
+    ShopSellItem, SpellbookContent, TargetCursor, TradeState, Weather,
 };
 use serde_json::{json, Value};
 
@@ -181,6 +189,16 @@ fn shop_sell_json(s: &ShopSell) -> Value {
     })
 }
 
+/// Serialize one spellbook's known-contents mask (0xBF/0x1B), keyed by its own
+/// serial. `content` is split into two u32 halves (`lo` = bits 0..31, `hi` =
+/// bits 32..63) rather than sent whole — see this module's top doc for why.
+fn spellbook_json((serial, sb): &(u32, SpellbookContent)) -> Value {
+    json!({
+        "serial": serial, "graphic": sb.graphic, "offset": sb.offset,
+        "lo": (sb.content & 0xFFFF_FFFF) as u32, "hi": (sb.content >> 32) as u32,
+    })
+}
+
 fn popup_entry_json(e: &PopupEntry) -> Value {
     json!({ "index": e.index, "cliloc": e.cliloc, "flags": e.flags })
 }
@@ -271,6 +289,7 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "aos": obs.aos,
         "opl": opl,
         "recent_damage": recent_damage,
+        "spellbooks": obs.spellbooks.iter().map(spellbook_json).collect::<Vec<_>>(),
     })
 }
 
@@ -585,7 +604,7 @@ mod tests {
             "player", "mobiles", "items", "new_journal", "pending_target", "skills", "gumps",
             "prompt", "trades", "buffs", "shop_buy", "shop_sell", "popup", "book", "party",
             "quest_arrow", "weather", "season", "light", "war", "last_attack", "combatant",
-            "corpse_of", "corpse_equip", "map_index", "aos", "opl", "recent_damage",
+            "corpse_of", "corpse_equip", "map_index", "aos", "opl", "recent_damage", "spellbooks",
         ] {
             assert!(v.get(k).is_some(), "missing key {k}");
         }
@@ -617,6 +636,32 @@ mod tests {
         assert_eq!(v["recent_damage"][1]["amount"], 7);
         // Monotonic seq lets a brain dedupe across polls.
         assert!(v["recent_damage"][1]["seq"].as_u64().unwrap() > v["recent_damage"][0]["seq"].as_u64().unwrap());
+    }
+
+    #[test]
+    fn observation_serializes_spellbooks_split_lo_hi() {
+        use anima_core::world::World;
+        let mut w = World::default();
+        // Magery book (graphic 0x0EFA), offset 1 (BookOffset(0)+1), a mask with
+        // bit 0 set (spell 1) and bit 40 set (well past JS's 32-bit range) — the
+        // split lo/hi halves must each carry the right bits.
+        let content: u64 = 1 | (1u64 << 40);
+        w.set_spellbook_content(0x4000_0010, 0x0EFA, 1, content);
+        let v = observation_to_json(&w.observe(&mut 0));
+
+        assert_eq!(v["spellbooks"].as_array().unwrap().len(), 1);
+        let sb = &v["spellbooks"][0];
+        assert_eq!(sb["serial"], 0x4000_0010);
+        assert_eq!(sb["graphic"], 0x0EFA);
+        assert_eq!(sb["offset"], 1);
+        assert_eq!(sb["lo"], 1u64);
+        assert_eq!(sb["hi"], 1u64 << 8); // bit 40 overall == bit 8 of the high half
+    }
+
+    #[test]
+    fn observation_json_spellbooks_empty_by_default() {
+        let v = observation_to_json(&Observation::default());
+        assert!(v["spellbooks"].as_array().unwrap().is_empty());
     }
 
     #[test]

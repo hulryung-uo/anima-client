@@ -290,6 +290,27 @@ pub struct TargetCursor {
     pub cursor_flag: u8,
 }
 
+/// A server-initiated paperdoll open/refresh (0x88 DisplayPaperdoll) — sent
+/// whenever we double-click a mobile, ours or another's (ServUO
+/// `Scripts/Misc/Paperdoll.cs`, off `Mobile.OnDoubleClick`). `title` is the
+/// server-precomputed name+title line (`Titles.ComputeTitle`, e.g. "Anima the
+/// Adventurer") — plain text, no cliloc to resolve. `warmode` mirrors the
+/// target's combat stance; `can_lift` is whether WE'RE allowed to lift/equip
+/// items on this doll (`Mobile.AllowEquipFrom` — true for our own paperdoll,
+/// false for a stranger's). `seq` is a monotonic tag (like [`Effect::seq`]):
+/// ServUO resends this on EVERY double-click, even re-clicking the same
+/// `serial` after we've closed its window, and real UO reopens it every time
+/// — so the renderer must treat each `seq` as its own "please open" request
+/// rather than deduping purely on `serial`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Paperdoll {
+    pub seq: u64,
+    pub serial: u32,
+    pub title: String,
+    pub warmode: bool,
+    pub can_lift: bool,
+}
+
 /// An outstanding server text prompt (from a 0xC2 UnicodePrompt request) — the
 /// mechanism behind ~38 ServUO flows (pet rename, house sign, guild abbreviation,
 /// …). The actual question text is *not* carried on this packet (ServUO sends it
@@ -528,6 +549,42 @@ pub struct World {
     /// An outstanding server text prompt (0xC2 UnicodePrompt), if one is pending.
     /// See [`PromptState`].
     pub prompt: Option<PromptState>,
+    /// The latest server-initiated paperdoll open/refresh (0x88), if any has
+    /// arrived this session. See [`Paperdoll`] — note its `seq`, not just
+    /// `serial`, is what tells a renderer this is a fresh open request.
+    pub paperdoll: Option<Paperdoll>,
+    /// Monotonic counter assigning each [`World::paperdoll`] update a unique `seq`.
+    pub paperdoll_seq: u64,
+    /// Recent 0x24 (DrawContainer/ContainerDisplay(HS)) events: each `(seq,
+    /// serial, gump_id)`, newest last, capped like `recent_lift_rejects`. This
+    /// is deliberately a **raw, unfiltered data log** — every `gump_id` ServUO
+    /// ever sends on 0x24 gets recorded, per D3 (core = data; renderer =
+    /// policy). That matters because ServUO reuses 0x24 for two things that
+    /// are NOT a container window (see [`crate::net::game::draw_container`]'s
+    /// doc for the exact ServUO/ClassicUO cites): `DisplayBuyList` (vendor
+    /// "Buy" window, `gump_id` 0x30, `serial` = the vendor MOBILE) and
+    /// `DisplaySpellbook` (`gump_id` 0xFFFF, `serial` = the spellbook ITEM).
+    /// Deciding those two shouldn't pop a generic container window is a
+    /// renderer/UI call, not a `World` one — `anima_net::scene`'s bridge to
+    /// the web client is what filters them out of the "open a window" signal
+    /// it emits; a future consumer of this same ring is free to make a
+    /// different call. Fires for a container we did NOT ourselves
+    /// double-click — a banker's "bank" speech, a GM `[bank`, a snoop menu
+    /// pick, … — the ordinary client-initiated open (our own double-click)
+    /// already opens its window locally and doesn't need this.
+    pub recent_container_opens: Vec<(u64, u32, u16)>,
+    /// Monotonic counter assigning each container-open event a unique `seq`.
+    pub container_open_seq: u64,
+    /// Recent Swing events (0x2F): each `(seq, attacker, defender)`, newest
+    /// last, capped like `recent_lift_rejects`. ServUO only ever sends this to
+    /// the ATTACKING player's own client (`attacker.Send(...)` — an NPC
+    /// attacker has no `NetState` to receive it), so `attacker` is normally our
+    /// own serial; carried generically anyway since nothing about the wire
+    /// format assumes that. Purely cosmetic feedback (face the defender) — no
+    /// gameplay state depends on it.
+    pub recent_swings: Vec<(u64, u32, u32)>,
+    /// Monotonic counter assigning each swing event a unique `seq`.
+    pub swing_seq: u64,
     /// Current facet/map index (0xBF/0x08 MapChange): 0=Felucca, 1=Trammel,
     /// 2=Ilshenar, 3=Malas, 4=Tokuno, 5=TerMur (ServUO `Map.MapID`). The play server
     /// watches this and reloads `anima_assets::MapData` for the matching facet via
@@ -563,6 +620,10 @@ const MAX_RECENT_DAMAGE: usize = 16;
 const MAX_RECENT_EFFECTS: usize = 32;
 /// How many recent lift-rejection events [`World::push_lift_reject`] keeps.
 const MAX_RECENT_LIFT_REJECTS: usize = 16;
+/// How many recent container-open events [`World::push_container_open`] keeps.
+const MAX_RECENT_CONTAINER_OPENS: usize = 16;
+/// How many recent swing events [`World::push_swing`] keeps.
+const MAX_RECENT_SWINGS: usize = 16;
 /// Defensive cap on [`World::corpse_of`]/[`World::corpse_equip`] — both are pruned
 /// on delete (0x1D), so this only guards against a delete we somehow missed
 /// pinning the map's growth for the rest of a long session.
@@ -732,6 +793,43 @@ impl World {
         }
     }
 
+    /// Record a 0x24 (DrawContainer/ContainerDisplay) event verbatim: the
+    /// server sent `gump_id` for `serial`, unfiltered — see
+    /// [`World::recent_container_opens`]'s doc for why this stays a raw data
+    /// log (including the non-container `gump_id`s 0x30/0xFFFF) rather than
+    /// deciding here whether it's "really" a container open. Assigns the next
+    /// monotonic `seq` and keeps only the most recent
+    /// [`MAX_RECENT_CONTAINER_OPENS`].
+    pub fn push_container_open(&mut self, serial: u32, gump_id: u16) {
+        self.container_open_seq += 1;
+        self.recent_container_opens.push((self.container_open_seq, serial, gump_id));
+        let overflow = self.recent_container_opens.len().saturating_sub(MAX_RECENT_CONTAINER_OPENS);
+        if overflow > 0 {
+            self.recent_container_opens.drain(0..overflow);
+        }
+    }
+
+    /// Record a Swing event (0x2F): `attacker` just swung at `defender`.
+    /// Assigns the next monotonic `seq` and keeps only the most recent
+    /// [`MAX_RECENT_SWINGS`].
+    pub fn push_swing(&mut self, attacker: u32, defender: u32) {
+        self.swing_seq += 1;
+        self.recent_swings.push((self.swing_seq, attacker, defender));
+        let overflow = self.recent_swings.len().saturating_sub(MAX_RECENT_SWINGS);
+        if overflow > 0 {
+            self.recent_swings.drain(0..overflow);
+        }
+    }
+
+    /// Record a server-initiated paperdoll open/refresh (0x88 DisplayPaperdoll).
+    /// Assigns the next monotonic `seq` (see [`Paperdoll::seq`]'s doc for why a
+    /// repeat of the same `serial` still needs a fresh one) and replaces any
+    /// prior state.
+    pub fn set_paperdoll(&mut self, serial: u32, title: String, warmode: bool, can_lift: bool) {
+        self.paperdoll_seq += 1;
+        self.paperdoll = Some(Paperdoll { seq: self.paperdoll_seq, serial, title, warmode, can_lift });
+    }
+
     /// Push a client-synthesized "System" journal line — no packet caused this; it's
     /// the client informing the player of something the server never says itself
     /// (e.g. a WalkTo the local pathfinder rejected). Reuses the exact mechanism a
@@ -815,6 +913,19 @@ impl World {
         self.gumps.retain(|g| g.serial != serial);
     }
 
+    /// Close every open gump of a given KIND (0xBF/0x04 CloseGump). ServUO
+    /// addresses this by `Gump.TypeID` — a hash of the C# gump class — which is
+    /// the SAME value the ordinary open packet (0xB0/0xDD) calls `gumpId`, i.e.
+    /// this matches [`Gump::gump_id`], not [`Gump::serial`] (one specific open
+    /// instance). Real call sites (`Mobile.CloseGump`, `BaseGump.Refresh`/
+    /// `.Cancel`) only ever have one gump of a kind open at a time, but nothing
+    /// stops more from accumulating, so this drops every matching one — mirrors
+    /// ClassicUO's own handler, which walks every open gump and disposes any
+    /// whose `ServerSerial` (its name for this same TypeID value) matches.
+    pub fn close_gump_by_type(&mut self, type_id: u32) {
+        self.gumps.retain(|g| g.gump_id != type_id);
+    }
+
     /// Drop the vendor SELL window (0x9E), if any. The window is consumed
     /// once we answer it (or abandon it) — clearing it locally keeps a stale
     /// list from being answered a second time by a later, unrelated sale
@@ -822,6 +933,14 @@ impl World {
     /// [`World::close_gump`]; see [`crate::agent::Action::SellItems`].
     pub fn close_shop_sell(&mut self) {
         self.shop_sell = None;
+    }
+
+    /// Drop the vendor BUY window (0x74), if any. Mirrors [`World::close_shop_sell`];
+    /// see [`crate::net::game::end_vendor`] (0x3B EndVendorBuy/EndVendorSell), which
+    /// is the actual server-driven close for this window (unlike the sell side,
+    /// nothing locally/optimistically cleared this before — see DESIGN history).
+    pub fn close_shop_buy(&mut self) {
+        self.shop_buy = None;
     }
 
     /// Open (or refresh) a secure trade session (0x6F action 0 Display).
@@ -994,6 +1113,39 @@ mod tests {
         w.player = Some(me);
 
         assert_eq!(w.player_mobile().unwrap().name, "Anima");
+    }
+
+    #[test]
+    fn close_shop_buy_drops_a_stale_buy_window() {
+        let mut w = World::new();
+        w.shop_buy = Some(ShopBuy { vendor: 0x1234, container: 0x1, entries: vec![] });
+        w.close_shop_buy();
+        assert!(w.shop_buy.is_none());
+    }
+
+    #[test]
+    fn close_gump_by_type_drops_matching_kind_keeps_others() {
+        let mut w = World::new();
+        w.add_gump(Gump { serial: 1, gump_id: 100, ..Default::default() });
+        w.add_gump(Gump { serial: 2, gump_id: 100, ..Default::default() });
+        w.add_gump(Gump { serial: 3, gump_id: 200, ..Default::default() });
+        w.close_gump_by_type(100);
+        assert_eq!(w.gumps.len(), 1);
+        assert_eq!(w.gumps[0].serial, 3);
+    }
+
+    #[test]
+    fn paperdoll_seq_increments_on_every_set_even_same_serial() {
+        let mut w = World::new();
+        w.set_paperdoll(0xAAAA, "Anima the Adventurer".into(), false, true);
+        let first = w.paperdoll.clone().unwrap();
+        assert_eq!(first.seq, 1);
+        // A repeat request for the SAME serial (re-double-click) still bumps
+        // `seq` — the renderer must reopen a window it had closed.
+        w.set_paperdoll(0xAAAA, "Anima the Adventurer".into(), true, true);
+        let second = w.paperdoll.clone().unwrap();
+        assert_eq!(second.seq, 2);
+        assert!(second.warmode);
     }
 
     #[test]

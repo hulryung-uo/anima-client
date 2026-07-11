@@ -78,6 +78,10 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x89 => corpse_equip(world, frame)?,
         0xC2 => unicode_prompt(world, frame)?,
         0x6F => secure_trade(world, frame)?,
+        0x3B => end_vendor(world, frame)?,
+        0x24 => draw_container(world, frame)?,
+        0x88 => open_paperdoll(world, frame)?,
+        0x2F => swing(world, frame)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -1254,6 +1258,118 @@ fn secure_trade(world: &mut World, frame: &[u8]) -> PResult<()> {
     Ok(())
 }
 
+/// 0x3B EndVendorBuy/EndVendorSell — the SAME wire opcode and 8-byte layout
+/// for both completion paths (ServUO `Server/Network/Packets.cs`: `EndVendorBuy`
+/// and `EndVendorSell` are both literally `base(0x3B, 8)`):
+/// `[id][len:u16=8][vendor:u32][unused:u8=0]`. ServUO's
+/// `PacketHandlers.VendorBuyReply`/`VendorSellReply` send this once a
+/// buy/sell actually completes (`IVendor.OnBuyItems`/`OnSellItems` returns
+/// true) or the vendor moved out of range/was deleted meanwhile — but NOT on
+/// a rejected sale, so the window is meant to stay open for a retry in that
+/// case. ClassicUO's own handler (`CloseVendorInterface`) disposes whichever
+/// `ShopGump` is keyed by this vendor serial regardless of buy/sell — the same
+/// single "close the vendor window for this serial" semantics we mirror here
+/// against whichever of [`World::shop_buy`]/[`World::shop_sell`] actually
+/// matches (closing is a no-op for whichever one doesn't, so this is safe to
+/// call unconditionally on every 0x3B).
+fn end_vendor(world: &mut World, frame: &[u8]) -> PResult<()> {
+    if frame.len() < 7 {
+        return Ok(());
+    }
+    let mut r = PacketReader::new(&frame[3..]); // skip id + 2-byte length
+    let vendor = r.u32()?;
+    if world.shop_buy.as_ref().is_some_and(|b| b.vendor == vendor) {
+        world.close_shop_buy();
+    }
+    if world.shop_sell.as_ref().is_some_and(|s| s.vendor == vendor) {
+        world.close_shop_sell();
+    }
+    Ok(())
+}
+
+/// 0x24 DrawContainer (ServUO `ContainerDisplay`/`ContainerDisplayHS`) — the
+/// SERVER itself opens a container window, as opposed to the ordinary flow
+/// where WE ask for it via our own double-click (banker "bank" speech, GM
+/// `[bank`, a snoop menu pick, …). Fixed on our (High-Seas-negotiated,
+/// 7.0.102.3-reporting) client: `[id][serial:u32][gumpId:i16]` plus a
+/// trailing `[unk:i16=0x7D]` ServUO's `ContainerDisplayHS` always appends once
+/// the client negotiates that protocol tier (`Container.DisplayTo` picks
+/// `ContainerDisplayHS` vs the 7-byte legacy `ContainerDisplay` off
+/// `NetState.HighSeas`, negotiated at client version 7.0.9.0+; ClassicUO's own
+/// `PacketsTable` makes the identical 9-vs-7 split at the same version — see
+/// `lengths.rs`'s `0x24` entry, `Fixed(9)`).
+///
+/// `gumpId` is NOT always a container: ServUO reuses this exact opcode for two
+/// other gumps, distinguished only by the id (`Server/Network/Packets.cs`):
+/// `DisplayBuyList`/`DisplayBuyListHS` (a vendor's "Buy" window) always writes
+/// `gumpId = 0x30` with `serial` = the vendor **mobile**, and
+/// `DisplaySpellbook`/`DisplaySpellbookHS` always writes `gumpId = -1`
+/// (`0xFFFF` as the wire i16) with `serial` = the spellbook **item**; only
+/// `ContainerDisplay`/`ContainerDisplayHS` write the container's real
+/// `Item.GumpID` (e.g. a backpack/bank box art id). ClassicUO's own 0x24
+/// handler (`PacketHandlers.OpenContainer`) special-cases exactly these two
+/// ids — `graphic == 0xFFFF` opens a `SpellbookGump`, `== 0x0030` opens a
+/// `ShopGump`, anything else opens a generic `ContainerGump` — and never
+/// builds a container window for the first two. We already surface vendor
+/// shops via 0x74/0x3B (`ShopBuy`/`ShopSell`) and spellbooks via 0xBF/0x1B
+/// (`SpellbookContent`), so treating 0x30/0xFFFF as a container-open too would
+/// spawn a spurious empty Container window (live-reproduced: opening a
+/// cobbler's Buy list pushed the vendor's own mobile serial in as if it were a
+/// container).
+///
+/// We still record `gump_id` in the ring for every 0x24 (see
+/// [`World::recent_container_opens`]'s doc for why that stays unfiltered, raw
+/// data) — deciding which of these ids is "really" a container-open window is
+/// the renderer's call (`anima_net::scene`'s bridge to the web client), not
+/// `World`'s, per D3 (core = data, renderer = policy).
+fn draw_container(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let serial = r.u32()?;
+    let gump_id = r.u16()?;
+    world.push_container_open(serial, gump_id);
+    Ok(())
+}
+
+/// 0x88 DisplayPaperdoll — ServUO sends this whenever we double-click a mobile,
+/// ours or another's (`Scripts/Misc/Paperdoll.cs`, off `Mobile.OnDoubleClick`).
+/// Fixed 66 bytes (ServUO `DisplayPaperdoll : base(0x88, 66)`):
+/// `[id][serial:u32][title: ascii fixed 60][flags:u8]`. `title` is the
+/// server-precomputed name+title line (`Titles.ComputeTitle`) — plain text, no
+/// cliloc to resolve. `flags`: `0x01` the mobile is in war mode; `0x02` we're
+/// allowed to lift/equip items on this doll (`Mobile.AllowEquipFrom` — true
+/// for our own, false for a stranger's). See [`crate::world::Paperdoll`] for
+/// why every request (even a repeat for the same serial) gets a fresh `seq`.
+fn open_paperdoll(world: &mut World, frame: &[u8]) -> PResult<()> {
+    if frame.len() < 66 {
+        return Ok(());
+    }
+    let mut r = PacketReader::new(&frame[1..]);
+    let serial = r.u32()?;
+    let title = r.fixed_ascii(60)?;
+    let flags = r.u8()?;
+    world.set_paperdoll(serial, title, flags & 0x01 != 0, flags & 0x02 != 0);
+    Ok(())
+}
+
+/// 0x2F Swing — `[id][flag:u8][attacker:u32][defender:u32]` (10 bytes, ServUO
+/// `Swing : base(0x2F, 10)`). ServUO sends this only to the ATTACKING player's
+/// own client (`attacker.Send(new Swing(...))` — an NPC attacker has no
+/// `NetState`, so this never arrives unless WE are the one swinging), meaning
+/// `attacker` is normally our own serial; stored generically anyway since
+/// nothing about the wire format assumes that. `flag` is always `0` at every
+/// real ServUO call site (`BaseWeapon`/`BaseRanged`) — vestigial, so we read
+/// past it and don't store it. Purely cosmetic feedback (the renderer briefly
+/// faces the attacker toward the defender) — recorded as a seq-numbered event
+/// like the other renderer-facing rings.
+fn swing(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    r.skip(1)?; // flag — always 0 at every real ServUO call site
+    let attacker = r.u32()?;
+    let defender = r.u32()?;
+    world.push_swing(attacker, defender);
+    Ok(())
+}
+
 /// 0x1D Delete — entity removed from the world.
 fn delete(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
@@ -1378,8 +1494,16 @@ fn unicode_talk(world: &mut World, frame: &[u8]) -> PResult<()> {
 
 /// 0xBF GeneralInfo — multiplexed subcommands. We handle the fast-walk key
 /// stack (sub 0x01 sets six keys, sub 0x02 pushes one; each walk consumes one),
-/// party (sub 0x06), the facet switch (sub 0x08), the popup menu (sub 0x14),
-/// and spellbook content (sub 0x1B).
+/// close-gump-by-type (sub 0x04), party (sub 0x06), the facet switch (sub
+/// 0x08), the popup menu (sub 0x14), and spellbook content (sub 0x1B).
+///
+/// Deliberately NOT wired: sub 0x16 CloseUserInterfaceWindows. ClassicUO does
+/// handle it client-side (`ExtendedCommand` case 0x16: paperdoll/statusbar/
+/// profile/container by numeric id), but a full-text search of ServUO's
+/// `Server/Network/Packets.cs` finds no packet class for it at all — nothing
+/// server-side ever constructs or sends a 0xBF/0x16 payload, so it's dead code
+/// on this stack (ServUO never emits it) and there is nothing to test against
+/// a live shard.
 fn general_info(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[3..]); // variable
     let subcmd = r.u16()?;
@@ -1396,6 +1520,18 @@ fn general_info(world: &mut World, frame: &[u8]) -> PResult<()> {
             if world.fast_walk.len() < 6 {
                 world.fast_walk.push(key);
             }
+        }
+        // 0x04 CloseGump — ServUO `CloseGump(typeID, buttonID) : base(0xBF)`,
+        // `EnsureCapacity(13)`: `[subcmd:u16][typeID:i32][buttonID:i32]`. Closes
+        // by TYPE (see `World::close_gump_by_type`'s doc), not by the specific
+        // open instance's serial. `buttonID` is read past and unused — every
+        // real ServUO call site (`Mobile.CloseGump`, `BaseGump.Refresh`/
+        // `.Cancel`) sends `0`, and we have no local "auto-click a button on
+        // the player's behalf" behavior to drive with a nonzero one anyway.
+        0x04 => {
+            let type_id = r.u32()?;
+            let _button_id = r.u32()?;
+            world.close_gump_by_type(type_id);
         }
         0x06 => parse_party(world, &mut r)?,
         // 0x08 MapChange — `[mapId:u8]` (ServUO `MapChange`, CUO `PacketHandlers`
@@ -3005,5 +3141,120 @@ mod tests {
         assert_eq!(w.map_index, 0);
         assert!(w.mobiles.contains_key(&stranger));
         assert!(w.items.contains_key(&ground_item));
+    }
+
+    #[test]
+    fn end_vendor_closes_matching_buy_and_sell_windows() {
+        let mut w = World::new();
+        w.shop_buy = Some(crate::world::ShopBuy { vendor: 0xAABB, container: 0x1, entries: vec![] });
+        // 0x3B: EndVendorBuy/EndVendorSell, vendor 0xAABB, trailing unused byte.
+        let mut p = PacketWriter::new();
+        p.u8(0x3B).u16(0).u32(0xAABB).u8(0);
+        let frame = patch_len(p.into_vec());
+        assert_eq!(frame.len(), 8); // ServUO EndVendorBuy/EndVendorSell : base(0x3B, 8)
+        assert!(apply_packet(&mut w, &frame));
+        assert!(w.shop_buy.is_none());
+
+        // A 0x3B for a DIFFERENT vendor must not touch an unrelated open window.
+        w.shop_sell = Some(crate::world::ShopSell { vendor: 0xCCDD, items: vec![] });
+        let mut q = PacketWriter::new();
+        q.u8(0x3B).u16(0).u32(0xAABB).u8(0);
+        assert!(apply_packet(&mut w, &patch_len(q.into_vec())));
+        assert!(w.shop_sell.is_some(), "unrelated vendor's sell window must survive");
+
+        // The matching vendor DOES close the sell window too (same opcode
+        // closes whichever of buy/sell is actually open for that vendor).
+        let mut r = PacketWriter::new();
+        r.u8(0x3B).u16(0).u32(0xCCDD).u8(0);
+        assert!(apply_packet(&mut w, &patch_len(r.into_vec())));
+        assert!(w.shop_sell.is_none());
+    }
+
+    #[test]
+    fn draw_container_queues_open_event() {
+        let mut w = World::new();
+        // 0x24 ContainerDisplayHS: serial, gumpId, trailing HS word (ignored).
+        let mut p = PacketWriter::new();
+        p.u8(0x24).u32(0x4000_0009).u16(0x003C).u16(0x007D);
+        let frame = p.into_vec();
+        assert_eq!(frame.len(), 9); // ServUO ContainerDisplayHS : base(0x24, 9)
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.recent_container_opens.last(), Some(&(1, 0x4000_0009, 0x003C)));
+    }
+
+    #[test]
+    fn draw_container_records_vendor_buy_and_spellbook_gump_ids_too() {
+        // `World` is a pure data log for 0x24 (see `recent_container_opens`'s
+        // doc) — it must NOT filter DisplayBuyList's gumpId 0x30 or
+        // DisplaySpellbook's 0xFFFF; that's the renderer's (anima-net scene
+        // bridge's) job, tested at that layer. Here we just confirm the raw
+        // gump_id survives into the ring for whatever consumer wants it.
+        let mut w = World::new();
+        // DisplayBuyListHS: vendor mobile serial, gumpId 0x30 ("buy window id").
+        let mut p = PacketWriter::new();
+        p.u8(0x24).u32(0x1000_0055).u16(0x0030).u16(0x0000);
+        assert!(apply_packet(&mut w, &p.into_vec()));
+        assert_eq!(w.recent_container_opens.last(), Some(&(1, 0x1000_0055, 0x0030)));
+
+        // DisplaySpellbookHS: spellbook item serial, gumpId 0xFFFF (-1).
+        let mut q = PacketWriter::new();
+        q.u8(0x24).u32(0x4000_0066).u16(0xFFFF).u16(0x007D);
+        assert!(apply_packet(&mut w, &q.into_vec()));
+        assert_eq!(w.recent_container_opens.last(), Some(&(2, 0x4000_0066, 0xFFFF)));
+    }
+
+    #[test]
+    fn open_paperdoll_parses_title_and_flags() {
+        let mut w = World::new();
+        // 0x88 DisplayPaperdoll: serial, 60-byte title, flags (warmode + canLift).
+        let mut p = PacketWriter::new();
+        p.u8(0x88).u32(0xDEAD_BEEF).fixed_ascii("Anima the Adventurer", 60).u8(0x03);
+        let frame = p.into_vec();
+        assert_eq!(frame.len(), 66); // ServUO DisplayPaperdoll : base(0x88, 66)
+        assert!(apply_packet(&mut w, &frame));
+        let pd = w.paperdoll.as_ref().expect("paperdoll set");
+        assert_eq!(pd.serial, 0xDEAD_BEEF);
+        assert_eq!(pd.title, "Anima the Adventurer");
+        assert!(pd.warmode);
+        assert!(pd.can_lift);
+        assert_eq!(pd.seq, 1);
+
+        // A second request for the SAME serial still bumps `seq` (real UO
+        // reopens on every double-click, even a repeat one).
+        let mut q = PacketWriter::new();
+        q.u8(0x88).u32(0xDEAD_BEEF).fixed_ascii("Anima the Adventurer", 60).u8(0x00);
+        assert!(apply_packet(&mut w, &q.into_vec()));
+        let pd2 = w.paperdoll.as_ref().expect("paperdoll set");
+        assert_eq!(pd2.seq, 2);
+        assert!(!pd2.warmode);
+    }
+
+    #[test]
+    fn swing_queues_attacker_and_defender() {
+        let mut w = World::new();
+        // 0x2F Swing: flag (always 0, unused), attacker, defender.
+        let mut p = PacketWriter::new();
+        p.u8(0x2F).u8(0).u32(0x1000_0001).u32(0x1000_0002);
+        let frame = p.into_vec();
+        assert_eq!(frame.len(), 10); // ServUO Swing : base(0x2F, 10)
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.recent_swings.last(), Some(&(1, 0x1000_0001, 0x1000_0002)));
+    }
+
+    #[test]
+    fn general_info_close_gump_by_type_drops_matching_kind() {
+        let mut w = World::new();
+        w.add_gump(Gump { serial: 1, gump_id: 0x2A, ..Default::default() });
+        w.add_gump(Gump { serial: 2, gump_id: 0x2A, ..Default::default() });
+        w.add_gump(Gump { serial: 3, gump_id: 0x5B, ..Default::default() });
+        // 0xBF/0x04 CloseGump: typeID 0x2A, buttonID 0 (every real ServUO call
+        // site sends 0 — see `general_info`'s doc).
+        let mut p = PacketWriter::new();
+        p.u8(0xBF).u16(0).u16(0x0004).u32(0x2A).u32(0);
+        let frame = patch_len(p.into_vec());
+        assert_eq!(frame.len(), 13); // ServUO CloseGump EnsureCapacity(13)
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.gumps.len(), 1);
+        assert_eq!(w.gumps[0].serial, 3);
     }
 }

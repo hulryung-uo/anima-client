@@ -1057,6 +1057,75 @@ fn prompt_json(world: &World) -> Value {
     }
 }
 
+/// Resolve a vendor shop-list name that may be a literal display string OR a
+/// bare cliloc id rendered as ASCII digits. ServUO's stock-item naming
+/// (`IShopSellInfo.GetNameFor`, `Scripts/VendorInfo/GenericSell.cs`) falls
+/// back to `item.LabelNumber.ToString()` — a plain decimal string, no `#` —
+/// whenever the item has no explicit `Item.Name`, which is the common case
+/// for ordinary stock; a leading `#` is stripped too before parsing, in case
+/// some other server variant writes it that way. Cliloc ids for item names
+/// run well above any count a real display name could plausibly be (`>=
+/// 500_000` — the same heuristic the 0x74 buy-list side already used), so a
+/// small numeric string (a name that just happens to be digits) is left
+/// alone, and anything at/above it is looked up in the Cliloc table, falling
+/// back to `name` **exactly as given** (any leading `#` included) if the
+/// table doesn't know it (no table loaded, or an id it doesn't have) — the
+/// `#`-stripped form is only used for the numeric parse, never invented into
+/// the display text we can't actually confirm.
+fn resolve_shop_name(name: &str, cliloc: Option<&Cliloc>) -> String {
+    name.strip_prefix('#')
+        .unwrap_or(name)
+        .parse::<u32>()
+        .ok()
+        .filter(|&id| id >= 500_000)
+        .and_then(|id| cliloc.and_then(|c| c.get(id).map(str::to_string)))
+        .unwrap_or_else(|| name.to_string())
+}
+
+/// Build the `paperdoll` object for the scene: the latest server-initiated
+/// paperdoll open/refresh (0x88), or `null` when none has arrived this
+/// session. `seq` lets the renderer treat a fresh request as a "please open"
+/// event even for a `serial` it already has a (possibly since-closed) window
+/// for — see [`crate::world::Paperdoll`]'s doc for why a repeat matters.
+fn paperdoll_json(world: &World) -> Value {
+    match &world.paperdoll {
+        None => Value::Null,
+        Some(p) => json!({
+            "seq": p.seq, "serial": p.serial, "title": p.title,
+            "warmode": p.warmode, "canLift": p.can_lift,
+        }),
+    }
+}
+
+/// ServUO 0x24 `gumpId`s that are NOT a container (see
+/// [`anima_core::net::game::draw_container`]'s doc for the ServUO/ClassicUO
+/// cites): `DisplayBuyList`/`DisplayBuyListHS` (vendor "Buy" window) always
+/// writes `0x30`; `DisplaySpellbook`/`DisplaySpellbookHS` always writes
+/// `0xFFFF` (`-1` as the wire i16).
+const GUMP_ID_VENDOR_BUY: u16 = 0x0030;
+const GUMP_ID_SPELLBOOK: u16 = 0xFFFF;
+
+/// Build the `containerOpens` array: [`World::recent_container_opens`] filtered
+/// down to events that are actually a container window. `World` keeps that ring
+/// as raw, unfiltered 0x24 data (every `gump_id` ServUO ever sent); deciding
+/// which of those ids should make the web client pop a window is a renderer
+/// policy call (D3: core = data, renderer = policy), so it happens here, not in
+/// `World`. We skip `GUMP_ID_VENDOR_BUY`/`GUMP_ID_SPELLBOOK` — a vendor's Buy
+/// list is already surfaced via `shop`/0x74/0x3B, and a spellbook via
+/// `spellbooks`/0xBF/0x1B, so re-showing either as a bare generic Container
+/// window here would be a spurious empty duplicate (live-reproduced: opening a
+/// vendor's Buy list otherwise pushed the vendor's own MOBILE serial into this
+/// ring as if it were a container).
+fn container_opens_json(world: &World) -> Value {
+    let opens: Vec<Value> = world
+        .recent_container_opens
+        .iter()
+        .filter(|&&(_, _, gump_id)| gump_id != GUMP_ID_VENDOR_BUY && gump_id != GUMP_ID_SPELLBOOK)
+        .map(|&(seq, serial, _)| json!({ "seq": seq, "serial": serial }))
+        .collect();
+    Value::Array(opens)
+}
+
 /// Serialize the current world + a map window (walkability/Z + real terrain
 /// color) + entities + journal to the JSON the web renderer consumes.
 pub fn build_scene(
@@ -1342,13 +1411,7 @@ pub fn build_scene(
             .map(|(price, name)| {
                 // ServUO sends cliloc-named stock as the bare numeric cliloc id; resolve
                 // it to the real item name (e.g. 1060834 → "a hatchet").
-                let nm = name
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|&id| id >= 500_000)
-                    .and_then(|id| cliloc.and_then(|c| c.get(id).map(str::to_string)))
-                    .unwrap_or_else(|| name.clone());
-                json!({ "price": price, "name": nm })
+                json!({ "price": price, "name": resolve_shop_name(name, cliloc) })
             })
             .collect();
         json!({ "vendor": b.vendor, "cont": b.container, "prices": prices })
@@ -1358,9 +1421,13 @@ pub fn build_scene(
             .items
             .iter()
             .map(|it| {
+                // Same cliloc-shaped-name resolution as the buy side above — ServUO's
+                // `IShopSellInfo.GetNameFor` falls back to a bare numeric LabelNumber
+                // string for stock with no explicit `Item.Name` (see
+                // `resolve_shop_name`'s doc), which otherwise showed as a raw id.
                 json!({
                     "serial": it.serial, "g": it.graphic, "amount": it.amount,
-                    "price": it.price, "name": it.name
+                    "price": it.price, "name": resolve_shop_name(&it.name, cliloc)
                 })
             })
             .collect();
@@ -1728,6 +1795,24 @@ pub fn build_scene(
         .map(|&(seq, reason)| json!({ "seq": seq, "reason": reason }))
         .collect();
     let lift_rejects = serde_json::to_string(&lift_rejects).unwrap_or_else(|_| "[]".into());
+    // Recent server-initiated container opens (0x24 DrawContainer): a window we
+    // did NOT ourselves double-click for (banker "bank" speech, GM `[bank`, a
+    // snoop, …). The client opens a window for each `seq` newer than the last it
+    // handled (reusing the same `openContainer` it uses for its own double-clicks).
+    // Filtered by `container_opens_json` to real container gumpIds — see its doc.
+    let container_opens = serde_json::to_string(&container_opens_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    // Recent Swing events (0x2F): `attacker` just swung at `defender`. Purely
+    // cosmetic — the client briefly faces the attacker toward the defender.
+    let swings: Vec<Value> = s
+        .world
+        .recent_swings
+        .iter()
+        .map(|&(seq, attacker, defender)| json!({ "seq": seq, "attacker": attacker, "defender": defender }))
+        .collect();
+    let swings = serde_json::to_string(&swings).unwrap_or_else(|_| "[]".into());
+    // The latest server-initiated paperdoll open/refresh (0x88), or null. See
+    // `paperdoll_json`'s doc for the `seq` "fresh request" semantics.
+    let paperdoll = serde_json::to_string(&paperdoll_json(&s.world)).unwrap_or_else(|_| "null".into());
     // Current facet/map index (0xBF/0x08 MapChange); see `World::map_index`'s doc
     // for what a real per-facet `MapData` reload would additionally require.
     let facet = s.world.map_index;
@@ -1741,7 +1826,8 @@ pub fn build_scene(
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
          \"popup\":{popup},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
-         \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"facet\":{facet},\"trades\":{trades},\
+         \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"containerOpens\":{container_opens},\"swings\":{swings},\
+         \"paperdoll\":{paperdoll},\"facet\":{facet},\"trades\":{trades},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",
         s.confirms, s.denies
     )
@@ -1926,6 +2012,83 @@ mod tests {
             prompt_json(&w),
             json!({ "active": 1, "serial": 0x77, "promptId": 42 })
         );
+    }
+
+    #[test]
+    fn container_opens_json_skips_vendor_buy_and_spellbook_gump_ids() {
+        let mut w = World::default();
+        // DisplayBuyList (vendor "Buy" window): gumpId 0x30 — must NOT open a
+        // (spurious, empty) container window; the vendor's shop already opens
+        // via `shop`/0x74/0x3B.
+        w.push_container_open(0x1000_0055, 0x0030);
+        assert_eq!(container_opens_json(&w), json!([]), "vendor buy gumpId must not signal an open");
+
+        // DisplaySpellbook: gumpId 0xFFFF — must NOT open one either; the book
+        // already opens via `spellbooks`/0xBF/0x1B.
+        w.push_container_open(0x4000_0066, 0xFFFF);
+        assert_eq!(container_opens_json(&w), json!([]), "spellbook gumpId must not signal an open");
+
+        // A normal container gumpId (e.g. a bank box) DOES open.
+        w.push_container_open(0x4000_0077, 0x0048);
+        assert_eq!(
+            container_opens_json(&w),
+            json!([{ "seq": 3, "serial": 0x4000_0077u32 }]),
+            "a real container gumpId must still signal an open"
+        );
+    }
+
+    #[test]
+    fn paperdoll_json_null_when_none_reports_when_set() {
+        let mut w = World::default();
+        assert_eq!(paperdoll_json(&w), Value::Null, "no paperdoll signal yet");
+
+        w.set_paperdoll(0xDEAD_BEEFu32, "Anima the Adventurer".to_string(), true, false);
+        assert_eq!(
+            paperdoll_json(&w),
+            json!({
+                "seq": 1, "serial": 0xDEAD_BEEFu32, "title": "Anima the Adventurer",
+                "warmode": true, "canLift": false,
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_shop_name_leaves_plain_names_alone() {
+        assert_eq!(resolve_shop_name("a hatchet", None), "a hatchet");
+        // A small numeric-looking name (below the cliloc-id floor) is left as-is.
+        assert_eq!(resolve_shop_name("123", None), "123");
+    }
+
+    #[test]
+    fn resolve_shop_name_resolves_cliloc_shaped_ids_bare_and_hashed() {
+        // No table loaded → falls back to the raw string exactly as given
+        // (the '#' is only stripped for the numeric *parse*, not the fallback).
+        assert_eq!(resolve_shop_name("1060834", None), "1060834");
+        assert_eq!(resolve_shop_name("#1060834", None), "#1060834");
+
+        // With a real (synthetic, on-disk) Cliloc table, both ServUO's actual
+        // bare-numeric shape (`IShopSellInfo.GetNameFor`'s `LabelNumber.ToString()`)
+        // and a hypothetical '#'-prefixed one resolve to the same real name.
+        // `Cliloc` only loads from a directory (`Cliloc::open`), so this writes a
+        // minimal synthetic `Cliloc.enu` (6-byte header + one record — same shape
+        // `anima_assets::cliloc`'s own tests build) to a scratch dir.
+        let dir = std::env::temp_dir()
+            .join(format!("anima_scene_test_cliloc_{}_{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let id: u32 = 1_060_834;
+        let text = "a hatchet";
+        let mut buf = vec![0u8; 6]; // 6-byte header, contents unused by the parser
+        buf.extend_from_slice(&id.to_le_bytes());
+        buf.push(0); // flag
+        buf.extend_from_slice(&(text.len() as u16).to_le_bytes());
+        buf.extend_from_slice(text.as_bytes());
+        std::fs::write(dir.join("Cliloc.enu"), &buf).expect("write synthetic Cliloc.enu");
+        let cliloc = Cliloc::open(&dir).expect("open synthetic Cliloc.enu");
+
+        assert_eq!(resolve_shop_name("1060834", Some(&cliloc)), "a hatchet");
+        assert_eq!(resolve_shop_name("#1060834", Some(&cliloc)), "a hatchet");
+
+        let _ = std::fs::remove_dir_all(&dir); // best-effort cleanup
     }
 
     #[test]
