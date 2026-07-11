@@ -423,17 +423,72 @@ const isoY = (x, y, z) => (x + y) * HALF - (z | 0) * ZSTEP;
 const depthZ = (x, y, pz, bias) => (x + y) * 8192 + ((pz | 0) + 130) * 16 + bias;
 
 // ---- texture + frame-count caches ----
-const texCache = new Map(), loading = new Set();
+// Hue is baked into the cache key/URL (the server pre-hues each PNG), so every
+// distinct dye of every item/body multiplies GPU-resident textures — an
+// unbounded cache pins hundreds of MB after a long multi-town tour. Bound it
+// with an LRU: texLastUsed tracks when each url was last actually drawn
+// (touchTex, called on every texFor hit, PLUS a blanket per-poll sweep over every
+// url a live sprite/anim-part could be showing — see forEachLiveTexUrl below,
+// called from syncWorld()). Eviction only ever considers entries idle past
+// TEX_IDLE_MS, so a texture a live sprite is still using — touched far more
+// often than that — is never pulled out from under it; the budget (TEX_BUDGET)
+// is picked high enough that ordinary town play never crosses it, so this only
+// changes marathon sessions.
+const texCache = new Map(), texLastUsed = new Map(), loading = new Set();
+const TEX_BUDGET = 1500;          // ~200MB at UO's typical small-sprite sizes
+const TEX_IDLE_MS = 5 * 60_000;   // don't evict anything touched more recently than this
+const TEX_SWEEP_MS = 30_000;      // don't re-scan for eviction more than 1x/30s
+let lastTexSweep = 0;
+function touchTex(url) { if (url) texLastUsed.set(url, performance.now()); }
 function texFor(url) {
-  if (texCache.has(url)) return texCache.get(url);
+  if (texCache.has(url)) { touchTex(url); return texCache.get(url); }
   if (!loading.has(url)) {
     loading.add(url);
     // markDirty() in the .then so a body/clothing frame that streams in gets
     // painted even while the character stands still (render-on-demand otherwise
     // wouldn't repaint an idle scene when a late texture arrives).
-    PIXI.Assets.load(url).then((t) => { texCache.set(url, t); markDirty(); }).catch(() => texCache.set(url, null));
+    PIXI.Assets.load(url).then((t) => {
+      texCache.set(url, t); touchTex(url); loading.delete(url); markDirty(); sweepTexCache();
+    }).catch(() => { texCache.set(url, null); touchTex(url); loading.delete(url); });
   }
   return null;
+}
+// Evict LRU entries once over TEX_BUDGET, throttled to at most 1 scan/TEX_SWEEP_MS
+// (this can run on every texture load once near budget, so keep it cheap). Only
+// evicts entries idle past TEX_IDLE_MS — see the cache's own comment above for why
+// that's safe. Routes eviction through PIXI.Assets.unload(url), NOT a bare
+// texture.destroy(true): Assets keeps its own url→texture cache (Loader.promiseCache
+// + the top-level Cache), and unload() is what forgets the url there too — destroying
+// the texture directly would leave a later PIXI.Assets.load(url) handing back the
+// same (now-destroyed) Texture instead of actually reloading it.
+//
+// Belt-and-braces: touchTex alone isn't trusted to have caught everything (two
+// real escapes found live: pruneFar's hysteresis-ring tiles, which sit on stage
+// outside the "seen this poll" window loop that does the touching, and a
+// mobile's st.partTex last-good fallback texture, whose OWN url only gets
+// touched incidentally, not every frame it's actually the one drawn). If either
+// escape (or a future one) evades touchTex bookkeeping, evicting a texture a
+// live sprite still points at throws inside app.render() ("Cannot read
+// properties of null (reading alphaMode)") and freezes the whole rAF loop (see
+// frame()'s own resilience fix). So: build the live set fresh at sweep time and
+// simply never evict anything in it, full stop, regardless of texLastUsed.
+function sweepTexCache() {
+  if (texCache.size <= TEX_BUDGET) return;
+  const now = performance.now();
+  if (now - lastTexSweep < TEX_SWEEP_MS) return;
+  lastTexSweep = now;
+  const live = new Set();
+  forEachLiveTexUrl((u) => { if (u) live.add(u); });
+  const stale = [];
+  for (const [url, last] of texLastUsed) if (!live.has(url) && now - last >= TEX_IDLE_MS) stale.push([url, last]);
+  if (!stale.length) return; // over budget but everything's still "recently" touched (or live) — wait
+  stale.sort((a, b) => a[1] - b[1]); // oldest-touched first
+  const over = texCache.size - TEX_BUDGET;
+  for (let i = 0; i < Math.min(over, stale.length); i++) {
+    const url = stale[i][0];
+    texCache.delete(url); texLastUsed.delete(url);
+    PIXI.Assets.unload(url).catch(() => {});
+  }
 }
 const frameCount = new Map();
 function framesFor(body, group, dir) {
@@ -568,16 +623,24 @@ function renderEquipTip() {
 // gump layers (topmost opaque pixel wins) so the cursor resolves the real item.
 const _ac = document.createElement("canvas");
 const _actx = _ac.getContext("2d", { willReadFrequently: true });
-const alphaCache = new Map(); // img.src → ImageData
+// img.src → ImageData. Each entry is a full decoded RGBA buffer (a 60×80 gump is
+// ~19KB, a big body gump can run past 200KB) and a distinct hue/item makes a
+// distinct src, so an unbounded cache pins more memory every dress/undress cycle.
+// Small LRU instead: bounded at ALPHA_CACHE_MAX, touched (moved to MRU) on hit.
+const ALPHA_CACHE_MAX = 32;
+const alphaCache = new Map();
 function imgAlpha(img, x, y) {
   const w = img.naturalWidth, hh = img.naturalHeight;
   if (!w || !img.complete || x < 0 || y < 0 || x >= w || y >= hh) return 0;
   let data = alphaCache.get(img.src);
-  if (!data) {
+  if (data) {
+    alphaCache.delete(img.src); alphaCache.set(img.src, data); // touch → most-recently-used
+  } else {
     _ac.width = w; _ac.height = hh; _actx.clearRect(0, 0, w, hh);
     try { _actx.drawImage(img, 0, 0); data = _actx.getImageData(0, 0, w, hh); }
     catch { return 0; }
     alphaCache.set(img.src, data);
+    if (alphaCache.size > ALPHA_CACHE_MAX) alphaCache.delete(alphaCache.keys().next().value); // evict LRU
   }
   return data.data[(y * w + x) * 4 + 3];
 }
@@ -715,7 +778,15 @@ async function main() {
   const RENDER_MS = 22; // ~45fps redraw ceiling
   function frame(now) {
     renderFrame(now - lastT); lastT = now;
-    if (dirty && now - lastDraw >= RENDER_MS) { app.render(); dirty = false; lastDraw = now; }
+    if (dirty && now - lastDraw >= RENDER_MS) {
+      // A render throw (e.g. a texture destroyed out from under a still-live
+      // sprite — see the texture-cache eviction comments above) must not kill
+      // this loop: requestAnimationFrame(frame) below would never run if
+      // app.render() threw uncaught, permanently freezing the client on one bad
+      // frame. Log it, force a retry next frame (markDirty), and move on.
+      try { app.render(); } catch (err) { console.error("app.render() failed, skipping frame:", err); markDirty(); }
+      dirty = false; lastDraw = now;
+    }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
@@ -1151,36 +1222,44 @@ function syncWorld(s) {
       seenT.add(key);
       const z0 = t.z | 0;
       const e = tilePool.get(key);
-      if (e && e.g === t.g && e.z === z0) continue; // unchanged
+      // Unchanged: nothing to rebuild. (LRU freshness for every pool entry —
+      // including tiles this loop never revisits, e.g. pruneFar's hysteresis
+      // ring — is stamped once per poll in one blanket pass; see
+      // forEachLiveTexUrl()/touchTex() at the end of this function.)
+      if (e && e.g === t.g && e.z === z0) continue;
       // corner heights (ClassicUO: top=this, right=(x+1,y), bottom=(x+1,y+1), left=(x,y+1))
       const z1 = zAt(x + 1, y), z2 = zAt(x + 1, y + 1), z3 = zAt(x, y + 1);
       if (z1 === null || z2 === null || z3 === null) continue; // await neighbours
       const sloped = !(z0 === z1 && z1 === z2 && z2 === z3);
 
-      let sp;
+      let sp, texUrl;
       if (!sloped) {
-        const tex = texFor(`art/land/${t.g}.png`);
+        texUrl = `art/land/${t.g}.png`;
+        const tex = texFor(texUrl);
         if (!tex) continue;
         sp = makeFlatTile(x, y, z0, tex);
       } else if (t.tx > 0) {
-        const tex = texFor(`texmap/${t.tx}.png`); // seamless texture for slopes
+        texUrl = `texmap/${t.tx}.png`; // seamless texture for slopes
+        const tex = texFor(texUrl);
         if (!tex) continue;
         sp = makeStretchedTile(x, y, z0, z1, z2, z3, tex, true);
       } else {
-        const tex = texFor(`art/land/${t.g}.png`); // no texmap → stretch the art
+        texUrl = `art/land/${t.g}.png`; // no texmap → stretch the art
+        const tex = texFor(texUrl);
         if (!tex) continue;
         sp = makeStretchedTile(x, y, z0, z1, z2, z3, tex, false);
       }
       if (e) { world.removeChild(e.sp); e.sp.destroy(); }
       world.addChild(sp);
-      tilePool.set(key, { sp, g: t.g, z: z0 });
+      tilePool.set(key, { sp, g: t.g, z: z0, url: texUrl });
     }
   }
   for (const st of s.statics || []) {
     const key = `${st.x},${st.y},${st.g},${st.z}`;
     seenS.add(key);
-    if (staticPool.has(key)) continue;
-    const tex = texFor(`art/static/${st.g}.png`);
+    if (staticPool.has(key)) continue; // unchanged; see the blanket LRU-touch note above
+    const texUrl = `art/static/${st.g}.png`;
+    const tex = texFor(texUrl);
     if (!tex) continue;
     const sp = new PIXI.Sprite(tex);
     sp.anchor.set(0.5, 1.0);
@@ -1188,11 +1267,14 @@ function syncWorld(s) {
     sp.zIndex = depthZ(st.x, st.y, st.pz ?? st.z, 4);
     // Tile + foliage flag for the transparency pass (circle-of-transparency / foliage fade).
     sp._tx = st.x; sp._ty = st.y; sp._foliage = !!st.f;
+    sp._texUrl = texUrl; // so the "still on screen" branch above can keep it LRU-fresh
     // Animated static (flames/fountains/water wheels): the server baked the ART
     // tile-id frame sequence (`a`) + per-frame interval ms (`ai`). Prefetch each
     // frame's texture and store them so the animation pass can swap sp.texture.
     if (Array.isArray(st.a) && st.a.length > 1) {
-      sp._frames = st.a.map((id) => texFor(`art/static/${id}.png`));
+      const frameUrls = st.a.map((id) => `art/static/${id}.png`);
+      sp._frames = frameUrls.map((u) => texFor(u));
+      sp._frameUrls = frameUrls;   // so tickAnimatedStatics/touch can re-resolve/re-stamp by url
       sp._afids = st.a;            // keep ids so late-loading frames can be resolved
       sp._ai = st.ai || 200;
       sp._fbase = performance.now();
@@ -1232,8 +1314,9 @@ function syncWorld(s) {
       }
     }
     const e = itemPool.get(key);
-    if (e && e.g === it.g && e.x === it.x && e.y === it.y && e.z === iz && e.corpseUrl === corpseUrl) continue; // unchanged
-    const tex = corpseTex || texFor(`art/static/${it.g}.png`);
+    if (e && e.g === it.g && e.x === it.x && e.y === it.y && e.z === iz && e.corpseUrl === corpseUrl) continue; // unchanged; see the blanket LRU-touch note above
+    const itemTexUrl = corpseUrl || `art/static/${it.g}.png`;
+    const tex = corpseTex || texFor(itemTexUrl);
     if (!tex) continue; // await art, retry next poll
     if (e) { world.removeChild(e.sp); e.sp.destroy(); }
     const sp = new PIXI.Sprite(tex);
@@ -1258,7 +1341,7 @@ function syncWorld(s) {
     sp.on("pointerover", () => { hoverEntity(serial); targetHighlightOn(sp); });
     sp.on("pointerout", () => { hoverOut(serial); targetHighlightOff(sp); });
     world.addChild(sp);
-    itemPool.set(key, { sp, g: it.g, x: it.x, y: it.y, z: iz, corpseUrl });
+    itemPool.set(key, { sp, g: it.g, x: it.x, y: it.y, z: iz, corpseUrl, url: itemTexUrl });
     markDirty();
   }
   for (const [k, e] of itemPool) {
@@ -1272,6 +1355,43 @@ function syncWorld(s) {
   // must be removed so the interior shows.
   prune(staticPool, seenS, (e) => e);
   diag.tiles = tilePool.size + staticPool.size;
+  // The static/item pool may have changed shape this poll (new sprite could need
+  // fading right where we already stand) — force one more full transparencyPass
+  // scan next frame regardless of whether the player's tile moved. See the flag's
+  // own comment above transparencyPass().
+  transparencyDirty = true;
+  // Stamp EVERY texture a live sprite/anim-part could currently be showing as
+  // "just used", once per poll — not only the ones this function's own diff
+  // loops happen to touch. Two real escapes found live, both live sprites the
+  // window loops above never revisit: (1) pruneFar's hysteresis-ring tiles
+  // (kept in tilePool at Chebyshev radius+1..+4 — on stage/screen for camera-
+  // slide hysteresis — but outside the span×span window loop that walks
+  // m.tiles); (2) a mobile's st.partTex last-good fallback (drawMobs reuses an
+  // old, already-drawn texture the instant a frame's current url hasn't
+  // resolved yet, without going through texFor/touchTex for THAT texture's own
+  // url). Left stale past TEX_IDLE_MS, either could get destroyed out from
+  // under an on-stage sprite by sweepTexCache → app.render() throws → the rAF
+  // loop dies (see frame()'s own resilience fix). ~1.3k Map.set calls at a
+  // typical view radius — trivial next to the rest of this function.
+  forEachLiveTexUrl(touchTex);
+}
+// Every texture url currently referenced by a live, on-stage sprite or a
+// mobile's per-part fallback (drawMobs's st.partTex — see part() below for why
+// it stores {tex,url} pairs, not just the texture). Two call sites: (1) a
+// per-poll touchTex sweep (syncWorld, above) so none of these ever look "idle"
+// to sweepTexCache's LRU scan; (2) sweepTexCache's own belt-and-braces
+// exclude-list, so even a url this pass fails to touch can never be evicted
+// while still referenced live.
+function forEachLiveTexUrl(fn) {
+  for (const e of tilePool.values()) fn(e.url);
+  for (const sp of staticPool.values()) {
+    fn(sp._texUrl);
+    if (sp._frameUrls) for (const u of sp._frameUrls) fn(u);
+  }
+  for (const e of itemPool.values()) fn(e.url);
+  for (const st of anim.values()) {
+    if (st.partTex) for (const e of st.partTex.values()) fn(e.url);
+  }
 }
 function prune(pool, seen, getSp) {
   for (const [key, e] of pool) {
@@ -1593,7 +1713,7 @@ function tickAnimatedStatics(now) {
     const idx = Math.floor(now / (sp._ai || 200)) % n;
     if (idx === sp._fidx) continue;
     let tex = frames[idx];
-    if (!tex) { tex = texFor(`art/static/${sp._afids[idx]}.png`); frames[idx] = tex; }
+    if (!tex) { tex = texFor(sp._frameUrls ? sp._frameUrls[idx] : `art/static/${sp._afids[idx]}.png`); frames[idx] = tex; }
     if (!tex) continue; // frame not loaded yet → keep the current texture
     sp.texture = tex; sp._fidx = idx; changed = true;
   }
@@ -1609,11 +1729,23 @@ function tickAnimatedStatics(now) {
 const fadedSprites = new Set();
 const R_COT = 2, R_FOL = 3;            // tile radius: circle-of-transparency / foliage
 const A_COT = 0.55, A_FOL = 0.45;      // faded alpha: statics / foliage
+// Full-pool scan is only worth redoing when it could actually change: the player
+// crossed a tile (fade radius is tile-relative) or syncWorld just rebuilt part of
+// the static/item pool (a new/removed sprite could need (un)fading even at the
+// same tile). `transparencyDirty` is set at the end of every syncWorld() call
+// (each poll, ~150ms) — cheap insurance against tracking exact pool deltas —
+// so this still cuts the scan from every rendered frame (60Hz) to at most once
+// per poll plus once per tile crossing, instead of every single frame.
+let transparencyDirty = true;
+let lastCotKey = null;
 function transparencyPass() {
   let ptx, pty, pz;
   if (pred) { ptx = Math.round(pred.rx); pty = Math.round(pred.ry); pz = pred.z; }
   else if (scene && scene.player) { ptx = scene.player.x; pty = scene.player.y; pz = scene.player.z; }
   else return;
+  const cotKey = ptx + "," + pty + "," + (pz | 0);
+  if (!transparencyDirty && cotKey === lastCotKey) return; // player tile unchanged, pool unchanged
+  lastCotKey = cotKey; transparencyDirty = false;
   // The avatar's current draw depth (same formula drawMobs uses for "self").
   const playerZi = depthZ(ptx, pty, (pz | 0) + 1, 8);
   const newFaded = new Set();
@@ -1737,8 +1869,16 @@ function drawMobs() {
   // (Dynamic world items are now drawn as real art sprites in syncWorld's itemPool,
   // not dots here.)
   // Resolve each rendered entity's skin hue + worn equipment from the scene.
-  const mobById = new Map();
-  for (const m of scene.mobiles || []) mobById.set("m" + m.serial, m);
+  // drawMobs() runs every rendered frame (60Hz) for animation, but `scene` itself
+  // only changes once per ~150ms poll (poll() assigns a brand-new parsed object
+  // each time) — so build this lookup once per scene and stash it there; a fresh
+  // scene object naturally invalidates it, no separate epoch/dirty flag needed.
+  let mobById = scene._mobById;
+  if (!mobById) {
+    mobById = new Map();
+    for (const m of scene.mobiles || []) mobById.set("m" + m.serial, m);
+    scene._mobById = mobById;
+  }
   for (const [id, st] of anim) {
     diag.ents++;
     // A cosmetic Swing (0x2F) flash (see `ingestSwings`) briefly overrides the
@@ -1832,7 +1972,12 @@ function drawMobs() {
     // fixes for the walk/run "naked↔dressed" flicker and the layer-swap bug:
     //  • PER-PART last-good texture (`st.partTex`): when a part's texture for the
     //    current frame is still loading, reuse its previous frame instead of dropping
-    //    it — so no layer (or the body) ever vanishes for a frame mid-walk.
+    //    it — so no layer (or the body) ever vanishes for a frame mid-walk. Stored as
+    //    {tex,url} pairs (not just the texture): the url is what forEachLiveTexUrl()
+    //    touches every poll, so a fallback that's the ONLY thing currently drawn for
+    //    a part doesn't go idle in texLastUsed and get evicted out from under it —
+    //    its own url is never re-passed through texFor()/touchTex() while it's the
+    //    fallback (the current frame's url is what's being requested instead).
     //  • STABLE per-part keys + rank-based z (not a shifting array index): a layer
     //    that's momentarily missing no longer shoves the others into different slots
     //    and swaps their textures.
@@ -1842,7 +1987,8 @@ function drawMobs() {
     // position the part correctly (ClassicUO math) rather than foot-anchoring it.
     const part = (key, url, rank, interactive, bodyId, grp, frm) => {
       let t = url ? texFor(url) : null;
-      if (t) st.partTex.set(key, t); else t = st.partTex.get(key);
+      if (t) st.partTex.set(key, { tex: t, url });
+      else { const fb = st.partTex.get(key); t = fb ? fb.tex : null; }
       if (t) {
         const c = bodyId != null ? centerFor(bodyId, grp, d, frm) : null;
         entries.push({ key, tex: t, rank, interactive, cx: c ? c[0] : null, cy: c ? c[1] : null });
@@ -2488,8 +2634,15 @@ const OVERHEAD_HEAD = 68;   // px above the feet anchor — clears the head (inc
 // don't pile up forever at the bottom.
 const localJournal = [];           // { text } — newest last
 const LOCAL_JOURNAL_MAX = 40;
+// Monotonic counter, bumped on every addSysMessage — NOT derived from length or
+// newest-text. Once localJournal is at its cap, pushing another line no longer
+// changes .length, and a new line whose text happens to repeat the previous one
+// wouldn't change "newest text" either; either alone would make hud()'s journal
+// change-signature miss a real append and silently drop the line from the DOM.
+let localJournalSeq = 0;
 function addSysMessage(text) {
   localJournal.push({ text });
+  localJournalSeq++;
   while (localJournal.length > LOCAL_JOURNAL_MAX) localJournal.shift();
 }
 // Scan the journal for new lines and float each above its speaker once.
@@ -2891,12 +3044,38 @@ function hpColor(f) { return f > 0.5 ? 0x46a758 : f > 0.25 ? 0xd9a441 : 0xe5484d
 // don't get confused.
 const POISON_COLOR = 0x2fd44a;
 
+// Greedy vertical de-collide for floating name labels — the same greedy-AABB
+// idea as the world map's POI label declutter (wmPlaceLabel: an AABB per label,
+// skip/keep against everything already placed this pass), except here we NUDGE
+// a colliding label straight up instead of hiding it — 2+ named mobiles standing
+// close together would otherwise render illegible stacked/overlapping text.
+// `boxes` accumulates this pass's already-placed labels (fresh array per
+// drawBars() call); returns the (possibly nudged) CSS y to use as the label's
+// bottom anchor (labels are positioned bottom-center via
+// `transform: translate(-50%,-100%)` — see `.nm-label` in index.html).
+function placeNameLabel(boxes, cx, bottom, w, h) {
+  const pad = 2;
+  let top = bottom - h, moved = true, guard = 0;
+  while (moved && guard++ < 16) {
+    moved = false;
+    for (const b of boxes) {
+      if (cx - w / 2 < b.r && cx + w / 2 > b.l && top < b.b + pad && bottom > b.t - pad) {
+        bottom = b.t - pad; top = bottom - h; moved = true; // push above whatever it collided with
+      }
+    }
+  }
+  boxes.push({ l: cx - w / 2, r: cx + w / 2, t: top, b: bottom });
+  return bottom;
+}
+
 // Draw a name + HP bar above each OTHER mobile, anchored to its interpolated iso
 // position (like the overhead speech). Objects are cached per serial and only
 // redrawn when their value/notoriety changes; pruned when the mobile leaves view.
 function drawBars(now) {
   if (!scene) return;
   const seen = new Set();
+  const nameBoxes = []; // this pass's placed name-label boxes, for placeNameLabel()
+  const nameJobs = []; // {d, serial, cx, naturalBottom, nm} — laid out after the loop, once, in a deterministic order
   let changed = false;
   const lastAttack = (scene.lastAttack | 0) >>> 0; // current auto-attack target (0 = none)
   // The server's authoritative combat opponent (0xAA ChangeCombatant) — usually
@@ -2961,15 +3140,43 @@ function drawBars(now) {
       seen.add(id);
       let d = nameDivs.get(id);
       if (!d) { d = document.createElement("div"); d.className = "nm-label"; namesEl().appendChild(d); nameDivs.set(id, d); }
-      if (d._t !== nm) { d.textContent = nm; d._t = nm; }
+      // Only a text change invalidates the cached size — mark it for the read
+      // phase below instead of measuring inline (that would force a reflow per
+      // label per frame, since the loop just dirtied this div's layout).
+      if (d._t !== nm) { d.textContent = nm; d._t = nm; d._measure = true; }
       if (d._noto !== m.noto) { d.style.color = cssColor(notoColor(m.noto)); d._noto = m.noto; }
       const fx = window.innerWidth / app.renderer.width, fy = window.innerHeight / app.renderer.height;
-      d.style.left = ((app.stage.x + x) * fx) + "px";
-      d.style.top = ((app.stage.y + topY - 2) * fy) + "px";
-      d.style.display = "block";
+      const cx = (app.stage.x + x) * fx;
+      const naturalBottom = (app.stage.y + topY - 2) * fy;
+      nameJobs.push({ d, serial, cx, naturalBottom, nm });
     } else {
       const d = nameDivs.get(id); if (d) d.style.display = "none";
     }
+  }
+  // Read phase: only labels whose text changed this frame (d._measure, set
+  // above) need a fresh offsetWidth/Height — that's the only thing that can
+  // actually change a label's size, so steady state (no text changes) reads
+  // nothing and forces zero reflows.
+  for (const { d, nm } of nameJobs) {
+    if (d._measure) {
+      // A generous estimate covers the very first frame, before the div has
+      // ever been laid out (offsetWidth/Height are 0 pre-layout).
+      d._w = d.offsetWidth || (nm.length * 7 + 10);
+      d._h = d.offsetHeight || 15;
+      d._measure = false;
+    }
+  }
+  // Write phase: sort deterministically (by on-screen bottom, then serial) so
+  // the greedy de-collide pass below always visits labels in the same order
+  // regardless of scene.mobiles' iteration order (a Rust HashMap — unordered,
+  // so it can reshuffle frame-to-frame as mobiles enter/leave view). Without
+  // this, which label gets nudged out of a collision could swap arbitrarily.
+  nameJobs.sort((a, b) => a.naturalBottom - b.naturalBottom || a.serial - b.serial);
+  for (const { d, cx, naturalBottom } of nameJobs) {
+    const bottom = placeNameLabel(nameBoxes, cx, naturalBottom, d._w, d._h);
+    d.style.left = cx + "px";
+    d.style.top = bottom + "px";
+    d.style.display = "block";
   }
   // Prune name/bar objects whose mobile left view (don't leak PIXI objects / DOM).
   for (const [id, g] of hpBars) if (!seen.has(id)) { barLayer.removeChild(g); g.destroy(); hpBars.delete(id); changed = true; }
@@ -3018,24 +3225,50 @@ function hud(s) {
     wi.className = war ? "war" : "peace";
   }
   const j = document.getElementById("journal");
-  // Keep following the newest line only if already scrolled to the bottom (don't
-  // yank the view while the user is reading back).
-  const atBottom = j.scrollHeight - j.scrollTop - j.clientHeight < 24;
-  j.innerHTML = "";
-  for (const line of s.journal || []) {
-    if (!line.text) continue;
-    const d = document.createElement("div");
-    d.textContent = line.name ? `${line.name}: ${line.text}` : line.text;
-    j.appendChild(d);
+  // Signature-skip (same pattern as the paperdoll/skills/party panels, `_sig`
+  // stashed on the element): hud() runs every ~150ms poll, but the journal itself
+  // usually hasn't grown since the last one — rebuilding its whole DOM unchanged
+  // is pure waste.
+  //
+  // Server half: the interactive play server stamps every line with a monotonic
+  // `seq` (anima-net/src/bin/play_server.rs), so the newest line's seq is a cheap,
+  // reliable change signal there. The non-interactive scene-bin FILE mode
+  // (anima-net/src/bin/scene.rs) never emits `seq` at all AND caps the journal at
+  // 12 lines — a seq-or-length-only signature would stop changing forever the
+  // moment that cap is first hit, even as lines keep rotating through, freezing
+  // the panel. So: use seq when the newest line actually has one, else fall back
+  // to a full-content signature (cheap here — that mode's array is ≤12 long).
+  const jSrc = s.journal || [];
+  const jLen = jSrc.length;
+  const jLastLine = jLen ? jSrc[jLen - 1] : null;
+  const jTail = jLastLine && jLastLine.seq != null
+    ? jLastLine.seq
+    : jSrc.map((l) => (l.name || "") + "" + (l.text || "")).join("");
+  // Local half: a monotonic counter (bumped in addSysMessage, not derived from
+  // length/newest-text) so a repeated-text line, or the ring hitting its own cap,
+  // still registers as a change.
+  const jSig = `${jLen}:${jTail}:${localJournalSeq}`;
+  if (j._sig !== jSig) {
+    j._sig = jSig;
+    // Keep following the newest line only if already scrolled to the bottom (don't
+    // yank the view while the user is reading back).
+    const atBottom = j.scrollHeight - j.scrollTop - j.clientHeight < 24;
+    j.innerHTML = "";
+    for (const line of jSrc) {
+      if (!line.text) continue;
+      const d = document.createElement("div");
+      d.textContent = line.name ? `${line.name}: ${line.text}` : line.text;
+      j.appendChild(d);
+    }
+    // Client-side system notices (skill gains/losses) after the server lines.
+    for (const line of localJournal) {
+      const d = document.createElement("div");
+      d.className = "jrnl-sys";
+      d.textContent = line.text;
+      j.appendChild(d);
+    }
+    if (atBottom) j.scrollTop = j.scrollHeight;
   }
-  // Client-side system notices (skill gains/losses) after the server lines.
-  for (const line of localJournal) {
-    const d = document.createElement("div");
-    d.className = "jrnl-sys";
-    d.textContent = line.text;
-    j.appendChild(d);
-  }
-  if (atBottom) j.scrollTop = j.scrollHeight;
   refreshStatus(s);   // keep the pull-out status bar live (if open)
 }
 function updateDiag() {
