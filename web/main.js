@@ -4626,6 +4626,12 @@ function refreshContainer(serial) {
       cell.appendChild(a);
     }
     cell.addEventListener("dblclick", () => {
+      // Belt and braces: a completed double-click on this cell means the press
+      // was a click, not a drag, no matter what — disarm a still-pending
+      // groundDrag for this same serial so a stray later pointermove (or the
+      // dialog/gump that "use" may pop, covering the cell) can't still promote
+      // it into a lift out from under the click that just resolved.
+      if (groundDrag && (groundDrag.serial >>> 0) === itemSerial) groundDrag = null;
       // A spellbook opens the spell-casting UI, not a container view.
       if (isSpellbook(it.g)) { if (!spellbookOn) toggleSpellbook(); return; }
       sendInput("use:" + itemSerial);
@@ -5271,11 +5277,18 @@ let placedAt = 0;               // perf time of the last placement (debounces th
 // under the finger, and the old 5px-only rule turned every such tap into a pickup.
 // So a small drift only counts once the button has been held past the double-click
 // window (DRAG_HOLD_MS); a clearly-intentional larger motion (DRAG_FAR) lifts at once.
-let groundDrag = null;          // { serial, g, amount, st, sx, sy, started, t } or null
+// For arms that DO have a natural on-screen cell (a container-grid icon or a
+// paperdoll `.eq-icon` row entry — see `rect` below), that hold/distance heuristic
+// is dropped entirely in favor of a hard rule: promote only once the pointer
+// actually LEAVES the cell it was pressed on. A double-click's drift, however
+// long held, never leaves a ~40px cell; a real drag-out always does almost
+// immediately. World items / the worn-doll figure have no such cell (a world
+// sprite's screen position pans with the camera), so they keep the old heuristic.
+let groundDrag = null;          // { serial, g, amount, st, sx, sy, started, t, rect? } or null
 let dragGhost = null;           // floating <img> glued to the cursor while an item is held
 const DRAG_THRESHOLD = 6;       // min px of motion before a held press is even a drag candidate
 const DRAG_FAR = 22;            // px of motion that means "definitely a drag" regardless of hold time
-const DRAG_HOLD_MS = 180;       // a small drift only becomes a drag after the button's been held this long (> a tap)
+const DRAG_HOLD_MS = 250;       // a small drift only becomes a drag after the button's been held this long (> a tap)
 
 // Place/refresh the floating ghost image at the cursor (page coords).
 function moveGhost(clientX, clientY) {
@@ -5549,17 +5562,43 @@ function refreshPrompt(s) {
 
 function setupItemDnD() {
   // Promote an armed press (world item / container icon / paperdoll icon / worn doll
-  // item) into a real lift once it moves past DRAG_THRESHOLD: the item jumps onto the
+  // item) into a real lift once it's unambiguously a drag: the item jumps onto the
   // cursor (UO pickup) and the ghost follows the mouse until placed. Cancelling the
   // pending single-click for this item suppresses the name-request a plain click fires.
-  window.addEventListener("mousemove", (e) => {
+  //
+  // Listens on POINTER events, not mouse events, and this isn't cosmetic: the
+  // container-cell/paperdoll-icon arm site below calls `e.preventDefault()` on
+  // `pointerdown` (to suppress the browser's native image-drag/text-selection
+  // gesture over the icon), and per the Pointer Events spec, canceling `pointerdown`
+  // suppresses EVERY subsequent compatibility mouse event (mousemove/mouseup/click)
+  // for that press — confirmed live (an instrumented `window.addEventListener`
+  // counter) both on a plain test element and on the real `.cont-item` cells: a
+  // genuine 40-190px drag produced zero `mousemove`/`mouseup` events and never
+  // promoted at all. `pointermove`/`pointerup` are unaffected by that suppression
+  // (only the legacy compatibility events are), so they're the only reliable way
+  // to observe the rest of a press that started with a cancelled `pointerdown`.
+  window.addEventListener("pointermove", (e) => {
     if (groundDrag && !cursorItem && !groundDrag.started) {
-      const moved = Math.max(Math.abs(e.clientX - groundDrag.sx), Math.abs(e.clientY - groundDrag.sy));
-      if (moved < DRAG_THRESHOLD) return;                 // hasn't moved enough to be a drag at all
-      // A small drift is a drag only if the button's been held past a tap; a big
-      // motion is unambiguously a drag and lifts immediately. This lets a click /
-      // double-click that wobbles a few px still resolve as a click.
-      if (moved < DRAG_FAR && (performance.now() - (groundDrag.t || 0)) < DRAG_HOLD_MS) return;
+      if (groundDrag.rect) {
+        // Container-cell / paperdoll-icon arm: it has a real on-screen cell, so
+        // skip the hold/distance heuristic entirely — a double-click's drift,
+        // however long held, never leaves a ~40px cell; a real drag-out does
+        // almost immediately. This is what actually stops "double-click lifts
+        // it" for these two sources (see the long comment above).
+        const r = groundDrag.rect;
+        const outside = e.clientX < r.left || e.clientX >= r.right || e.clientY < r.top || e.clientY >= r.bottom;
+        if (!outside) return;
+      } else {
+        // World item / worn-doll figure: no natural cell to test "left it"
+        // against (a world sprite's screen position pans with the camera), so
+        // keep the original hold-time/distance heuristic.
+        const moved = Math.max(Math.abs(e.clientX - groundDrag.sx), Math.abs(e.clientY - groundDrag.sy));
+        if (moved < DRAG_THRESHOLD) return;                 // hasn't moved enough to be a drag at all
+        // A small drift is a drag only if the button's been held past a tap; a big
+        // motion is unambiguously a drag and lifts immediately. This lets a click /
+        // double-click that wobbles a few px still resolve as a click.
+        if (moved < DRAG_FAR && (performance.now() - (groundDrag.t || 0)) < DRAG_HOLD_MS) return;
+      }
       groundDrag.started = true;
       if (clickPend && (clickPend.serial >>> 0) === groundDrag.serial) { clearTimeout(clickPend.timer); clickPend = null; }
       const { serial, g, amount, st } = groundDrag;
@@ -5583,7 +5622,9 @@ function setupItemDnD() {
   // Release of the LIFTING press: a one-motion drag that ends over a valid target
   // places immediately; ending over nothing leaves the item held for a later click.
   // (Separate placement clicks are handled in the pointerdown listener below.)
-  window.addEventListener("mouseup", (e) => {
+  // `pointerup`, not `mouseup` — same compatibility-event-suppression reason as
+  // the listener above; a cancelled `pointerdown` means `mouseup` never fires.
+  window.addEventListener("pointerup", (e) => {
     if (e.button !== 0) return;
     if (groundDrag && !groundDrag.started) { groundDrag = null; return; }  // never moved → leave the click alone
     groundDrag = null;
@@ -5600,7 +5641,7 @@ function setupItemDnD() {
   window.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
     if (cursorItem) {
-      if (liftDrag) return;       // the lifting press is still down → its mouseup resolves it
+      if (liftDrag) return;       // the lifting press is still down → its pointerup resolves it
       if (scene && scene.target && scene.target.active === 1 && !targetUIHidden) return;
       e.preventDefault(); e.stopPropagation();
       if (e.stopImmediatePropagation) e.stopImmediatePropagation();
@@ -5616,9 +5657,13 @@ function setupItemDnD() {
       // that isn't ours to move.
       if (cell.dataset.ro === "1") return;
       e.preventDefault();
+      // `rect`: the cell's own screen bounds at arm time — see the promotion
+      // listener above. This is what makes a double-click safe here: leaving
+      // the cell is the ONLY thing that promotes, not how long/far within it.
       groundDrag = { serial: (+cell.dataset.serial) >>> 0, g: +cell.dataset.g | 0,
                      amount: (+cell.dataset.amount) || 1, st: cell.dataset.st === "1",
-                     sx: e.clientX, sy: e.clientY, started: false, t: performance.now() };
+                     sx: e.clientX, sy: e.clientY, started: false, t: performance.now(),
+                     rect: cell.getBoundingClientRect() };
       return;
     }
     if (pdTarget == null) {       // own paperdoll only — can't move another mobile's gear
@@ -5626,7 +5671,8 @@ function setupItemDnD() {
       if (ic) {
         e.preventDefault();
         groundDrag = { serial: (+ic.dataset.serial) >>> 0, g: +ic.dataset.g | 0,
-                       amount: 1, sx: e.clientX, sy: e.clientY, started: false, t: performance.now() };
+                       amount: 1, sx: e.clientX, sy: e.clientY, started: false, t: performance.now(),
+                       rect: ic.getBoundingClientRect() };
       }
     }
   }, true);
