@@ -4,7 +4,9 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
-use anima_assets::{Anim, AnimData, Art, Cliloc, Image, MapData, RadarCol, ZReason, MAP_HEIGHT, MAP_WIDTH};
+use anima_assets::{
+    Anim, AnimData, Art, Cliloc, Image, MapData, Multis, RadarCol, StaticTile, ZReason, MAP_HEIGHT, MAP_WIDTH,
+};
 use anima_core::gump_layout::{self, GumpElement, HtmlText};
 use anima_core::World;
 use serde_json::{json, Value};
@@ -60,13 +62,97 @@ pub enum StepDeny {
     DynamicItem { graphic: u16, item_z: i32 },
 }
 
+/// Every multi component (boat hull/deck, house wall/floor — never the
+/// multi's own `World::items` entry, which carries a multi id in `graphic`,
+/// not an ART graphic) sitting at world tile `(x, y)`, as `(graphic,
+/// absolute_z)` pairs. The ONE shared fold every multi-aware walkability check
+/// (blocking, standing-surface contribution, step-Z resolution) builds on, so
+/// they can never disagree about which components are even in play on a tile.
+/// Resolved through each in-view multi's own tile-indexed component list
+/// ([`Multis::components_at`]) instead of a direct `World::items` hit — a
+/// component isn't its own `World::items` entry. Cheap even per A* node:
+/// `World::items` only ever holds the handful of multis actually in view
+/// (pruned by 0x1D like any item), and `components_at` is O(components on
+/// this ONE tile) after the first call per multi id.
+///
+/// Includes an invisible component when it's the multi's index-0 record
+/// (`MultiComponent::is_origin`) — ServUO's own collision/placement grid force
+/// -includes index 0 regardless of its flags (`Server/MultiData.cs`
+/// `MultiComponentList`, every constructor: `if (i == 0 ||
+/// allTiles[i].m_Flags != 0)`), so client-side walkability prediction must
+/// match that or risk disagreeing with a server-side deny/allow on the
+/// origin tile. This is the WALKABILITY rule only — rendering (the tile loop
+/// in [`build_scene`]) still checks `visible` on its own, since ClassicUO
+/// only ever *draws* visible components.
+fn multi_components_at(world: &World, multis: &Multis, x: i64, y: i64) -> Vec<(u16, i32)> {
+    let mut out = Vec::new();
+    for it in world.items.values().filter(|it| it.is_multi) {
+        let (dx, dy) = (x - it.pos.x as i64, y - it.pos.y as i64);
+        if dx < i16::MIN as i64 || dx > i16::MAX as i64 || dy < i16::MIN as i64 || dy > i16::MAX as i64 {
+            continue; // absurdly far from this multi's origin — never one of its tiles
+        }
+        for c in multis.components_at(it.graphic as u32, dx as i16, dy as i16) {
+            if c.visible || c.is_origin {
+                out.push((c.graphic, it.pos.z as i32 + c.dz as i32));
+            }
+        }
+    }
+    out
+}
+
+/// [`multi_components_at`]'s tuples, reshaped into synthetic [`StaticTile`]s
+/// so they can be folded straight into [`MapData::walkable_z_explain`]'s own
+/// candidate scoring ([`crate::scene`]'s only consumer of `extra`) — a boat
+/// deck then contributes a standing surface, and a hull wall genuinely
+/// blocks, using the EXACT SAME impassable/surface/bridge rules a real static
+/// gets (`StaticTile::impassable`/`::surface`), not a parallel ad hoc check.
+fn multi_statics_at(world: &World, multis: &Multis, map: &MapData, x: i64, y: i64) -> Vec<StaticTile> {
+    multi_components_at(world, multis, x, y)
+        .into_iter()
+        .map(|(graphic, z)| StaticTile {
+            graphic,
+            z: z.clamp(i8::MIN as i32, i8::MAX as i32) as i8,
+            height: map.item_height(graphic),
+            flags: map.item_flags(graphic),
+        })
+        .collect()
+}
+
+/// Does a **multi component** block a body at `current_z` stepping onto `(x,
+/// y)`? A real interactive door is never baked into a multi's component list
+/// (ServUO places it as its own separate door `Item`, e.g.
+/// `BaseHouse.AddSouthDoor`), so no door exception is needed here — that
+/// already flows through the ordinary dynamic-item path above.
+fn multi_blocker_at(
+    world: &World,
+    multis: &Multis,
+    map: &mut MapData,
+    x: i64,
+    y: i64,
+    current_z: i32,
+    ghost: bool,
+) -> Option<(u16, i32)> {
+    multi_components_at(world, multis, x, y)
+        .into_iter()
+        .find(|&(graphic, comp_z)| {
+            map.item_blocks(graphic, comp_z, current_z) && !(ghost && map.item_is_door(graphic))
+        })
+}
+
 /// Is tile (x, y) walkable for a body at `current_z`, and if so what Z would it
 /// stand at? Combines the static map (land + statics, via
-/// [`MapData::walkable_z_explain`]) with **dynamic world items** — an
-/// impassable placed object (e.g. a crate) blocks too.
+/// [`MapData::walkable_z_explain`]) — widened, when `multis` is given, with
+/// any **in-view multi component** (boat deck/hull, house floor/wall) folded
+/// in via [`multi_statics_at`] so a component can CONTRIBUTE a standing
+/// surface (a boat deck) exactly like a real static, not just block one —
+/// with **dynamic world items** on top — an impassable placed object (e.g. a
+/// crate) blocks too — and then, same as [`can_walk`]/[`step_ok`]'s own
+/// two-layer shape, a final [`multi_blocker_at`] pass for a multi component
+/// occupying this exact body span.
 pub fn explain_tile_walkable(
     world: &World,
     map: &mut MapData,
+    multis: Option<&Multis>,
     x: i64,
     y: i64,
     current_z: i32,
@@ -74,16 +160,25 @@ pub fn explain_tile_walkable(
     if x < 0 || y < 0 {
         return Err(StepDeny::OffMap);
     }
-    let z = map.walkable_z_explain(x as u32, y as u32, current_z).map_err(StepDeny::Terrain)?;
+    let extra = multis.map(|m| multi_statics_at(world, m, map, x, y)).unwrap_or_default();
+    let z = map
+        .walkable_z_explain(x as u32, y as u32, current_z, &extra)
+        .map_err(StepDeny::Terrain)?;
     let ghost = player_is_ghost(world);
     if let Some(it) = world.items.values().find(|it| {
-        it.container.is_none()
+        !it.is_multi
+            && it.container.is_none()
             && it.pos.x as i64 == x
             && it.pos.y as i64 == y
             && map.item_blocks(it.graphic, it.pos.z as i32, current_z)
             && !(ghost && map.item_is_door(it.graphic))
     }) {
         return Err(StepDeny::DynamicItem { graphic: it.graphic, item_z: it.pos.z as i32 });
+    }
+    if let Some(multis) = multis {
+        if let Some((graphic, item_z)) = multi_blocker_at(world, multis, map, x, y, current_z, ghost) {
+            return Err(StepDeny::DynamicItem { graphic, item_z });
+        }
     }
     Ok(z)
 }
@@ -94,8 +189,8 @@ pub fn explain_tile_walkable(
 /// `w` flag and the play-server's pacing use this so we never try to step into
 /// an impassable object (it would just DenyWalk → snap back). Thin wrapper over
 /// [`explain_tile_walkable`] so the two can never drift apart.
-pub fn tile_walkable(world: &World, map: &mut MapData, x: i64, y: i64, current_z: i32) -> bool {
-    explain_tile_walkable(world, map, x, y, current_z).is_ok()
+pub fn tile_walkable(world: &World, map: &mut MapData, multis: Option<&Multis>, x: i64, y: i64, current_z: i32) -> bool {
+    explain_tile_walkable(world, map, multis, x, y, current_z).is_ok()
 }
 
 /// Is tile (x, y) walkable for **click-to-walk route planning**, at
@@ -111,8 +206,15 @@ pub fn tile_walkable(world: &World, map: &mut MapData, x: i64, y: i64, current_z
 /// Manual walking (`can_walk`/`step_ok`) and the debug minimap overlay keep
 /// [`tile_walkable`]'s strict semantics: a closed door genuinely blocks a
 /// single committed step until something has actually opened it.
-pub fn tile_walkable_for_planning(world: &World, map: &mut MapData, x: i64, y: i64, current_z: i32) -> Option<i32> {
-    match explain_tile_walkable(world, map, x, y, current_z) {
+pub fn tile_walkable_for_planning(
+    world: &World,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    x: i64,
+    y: i64,
+    current_z: i32,
+) -> Option<i32> {
+    match explain_tile_walkable(world, map, multis, x, y, current_z) {
         Ok(z) => Some(z),
         Err(StepDeny::DynamicItem { .. }) => {
             // `explain_tile_walkable`'s `.find()` only reports the FIRST
@@ -121,20 +223,26 @@ pub fn tile_walkable_for_planning(world: &World, map: &mut MapData, x: i64, y: i
             // A door on the tile only makes it plannable-through if EVERY
             // impassable dynamic item there is a door — a crate someone
             // dropped in the same doorway must still deny, in either
-            // find-order (see the FIX 4 regression test).
+            // find-order (see the FIX 4 regression test). Multi components are
+            // never doors themselves (see `multi_blocker_at`'s doc), so any
+            // multi blocker on this tile always fails the "every blocker is a
+            // door" test — a wall/hull never becomes plannable-through.
             let ghost = player_is_ghost(world);
             let all_blockers_are_doors = world.items.values().all(|it| {
-                let blocks = it.container.is_none()
+                let blocks = !it.is_multi
+                    && it.container.is_none()
                     && it.pos.x as i64 == x
                     && it.pos.y as i64 == y
                     && map.item_blocks(it.graphic, it.pos.z as i32, current_z)
                     && !(ghost && map.item_is_door(it.graphic));
                 !blocks || map.item_is_door(it.graphic)
-            });
+            }) && multis.is_none_or(|m| multi_blocker_at(world, m, map, x, y, current_z, ghost).is_none());
             if all_blockers_are_doors {
                 // Every blocker on this tile is an openable door — recompute
-                // without dynamic items (the static base still applies).
-                map.walkable_z(x as u32, y as u32, current_z)
+                // without dynamic items (the static base — real statics AND
+                // any multi-contributed surface — still applies).
+                let extra = multis.map(|m| multi_statics_at(world, m, map, x, y)).unwrap_or_default();
+                map.walkable_z_explain(x as u32, y as u32, current_z, &extra).ok()
             } else {
                 None
             }
@@ -147,13 +255,16 @@ pub fn tile_walkable_for_planning(world: &World, map: &mut MapData, x: i64, y: i
 /// blocking a body at `current_z`, if any — used by the click-to-walk
 /// executor to know when it should open a door instead of giving up (see
 /// [`tile_walkable_for_planning`]'s doc for why this is safe to treat as
-/// "walkable, given we act on it").
+/// "walkable, given we act on it"). Multi components are never doors
+/// themselves (see [`multi_blocker_at`]'s doc), so this only ever needs to
+/// look at `World::items`.
 pub fn door_blocking_at(world: &World, map: &MapData, x: i64, y: i64, current_z: i32) -> Option<u32> {
     world
         .items
         .values()
         .find(|it| {
-            it.container.is_none()
+            !it.is_multi
+                && it.container.is_none()
                 && it.pos.x as i64 == x
                 && it.pos.y as i64 == y
                 && map.item_is_door(it.graphic)
@@ -200,26 +311,35 @@ fn dir_from_delta(dx: i64, dy: i64) -> Option<u8> {
 /// Can a body at (fx, fy, fz) step in direction `dir`? Faithful to ClassicUO
 /// `CanWalk`'s per-tile test: the destination must resolve a standing Z via
 /// [`calculate_new_z`] (the full CalculateNewZ — surfaces/bridges/headroom and
-/// the StepHeight climb limit), AND no impassable **dynamic world item** may sit
-/// on it. This is stricter (and ServUO-accurate) than the coarse direction-less
+/// the StepHeight climb limit), AND no impassable **dynamic world item** (nor,
+/// when `multis` is given, multi component — boat hull/house wall) may sit on
+/// it. This is stricter (and ServUO-accurate) than the coarse direction-less
 /// `walkable_z` hint we still emit per-tile for the renderer.
-fn step_ok(world: &World, map: &mut MapData, fx: i64, fy: i64, fz: i32, dir: u8) -> bool {
+fn step_ok(world: &World, map: &mut MapData, multis: Option<&Multis>, fx: i64, fy: i64, fz: i32, dir: u8) -> bool {
     let (dx, dy) = delta(dir);
     let (tx, ty) = (fx + dx, fy + dy);
     if tx < 0 || ty < 0 {
         return false;
     }
-    if calculate_new_z(map, tx, ty, fz, dir).is_none() {
+    if calculate_new_z(world, map, multis, tx, ty, fz, dir).is_none() {
         return false;
     }
     let ghost = player_is_ghost(world);
-    !world.items.values().any(|it| {
-        it.container.is_none()
+    let blocked_by_item = world.items.values().any(|it| {
+        !it.is_multi
+            && it.container.is_none()
             && it.pos.x as i64 == tx
             && it.pos.y as i64 == ty
             && map.item_blocks(it.graphic, it.pos.z as i32, fz)
             && !(ghost && map.item_is_door(it.graphic))
-    })
+    });
+    if blocked_by_item {
+        return false;
+    }
+    match multis {
+        Some(m) => multi_blocker_at(world, m, map, tx, ty, fz, ghost).is_none(),
+        None => true,
+    }
 }
 
 /// ClassicUO `Pathfinder.CanWalk`: resolve a requested step from (x, y, z).
@@ -231,6 +351,7 @@ fn step_ok(world: &World, map: &mut MapData, fx: i64, fy: i64, fz: i32, dir: u8)
 pub fn can_walk(
     world: &World,
     map: &mut MapData,
+    multis: Option<&Multis>,
     x: i64,
     y: i64,
     z: i32,
@@ -239,14 +360,14 @@ pub fn can_walk(
     let dir = dir & 7;
     let (dx, dy) = delta(dir);
     let (mut nx, mut ny, mut ndir) = (x + dx, y + dy, dir);
-    let mut passed = step_ok(world, map, x, y, z, dir);
+    let mut passed = step_ok(world, map, multis, x, y, z, dir);
 
     if dir % 2 == 1 {
         // Diagonal: no corner-cutting — both flanking cardinals must be open too.
         if passed {
             for off in [1i32, -1] {
                 let cd = (dir as i32 + off).rem_euclid(8) as u8;
-                if !step_ok(world, map, x, y, z, cd) {
+                if !step_ok(world, map, multis, x, y, z, cd) {
                     passed = false;
                     break;
                 }
@@ -256,7 +377,7 @@ pub fn can_walk(
         if !passed {
             for off in [1i32, -1] {
                 let cd = (dir as i32 + off).rem_euclid(8) as u8;
-                if step_ok(world, map, x, y, z, cd) {
+                if step_ok(world, map, multis, x, y, z, cd) {
                     let (cx, cy) = delta(cd);
                     ndir = cd;
                     nx = x + cx;
@@ -304,9 +425,62 @@ fn anim_interval_ms(interval: u8) -> u32 {
     ((interval as u32).max(1) * 100).clamp(100, 1000)
 }
 
+/// The `,"a":[frame,frame,...],"ai":N` JSON suffix for an animated static/multi
+/// component graphic (flames/fountains/water wheels — `TileFlag.Animation`,
+/// frame sequence from `animdata.mul`), or `""` when the graphic isn't
+/// animated / animdata gives fewer than 2 frames. Shared by the real-statics
+/// render loop and the multi-component one (FIX 6) so an animated component
+/// (mill wheel, pennant) cycles frames exactly like the identical graphic
+/// would as a real static, instead of freezing on frame 0. Pure given
+/// `map`/`animdata`, so this is unit-testable against real tiledata/animdata
+/// without a live `Session` (see the `#[ignore]`d test below).
+fn anim_suffix(map: &MapData, animdata: Option<&AnimData>, graphic: u16) -> String {
+    let mut anim = String::new();
+    if map.item_is_animated(graphic) {
+        if let Some(ad) = animdata {
+            let seq = ad.frame_sequence(graphic);
+            if seq.len() > 1 {
+                let ai = anim_interval_ms(ad.frames(graphic).1);
+                anim.push_str(",\"a\":[");
+                for (i, g) in seq.iter().enumerate() {
+                    if i > 0 {
+                        anim.push(',');
+                    }
+                    let _ = write!(anim, "{g}");
+                }
+                let _ = write!(anim, "],\"ai\":{ai}");
+            }
+        }
+    }
+    anim
+}
+
+/// Real statics at `(x, y)` PLUS, when `multis` is given, any in-view multi
+/// component there — as `(z, flags)` pairs, everything [`max_draw_z`] /
+/// [`calculate_near_z`]'s roof-culling needs. A placed multi's own roof (a
+/// house has real `FLAG_ROOF` components) must lift off exactly like a real
+/// static roof does when the player is inside it — the static map alone has
+/// no idea a multi is even there (see [`multi_components_at`]'s doc), so
+/// without this a boat/house roof would never cull and the interior would
+/// never show.
+fn roof_scan_tiles(world: &World, multis: Option<&Multis>, map: &mut MapData, x: i64, y: i64) -> Vec<(i32, u64)> {
+    let mut out: Vec<(i32, u64)> =
+        map.statics(x as u32, y as u32).into_iter().map(|s| (s.z as i32, s.flags)).collect();
+    if let Some(multis) = multis {
+        out.extend(
+            multi_components_at(world, multis, x, y)
+                .into_iter()
+                .map(|(graphic, z)| (z, map.item_flags(graphic))),
+        );
+    }
+    out
+}
+
 /// ClassicUO `UpdateMaxDrawZ`: the Z at/above which statics are hidden so a roof
 /// or upper floor over the player vanishes and the interior shows. 127 = draw all.
-fn max_draw_z(map: &mut MapData, px: i64, py: i64, pz: i32) -> i32 {
+/// `multis` widens both scans below to in-view multi components (a house roof
+/// is no different from a real static one) via [`roof_scan_tiles`].
+fn max_draw_z(world: &World, map: &mut MapData, multis: Option<&Multis>, px: i64, py: i64, pz: i32) -> i32 {
     if px < 0 || py < 0 {
         return 127;
     }
@@ -318,13 +492,13 @@ fn max_draw_z(map: &mut MapData, px: i64, py: i64, pz: i32) -> i32 {
     if pz16 <= map.land(px as u32, py as u32).z as i32 {
         return pz16;
     }
-    // Statics over the player's own tile: an upper floor / non-roof blocker.
-    for s in map.statics(px as u32, py as u32) {
-        let tz = s.z as i32;
+    // Statics (+ multi components) over the player's own tile: an upper floor
+    // / non-roof blocker.
+    for (tz, flags) in roof_scan_tiles(world, multis, map, px, py) {
         if tz > pz14 && tz < max_z {
-            let is_roof = s.flags & FLAG_ROOF != 0;
-            let is_surface = s.flags & FLAG_SURFACE != 0;
-            if (s.flags & 0x2_0004) == 0 && (!is_roof || is_surface) {
+            let is_roof = flags & FLAG_ROOF != 0;
+            let is_surface = flags & FLAG_SURFACE != 0;
+            if (flags & 0x2_0004) == 0 && (!is_roof || is_surface) {
                 max_z = tz;
             }
         }
@@ -333,13 +507,12 @@ fn max_draw_z(map: &mut MapData, px: i64, py: i64, pz: i32) -> i32 {
     // ceiling to the *near-Z* of its whole connected span (CalculateNearZ), so a
     // pitched roof lifts off cleanly instead of just its peak band.
     let mut roof_found = false;
-    for s in map.statics((px + 1) as u32, (py + 1) as u32) {
-        let tz = s.z as i32;
+    for (tz, flags) in roof_scan_tiles(world, multis, map, px + 1, py + 1) {
         if tz > pz14 && tz < max_z {
-            let is_roof = s.flags & FLAG_ROOF != 0;
-            if (s.flags & 0x204) == 0 && is_roof {
+            let is_roof = flags & FLAG_ROOF != 0;
+            if (flags & 0x204) == 0 && is_roof {
                 let mut visited = HashSet::new();
-                max_z = calculate_near_z(map, px + 1, py + 1, tz, tz, &mut visited);
+                max_z = calculate_near_z(world, multis, map, px + 1, py + 1, tz, tz, &mut visited);
                 roof_found = true;
             }
         }
@@ -355,7 +528,13 @@ fn max_draw_z(map: &mut MapData, px: i64, py: i64, pz: i32) -> i32 {
 
 /// Flood-fill the lowest connected roof Z within ±6 of `z`, starting at (x, y).
 /// Ported from ClassicUO `Map.CalculateNearZ`. `visited` prevents revisits.
+/// `multis` (see [`roof_scan_tiles`]) lets a house's own roof components join
+/// the flood, so a multi roof spanning several tiles lifts off as one
+/// connected span instead of stopping dead at the first non-static tile.
+#[allow(clippy::too_many_arguments)]
 fn calculate_near_z(
+    world: &World,
+    multis: Option<&Multis>,
     map: &mut MapData,
     x: i64,
     y: i64,
@@ -366,19 +545,17 @@ fn calculate_near_z(
     if x < 0 || y < 0 || !visited.insert((x, y)) {
         return default_z;
     }
-    let roof = map
-        .statics(x as u32, y as u32)
+    let roof = roof_scan_tiles(world, multis, map, x, y)
         .into_iter()
-        .find(|s| s.flags & FLAG_ROOF != 0 && (z - s.z as i32).abs() <= 6);
-    let Some(s) = roof else {
+        .find(|&(tz, flags)| flags & FLAG_ROOF != 0 && (z - tz).abs() <= 6);
+    let Some((tz, _)) = roof else {
         return default_z;
     };
-    let tz = s.z as i32;
     let mut near = default_z.min(tz);
-    near = calculate_near_z(map, x - 1, y, tz, near, visited);
-    near = calculate_near_z(map, x + 1, y, tz, near, visited);
-    near = calculate_near_z(map, x, y - 1, tz, near, visited);
-    near = calculate_near_z(map, x, y + 1, tz, near, visited);
+    near = calculate_near_z(world, multis, map, x - 1, y, tz, near, visited);
+    near = calculate_near_z(world, multis, map, x + 1, y, tz, near, visited);
+    near = calculate_near_z(world, multis, map, x, y - 1, tz, near, visited);
+    near = calculate_near_z(world, multis, map, x, y + 1, tz, near, visited);
     near
 }
 
@@ -458,9 +635,46 @@ fn calc_current_average_z(map: &mut MapData, x: i64, y: i64, direction: i32) -> 
     }
 }
 
-/// ClassicUO `Pathfinder.CreateItemList`: land + statics on a tile as `PathObj`s
-/// (mobiles are not modelled here — they rarely change the standing Z).
-fn create_item_list(map: &mut MapData, x: i64, y: i64) -> Vec<PathObj> {
+/// Turn a tiledata-flags-bearing object at world Z `z` with tiledata `height`
+/// into a [`PathObj`] the same way ClassicUO's `CreateItemList` treats a real
+/// static, or `None` if it contributes nothing to standing (`flags == 0` —
+/// neither impassable nor surface/bridge). Shared by [`create_item_list`]'s
+/// real-statics loop and its multi-component loop (a boat deck plank or house
+/// floor tile) so the two can never derive the impassable/surface/bridge bits
+/// differently.
+fn tiledata_path_obj(z: i32, height: i32, tile_flags: u64) -> Option<PathObj> {
+    let impassable = tile_flags & FLAG_IMPASSABLE != 0;
+    let is_surface = tile_flags & FLAG_SURFACE != 0;
+    let is_bridge = tile_flags & FLAG_BRIDGE != 0;
+    let mut flags = 0u32;
+    if impassable || is_surface {
+        flags = POF_IMPASS;
+    }
+    if !impassable {
+        if is_surface {
+            flags |= POF_SURFACE;
+        }
+        if is_bridge {
+            flags |= POF_BRIDGE;
+        }
+    }
+    if flags == 0 {
+        return None;
+    }
+    // Bridges (stairs/ramps) stand at half height; surfaces at full.
+    let avg = if is_bridge { height / 2 } else { height } + z;
+    Some(PathObj { flags, z, avg_z: avg, height, land_stretched: false })
+}
+
+/// ClassicUO `Pathfinder.CreateItemList`: land + statics **and, when `multis`
+/// is given, in-view multi components** (a boat deck/hull, house floor/wall) on
+/// a tile, as `PathObj`s (mobiles are not modelled here — they rarely change
+/// the standing Z). Multi components matter here for the SAME reason they
+/// matter for blocking (see `multi_blocker_at`'s doc): without them, stepping
+/// onto/around a boat whose deck sits at a Z the static map alone knows
+/// nothing about would resolve the wrong standing Z (or none at all) and every
+/// step would look like a deny.
+fn create_item_list(world: &World, map: &mut MapData, multis: Option<&Multis>, x: i64, y: i64) -> Vec<PathObj> {
     let mut list = Vec::new();
     if x < 0 || y < 0 {
         return list;
@@ -483,33 +697,16 @@ fn create_item_list(map: &mut MapData, x: i64, y: i64) -> Vec<PathObj> {
         });
     }
     for s in map.statics(x as u32, y as u32) {
-        let impassable = s.flags & FLAG_IMPASSABLE != 0;
-        let is_surface = s.flags & FLAG_SURFACE != 0;
-        let is_bridge = s.flags & FLAG_BRIDGE != 0;
-        let mut flags = 0u32;
-        if impassable || is_surface {
-            flags = POF_IMPASS;
+        if let Some(obj) = tiledata_path_obj(s.z as i32, s.height as i32, s.flags) {
+            list.push(obj);
         }
-        if !impassable {
-            if is_surface {
-                flags |= POF_SURFACE;
+    }
+    if let Some(multis) = multis {
+        for (graphic, cz) in multi_components_at(world, multis, x, y) {
+            let h = map.item_height(graphic) as i32;
+            if let Some(obj) = tiledata_path_obj(cz, h, map.item_flags(graphic)) {
+                list.push(obj);
             }
-            if is_bridge {
-                flags |= POF_BRIDGE;
-            }
-        }
-        if flags != 0 {
-            let obj_z = s.z as i32;
-            let h = s.height as i32;
-            // Bridges (stairs/ramps) stand at half height; surfaces at full.
-            let avg = if is_bridge { h / 2 } else { h } + obj_z;
-            list.push(PathObj {
-                flags,
-                z: obj_z,
-                avg_z: avg,
-                height: h,
-                land_stretched: false,
-            });
         }
     }
     list
@@ -546,7 +743,9 @@ fn bound_min_max_z(source: &[PathObj], current_z: i32, stretched_avg: i32) -> (i
 /// ClassicUO `Pathfinder.CalculateMinMaxZ`: bound the step using the tile we
 /// came *from* (opposite of `direction`). Returns `(min_z, max_z)`.
 fn calc_min_max_z(
+    world: &World,
     map: &mut MapData,
+    multis: Option<&Multis>,
     x: i64,
     y: i64,
     current_z: i32,
@@ -555,7 +754,7 @@ fn calc_min_max_z(
     let back = (direction ^ 4) & 7;
     let sx = x + OFF_X[back as usize];
     let sy = y + OFF_Y[back as usize];
-    let source = create_item_list(map, sx, sy);
+    let source = create_item_list(world, map, multis, sx, sy);
     // Only land can be "stretched" (sloped) — at most one land entry per tile,
     // so this is computed at most once, matching the original inline call site.
     let stretched_avg = if source.iter().any(|o| o.land_stretched) {
@@ -634,9 +833,13 @@ fn resolve_standing_z(mut list: Vec<PathObj>, min_z: i32, max_z: i32, current_z:
 
 /// ClassicUO `Pathfinder.CalculateNewZ`: the standing Z when stepping onto
 /// `(x, y)` from `current_z` heading `direction`. `None` when the tile has no
-/// valid surface to stand on (a real DenyWalk situation).
+/// valid surface to stand on (a real DenyWalk situation). `multis` (when given)
+/// lets a boat deck/house floor contribute a standing Z the static map alone
+/// wouldn't know about — see [`create_item_list`]'s doc.
 pub fn calculate_new_z(
+    world: &World,
     map: &mut MapData,
+    multis: Option<&Multis>,
     x: i64,
     y: i64,
     current_z: i32,
@@ -645,8 +848,8 @@ pub fn calculate_new_z(
     if x < 0 || y < 0 {
         return None;
     }
-    let (min_z, max_z) = calc_min_max_z(map, x, y, current_z, direction);
-    let list = create_item_list(map, x, y);
+    let (min_z, max_z) = calc_min_max_z(world, map, multis, x, y, current_z, direction);
+    let list = create_item_list(world, map, multis, x, y);
     resolve_standing_z(list, min_z, max_z, current_z)
 }
 
@@ -1128,6 +1331,7 @@ fn container_opens_json(world: &World) -> Value {
 
 /// Serialize the current world + a map window (walkability/Z + real terrain
 /// color) + entities + journal to the JSON the web renderer consumes.
+#[allow(clippy::too_many_arguments)]
 pub fn build_scene(
     s: &mut Session,
     map: Option<&mut MapData>,
@@ -1135,6 +1339,7 @@ pub fn build_scene(
     cliloc: Option<&Cliloc>,
     animdata: Option<&AnimData>,
     anim: Option<&Anim>,
+    multis: Option<&Multis>,
     journal: &[Value],
 ) -> String {
     // `Body.def` remap (ClassicUO ReplaceBody): redirect an exotic body to its real
@@ -1173,7 +1378,7 @@ pub fn build_scene(
     // (or furniture on a hidden upper floor) renders floating over the black void.
     let mut map = map;
     let max_z = match map {
-        Some(ref mut m) => max_draw_z(m, px, py, pz),
+        Some(ref mut m) => max_draw_z(&s.world, m, multis, px, py, pz),
         None => 127i32,
     };
 
@@ -1290,8 +1495,11 @@ pub fn build_scene(
         .values()
         .filter(|it| {
             // Same z-ceiling rule the statics loop applies: at/above max_z is
-            // hidden (roof lifted / cave ceiling), so no floating items.
-            it.container.is_none() && !item_nodraw(it.graphic) && (it.pos.z as i32) < max_z
+            // hidden (roof lifted / cave ceiling), so no floating items. A multi
+            // (`is_multi`) isn't a drawable item at all — its `graphic` is a
+            // multi id, not an ART graphic; it's expanded into the statics
+            // stream (see the tile loop below) instead of drawn directly here.
+            !it.is_multi && it.container.is_none() && !item_nodraw(it.graphic) && (it.pos.z as i32) < max_z
         })
         .map(|it| {
             let mut v = json!({
@@ -1339,7 +1547,10 @@ pub fn build_scene(
         if lights.len() >= LIGHT_CAP {
             break;
         }
-        if it.container.is_none() && item_is_light(it.graphic) {
+        // A multi's own entry carries a multi id in `graphic`, not an ART
+        // graphic — skip it here (any light-emitting components are handled
+        // per-component in the tile loop below, alongside static lights).
+        if !it.is_multi && it.container.is_none() && item_is_light(it.graphic) {
             lights.push(json!({ "x": it.pos.x, "y": it.pos.y, "z": it.pos.z, "r": 3 }));
         }
     }
@@ -1463,6 +1674,29 @@ pub fn build_scene(
         // Under cover? Then (like ClassicUO `_noDrawRoofs`) hide *every* roof tile
         // in view, not only those above max_z — so the whole roof lifts off.
         let under_cover = max_z < 127;
+        // Multis (boats/houses) within the window + a margin big enough for the
+        // furthest real component (26 tiles, verified against the real
+        // multi.mul — see `anima_assets::multis`'s module doc) so a multi whose
+        // ORIGIN sits just outside the window can still have components drawn
+        // over/walked over just inside it. Resolved once per scene build (not
+        // per tile) as `(x, y, z, multi_id)`; `Multis::components_at`'s own
+        // per-multi cache then makes each tile's lookup below O(components on
+        // that ONE tile), not O(components on the whole multi).
+        const MULTI_MARGIN: i64 = 32;
+        let near_multis: Vec<(i64, i64, i32, u32)> = if multis.is_some() {
+            s.world
+                .items
+                .values()
+                .filter(|it| {
+                    it.is_multi
+                        && (it.pos.x as i64 - px).abs() <= RADIUS + MULTI_MARGIN
+                        && (it.pos.y as i64 - py).abs() <= RADIUS + MULTI_MARGIN
+                })
+                .map(|it| (it.pos.x as i64, it.pos.y as i64, it.pos.z as i32, it.graphic as u32))
+                .collect()
+        } else {
+            Vec::new()
+        };
         // DEBUG: statics above the player on this tile (to diagnose roof hiding).
         if px >= 0 && py >= 0 {
             for s in map.statics(px as u32, py as u32) {
@@ -1482,7 +1716,7 @@ pub fn build_scene(
                     tiles.push_str("{\"w\":0,\"z\":0,\"g\":0,\"tx\":0,\"c\":[10,10,12],\"h\":0,\"sz\":0},");
                     continue;
                 }
-                let walk = tile_walkable(&s.world, map, x, y, pz);
+                let walk = tile_walkable(&s.world, map, multis, x, y, pz);
                 let land = map.land(x as u32, y as u32);
                 let c = art
                     .as_mut()
@@ -1533,7 +1767,7 @@ pub fn build_scene(
                 // tiles per build, so the full-flood cost the cheap path avoids stays away.
                 let sz = if (-1..=1).contains(&dx) && (-1..=1).contains(&dy) && (dx != 0 || dy != 0) {
                     dir_from_delta(dx, dy)
-                        .and_then(|zd| calculate_new_z(map, x, y, pz, zd))
+                        .and_then(|zd| calculate_new_z(&s.world, map, multis, x, y, pz, zd))
                         .unwrap_or(sz)
                 } else {
                     sz
@@ -1578,23 +1812,7 @@ pub fn build_scene(
                         // Bake the frame tile-id sequence (`a`) + per-frame interval in
                         // ms (`ai`) so the renderer just swaps textures. Only emit when
                         // the tile is animated AND animdata gives more than one frame.
-                        let mut anim = String::new();
-                        if map.item_is_animated(s.graphic) {
-                            if let Some(ad) = animdata {
-                                let seq = ad.frame_sequence(s.graphic);
-                                if seq.len() > 1 {
-                                    let ai = anim_interval_ms(ad.frames(s.graphic).1);
-                                    anim.push_str(",\"a\":[");
-                                    for (i, g) in seq.iter().enumerate() {
-                                        if i > 0 {
-                                            anim.push(',');
-                                        }
-                                        let _ = write!(anim, "{g}");
-                                    }
-                                    let _ = write!(anim, "],\"ai\":{ai}");
-                                }
-                            }
-                        }
+                        let anim = anim_suffix(map, animdata, s.graphic);
                         let _ = write!(
                             statics,
                             "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}}},",
@@ -1605,6 +1823,58 @@ pub fn build_scene(
                         // at night — same shape as dynamic-item lights (r:3).
                         if lights.len() < LIGHT_CAP && map.item_is_light(s.graphic) {
                             lights.push(json!({ "x": x, "y": y, "z": s.z, "r": 3 }));
+                        }
+                    }
+                    // Multi components (boat hull/deck, house walls) whose tile
+                    // falls on this world (x, y) — expanded into the SAME statics
+                    // stream so the renderer needs no new drawing path (a
+                    // component looks and sorts exactly like a static). Respects
+                    // the same roof/max_z cull and nodraw skip as real statics
+                    // (see the c9db52b commit that applied the rule to items too)
+                    // so standing inside a boat/house still shows its own deck
+                    // instead of the roof floating over nothing.
+                    if let Some(multis) = multis {
+                        for &(mx, my, mz, multi_id) in &near_multis {
+                            let (cdx, cdy) = (x - mx, y - my);
+                            if !(i16::MIN as i64..=i16::MAX as i64).contains(&cdx)
+                                || !(i16::MIN as i64..=i16::MAX as i64).contains(&cdy)
+                            {
+                                continue;
+                            }
+                            for c in multis.components_at(multi_id, cdx as i16, cdy as i16) {
+                                if !c.visible || map.item_is_nodraw(c.graphic) {
+                                    continue;
+                                }
+                                let cz = mz + c.dz as i32;
+                                let is_roof = map.item_flags(c.graphic) & FLAG_ROOF != 0;
+                                if cz >= max_z || (under_cover && is_roof) {
+                                    continue;
+                                }
+                                let mut spz = cz;
+                                if map.item_flags(c.graphic) & 0x1 != 0 {
+                                    spz -= 1; // Background
+                                }
+                                if map.item_height(c.graphic) != 0 {
+                                    spz += 1; // has height (wall/solid)
+                                }
+                                let foliage =
+                                    if map.item_flags(c.graphic) & FLAG_FOLIAGE != 0 { ",\"f\":1" } else { "" };
+                                // Same animdata frame-sequence lookup the real-statics
+                                // loop above does (via the shared `anim_suffix`) — an
+                                // animated component (mill wheel, pennant) must cycle
+                                // frames exactly like the identical graphic would as a
+                                // real static, not freeze on frame 0.
+                                let anim = anim_suffix(map, animdata, c.graphic);
+                                let _ = write!(
+                                    statics,
+                                    "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}}},",
+                                    x, y, cz, c.graphic, spz, foliage, anim
+                                );
+                                n_statics += 1;
+                                if lights.len() < LIGHT_CAP && map.item_is_light(c.graphic) {
+                                    lights.push(json!({ "x": x, "y": y, "z": cz, "r": 3 }));
+                                }
+                            }
                         }
                     }
                 }
@@ -1950,6 +2220,7 @@ mod tests {
     // (`stack_fields`/`corpse_fields`) pulled out of its item loop so the
     // corpse/stackable shaping is unit-testable without a live Session.
 
+    use anima_assets::MultiComponent;
     use anima_core::types::{Position, Serial};
     use anima_core::world::{Book, PopupEntry, PopupMenu, PromptState, TradeState};
 
@@ -2313,6 +2584,7 @@ mod tests {
     fn britain_bank_stair_z_sequence_matches_captured_climb() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let mut map = MapData::open(&dir).expect("open map data");
+        let world = anima_core::World::new();
         const X: i64 = 1495;
         const NORTH: u8 = 0;
         const SOUTH: u8 = 4;
@@ -2321,7 +2593,7 @@ mod tests {
         let mut z = 10i32;
         let mut seq = vec![z];
         for y in [1628i64, 1627, 1626, 1625] {
-            z = calculate_new_z(&mut map, X, y, z, NORTH).expect("stair climbs north");
+            z = calculate_new_z(&world, &mut map, None, X, y, z, NORTH).expect("stair climbs north");
             seq.push(z);
         }
         assert_eq!(seq, vec![10, 10, 12, 17, 20], "climbing-north Z sequence (trivial 10->10 step included)");
@@ -2330,7 +2602,7 @@ mod tests {
         let mut z = 20i32;
         let mut seq = vec![z];
         for y in [1626i64, 1627, 1628, 1629] {
-            z = calculate_new_z(&mut map, X, y, z, SOUTH).expect("stair descends south");
+            z = calculate_new_z(&world, &mut map, None, X, y, z, SOUTH).expect("stair descends south");
             seq.push(z);
         }
         assert_eq!(seq, vec![20, 17, 12, 10, 10], "descending-south Z sequence (trivial 10->10 step included)");
@@ -2366,19 +2638,20 @@ mod tests {
                 hue: 0,
                 name: String::new(),
                 direction: 0,
+                is_multi: false,
             },
         );
 
         // Strict (manual-walk / minimap) check: the closed door really blocks.
-        match explain_tile_walkable(&world, &mut map, 1611, 1591, 5) {
+        match explain_tile_walkable(&world, &mut map, None, 1611, 1591, 5) {
             Err(StepDeny::DynamicItem { graphic, .. }) => assert_eq!(graphic, 0x06A5),
             other => panic!("expected a closed-door deny, got {other:?}"),
         }
-        assert!(!tile_walkable(&world, &mut map, 1611, 1591, 5));
+        assert!(!tile_walkable(&world, &mut map, None, 1611, 1591, 5));
 
         // Planning check: the same closed door does not block.
         assert!(
-            tile_walkable_for_planning(&world, &mut map, 1611, 1591, 5).is_some(),
+            tile_walkable_for_planning(&world, &mut map, None, 1611, 1591, 5).is_some(),
             "click-to-walk planning must route through a closed (openable) door"
         );
 
@@ -2425,6 +2698,7 @@ mod tests {
                     hue: 0,
                     name: String::new(),
                     direction: 0,
+                    is_multi: false,
                 },
             );
             world.items.insert(
@@ -2439,14 +2713,198 @@ mod tests {
                     hue: 0,
                     name: String::new(),
                     direction: 0,
+                    is_multi: false,
                 },
             );
             assert!(
-                tile_walkable_for_planning(&world, &mut map, 1611, 1591, 5).is_none(),
+                tile_walkable_for_planning(&world, &mut map, None, 1611, 1591, 5).is_none(),
                 "a crate blocking the same tile as an openable door must still deny planning \
                  (door_serial={door_serial}, crate_serial={crate_serial})"
             );
         }
+    }
+
+    // ---- FIX 1/2/6/7: multi-component walkability + rendering -----------------
+
+    fn synth_item(serial: u32, graphic: u16, x: u16, y: u16, z: i8, is_multi: bool) -> anima_core::world::Item {
+        anima_core::world::Item {
+            serial,
+            graphic,
+            amount: 1,
+            pos: anima_core::types::Position { x, y, z },
+            container: None,
+            layer: 0,
+            hue: 0,
+            name: String::new(),
+            direction: 0,
+            is_multi,
+        }
+    }
+
+    /// FIX 7 (pure, no map/file data needed): [`multi_components_at`] must
+    /// force-include an invisible index-0 (`is_origin`) component — matching
+    /// ServUO's own collision grid (`Server/MultiData.cs::MultiComponentList`:
+    /// `if (i == 0 || allTiles[i].m_Flags != 0)`) — while still dropping any
+    /// OTHER invisible component, and never returning a component from a
+    /// different tile or a different (non-multi) `World::items` entry.
+    #[test]
+    fn multi_components_at_includes_invisible_origin_but_not_invisible_others() {
+        let mut world = anima_core::World::new();
+        world.items.insert(1, synth_item(1, 42, 1000, 1000, -15, true)); // graphic 42 = multi id
+        world.items.insert(2, synth_item(2, 0x0BB8, 1000, 1000, 0, false)); // an ordinary item, ignored
+
+        let multis = Multis::from_components(std::collections::HashMap::from([(
+            42,
+            vec![
+                MultiComponent { graphic: 0x1000, dx: 0, dy: 0, dz: 0, visible: false, is_origin: true },
+                MultiComponent { graphic: 0x1001, dx: 0, dy: 0, dz: 4, visible: false, is_origin: false },
+                MultiComponent { graphic: 0x1002, dx: 0, dy: 0, dz: 8, visible: true, is_origin: false },
+                MultiComponent { graphic: 0x2000, dx: 1, dy: 0, dz: 0, visible: true, is_origin: false },
+            ],
+        )]));
+
+        let here = multi_components_at(&world, &multis, 1000, 1000);
+        assert_eq!(here.len(), 2, "invisible origin + visible component only: {here:?}");
+        assert!(here.contains(&(0x1000, -15)), "invisible index-0 origin must still count for walkability");
+        assert!(here.contains(&(0x1002, -7)), "visible component must count");
+        assert!(!here.iter().any(|&(g, _)| g == 0x1001), "invisible NON-origin component must be excluded");
+
+        assert_eq!(multi_components_at(&world, &multis, 1001, 1000), vec![(0x2000, -15)]);
+        assert!(
+            multi_components_at(&world, &multis, 50_000, 50_000).is_empty(),
+            "way outside any multi's footprint must return nothing"
+        );
+    }
+
+    /// FIX 1 + FIX 7, end-to-end against REAL SmallBoat multi data (id 0,
+    /// ServUO `SmallBoat.NorthID`) and a REAL clear-open-water spot: probed
+    /// directly (see the `anima-assets` `probe_water`-style scan this test's
+    /// coordinates came from) — every tile in a 7×7 box around (1459,1767) is
+    /// impassable deep water with zero real statics, so any walkability there
+    /// comes ONLY from the synthetic boat placed by this test, not dock
+    /// clutter. Component offsets/flags below were read directly off this
+    /// boat id's real component list (`Multis::components(0)`):
+    /// `(dx=0,dy=-2)` is graphic `0x3EAC` (Surface, visible, height 3 — a deck
+    /// plank); `(dx=-2,dy=-1)` is graphic `0x3EB1` (Impassable, visible — a
+    /// hull side piece). Both at `dz=0`: every SmallBoat component sits
+    /// coplanar with the multi's own Z (verified: every one of the 38
+    /// components for every facing has `dz == 0`).
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn fix1_smallboat_deck_walkable_hull_blocks_using_real_boat_data() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let mut map = MapData::open(&dir).expect("open map data");
+        let multis = Multis::open(&dir).expect("open multi data");
+
+        // Confirm the fixture assumption: a clear 7x7 open-water box, no statics.
+        for oy in -3i64..=3 {
+            for ox in -3i64..=3 {
+                let (tx, ty) = ((1459 + ox) as u32, (1767 + oy) as u32);
+                assert!(map.land(tx, ty).impassable(), "({tx},{ty}) should be deep water");
+                assert!(map.statics(tx, ty).is_empty(), "({tx},{ty}) should have no real statics");
+            }
+        }
+
+        // A SmallBoat (multi id 0) "placed" at (1459,1767); this shard snaps a
+        // placed boat's Z to -15 (see FIX 3's live verification) — the exact
+        // value doesn't matter to this check (only that the deck resolves
+        // within one climb-step of it), so it's used as-observed.
+        let (boat_x, boat_y, boat_z): (i64, i64, i32) = (1459, 1767, -15);
+        let mut world = anima_core::World::new();
+        world.items.insert(1, synth_item(1, 0, boat_x as u16, boat_y as u16, boat_z as i8, true));
+
+        // Deck tile: must be walkable, `tile_walkable` (the renderer's `w`
+        // flag) and `tile_walkable_for_planning` (the click-to-walk A*
+        // terrain adapter) must agree, and the standing Z must be the deck's
+        // own top (boat_z + height 3).
+        let (deck_x, deck_y) = (boat_x, boat_y - 2);
+        assert_eq!(
+            explain_tile_walkable(&world, &mut map, Some(&multis), deck_x, deck_y, boat_z),
+            Ok(boat_z + 3),
+            "the deck component must contribute a standing surface over open water"
+        );
+        assert!(tile_walkable(&world, &mut map, Some(&multis), deck_x, deck_y, boat_z));
+        assert!(tile_walkable_for_planning(&world, &mut map, Some(&multis), deck_x, deck_y, boat_z).is_some());
+        // Without the boat, the SAME tile is unwalkable open water — proves
+        // the deck (not some coincidental real static) is what's carrying it.
+        assert!(!tile_walkable(&world, &mut map, None, deck_x, deck_y, boat_z));
+
+        // Hull tile: must deny. HONEST finding (this is exactly the FIX 3
+        // re-verification the review asked for): the hull piece (0x3EB1) is
+        // Impassable-only, contributing NO standing candidate of its own
+        // (`score_walkable_z`'s candidate rule is `surface() && !impassable()`)
+        // — and this exact (dx,dy) has no OTHER (deck) component sharing it.
+        // So the deny reason is `NoSurface` (nothing to stand on at all), NOT
+        // `Blocked` (an overlapping impassable object stepping on an
+        // otherwise-valid candidate) — `multi_blocker_at`'s DynamicItem path
+        // never even fires here, because `walkable_z_explain` already denies
+        // first. Either way the OBSERVABLE result is the same: the hull tile
+        // is unwalkable, matching what a real player sees at the ship's rail.
+        let (hull_x, hull_y) = (boat_x - 2, boat_y - 1);
+        match explain_tile_walkable(&world, &mut map, Some(&multis), hull_x, hull_y, boat_z) {
+            Err(StepDeny::Terrain(ZReason::NoSurface)) => {}
+            other => panic!("expected a NoSurface deny at the hull tile, got {other:?}"),
+        }
+        assert!(!tile_walkable(&world, &mut map, Some(&multis), hull_x, hull_y, boat_z));
+    }
+
+    /// FIX 2: a multi's own roof component must lift `max_draw_z`'s ceiling
+    /// exactly like a real static roof would — the static map alone has no
+    /// idea a multi is even there, so without this a boat/house roof would
+    /// never cull and the interior would never show. Uses a real ROOF-flagged
+    /// graphic (0x0586, `FLAG_ROOF` set, non-surface, height 3 — probed
+    /// directly off tiledata.mul) so the tiledata half of the check is real,
+    /// not synthetic.
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn max_draw_z_culls_a_multi_roof_component_above_the_player() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let mut map = MapData::open(&dir).expect("open map data");
+        assert_ne!(map.item_flags(0x0586) & FLAG_ROOF, 0, "0x0586 should be a real roof graphic");
+
+        // New Haven spawn: outdoors, open sky — baseline with no multi at all.
+        let (px, py, pz) = (3503i64, 2574, 0i32);
+        let baseline = max_draw_z(&anima_core::World::new(), &mut map, None, px, py, pz);
+        assert_eq!(baseline, 127, "open field with no roof over the player: draw everything");
+
+        // A synthetic multi whose one component (the real roof graphic) sits
+        // directly over the tile the player faces into (px+1, py+1) — the
+        // same tile real statics use for `max_draw_z`'s roof-flood check.
+        let mut world = anima_core::World::new();
+        world.items.insert(
+            1,
+            synth_item(1, 999, (px + 1) as u16, (py + 1) as u16, (pz + 15) as i8, true),
+        );
+        let multis = Multis::from_components(std::collections::HashMap::from([(
+            999,
+            vec![MultiComponent { graphic: 0x0586, dx: 0, dy: 0, dz: 0, visible: true, is_origin: true }],
+        )]));
+
+        let culled = max_draw_z(&world, &mut map, Some(&multis), px, py, pz);
+        assert!(culled < 127, "the multi's roof component must cull max_draw_z, got {culled}");
+    }
+
+    /// FIX 6 (pure given real tiledata/animdata, no `Session` needed): an
+    /// animated multi component (mill wheel, pennant) must get the SAME
+    /// frame-sequence treatment [`anim_suffix`] gives a real static — not
+    /// freeze on frame 0. Uses a real animated graphic (0x03AE, 3 frames,
+    /// probed directly off animdata.mul).
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn anim_suffix_emits_frame_sequence_for_a_real_animated_graphic() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let map = MapData::open(&dir).expect("open map data");
+        let animdata = AnimData::open(&dir).expect("open animdata");
+        assert!(map.item_is_animated(0x03AE), "0x03AE should be a real animated graphic");
+
+        let suffix = anim_suffix(&map, Some(&animdata), 0x03AE);
+        assert!(suffix.contains("\"a\":[942,943,944]"), "suffix={suffix}");
+        assert!(suffix.contains("\"ai\":"), "suffix={suffix}");
+
+        // A non-animated graphic (an ordinary wall) emits nothing.
+        assert_eq!(anim_suffix(&map, Some(&animdata), 0x0001), "");
+        // No animdata table at all → nothing, even for an animated graphic.
+        assert_eq!(anim_suffix(&map, None, 0x03AE), "");
     }
 }
 

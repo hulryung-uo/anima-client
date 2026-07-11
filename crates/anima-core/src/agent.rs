@@ -69,6 +69,14 @@ pub struct MobileView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemView {
     pub serial: u32,
+    /// **Not always an ART graphic.** When [`Self::is_multi`] is set, this is
+    /// a *multi id* (an index into `multi.idx`/`multi.mul`, resolved via
+    /// `anima_assets::Multis`) — an entirely different id space from ordinary
+    /// item ART graphics, and small multi ids collide with real, common ART
+    /// ids (e.g. multi id `0x0002` is also a real item graphic). A brain that
+    /// filters/matches on `graphic` without checking `is_multi` first will
+    /// silently corrupt on a multi in view — always check `is_multi` before
+    /// treating this as an ART id.
     pub graphic: u16,
     pub amount: u16,
     pub pos: Position,
@@ -76,6 +84,13 @@ pub struct ItemView {
     /// Worn layer (0 if not equipped). 0x15 (21) = backpack.
     pub layer: u8,
     pub distance: u32,
+    /// Is this a **multi** (a placed boat or house) rather than a normal,
+    /// pickable ground item? See [`crate::world::Item::is_multi`]'s doc — this
+    /// mirrors it straight through. `anima-net::scene` expands a multi's
+    /// components into the rendered/walkable world; this `ItemView` is its
+    /// own single ground-level entry (one per placed multi, not per
+    /// component), carrying the multi's own position and id.
+    pub is_multi: bool,
 }
 
 /// A perception snapshot for the brain. Nearby lists are sorted by distance.
@@ -404,6 +419,7 @@ impl World {
                 container: it.container,
                 layer: it.layer,
                 distance: chebyshev(player.pos, it.pos),
+                is_multi: it.is_multi,
             })
             .collect();
         items.sort_by_key(|it| it.distance);

@@ -193,11 +193,22 @@ fn put_in_container(world: &mut World, rec: (u32, u16, u16, u16, u16, u32, u16))
 /// 0xF3 WorldItemHS — a ground item, the modern form ServUO sends to 7.0.9+
 /// clients (supersedes 0x1A). `[id][unk:u16][type:u8][serial:u32][graphic:u16]
 /// [inc:u8][amount:u16][amount2:u16][x:u16][y:u16][z:i8][direction:u8][hue:u16][flags:u8]`.
-/// `type == 2` is a multi (house/boat), not a normal item — skipped. The
-/// `direction` byte only matters for a corpse (`graphic == 0x2006`), which uses it
-/// to orient the death-pose sprite (ClassicUO `UpdateItemSA`/`Item.Direction`;
-/// same wire byte it also reuses as `LightID` for non-corpse items, which we don't
-/// model).
+/// `type == 2` is a **multi** (a placed boat or house), not a pickable item:
+/// ClassicUO `UpdateGameObject` still stores it as an `Item` (`item.IsMulti =
+/// true`). Unlike the legacy 0x1A path (where a multi is self-inferred from a
+/// `graphic >= 0x4000` bank bit the *client* must notice and strip), 0xF3 tells
+/// the client the type explicitly via this `type` byte, and ServUO's own
+/// packet writer (`Server/Network/Packets.cs` `WorldItemHS`) masks `itemID &=
+/// 0x3FFF` BEFORE ever writing a `BaseMulti`'s graphic — so the wire `graphic`
+/// here NEVER carries the bank bit; there is nothing to strip. `graphic` is a
+/// *multi id* (an index into `multi.idx`/`multi.mul`), not an ART graphic. We
+/// mirror ClassicUO: store it via [`World::item_mut`] like any other item (so
+/// 0x1D delete/prune/facet-purge all keep working unmodified) with
+/// [`crate::world::Item::is_multi`] set; `anima-net::scene` expands its
+/// components into the rendered/walkable world. The `direction` byte only
+/// matters for a corpse (`graphic == 0x2006`), which uses it to orient the
+/// death-pose sprite (ClassicUO `UpdateItemSA`/`Item.Direction`; same wire byte
+/// it also reuses as `LightID` for non-corpse items, which we don't model).
 fn world_item_hs(world: &mut World, frame: &[u8]) -> PResult<()> {
     if frame.len() < 24 {
         return Ok(());
@@ -215,11 +226,18 @@ fn world_item_hs(world: &mut World, frame: &[u8]) -> PResult<()> {
     let z = r.i8()?;
     let direction = r.u8()?;
     let hue = r.u16()?;
-    if data_type == 0x02 {
-        return Ok(()); // multi — not a pickable item
+    let is_multi = data_type == 0x02;
+    let mut graphic = graphic.wrapping_add(graphic_inc as u16);
+    if is_multi {
+        // Defensive only: real ServUO traffic never sets the bank bit here at
+        // all (see this fn's doc) — this mask is a no-op on the wire, kept so
+        // the invariant "a multi's `graphic` field is always a plain, unmasked
+        // multi id" matches the legacy 0x1A path, which really does need to
+        // strip a live bank bit.
+        graphic &= 0x3FFF;
     }
     let it = world.item_mut(serial);
-    it.graphic = graphic.wrapping_add(graphic_inc as u16);
+    it.graphic = graphic;
     it.pos.x = x;
     it.pos.y = y;
     it.pos.z = z;
@@ -228,6 +246,7 @@ fn world_item_hs(world: &mut World, frame: &[u8]) -> PResult<()> {
     it.container = None;
     it.layer = 0;
     it.direction = direction & 0x07;
+    it.is_multi = is_multi;
     Ok(())
 }
 
@@ -452,7 +471,9 @@ fn mobile_incoming(world: &mut World, frame: &[u8]) -> PResult<()> {
     Ok(())
 }
 
-/// 0x1A WorldItem — an item on the ground (legacy layout, with flag bits).
+/// 0x1A WorldItem — an item on the ground (legacy layout, with flag bits). A
+/// wire graphic `>= 0x4000` marks a **multi** (placed boat/house) instead of a
+/// normal item — see [`Item::is_multi`](crate::world::Item::is_multi)'s doc.
 fn world_item(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[3..]); // variable
     let mut serial = r.u32()?;
@@ -460,11 +481,29 @@ fn world_item(world: &mut World, frame: &[u8]) -> PResult<()> {
     serial &= 0x7FFF_FFFF;
 
     let mut graphic = r.u16()?;
+    let mut graphic_inc = 0u16;
     if graphic & 0x8000 != 0 {
         graphic &= 0x7FFF;
-        graphic = graphic.wrapping_add(r.u8()? as u16); // graphic_inc
+        graphic_inc = r.u8()? as u16;
     }
-    graphic &= 0x3FFF; // strip the 0x4000 multi flag
+    // ClassicUO `UpdateItem` classifies `type = graphic >= 0x4000 ? 2 : 0`
+    // (multi vs normal item) from the graphic AS READ off the wire —
+    // `graphicInc` is stashed in a separate local and only added to `graphic`
+    // later, inside `UpdateGameObject`, well AFTER this classification already
+    // ran. Classifying on the post-increment value would misjudge an item
+    // whose increment happens to cross the 0x4000 boundary (see the
+    // `world_item_legacy_multi_classified_before_graphic_inc_added` regression
+    // test) — so this must run BEFORE `graphic_inc` is folded in.
+    let is_multi = graphic >= 0x4000;
+    graphic = graphic.wrapping_add(graphic_inc);
+    if is_multi {
+        // ClassicUO masks a multi's graphic to `& 0x3FFF` (the wire value
+        // carries the bank bit; strip it to get the plain multi id) — a
+        // NON-multi item's graphic is stored unmasked, whatever
+        // `graphic + graphic_inc` comes to (`UpdateGameObject`'s `item.Graphic
+        // = graphic;` in its non-multi branch never masks).
+        graphic &= 0x3FFF;
+    }
 
     let amount = if has_amount { r.u16()? } else { 0 };
 
@@ -498,6 +537,7 @@ fn world_item(world: &mut World, frame: &[u8]) -> PResult<()> {
     it.amount = if amount == 0 { 1 } else { amount };
     it.container = None; // on the ground
     it.direction = direction & 0x07;
+    it.is_multi = is_multi;
     Ok(())
 }
 
@@ -2017,6 +2057,80 @@ mod tests {
         assert_eq!(it.graphic, 0x0FB1);
         assert_eq!((it.pos.x, it.pos.y), (2566, 493));
         assert_eq!(it.container, None);
+    }
+
+    #[test]
+    fn world_item_hs_multi_populates_is_multi_and_strips_bank_bit() {
+        let mut w = World::new();
+        // 0xF3 type==2: a SmallBoat placed at (1492, 1760, 0) — multi id 2
+        // (ServUO `SmallBoat.SouthID`). Real wire shape (verified against
+        // ServUO `Server/Network/Packets.cs` `WorldItemHS`): the server masks
+        // `itemID &= 0x3FFF` BEFORE writing a `BaseMulti`'s graphic, so this
+        // NEVER carries the 0x4000 bank bit on the wire — `type == 2` alone is
+        // what tells the client it's a multi. `inc` is always written as a
+        // literal 0 for both branches (ServUO never increments here).
+        let mut p = PacketWriter::new();
+        p.u8(0xF3).u16(0x0001).u8(0x02); // id, unk, data_type=multi
+        p.u32(0x4001_2345).u16(0x0002).u8(0); // serial, graphic (plain multi id 2, no bank bit), inc
+        p.u16(1).u16(1); // amount, amount2
+        p.u16(1492).u16(1760).u8(0); // x, y, z
+        p.u8(2).u16(0).u8(0); // direction (south), hue, flags
+        apply_packet(&mut w, &p.into_vec());
+        let it = w.items.get(&0x4001_2345).expect("multi added to World.items");
+        assert!(it.is_multi, "type==2 must set is_multi");
+        assert_eq!(it.graphic, 0x0002, "graphic is the plain multi id (never had a bank bit to strip)");
+        assert_eq!((it.pos.x, it.pos.y, it.pos.z), (1492, 1760, 0));
+
+        // Despawns (0x1D) exactly like any other item/mobile.
+        let mut d = PacketWriter::new();
+        d.u8(0x1D).u32(0x4001_2345);
+        assert!(apply_packet(&mut w, &d.into_vec()));
+        assert!(!w.items.contains_key(&0x4001_2345), "0x1D must remove the multi like a normal item");
+    }
+
+    #[test]
+    fn world_item_legacy_multi_detected_by_graphic_bank_bit() {
+        let mut w = World::new();
+        // 0x1A: a multi's wire graphic is `>= 0x4000` (ClassicUO `UpdateItem`'s
+        // `type = graphic >= 0x4000 ? 2 : 0`), here 0x4064 = bank bit | house
+        // multi id 0x64 (StonePlasterHouse).
+        let mut p = PacketWriter::new();
+        p.u8(0x1A).u16(0); // id, len (unused — frame is read from offset 3)
+        p.u32(0x4000_9999); // serial (no has_amount flag)
+        p.u16(0x4064); // graphic: bank bit | multi id 0x64
+        p.u16(1000).u16(1000); // x, y (no direction/hue flags)
+        p.u8(0); // z
+        apply_packet(&mut w, &p.into_vec());
+        let it = w.items.get(&0x4000_9999).expect("legacy multi added");
+        assert!(it.is_multi, "graphic >= 0x4000 must set is_multi on 0x1A too");
+        assert_eq!(it.graphic, 0x0064);
+    }
+
+    #[test]
+    fn world_item_legacy_multi_classified_before_graphic_inc_added() {
+        let mut w = World::new();
+        // 0x1A: ClassicUO's `UpdateItem` classifies `type = graphic >= 0x4000 ?
+        // 2 : 0` from the graphic AS READ off the wire (after stripping the
+        // 0x8000 extension bit, if set) — `graphicInc` is stored separately
+        // and only added to `graphic` later, inside `UpdateGameObject`, well
+        // after this classification already ran. Pick a wire graphic (0x3FFE,
+        // extended) + inc (4) whose SUM crosses 0x4000 (0x4002) but whose
+        // PRE-inc value (0x3FFE) does not: classifying post-inc (the bug)
+        // would misread this as multi id 2; classifying pre-inc (correct)
+        // leaves it an ordinary item — which ClassicUO then stores with its
+        // full, unmasked incremented graphic (a non-multi item's graphic is
+        // never masked).
+        let mut p = PacketWriter::new();
+        p.u8(0x1A).u16(0); // id, len (unused — frame is read from offset 3)
+        p.u32(0x4000_AAAA); // serial (no has_amount flag)
+        p.u16(0x8000 | 0x3FFE); // graphic: 0x8000 ext bit | pre-inc value 0x3FFE
+        p.u8(4); // graphic_inc
+        p.u16(1000).u16(1000); // x, y (no direction/hue/flags bits set)
+        p.u8(0); // z
+        apply_packet(&mut w, &p.into_vec());
+        let it = w.items.get(&0x4000_AAAA).expect("item added");
+        assert!(!it.is_multi, "pre-inc graphic 0x3FFE is below 0x4000 — must NOT classify as a multi");
+        assert_eq!(it.graphic, 0x4002, "non-multi keeps the full incremented graphic unmasked, like ClassicUO");
     }
 
     #[test]

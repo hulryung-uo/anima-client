@@ -69,6 +69,15 @@ pub struct Item {
     /// sprite (ClassicUO stores this same wire byte as both `Item.Direction` and,
     /// reused, `Item.LightID`/`Layer`; we only need the facing).
     pub direction: u8,
+    /// Is this a **multi** (a placed boat or house), not a normal pickable item?
+    /// Set when `type == 2` on 0x1A/0xF3 (ClassicUO `UpdateGameObject`'s
+    /// `item.IsMulti`); `graphic` is then a *multi id* (an index into
+    /// `multi.idx`/`multi.mul`, resolved via `anima_assets::Multis`), not an ART
+    /// graphic. Reuses the ordinary `Item`/`World::items` machinery (get-or-create,
+    /// 0x1D delete/prune, facet purge) instead of a separate map — a multi is a
+    /// world *entity* like any other, just one the renderer expands into many
+    /// static-like components instead of drawing directly.
+    pub is_multi: bool,
 }
 
 /// Self-only fields that don't live on the player's [`Mobile`].

@@ -392,14 +392,31 @@ impl MapData {
     /// Z, for `[pathdbg]` diagnostics (`ANIMA_DEBUG` in play_server.rs) —
     /// reuses [`score_walkable_z`] so the two can never drift apart. See
     /// [`ZReason`] for what each rejection means.
-    pub fn walkable_z_explain(&mut self, x: u32, y: u32, current_z: i32) -> Result<i32, ZReason> {
+    ///
+    /// `extra` lets a caller fold in tiles this `MapData` doesn't itself know
+    /// about — namely a placed multi's components (a boat deck/hull, house
+    /// floor/wall), which live in `World::items` + `anima_assets::Multis`, not
+    /// in the static map file. Passed straight through to [`score_walkable_z`]
+    /// alongside the real statics so a multi component gets EXACTLY the same
+    /// impassable/surface/bridge treatment a real static would (standing
+    /// surface if `Surface`/`Bridge`, blocker if `Impassable` — see
+    /// `anima_net::scene`'s multi-component fold, which is the only real
+    /// caller that ever passes a non-empty slice here).
+    pub fn walkable_z_explain(
+        &mut self,
+        x: u32,
+        y: u32,
+        current_z: i32,
+        extra: &[StaticTile],
+    ) -> Result<i32, ZReason> {
         let land = self.land(x, y);
-        let statics = self.statics(x, y);
+        let mut statics = self.statics(x, y);
+        statics.extend_from_slice(extra);
         score_walkable_z(land, &statics, current_z)
     }
 
     pub fn walkable_z(&mut self, x: u32, y: u32, current_z: i32) -> Option<i32> {
-        self.walkable_z_explain(x, y, current_z).ok()
+        self.walkable_z_explain(x, y, current_z, &[]).ok()
     }
 }
 
@@ -487,5 +504,64 @@ mod tests {
             score_walkable_z(land, &statics, 0),
             Err(ZReason::Blocked { candidate_z: 0, blocking_graphic: 0x0999 })
         );
+    }
+
+    // FIX 1 (multi-component walkability): `walkable_z_explain`'s `extra`
+    // parameter feeds straight into this SAME `score_walkable_z` scoring —
+    // these prove that mechanism directly (no `MapData`/file I/O needed): a
+    // multi component (boat deck/hull), reshaped into a `StaticTile` by
+    // `anima_net::scene::multi_statics_at`, gets EXACTLY the standing-surface/
+    // blocking treatment a real static would.
+
+    #[test]
+    fn score_walkable_extra_static_contributes_a_standing_surface_over_impassable_land() {
+        // Deep water: impassable land, no real statics at all — nothing to
+        // stand on without something extra (this is the exact shape of a
+        // SmallBoat deck tile over open water: FIX 1's root-cause bug).
+        let land = LandTile { graphic: 0x00A8, z: -5, flags: flags::IMPASSABLE, tex_id: 0 };
+        // A boat "deck" component: Surface, NOT impassable, standing height 4
+        // above its own z (-15..-11).
+        let deck = StaticTile { graphic: 0x0032, z: -15, height: 4, flags: flags::SURFACE };
+        assert_eq!(
+            score_walkable_z(land, &[deck], -15),
+            Ok(-11),
+            "the deck's own surface must resolve as a standing Z even though land alone gives none"
+        );
+    }
+
+    #[test]
+    fn score_walkable_extra_static_blocks_like_a_real_wall() {
+        // A walkable deck (candidate z=0) PLUS an impassable hull/wall
+        // component whose span [−2, 18) overlaps the deck's body span [0, 16)
+        // must deny exactly like a real static wall would (same rule, same
+        // code path — `score_walkable_z` doesn't know the difference).
+        let land = LandTile { graphic: 3, z: 0, flags: flags::IMPASSABLE, tex_id: 0 };
+        let deck = StaticTile { graphic: 0x0032, z: 0, height: 0, flags: flags::SURFACE };
+        let hull = StaticTile { graphic: 0x0999, z: -2, height: 20, flags: flags::IMPASSABLE };
+        assert_eq!(
+            score_walkable_z(land, &[deck, hull], 0),
+            Err(ZReason::Blocked { candidate_z: 0, blocking_graphic: 0x0999 })
+        );
+    }
+
+    /// [`MapData::walkable_z_explain`]'s `extra` param is a straight
+    /// pass-through into [`score_walkable_z`]'s `statics` list (proven above
+    /// directly against synthetic data) — this confirms the real plumbing
+    /// against a real tile: an inert (`flags: 0`) extra contributes nothing,
+    /// so it must not change the real spawn tile's answer at all, while a
+    /// real `MapData::open`'d instance is exercised end to end.
+    #[test]
+    #[ignore]
+    fn walkable_z_explain_inert_extra_does_not_change_a_real_tile() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let mut map = MapData::open(&dir).expect("open map data");
+        let land = map.land(3503, 2574);
+        let inert = StaticTile { graphic: 0x1234, z: 40, height: 10, flags: 0 };
+        assert_eq!(
+            map.walkable_z_explain(3503, 2574, land.z as i32, &[]),
+            map.walkable_z_explain(3503, 2574, land.z as i32, &[inert]),
+            "a flagless extra static is neither a candidate nor a blocker — must be a no-op"
+        );
+        assert!(map.walkable_z_explain(3503, 2574, land.z as i32, &[]).is_ok(), "spawn tile should be walkable");
     }
 }

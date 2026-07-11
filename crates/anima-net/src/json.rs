@@ -5,7 +5,7 @@
 //! shapes are the contract mirrored by `anima2/anima2/contract.py` — keep the
 //! two in lockstep.
 //!
-//! ## Schema (v4 — snake_case, versioned)
+//! ## Schema (v5 — snake_case, versioned)
 //!
 //! [`observation_to_json`] emits one object with these top-level keys, one per
 //! [`Observation`] field: `player`, `mobiles`, `items`, `new_journal`,
@@ -38,9 +38,14 @@
 //! coarse scaled percentage); dedupe on `seq` across polls like the
 //! renderer's scene bridge does.
 //!
-//! Bump the "v4" marker above (and note the change here) whenever a key is
+//! Bump the "v5" marker above (and note the change here) whenever a key is
 //! renamed or removed — the Python side keys off these names verbatim. (v3:
-//! added `opl`, `recent_damage`. v4: added `spellbooks`.)
+//! added `opl`, `recent_damage`. v4: added `spellbooks`. v5: added `items[].
+//! is_multi` — a placed boat/house leaks into `items` as an ordinary-looking
+//! entry, but its `graphic` is a *multi id* (an index into
+//! `multi.idx`/`multi.mul`), not an ART graphic, and small multi ids collide
+//! with real ART ids (e.g. multi id `0x0002`). A brain must check `is_multi`
+//! before treating `graphic` as an ART id — see [`ItemView`]'s doc.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
@@ -81,7 +86,7 @@ fn item_json(i: &ItemView) -> Value {
     json!({
         "serial": i.serial, "graphic": i.graphic, "amount": i.amount,
         "pos": pos_json(&i.pos), "container": i.container, "layer": i.layer,
-        "distance": i.distance,
+        "distance": i.distance, "is_multi": i.is_multi,
     })
 }
 
@@ -615,6 +620,39 @@ mod tests {
         assert!(v["book"].is_null());
         assert!(v["popup"].is_null());
         assert!(v["prompt"].is_null());
+    }
+
+    /// Schema v5: `items[].is_multi` — a placed boat/house shows up in
+    /// `items` (it's a `World::items` entry like any other) but its `graphic`
+    /// is a multi id, not an ART id (see [`ItemView`]'s doc); a brain must be
+    /// able to tell the two apart from the JSON alone.
+    #[test]
+    fn item_json_serializes_is_multi() {
+        use anima_core::types::Position;
+
+        let normal = ItemView {
+            serial: 1,
+            graphic: 0x0EED,
+            amount: 1,
+            pos: Position { x: 100, y: 100, z: 0 },
+            container: None,
+            layer: 0,
+            distance: 3,
+            is_multi: false,
+        };
+        let multi = ItemView {
+            serial: 2,
+            graphic: 0x0002, // a real ART id too — the collision `is_multi` guards against
+            amount: 1,
+            pos: Position { x: 1492, y: 1760, z: 0 },
+            container: None,
+            layer: 0,
+            distance: 5,
+            is_multi: true,
+        };
+        assert_eq!(item_json(&normal)["is_multi"], false);
+        assert_eq!(item_json(&multi)["is_multi"], true);
+        assert_eq!(item_json(&multi)["graphic"], 2, "graphic is still emitted — just not an ART id here");
     }
 
     #[test]

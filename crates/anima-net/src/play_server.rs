@@ -22,7 +22,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anima_assets::{
-    Anim, AnimData, Art, Cliloc, Gumps, Hues, MapData, RadarCol, Sounds, Texmaps, TileData, ZReason,
+    Anim, AnimData, Art, Cliloc, Gumps, Hues, MapData, Multis, RadarCol, Sounds, Texmaps, TileData, ZReason,
 };
 use anima_core::net::LoginConfig;
 use anima_core::path::{find_path, find_path_near, Terrain};
@@ -90,6 +90,7 @@ struct MapTerrain<'a> {
     world: &'a anima_core::World,
     map: &'a mut MapData,
     blocked: &'a std::collections::HashSet<(u32, u32)>,
+    multis: Option<&'a Multis>,
 }
 
 impl Terrain for MapTerrain<'_> {
@@ -100,7 +101,7 @@ impl Terrain for MapTerrain<'_> {
         // Planning, not a real committed step: a closed door doesn't block a
         // *route* (see `tile_walkable_for_planning`'s doc) — the auto-walk
         // executor opens any door it actually needs to step through.
-        tile_walkable_for_planning(self.world, self.map, x as i64, y as i64, from_z)
+        tile_walkable_for_planning(self.world, self.map, self.multis, x as i64, y as i64, from_z)
     }
 }
 
@@ -115,6 +116,7 @@ impl Terrain for MapTerrain<'_> {
 fn debug_probe_neighbors(
     world: &anima_core::World,
     map: &mut MapData,
+    multis: Option<&Multis>,
     blocked: &std::collections::HashSet<(u32, u32)>,
     px: u32,
     py: u32,
@@ -132,7 +134,7 @@ fn debug_probe_neighbors(
             eprintln!("[pathdbg] dir={dir} ({ux},{uy}): DENY blacklisted");
             continue;
         }
-        match explain_tile_walkable(world, map, nx, ny, pz) {
+        match explain_tile_walkable(world, map, multis, nx, ny, pz) {
             Ok(z) => eprintln!("[pathdbg] dir={dir} ({ux},{uy}): ALLOW z {pz}->{z}"),
             Err(StepDeny::OffMap) => eprintln!("[pathdbg] dir={dir} ({ux},{uy}): DENY off-map"),
             Err(StepDeny::Terrain(ZReason::NoSurface)) => {
@@ -261,6 +263,10 @@ pub struct PlayServer {
     cfg: PlayConfig,
     port: u16,
     map: Option<MapData>,
+    // Multi (house/boat) component reader — a placed multi's component list
+    // (dx/dy/dz + graphic) never varies per facet, unlike `map`, so this is
+    // loaded once at `bind()` and never reloaded on a facet switch.
+    multis: Option<Multis>,
     art: Option<Arc<Mutex<Art>>>,
     anim: Option<Arc<Anim>>,
     cliloc: Option<Arc<Cliloc>>,
@@ -286,6 +292,11 @@ pub struct PlayServer {
 pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     let data_dir = cfg.data_dir.clone();
     let mut map = MapData::open(&data_dir).ok();
+    // Multi (house/boat) component reader — `multi.idx`/`multi.mul`. Same
+    // dataset regardless of facet, so loaded once here (unlike `map`, which
+    // reloads per facet in the game loop).
+    let multis: Option<Multis> = Multis::open(&data_dir).ok();
+    println!("play: multis {}", if multis.is_some() { "loaded" } else { "not loaded" });
     // Art is shared: the game loop reads avg colors, the HTTP thread encodes PNGs.
     let art: Option<Arc<Mutex<Art>>> = Art::open(&data_dir).ok().map(|a| Arc::new(Mutex::new(a)));
     let anim: Option<Arc<Anim>> = Anim::open(&data_dir).ok().map(Arc::new);
@@ -410,7 +421,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
         },
     );
 
-    Ok(PlayServer { cfg, port, map: map.take(), art, anim, cliloc, animdata, tiledata, scene, rx, login_rx, sse_hub, facet })
+    Ok(PlayServer { cfg, port, map: map.take(), multis, art, anim, cliloc, animdata, tiledata, scene, rx, login_rx, sse_hub, facet })
 }
 
 impl PlayServer {
@@ -422,7 +433,7 @@ impl PlayServer {
     /// Log in (auto or via the served login page) and run the game loop.
     /// Blocks until the game connection closes.
     pub fn run(self) -> io::Result<()> {
-        let PlayServer { cfg, port, mut map, art, anim, cliloc, animdata, tiledata, scene, rx, login_rx, sse_hub, facet } = self;
+        let PlayServer { cfg, port, mut map, multis, art, anim, cliloc, animdata, tiledata, scene, rx, login_rx, sse_hub, facet } = self;
 
         // Starting city for a newly-created character (ServUO honors the selection):
         // 0=Magincia/New Haven list-dependent, 3=Britain, ... Override via ANIMA_CITY.
@@ -543,7 +554,7 @@ impl PlayServer {
                         let req = dir & 7;
                         let resolved = map
                             .as_mut()
-                            .and_then(|m| can_walk(&session.world, m, px, py, pz, req));
+                            .and_then(|m| can_walk(&session.world, m, multis.as_ref(), px, py, pz, req));
                         let send = if facing == req {
                             resolved.map(|(nd, _, _)| nd)
                         } else {
@@ -590,7 +601,8 @@ impl PlayServer {
                                 // `Pathfinder.WalkTo` (its `distance = 1` relaxation for a
                                 // blocked exact tile — see `find_path_near`'s doc).
                                 let empty = std::collections::HashSet::new();
-                                let mut terrain = MapTerrain { world: &session.world, map: &mut *m, blocked: &empty };
+                                let mut terrain =
+                                    MapTerrain { world: &session.world, map: &mut *m, blocked: &empty, multis: multis.as_ref() };
                                 let resolved = find_path_near(
                                     &mut terrain,
                                     (px, py, pz),
@@ -644,7 +656,7 @@ impl PlayServer {
                                             // `empty`, not `auto_blocked`: this probe explains the
                                             // reachability check that just ran above, which (as a
                                             // fresh WalkTo, not an in-progress route) used no blacklist.
-                                            debug_probe_neighbors(&session.world, m, &empty, px, py, pz);
+                                            debug_probe_neighbors(&session.world, m, multis.as_ref(), &empty, px, py, pz);
                                         }
                                         auto_goal = None;
                                     }
@@ -707,7 +719,7 @@ impl PlayServer {
 
                         let path = map.as_mut().and_then(|m| {
                             let mut terrain =
-                                MapTerrain { world: &session.world, map: m, blocked: &auto_blocked };
+                                MapTerrain { world: &session.world, map: m, blocked: &auto_blocked, multis: multis.as_ref() };
                             find_path(
                                 &mut terrain,
                                 (px as u32, py as u32, pz as i32),
@@ -721,7 +733,7 @@ impl PlayServer {
                                 // Resolve like a manual key: a blocked diagonal slides to
                                 // a free cardinal; a turn precedes a move on a new facing.
                                 let resolved = map.as_mut().and_then(|m| {
-                                    can_walk(&session.world, m, px as i64, py as i64, pz as i32, want)
+                                    can_walk(&session.world, m, multis.as_ref(), px as i64, py as i64, pz as i32, want)
                                 });
                                 let send = if facing == want {
                                     resolved.map(|(nd, _, _)| nd)
@@ -883,7 +895,9 @@ impl PlayServer {
                 let mut nz = pos.2;
                 if let Some(m) = map.as_mut() {
                     let dir = delta_dir(pos.0 as i64 - last_pos.0 as i64, pos.1 as i64 - last_pos.1 as i64);
-                    if let Some(z) = calculate_new_z(m, pos.0 as i64, pos.1 as i64, last_pos.2 as i32, dir) {
+                    if let Some(z) =
+                        calculate_new_z(&session.world, m, multis.as_ref(), pos.0 as i64, pos.1 as i64, last_pos.2 as i32, dir)
+                    {
                         nz = z as i8;
                         if let Some(p) = session.world.player_mobile_mut() {
                             p.pos.z = nz;
@@ -946,7 +960,16 @@ impl PlayServer {
             if dirty || last_build.elapsed() >= Duration::from_millis(250) {
                 let t0 = Instant::now();
                 let mut art_guard = art.as_ref().map(|a| a.lock().unwrap());
-                let json = build_scene(&mut session, map.as_mut(), art_guard.as_deref_mut(), cliloc.as_deref(), animdata.as_ref(), anim.as_deref(), &journal);
+                let json = build_scene(
+                    &mut session,
+                    map.as_mut(),
+                    art_guard.as_deref_mut(),
+                    cliloc.as_deref(),
+                    animdata.as_ref(),
+                    anim.as_deref(),
+                    multis.as_ref(),
+                    &journal,
+                );
                 drop(art_guard);
                 *scene.lock().unwrap() = json;
                 last_build = Instant::now();
@@ -2066,6 +2089,7 @@ mod walkto_pathing_tests {
                 hue: 0,
                 name: String::new(),
                 direction: 0,
+                is_multi: false,
             },
         );
         world.items.insert(
@@ -2080,6 +2104,7 @@ mod walkto_pathing_tests {
                 hue: 0,
                 name: String::new(),
                 direction: 0,
+                is_multi: false,
             },
         );
         // Seal the real ~29-tile detour around the east end of this building
@@ -2090,7 +2115,7 @@ mod walkto_pathing_tests {
             (1583u32..=1599).flat_map(|y| (1625u32..=1640).map(move |x| (x, y))).collect();
 
         let path = {
-            let mut terrain = MapTerrain { world: &world, map: &mut map, blocked: &sealed };
+            let mut terrain = MapTerrain { world: &world, map: &mut map, blocked: &sealed, multis: None };
             find_path(&mut terrain, (1620, 1595, 5), (1621, 1588), AUTO_WALK_MAX_EXPANSIONS)
         };
         assert!(path.is_some_and(|p| !p.is_empty()), "a closed door must not make the goal unreachable");
@@ -2111,7 +2136,7 @@ mod walkto_pathing_tests {
                 if self.blocked.contains(&(x, y)) {
                     return None;
                 }
-                if crate::scene::tile_walkable(self.world, self.map, x as i64, y as i64, from_z) {
+                if crate::scene::tile_walkable(self.world, self.map, None, x as i64, y as i64, from_z) {
                     self.map.walkable_z(x, y, from_z)
                 } else {
                     None
@@ -2148,7 +2173,7 @@ mod walkto_pathing_tests {
             "(1503,1618) from z=20 should be blocked by the real static in this repro"
         );
 
-        let mut terrain = MapTerrain { world: &world, map: &mut map, blocked: &empty };
+        let mut terrain = MapTerrain { world: &world, map: &mut map, blocked: &empty, multis: None };
         let resolved =
             find_path_near(&mut terrain, (1500, 1620, 20), (1503, 1618), WALKTO_GOAL_SLOP, AUTO_WALK_MAX_EXPANSIONS);
         let (goal, path) = resolved.expect("a nearby tile must be reachable even though the exact click wasn't");

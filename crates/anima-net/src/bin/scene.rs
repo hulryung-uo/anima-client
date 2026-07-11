@@ -8,7 +8,7 @@
 use std::io::Write;
 use std::time::Duration;
 
-use anima_assets::{Art, MapData};
+use anima_assets::{Art, MapData, Multis};
 use anima_core::net::LoginConfig;
 use anima_net::scene::build_scene;
 use anima_net::{Endpoint, Session};
@@ -25,6 +25,7 @@ fn main() {
 
     let mut map = MapData::open(&data_dir).ok();
     let mut art = Art::open(&data_dir).ok();
+    let multis = Multis::open(&data_dir).ok();
 
     let cfg = LoginConfig {
         username: user.clone(),
@@ -62,7 +63,7 @@ fn main() {
             journal.remove(0);
         }
 
-        let scene = build_scene(&mut s, map.as_mut(), art.as_mut(), None, None, None, &journal);
+        let scene = build_scene(&mut s, map.as_mut(), art.as_mut(), None, None, None, multis.as_ref(), &journal);
         write_atomic(&out, &scene);
     }
 }
