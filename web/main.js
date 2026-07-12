@@ -1827,6 +1827,15 @@ function processSteps(now, dt) {
     if (s.turn) {
       pred.dir = s.dir; pred.rx = pred.x; pred.ry = pred.y; pred.rz = pred.z; pred.moving = true;
     } else {
+      // Keep the queued step's Z target current. It was captured once at enqueue
+      // time from whatever `scene.map` snapshot was on hand then; for a tile the
+      // server's scene build hadn't yet resolved authoritatively (see scene.rs
+      // `sz_chain`) that snapshot can be a stale/cheap guess. As fresher polls
+      // land — updating `scene.map` in place — re-read it here every frame so a
+      // correction arrives as a smooth mid-glide adjustment instead of only
+      // surfacing later via the at-rest reconcile (the visible "pop").
+      const freshSz = tileSZ(s.x, s.y);
+      if (freshSz !== null) s.z = freshSz;
       pred.rx = pred.x + (s.x - pred.x) * prog;
       pred.ry = pred.y + (s.y - pred.y) * prog;
       // Z is *not* locked to `prog` like x/y. Real UO staircases are built from
@@ -1844,7 +1853,15 @@ function processSteps(now, dt) {
       pred.dir = s.dir; pred.moving = true;
     }
     if (prog >= 1) {                       // step complete → commit base, carry remainder
-      if (!s.turn) { pred.x = s.x; pred.y = s.y; pred.z = s.z; }
+      // Hard-commit rz to the step's resolved z along with the base (was only
+      // ever *chased* toward it — RZ_CATCHUP leaves ~8% of the delta unresolved
+      // at `dur`, see above). Without this the residual carries into the next
+      // queued step's chase as extra distance to make up, which COMPOUNDS over
+      // a multi-step climb/staircase (verified live: consecutive height-
+      // changing steps grew an increasing rz-vs-z gap). Committing exactly here
+      // matches ClassicUO's step-boundary behavior (`Offset.Z = 0` on commit)
+      // without touching the mid-step ease that avoids a per-tile speed lurch.
+      if (!s.turn) { pred.x = s.x; pred.y = s.y; pred.z = s.z; pred.rz = s.z; }
       pred.dir = s.dir;
       // ClassicUO model: WE are the pacer. Each committed step (the prediction
       // paced it at the UO cadence) is sent to the server as ONE walk — so the

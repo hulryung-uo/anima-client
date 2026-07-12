@@ -1791,6 +1791,59 @@ pub fn build_scene(
         // Under cover? Then (like ClassicUO `_noDrawRoofs`) hide *every* roof tile
         // in view, not only those above max_z — so the whole roof lifts off.
         let under_cover = max_z < 127;
+        // Authoritative sz for a WIDER neighbourhood than just the 8 immediate
+        // neighbours, resolved by chaining `calculate_new_z` hop-by-hop outward
+        // (BFS by Chebyshev shell) from the player's own confirmed Z, instead of
+        // a single hop from `pz`. Fixes a real misprediction: the cheap fallback
+        // below (`best` nearest-to-`pz` within ±16) picks the candidate closest
+        // to the CURRENT (already-passed) player Z, which on genuinely varied
+        // terrain silently prefers the wrong static/land Z once you're a few
+        // tiles further along a climb — verified live at (1420,1702): standing
+        // at (1428,1702,2), the cheap hint for (1432,1702) was `9`; actually
+        // walking there (ServUO-confirmed) lands at `12`. That 3-unit miss is
+        // what the browser predicted, committed to, and only found out about
+        // after the fact — the reported "flat, then pops up" bug. Chaining the
+        // real per-hop calc from each already-resolved neighbour (its Chebyshev
+        // predecessor, walking straight back toward the player) instead of a
+        // single far hop keeps every step of the chain as accurate as the
+        // existing radius-1 case. `CHAIN_RADIUS` matches the browser's
+        // `LEAD_CAP` (how far prediction can run ahead of the confirmed server
+        // position — web/main.js) so a queued step's destination is (almost)
+        // never outside this window. Cost: ~80 extra `calculate_new_z` calls per
+        // build (vs. 8 before) over tiles already fetched for rendering — no
+        // extra map I/O, so this doesn't reintroduce the full-flood cost the
+        // cheap path was written to avoid.
+        const CHAIN_RADIUS: i64 = 4;
+        const CHAIN_SPAN: usize = (2 * CHAIN_RADIUS as usize) + 1;
+        let chain_idx = |ddx: i64, ddy: i64| -> usize {
+            ((ddy + CHAIN_RADIUS) as usize) * CHAIN_SPAN + (ddx + CHAIN_RADIUS) as usize
+        };
+        let mut sz_chain: Vec<Option<i32>> = vec![None; CHAIN_SPAN * CHAIN_SPAN];
+        sz_chain[chain_idx(0, 0)] = Some(pz);
+        for shell in 1..=CHAIN_RADIUS {
+            for ddy in -shell..=shell {
+                for ddx in -shell..=shell {
+                    if ddx.abs().max(ddy.abs()) != shell {
+                        continue; // this shell's ring only
+                    }
+                    // Predecessor: one Chebyshev shell closer to the player,
+                    // walking straight back toward them on both axes — already
+                    // resolved by an earlier (smaller) shell iteration.
+                    let (pdx, pdy) = (ddx - ddx.signum(), ddy - ddy.signum());
+                    let Some(Some(pz_hop)) = sz_chain.get(chain_idx(pdx, pdy)).copied() else {
+                        continue;
+                    };
+                    let Some(dir) = dir_from_delta(ddx - pdx, ddy - pdy) else {
+                        continue;
+                    };
+                    if let Some(z) =
+                        calculate_new_z(&s.world, map, multis, px + ddx, py + ddy, pz_hop, dir)
+                    {
+                        sz_chain[chain_idx(ddx, ddy)] = Some(z);
+                    }
+                }
+            }
+        }
         // Multis (boats/houses) within the window + a margin big enough for the
         // furthest real component (26 tiles, verified against the real
         // multi.mul — see `anima_assets::multis`'s module doc) so a multi whose
@@ -1876,16 +1929,16 @@ pub fn build_scene(
                 } else {
                     land.z as i32 // unwalkable → terrain baseline
                 };
-                // For the player's immediate neighbours — the only tiles a single
-                // step can reach — replace the cheap hint with the AUTHORITATIVE
-                // CalculateNewZ (the same math the server uses). This makes the climb
-                // prediction exact, so a stair/ramp rises *during* the glide instead
-                // of the avatar sliding flat then popping up a poll later. Only 8 extra
-                // tiles per build, so the full-flood cost the cheap path avoids stays away.
-                let sz = if (-1..=1).contains(&dx) && (-1..=1).contains(&dy) && (dx != 0 || dy != 0) {
-                    dir_from_delta(dx, dy)
-                        .and_then(|zd| calculate_new_z(&s.world, map, multis, x, y, pz, zd))
-                        .unwrap_or(sz)
+                // For tiles within CHAIN_RADIUS of the player, replace the cheap
+                // hint with the AUTHORITATIVE chained CalculateNewZ computed above
+                // (the same math the server uses, hop-by-hop from the player's own
+                // Z). This makes the climb prediction exact well past the
+                // immediate neighbours, so a stair/ramp/slope rises *during* the
+                // glide instead of the avatar sliding flat then popping up a poll
+                // later (see `sz_chain`'s doc above for the live-verified miss this
+                // fixes).
+                let sz = if dx.abs() <= CHAIN_RADIUS && dy.abs() <= CHAIN_RADIUS {
+                    sz_chain[chain_idx(dx, dy)].unwrap_or(sz)
                 } else {
                     sz
                 };
