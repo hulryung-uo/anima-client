@@ -170,6 +170,11 @@ let lastPaperdollSeq = 0;      // highest paperdoll-signal seq we've already han
 // read by refreshPaperdoll() to show the real title line instead of the plain
 // mobile name, when it matches the currently-displayed doll.
 let pdServerInfo = null;
+// ---- treasure/decoration map windows (0x90/0xF5 DisplayMap(New) + 0x56
+// MapCommand) — one window per serial (unlike the paperdoll's single slot),
+// so this is a per-serial seq gate, not one global counter. See
+// `refreshMapWindows`'s doc for the open-vs-refresh split.
+const lastMapOpenSeq = new Map(); // serial -> highest openSeq we've already opened for
 // ClassicUO ServerErrorMessages._pickUpErrors, indexed by the wire reason byte;
 // any reason >= 4 (including the "generic/Inspecific" 5) reads the same message
 // as 4 (ClassicUO clamps `code >= 5` to `code = 4`).
@@ -1295,6 +1300,8 @@ function primeSeqRings(s) {
   lastSwingSeq = Math.max(lastSwingSeq, maxSeq(s.swings));
   lastSoundSeq = Math.max(lastSoundSeq, maxSeq(s.sounds));
   if (s.paperdoll) lastPaperdollSeq = Math.max(lastPaperdollSeq, s.paperdoll.seq | 0);
+  // Per-serial, unlike the rings above — see `lastMapOpenSeq`'s doc.
+  if (s.maps) for (const m of s.maps) lastMapOpenSeq.set(m.serial >>> 0, m.openSeq | 0);
 }
 
 async function poll() {
@@ -1321,6 +1328,7 @@ async function poll() {
     ingestContainerOpens(scene); // open a window for each server-initiated container open (0x24)
     ingestSwings(scene); // briefly face the attacker toward the defender (0x2F Swing)
     ingestPaperdoll(scene); // open/refresh a paperdoll the server told us to show (0x88)
+    refreshMapWindows(scene); // treasure/decoration map windows (0x90/0xF5 + 0x56)
     refreshTip(); // update the hover tooltip if its OPL just arrived/changed
     drawMinimap(scene);
     updateGuardZones(scene); // guard-zone overlay: refetch on facet change, redraw clipped to view
@@ -4707,6 +4715,91 @@ function refreshTrade(scene) {
     if (!seen.has(myCont)) closeTradeWindow(myCont);
   }
 }
+
+// ---- treasure/decoration map windows (0x90/0xF5 DisplayMap(New) + 0x56
+// MapCommand — ServUO `Scripts/Items/Tools/MapItem.cs`; one window per
+// serial, built dynamically like .trade-win/.container-win) ----
+const mapWins = new Map(); // serial -> { el, sig, canvas }
+let mapCascade = 0;
+function closeMapWindow(serial) {
+  const win = mapWins.get(serial);
+  if (win) { win.el.remove(); mapWins.delete(serial); }
+}
+function buildMapWindow(serial) {
+  const el = document.createElement("div");
+  el.className = "gump-win map-win";
+  const off = (mapCascade++ % 8) * 22;
+  el.style.left = (260 + off) + "px";
+  el.style.top = (80 + off) + "px";
+  el.innerHTML = '<div class="gump-title"><span>Map</span><span class="gump-close">✕</span></div>'
+    + '<div class="gump-body"><div class="map-canvas"></div></div>';
+  document.body.appendChild(el);
+  el.querySelector(".gump-close").addEventListener("click", () => closeMapWindow(serial));
+  makeDraggable(el, el.querySelector(".gump-title"));
+  const win = { el, sig: null, canvas: el.querySelector(".map-canvas") };
+  mapWins.set(serial, win);
+  return win;
+}
+// Rebuild a map window's art/pins only when its content signature changed.
+// Bounds/size never change for a given serial in practice, but PINS do via
+// bare 0x56 traffic that does NOT bump `openSeq` (see `MapView::open_seq`'s
+// doc) — so this must run on every poll for an already-open window,
+// independent of `refreshMapWindows`'s open-a-NEW-window gate. The
+// background is the (constant, ServUO always sends 0x139D) parchment gump
+// art stretched via CSS to the map's own w×h box — pins are drawn at their
+// raw wire (x, y) with NO further rescale, because stretching the background
+// to fill that exact box already makes it line up (see `MapView`'s Rust doc
+// for why no client-side pin math is needed either way). Pin index 0 is the
+// treasure/chest pin (ServUO `MapItem.RemovePin` refuses to remove it) —
+// drawn with the `.chest` variant so it reads as the goal.
+function renderMapWindow(win, m) {
+  const sig = JSON.stringify([m.gumpArt, m.w, m.h, m.pins, m.editable]);
+  if (win.sig === sig) return;
+  win.sig = sig;
+  const w = m.w | 0, h = m.h | 0;
+  const c = win.canvas;
+  c.style.width = w + "px";
+  c.style.height = h + "px";
+  c.innerHTML = `<img class="map-bg" src="gump/${m.gumpArt | 0}.png" alt=""`
+    + ` onerror="this.onerror=null;this.style.display='none'">`;
+  (m.pins || []).forEach((p, i) => {
+    const pin = document.createElement("div");
+    pin.className = "map-pin" + (i === 0 ? " chest" : "");
+    pin.style.left = (p[0] | 0) + "px";
+    pin.style.top = (p[1] | 0) + "px";
+    pin.title = i === 0 ? "treasure" : ("pin " + i);
+    c.appendChild(pin);
+  });
+}
+// Open a NEW window only when a serial's `openSeq` (scene.maps[].openSeq)
+// advances past what we've already opened for — see `lastMapOpenSeq`'s doc:
+// this is what stops a user-closed map window from popping back open on
+// every poll just because World still carries the same MapView. Content of
+// any ALREADY-open window is still refreshed every poll regardless (a pin
+// can change via a bare 0x56 that doesn't bump `openSeq`). A window whose
+// map fell out of scene.maps entirely (the item was deleted, or a facet
+// switch purged it — see `World::on_map_change`) is closed to match.
+function refreshMapWindows(scene) {
+  const list = (scene && scene.maps) || [];
+  const seen = new Set();
+  for (const m of list) {
+    const serial = m.serial >>> 0;
+    seen.add(serial);
+    const seq = m.openSeq | 0;
+    const isNew = seq > (lastMapOpenSeq.get(serial) || 0);
+    let win = mapWins.get(serial);
+    if (isNew) {
+      lastMapOpenSeq.set(serial, seq);
+      if (win) bringToFront(win.el);
+      else win = buildMapWindow(serial);
+    }
+    if (win) renderMapWindow(win, m);
+  }
+  for (const serial of [...mapWins.keys()]) {
+    if (!seen.has(serial)) closeMapWindow(serial);
+  }
+}
+
 // The worn backpack is the equip entry on layer 21 (0x15).
 function backpackSerial() {
   const p = scene && scene.player;

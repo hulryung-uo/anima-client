@@ -286,6 +286,63 @@ pub struct SpellbookContent {
     pub content: u64,
 }
 
+/// A treasure/decoration map item's window (0x90 DisplayMap / 0xF5
+/// DisplayMapNew + 0x56 MapCommand — ServUO `Scripts/Items/Tools/MapItem.cs`,
+/// cross-checked against ClassicUO `PacketHandlers.DisplayMap`/`MapData` and
+/// `Game/UI/Gumps/MapGump.cs`). Keyed by the map item's own serial in
+/// [`World::map_gumps`].
+///
+/// `gump_art` is a constant `0x139D` at every real ServUO call site (the
+/// blank aged-parchment map background — ClassicUO's `MapGump` only ever
+/// uses this id for a small decorative corner icon and instead renders a
+/// custom terrain-snippet texture for the real background, but we don't have
+/// that asset pipeline; the renderer stretches the plain `0x139D` gump art to
+/// `width`×`height` instead, which needs no further pin rescale — see below).
+/// `facet` mirrors [`World::map_index`]'s encoding (0=Felucca, 1=Trammel,
+/// 2=Ilshenar, 3=Malas, 4=Tokuno, 5=TerMur); a legacy 0x90 carries no facet at
+/// all, so it defaults to 0 (Felucca) for one.
+///
+/// `min_x`/`min_y`/`max_x`/`max_y` are the WORLD tile-coordinate bounds this
+/// map covers (`MapItem.Bounds`); `width`/`height` are the RENDERED art size
+/// in pixels. Critically, [`MapView::pins`] are already expressed in that
+/// same `width`×`height` PIXEL space, not world tiles — ServUO's
+/// `MapItem.ConvertToWorld`/`ConvertToMap` do the bounds↔pixel conversion
+/// server-side before a pin ever hits the wire, and ClassicUO's own
+/// `MapGump.PinControl` positions a pin at its raw wire `(x, y)` with no
+/// client-side rescale — so a renderer draws each pin straight onto the
+/// `width`×`height` art, no math needed (only rescale if you choose to
+/// display the background at something OTHER than its native `width`×
+/// `height`, e.g. stretching gump art `0x139D` to fill that same box already
+/// accounts for it).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MapView {
+    /// Monotonic tag bumped every 0x90/0xF5 for ANY map serial (shared ring
+    /// like [`World::container_open_seq`], not a per-serial counter) — ServUO
+    /// resends full `MapDetails`/`NewMapDetails` on EVERY double-click/decode
+    /// (`MapItem.OnDoubleClick`/`TreasureMap.Decode` always call `DisplayTo`),
+    /// even for byte-identical content, and real UO reopens the window every
+    /// time. The renderer must treat each `open_seq` as its own "please open"
+    /// request rather than deduping purely on `serial` (mirrors
+    /// [`Paperdoll::seq`]).
+    pub open_seq: u64,
+    pub gump_art: u16,
+    pub facet: u8,
+    pub min_x: u16,
+    pub min_y: u16,
+    pub max_x: u16,
+    pub max_y: u16,
+    pub width: u16,
+    pub height: u16,
+    /// Pins in `width`×`height` pixel space, in server order. Index 0 is the
+    /// treasure/chest pin on a decoded treasure map — ServUO's `MapItem.
+    /// RemovePin` refuses to remove index 0 (see [`World::apply_map_command`]),
+    /// so a renderer may want to draw it distinctly from player-added pins.
+    pub pins: Vec<(u16, u16)>,
+    /// Whether the player may currently edit pins (0x56 command 7
+    /// MapSetEditable — ServUO `MapItem.ValidateEdit`/`OnToggleEditable`).
+    pub editable: bool,
+}
+
 /// An outstanding target cursor the server is waiting on (from a 0x6C request).
 /// The brain answers it with `Action::TargetObject`/`TargetGround`; the response
 /// must echo `cursor_id`, `cursor_flag`, and `target_type`.
@@ -612,6 +669,17 @@ pub struct World {
     /// [`World::trade_mut`]/[`World::close_trade`] rather than indexing
     /// directly.
     pub trades: Vec<TradeState>,
+    /// Open treasure/decoration map windows (0x90/0xF5 + 0x56), keyed by the
+    /// map item's own serial. See [`MapView`]. Pruned like [`World::spellbooks`]:
+    /// dropped on delete ([`World::remove`]) and on a facet purge
+    /// ([`World::on_map_change`]). Set via [`World::set_map_view`]/
+    /// [`World::apply_map_command`] — never insert directly (that's what
+    /// assigns a correctly-ordered [`MapView::open_seq`]).
+    pub map_gumps: HashMap<u32, MapView>,
+    /// Monotonic counter assigning each [`World::set_map_view`] call (any
+    /// serial) its [`MapView::open_seq`] — a single shared ring, like
+    /// [`World::container_open_seq`], not one counter per map.
+    pub map_open_seq: u64,
 }
 
 /// Notoriety values treated as hostile for auto-attack selection:
@@ -1013,11 +1081,109 @@ impl World {
         self.spellbooks.insert(serial, SpellbookContent { graphic, offset, content });
     }
 
+    /// Open or refresh a map item's window (0x90 DisplayMap / 0xF5
+    /// DisplayMapNew). Upserts by `serial`, resetting `pins` to empty and
+    /// bumping [`MapView::open_seq`] UNCONDITIONALLY, even for byte-identical
+    /// content — see that field's doc for why a repeat must still read as a
+    /// fresh "please open". Resetting `pins` here (rather than keeping the
+    /// old list) matches the real wire sequence: ServUO's `MapItem.DisplayTo`
+    /// always follows this packet with a 0x56 command-5 (Clear) and then one
+    /// command-1 (Add) per CURRENT pin, so the full list is about to be
+    /// rebuilt from scratch by [`World::apply_map_command`] regardless.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_map_view(
+        &mut self,
+        serial: u32,
+        gump_art: u16,
+        facet: u8,
+        min_x: u16,
+        min_y: u16,
+        max_x: u16,
+        max_y: u16,
+        width: u16,
+        height: u16,
+    ) {
+        self.map_open_seq += 1;
+        self.map_gumps.insert(
+            serial,
+            MapView {
+                open_seq: self.map_open_seq,
+                gump_art,
+                facet,
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+                width,
+                height,
+                pins: Vec::new(),
+                editable: false,
+            },
+        );
+    }
+
+    /// Apply a 0x56 MapCommand to the map window `serial` names — a no-op if
+    /// we have no [`MapView`] for it (a command for a map we were never shown
+    /// a 0x90/0xF5 for, or one already pruned). `command`/`number`/`x`/`y` are
+    /// the raw wire fields; semantics cross-checked against ServUO `MapItem`'s
+    /// `OnAddPin`/`OnInsertPin`/`OnChangePin`/`OnRemovePin`/`OnClearPins`/
+    /// `OnToggleEditable` and its `MapSetEditable` reply, and ClassicUO's
+    /// `MapMessageType` enum (`Add`=1, `Insert`=2, `Move`=3, `Remove`=4,
+    /// `Clear`=5, `Edit`=6, `EditResponse`=7):
+    /// - `1` Add — append `(x, y)` (`number` unused; ServUO's own `MapAddPin`
+    ///   reply always writes 0 there).
+    /// - `2` Insert — insert `(x, y)` at index `number`, clamped to the end
+    ///   (ServUO `InsertPin`: an out-of-range index appends instead).
+    /// - `3` Move/Change — replace the pin at index `number` with `(x, y)`;
+    ///   no-op if `number` is out of range (ServUO `ChangePin`).
+    /// - `4` Remove — remove the pin at index `number`; refuses index 0 (the
+    ///   treasure/chest pin — see [`MapView::pins`]'s doc) same as ServUO's
+    ///   `RemovePin` (`index > 0 && index < count`), and any other
+    ///   out-of-range index.
+    /// - `5` Clear — drop every pin. Also how ServUO's own `MapDisplay` "please
+    ///   open" nudge rides this exact command (`number=x=y=0`) right after a
+    ///   0x90/0xF5 — harmless here since [`World::set_map_view`] already
+    ///   reset `pins` to empty.
+    /// - `6` Edit (toggle request) — flips `editable`. Only ever observed as a
+    ///   CLIENT→SERVER request in the reference sources (a real client's
+    ///   "Plot Course"/"Stop Plotting" button); handled defensively for
+    ///   protocol completeness in case a server ever echoes it back.
+    /// - `7` EditResponse — the authoritative feedback: sets `editable` from
+    ///   the bool ServUO packs into `number` (`MapSetEditable`).
+    /// - Any other byte is ignored.
+    pub fn apply_map_command(&mut self, serial: u32, command: u8, number: u8, x: u16, y: u16) {
+        let Some(mv) = self.map_gumps.get_mut(&serial) else {
+            return;
+        };
+        match command {
+            1 => mv.pins.push((x, y)),
+            2 => {
+                let idx = (number as usize).min(mv.pins.len());
+                mv.pins.insert(idx, (x, y));
+            }
+            3 => {
+                if let Some(p) = mv.pins.get_mut(number as usize) {
+                    *p = (x, y);
+                }
+            }
+            4 => {
+                if number > 0 && (number as usize) < mv.pins.len() {
+                    mv.pins.remove(number as usize);
+                }
+            }
+            5 => mv.pins.clear(),
+            6 => mv.editable = !mv.editable,
+            7 => mv.editable = number != 0,
+            _ => {}
+        }
+    }
+
     /// Remove an entity (mobile or item) by serial. Returns true if it was a mobile.
     /// A deleted corpse item also drops its [`World::corpse_of`]/
     /// [`World::corpse_equip`] entries (corpses despawn, so these must not outlive
     /// the item they describe). A deleted spellbook likewise drops its
-    /// [`World::spellbooks`] entry.
+    /// [`World::spellbooks`] entry, and a deleted map item drops its
+    /// [`World::map_gumps`] window.
     pub fn remove(&mut self, serial: u32) -> bool {
         let was_mobile = self.mobiles.remove(&serial).is_some();
         self.items.remove(&serial);
@@ -1026,6 +1192,7 @@ impl World {
         self.spellbooks.remove(&serial);
         self.corpse_of.remove(&serial);
         self.corpse_equip.remove(&serial);
+        self.map_gumps.remove(&serial);
         was_mobile
     }
 
@@ -1079,6 +1246,7 @@ impl World {
             self.opl.clear();
             self.opl_revision.clear();
             self.spellbooks.clear();
+            self.map_gumps.clear();
             self.popup = None;
             return;
         };
@@ -1102,6 +1270,7 @@ impl World {
         self.opl.retain(|serial, _| alive(serial));
         self.opl_revision.retain(|serial, _| alive(serial));
         self.spellbooks.retain(|serial, _| alive(serial));
+        self.map_gumps.retain(|serial, _| alive(serial));
         if self.popup.as_ref().is_some_and(|p| !alive(&p.serial)) {
             self.popup = None;
         }
@@ -1167,6 +1336,104 @@ mod tests {
         w.shop_sell = Some(ShopSell { vendor: 0x1234, items: vec![] });
         w.close_shop_sell();
         assert!(w.shop_sell.is_none());
+    }
+
+    #[test]
+    fn set_map_view_upserts_and_bumps_open_seq_even_when_repeated() {
+        let mut w = World::new();
+        w.set_map_view(0x4000_1111, 0x139D, 0, 0, 0, 400, 400, 200, 200);
+        let first = w.map_gumps.get(&0x4000_1111).cloned().unwrap();
+        assert_eq!(first.open_seq, 1);
+        assert_eq!((first.gump_art, first.width, first.height), (0x139D, 200, 200));
+        assert!(first.pins.is_empty());
+
+        // A re-decode/re-click resends byte-identical bounds — must still bump
+        // `open_seq` (see `MapView::open_seq`'s doc) so the renderer reopens a
+        // window the player closed.
+        w.set_map_view(0x4000_1111, 0x139D, 0, 0, 0, 400, 400, 200, 200);
+        let second = w.map_gumps.get(&0x4000_1111).unwrap();
+        assert_eq!(second.open_seq, 2);
+    }
+
+    #[test]
+    fn apply_map_command_add_and_clear_pins() {
+        let mut w = World::new();
+        w.set_map_view(0x4000_2222, 0x139D, 0, 0, 0, 400, 400, 200, 200);
+        // command 1 = Add: the treasure/chest pin (index 0), then a player pin.
+        w.apply_map_command(0x4000_2222, 1, 0, 100, 120);
+        w.apply_map_command(0x4000_2222, 1, 0, 50, 60);
+        assert_eq!(w.map_gumps[&0x4000_2222].pins, vec![(100, 120), (50, 60)]);
+
+        // command 5 = Clear: drops every pin.
+        w.apply_map_command(0x4000_2222, 5, 0, 0, 0);
+        assert!(w.map_gumps[&0x4000_2222].pins.is_empty());
+    }
+
+    #[test]
+    fn apply_map_command_remove_refuses_index_zero() {
+        let mut w = World::new();
+        w.set_map_view(0x4000_3333, 0x139D, 0, 0, 0, 400, 400, 200, 200);
+        w.apply_map_command(0x4000_3333, 1, 0, 10, 10); // index 0 — the chest pin
+        w.apply_map_command(0x4000_3333, 1, 0, 20, 20); // index 1 — a player pin
+
+        // Removing index 0 (the chest pin) must be refused, mirroring ServUO
+        // `MapItem.RemovePin`'s `index > 0` guard.
+        w.apply_map_command(0x4000_3333, 4, 0, 0, 0);
+        assert_eq!(w.map_gumps[&0x4000_3333].pins.len(), 2, "index 0 must survive a remove");
+
+        // Removing index 1 is allowed.
+        w.apply_map_command(0x4000_3333, 4, 1, 0, 0);
+        assert_eq!(w.map_gumps[&0x4000_3333].pins, vec![(10, 10)]);
+
+        // Out-of-range index is a no-op, not a panic.
+        w.apply_map_command(0x4000_3333, 4, 9, 0, 0);
+        assert_eq!(w.map_gumps[&0x4000_3333].pins.len(), 1);
+    }
+
+    #[test]
+    fn apply_map_command_insert_move_and_editable() {
+        let mut w = World::new();
+        w.set_map_view(0x4000_4444, 0x139D, 0, 0, 0, 400, 400, 200, 200);
+        w.apply_map_command(0x4000_4444, 1, 0, 10, 10); // [ (10,10) ]
+        w.apply_map_command(0x4000_4444, 2, 0, 5, 5); // Insert at 0 -> [(5,5),(10,10)]
+        assert_eq!(w.map_gumps[&0x4000_4444].pins, vec![(5, 5), (10, 10)]);
+
+        // Insert at an out-of-range index appends (ServUO `InsertPin` behavior).
+        w.apply_map_command(0x4000_4444, 2, 99, 30, 30);
+        assert_eq!(w.map_gumps[&0x4000_4444].pins, vec![(5, 5), (10, 10), (30, 30)]);
+
+        // Move/change index 1 in place.
+        w.apply_map_command(0x4000_4444, 3, 1, 11, 12);
+        assert_eq!(w.map_gumps[&0x4000_4444].pins[1], (11, 12));
+
+        // command 7 = SetEditable: `number` carries the bool.
+        assert!(!w.map_gumps[&0x4000_4444].editable);
+        w.apply_map_command(0x4000_4444, 7, 1, 0, 0);
+        assert!(w.map_gumps[&0x4000_4444].editable);
+        w.apply_map_command(0x4000_4444, 7, 0, 0, 0);
+        assert!(!w.map_gumps[&0x4000_4444].editable);
+    }
+
+    #[test]
+    fn apply_map_command_unknown_serial_is_a_no_op() {
+        let mut w = World::new();
+        w.apply_map_command(0xDEAD_BEEF, 1, 0, 1, 1); // no MapView for this serial
+        assert!(w.map_gumps.is_empty());
+    }
+
+    #[test]
+    fn map_view_pruned_on_delete_and_facet_purge() {
+        let mut w = World::new();
+        w.enter_world(&LoginResult { serial: 0x1, x: 0, y: 0, z: 0, direction: 0, body: 0x190, aos: false });
+        w.set_map_view(0x4000_5555, 0x139D, 0, 0, 0, 400, 400, 200, 200);
+        assert!(w.map_gumps.contains_key(&0x4000_5555));
+
+        w.remove(0x4000_5555);
+        assert!(w.map_gumps.is_empty(), "0x1D delete must prune the map view");
+
+        w.set_map_view(0x4000_6666, 0x139D, 0, 0, 0, 400, 400, 200, 200);
+        w.on_map_change(1); // facet switch — not rooted at the player, so it's purged
+        assert!(w.map_gumps.is_empty(), "a facet switch must purge a map view we're not carrying");
     }
 
     #[test]

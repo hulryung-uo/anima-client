@@ -514,6 +514,31 @@
       .tr-balance { font-size: 11px; color: #9aa0a6; margin-top: 4px; }
       .tr-their-gold { font-size: 11px; color: #9aa0a6; margin-top: 6px; }
       .tr-cancel { width: 100%; margin-top: 10px; }
+      /* ---- treasure/decoration map windows (0x90/0xF5 DisplayMap(New) + 0x56
+         MapCommand; one window per serial, built dynamically like .trade-win —
+         several treasure maps can be open at once). .gump-win's default 10px
+         .gump-body padding would sit inside the drawn art's own border, so it's
+         cancelled here (matches .dialog-win's own override) and the map's
+         own w×h box (set inline per-window, since it varies per map) owns the
+         full body instead. */
+      .map-win .gump-body { padding: 0; }
+      .map-canvas { position: relative; overflow: hidden; background: #000; }
+      .map-bg {
+        position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+        image-rendering: pixelated; pointer-events: none;
+      }
+      .map-pin {
+        position: absolute; width: 9px; height: 9px; margin-left: -5px; margin-top: -5px;
+        border-radius: 50%; background: #ff3b3b; border: 1px solid #fff;
+        box-shadow: 0 0 3px rgba(0, 0, 0, .7); pointer-events: none;
+      }
+      /* Pin index 0 is the treasure/chest pin (ServUO `MapItem.RemovePin`
+         refuses to remove it) — drawn bigger and gold so it reads as the goal,
+         distinct from any player-added waypoint pins after it. */
+      .map-pin.chest {
+        width: 13px; height: 13px; margin-left: -7px; margin-top: -7px;
+        background: #ffd24a; border-color: #4a3400;
+      }
       /* ---- stack-split dialog (dragging an item stack, amount > 1) ---- */
       .split-win { width: 170px; z-index: 45; }
       .split-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; }

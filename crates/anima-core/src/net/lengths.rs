@@ -90,6 +90,13 @@ mod tests {
         assert_eq!(packet_length(0xA8), PacketLength::Variable); // ServerList
         assert_eq!(packet_length(0xA9), PacketLength::Variable); // CharacterList
         assert_eq!(packet_length(0x8C), PacketLength::Fixed(11)); // ServerRedirect
+        // Treasure/decoration map packets (ServUO `Scripts/Items/Tools/MapItem.cs`):
+        // a wrong entry here desyncs the whole stream, since these are Fixed, not
+        // Variable — verified against `MapDetails : base(0x90, 19)`,
+        // `NewMapDetails : base(0xF5, 21)`, `MapCommand : base(0x56, 11)`.
+        assert_eq!(packet_length(0x90), PacketLength::Fixed(19)); // MapDetails
+        assert_eq!(packet_length(0xF5), PacketLength::Fixed(21)); // NewMapDetails
+        assert_eq!(packet_length(0x56), PacketLength::Fixed(11)); // MapCommand
     }
 
     #[test]

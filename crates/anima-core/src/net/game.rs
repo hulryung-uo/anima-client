@@ -82,6 +82,9 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x24 => draw_container(world, frame)?,
         0x88 => open_paperdoll(world, frame)?,
         0x2F => swing(world, frame)?,
+        0x90 => display_map(world, frame, false)?,
+        0xF5 => display_map(world, frame, true)?,
+        0x56 => map_command(world, frame)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -1407,6 +1410,56 @@ fn swing(world: &mut World, frame: &[u8]) -> PResult<()> {
     let attacker = r.u32()?;
     let defender = r.u32()?;
     world.push_swing(attacker, defender);
+    Ok(())
+}
+
+/// 0x90 DisplayMap (legacy) / 0xF5 DisplayMapNew — opens/refreshes a treasure
+/// or decoration map item's window (ServUO `Scripts/Items/Tools/MapItem.cs`
+/// `MapDetails : base(0x90, 19)` / `NewMapDetails : base(0xF5, 21)`;
+/// cross-checked against ClassicUO `PacketHandlers.DisplayMap`). Both share
+/// the same 17-byte body: `[id][serial:u32][gumpArt:u16][minX:u16][minY:u16]
+/// [maxX:u16][maxY:u16][width:u16][height:u16]` (1+4+2*7 = 19, matching 0x90's
+/// fixed length exactly); 0xF5 appends one more `[facet:u16]` at the very END
+/// (verified in ServUO's `NewMapDetails` ctor — it writes the identical 8
+/// fields as `MapDetails`, THEN one more `short`; the facet is NOT interleaved
+/// before `width`/`height`), bringing it to 21 bytes. `has_facet` selects
+/// which of the two this frame is. See [`crate::world::MapView`]'s doc for
+/// what each field means and the pin-coordinate-space note.
+fn display_map(world: &mut World, frame: &[u8], has_facet: bool) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let serial = r.u32()?;
+    let gump_art = r.u16()?;
+    let min_x = r.u16()?;
+    let min_y = r.u16()?;
+    let max_x = r.u16()?;
+    let max_y = r.u16()?;
+    let width = r.u16()?;
+    let height = r.u16()?;
+    // A legacy 0x90 carries no facet at all — ServUO's `MapDetails` ctor never
+    // writes one, so 0 (Felucca) is the only sane default (matches
+    // `World::map_index`'s own encoding).
+    let facet = if has_facet { r.u16()? as u8 } else { 0 };
+    world.set_map_view(serial, gump_art, facet, min_x, min_y, max_x, max_y, width, height);
+    Ok(())
+}
+
+/// 0x56 MapCommand — mutates the pins/editable flag of an already-open map
+/// window (see [`display_map`]/[`crate::world::MapView`]). Fixed 11 bytes
+/// (ServUO `MapCommand : base(0x56, 11)`): `[id][serial:u32][command:u8]
+/// [number:u8][x:u16][y:u16]`. A no-op if `serial` has no [`crate::world::
+/// MapView`] yet (a command for a map we haven't been shown, or one already
+/// pruned) — see [`crate::world::World::apply_map_command`] for the full
+/// per-command semantics (add/insert/move/remove/clear/toggle-editable/
+/// set-editable), verified against ServUO `MapItem`'s `On*Pin`/
+/// `OnToggleEditable` handlers and ClassicUO's `MapMessageType` enum.
+fn map_command(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let serial = r.u32()?;
+    let command = r.u8()?;
+    let number = r.u8()?;
+    let x = r.u16()?;
+    let y = r.u16()?;
+    world.apply_map_command(serial, command, number, x, y);
     Ok(())
 }
 
@@ -3370,5 +3423,143 @@ mod tests {
         assert!(apply_packet(&mut w, &frame));
         assert_eq!(w.gumps.len(), 1);
         assert_eq!(w.gumps[0].serial, 3);
+    }
+
+    #[test]
+    fn display_map_legacy_0x90_parses_bounds_no_facet() {
+        let mut w = World::new();
+        // 0x90 MapDetails: serial, gumpArt (always 0x139D), bounds, size. No facet.
+        let mut p = PacketWriter::new();
+        p.u8(0x90).u32(0x4000_7777).u16(0x139D);
+        p.u16(0).u16(0).u16(400).u16(400); // minX, minY, maxX, maxY
+        p.u16(200).u16(200); // width, height
+        let frame = p.into_vec();
+        assert_eq!(frame.len(), 19); // ServUO MapDetails : base(0x90, 19)
+        assert!(apply_packet(&mut w, &frame));
+
+        let mv = w.map_gumps.get(&0x4000_7777).expect("map view set");
+        assert_eq!(mv.open_seq, 1);
+        assert_eq!(mv.gump_art, 0x139D);
+        assert_eq!(mv.facet, 0, "legacy 0x90 carries no facet — defaults to Felucca");
+        assert_eq!((mv.min_x, mv.min_y, mv.max_x, mv.max_y), (0, 0, 400, 400));
+        assert_eq!((mv.width, mv.height), (200, 200));
+        assert!(mv.pins.is_empty());
+    }
+
+    #[test]
+    fn display_map_new_0xf5_parses_trailing_facet() {
+        let mut w = World::new();
+        // 0xF5 NewMapDetails: identical body to 0x90, PLUS a trailing facet u16
+        // (verified against ServUO's `NewMapDetails` ctor — appended at the very
+        // end, not interleaved before width/height). facet=3 (Malas).
+        let mut p = PacketWriter::new();
+        p.u8(0xF5).u32(0x4000_8888).u16(0x139D);
+        p.u16(520).u16(0).u16(2580).u16(2050);
+        p.u16(400).u16(400);
+        p.u16(3); // facet: Malas
+        let frame = p.into_vec();
+        assert_eq!(frame.len(), 21); // ServUO NewMapDetails : base(0xF5, 21)
+        assert!(apply_packet(&mut w, &frame));
+
+        let mv = w.map_gumps.get(&0x4000_8888).expect("map view set");
+        assert_eq!(mv.facet, 3);
+        assert_eq!((mv.min_x, mv.min_y, mv.max_x, mv.max_y), (520, 0, 2580, 2050));
+        assert_eq!((mv.width, mv.height), (400, 400));
+    }
+
+    #[test]
+    fn display_map_resend_bumps_open_seq_and_resets_pins() {
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0x90).u32(0x4000_9999).u16(0x139D).u16(0).u16(0).u16(400).u16(400).u16(200).u16(200);
+        assert!(apply_packet(&mut w, &p.into_vec()));
+        assert_eq!(w.map_gumps[&0x4000_9999].open_seq, 1);
+
+        // Simulate the pin arriving via 0x56, then a re-decode/re-click resending
+        // 0x90 — real ServUO `MapItem.DisplayTo` always resends the bounds packet
+        // first (about to be followed by a fresh Clear+re-Add over 0x56).
+        let mut add = PacketWriter::new();
+        add.u8(0x56).u32(0x4000_9999).u8(1).u8(0).u16(50).u16(60);
+        assert!(apply_packet(&mut w, &add.into_vec()));
+        assert_eq!(w.map_gumps[&0x4000_9999].pins.len(), 1);
+
+        let mut q = PacketWriter::new();
+        q.u8(0x90).u32(0x4000_9999).u16(0x139D).u16(0).u16(0).u16(400).u16(400).u16(200).u16(200);
+        assert!(apply_packet(&mut w, &q.into_vec()));
+        let mv = &w.map_gumps[&0x4000_9999];
+        assert_eq!(mv.open_seq, 2, "a resend must bump open_seq even with identical bounds");
+        assert!(mv.pins.is_empty(), "a resend resets pins — the real wire flow re-adds them over 0x56");
+    }
+
+    #[test]
+    fn map_command_add_pin() {
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0x90).u32(0x4000_AAAA).u16(0x139D).u16(0).u16(0).u16(400).u16(400).u16(200).u16(200);
+        assert!(apply_packet(&mut w, &p.into_vec()));
+
+        // 0x56 MapCommand command=1 (Add): the chest pin lands at index 0.
+        let mut add = PacketWriter::new();
+        add.u8(0x56).u32(0x4000_AAAA).u8(1).u8(0).u16(100).u16(120);
+        let frame = add.into_vec();
+        assert_eq!(frame.len(), 11); // ServUO MapCommand : base(0x56, 11)
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.map_gumps[&0x4000_AAAA].pins, vec![(100, 120)]);
+    }
+
+    #[test]
+    fn map_command_clear_drops_every_pin() {
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0x90).u32(0x4000_BBBB).u16(0x139D).u16(0).u16(0).u16(400).u16(400).u16(200).u16(200);
+        assert!(apply_packet(&mut w, &p.into_vec()));
+        for (x, y) in [(10u16, 10u16), (20, 20), (30, 30)] {
+            let mut add = PacketWriter::new();
+            add.u8(0x56).u32(0x4000_BBBB).u8(1).u8(0).u16(x).u16(y);
+            apply_packet(&mut w, &add.into_vec());
+        }
+        assert_eq!(w.map_gumps[&0x4000_BBBB].pins.len(), 3);
+
+        // command=5 (Clear).
+        let mut clear = PacketWriter::new();
+        clear.u8(0x56).u32(0x4000_BBBB).u8(5).u8(0).u16(0).u16(0);
+        assert!(apply_packet(&mut w, &clear.into_vec()));
+        assert!(w.map_gumps[&0x4000_BBBB].pins.is_empty());
+    }
+
+    #[test]
+    fn map_command_remove_refuses_index_zero() {
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0x90).u32(0x4000_CCCC).u16(0x139D).u16(0).u16(0).u16(400).u16(400).u16(200).u16(200);
+        assert!(apply_packet(&mut w, &p.into_vec()));
+        for (x, y) in [(10u16, 10u16), (20, 20)] {
+            let mut add = PacketWriter::new();
+            add.u8(0x56).u32(0x4000_CCCC).u8(1).u8(0).u16(x).u16(y);
+            apply_packet(&mut w, &add.into_vec());
+        }
+
+        // command=4 (Remove) index 0 — the treasure/chest pin — is refused
+        // (ServUO `MapItem.RemovePin`'s `index > 0` guard).
+        let mut rm0 = PacketWriter::new();
+        rm0.u8(0x56).u32(0x4000_CCCC).u8(4).u8(0).u16(0).u16(0);
+        assert!(apply_packet(&mut w, &rm0.into_vec()));
+        assert_eq!(w.map_gumps[&0x4000_CCCC].pins.len(), 2, "index 0 must survive");
+
+        // command=4 index 1 succeeds.
+        let mut rm1 = PacketWriter::new();
+        rm1.u8(0x56).u32(0x4000_CCCC).u8(4).u8(1).u16(0).u16(0);
+        assert!(apply_packet(&mut w, &rm1.into_vec()));
+        assert_eq!(w.map_gumps[&0x4000_CCCC].pins, vec![(10, 10)]);
+    }
+
+    #[test]
+    fn map_command_unknown_serial_is_ignored() {
+        let mut w = World::new();
+        // No 0x90/0xF5 was ever sent for this serial — must not panic or create one.
+        let mut p = PacketWriter::new();
+        p.u8(0x56).u32(0xDEAD_0000).u8(1).u8(0).u16(1).u16(1);
+        assert!(apply_packet(&mut w, &p.into_vec()));
+        assert!(w.map_gumps.is_empty());
     }
 }

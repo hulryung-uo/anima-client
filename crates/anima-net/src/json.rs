@@ -5,14 +5,15 @@
 //! shapes are the contract mirrored by `anima2/anima2/contract.py` — keep the
 //! two in lockstep.
 //!
-//! ## Schema (v5 — snake_case, versioned)
+//! ## Schema (v6 — snake_case, versioned)
 //!
 //! [`observation_to_json`] emits one object with these top-level keys, one per
 //! [`Observation`] field: `player`, `mobiles`, `items`, `new_journal`,
 //! `pending_target`, `skills`, `gumps`, `prompt`, `trades`, `buffs`,
 //! `shop_buy`, `shop_sell`, `popup`, `book`, `party`, `quest_arrow`, `weather`,
 //! `season`, `light`, `war`, `last_attack`, `combatant`, `corpse_of`,
-//! `corpse_equip`, `map_index`, `aos`, `opl`, `recent_damage`, `spellbooks`. A
+//! `corpse_equip`, `map_index`, `aos`, `opl`, `recent_damage`, `spellbooks`,
+//! `map_gumps`. A
 //! gump's `elements` are the structured [`anima_core::gump_layout::GumpElement`]s
 //! (see [`gump_element_json`]) — a cliloc-driven `html` element carries the
 //! raw `{"id":..,"args":..}` reference *unresolved* (no Cliloc table is
@@ -22,7 +23,10 @@
 //! u32 halves (see [`spellbook_json`]) rather than one 64-bit number, for the
 //! same reason the scene bridge splits it: a JS-side (or any float-backed
 //! JSON) consumer only keeps 53 bits of integer precision, which a full
-//! 64-spell Magery book's mask can exceed.
+//! 64-spell Magery book's mask can exceed. `map_gumps` entries (see
+//! [`map_view_json`]) carry a treasure/decoration map's pixel-space pins
+//! straight through — no Cliloc/rescale involved (ServUO already converts
+//! bounds↔pixel server-side; see [`anima_core::world::MapView`]'s doc).
 //!
 //! Deliberately **excluded** (renderer/audio-only playback queues with no
 //! decision-relevant signal, and each would just add per-tick serialization
@@ -38,14 +42,17 @@
 //! coarse scaled percentage); dedupe on `seq` across polls like the
 //! renderer's scene bridge does.
 //!
-//! Bump the "v5" marker above (and note the change here) whenever a key is
+//! Bump the "v6" marker above (and note the change here) whenever a key is
 //! renamed or removed — the Python side keys off these names verbatim. (v3:
 //! added `opl`, `recent_damage`. v4: added `spellbooks`. v5: added `items[].
 //! is_multi` — a placed boat/house leaks into `items` as an ordinary-looking
 //! entry, but its `graphic` is a *multi id* (an index into
 //! `multi.idx`/`multi.mul`), not an ART graphic, and small multi ids collide
 //! with real ART ids (e.g. multi id `0x0002`). A brain must check `is_multi`
-//! before treating `graphic` as an ART id — see [`ItemView`]'s doc.)
+//! before treating `graphic` as an ART id — see [`ItemView`]'s doc. v6: added
+//! `map_gumps` — treasure/decoration map windows (0x90/0xF5 DisplayMap(New) +
+//! 0x56 MapCommand), so a brain can locate a decoded treasure map's pins
+//! without a human reading the parchment.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
@@ -56,8 +63,8 @@ use anima_core::agent::{
 use anima_core::gump_layout::{GumpElement, HtmlText};
 use anima_core::types::Position;
 use anima_core::world::{
-    Book, Buff, JournalEntry, Party, PopupEntry, PopupMenu, PromptState, ShopBuy, ShopSell,
-    ShopSellItem, SpellbookContent, TargetCursor, TradeState, Weather,
+    Book, Buff, JournalEntry, MapView, Party, PopupEntry, PopupMenu, PromptState, ShopBuy,
+    ShopSell, ShopSellItem, SpellbookContent, TargetCursor, TradeState, Weather,
 };
 use serde_json::{json, Value};
 
@@ -204,6 +211,19 @@ fn spellbook_json((serial, sb): &(u32, SpellbookContent)) -> Value {
     })
 }
 
+/// Serialize one open map window (0x90/0xF5 + 0x56), keyed by its own serial.
+/// `pins` are `[x, y]` pairs in `width`×`height` pixel space (see [`MapView`]'s
+/// doc — already server-converted, no rescale needed).
+fn map_view_json((serial, mv): &(u32, MapView)) -> Value {
+    json!({
+        "serial": serial, "open_seq": mv.open_seq, "gump_art": mv.gump_art, "facet": mv.facet,
+        "bounds": { "min_x": mv.min_x, "min_y": mv.min_y, "max_x": mv.max_x, "max_y": mv.max_y },
+        "width": mv.width, "height": mv.height,
+        "pins": mv.pins.iter().map(|&(x, y)| json!([x, y])).collect::<Vec<_>>(),
+        "editable": mv.editable,
+    })
+}
+
 fn popup_entry_json(e: &PopupEntry) -> Value {
     json!({ "index": e.index, "cliloc": e.cliloc, "flags": e.flags })
 }
@@ -295,6 +315,7 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "opl": opl,
         "recent_damage": recent_damage,
         "spellbooks": obs.spellbooks.iter().map(spellbook_json).collect::<Vec<_>>(),
+        "map_gumps": obs.map_gumps.iter().map(map_view_json).collect::<Vec<_>>(),
     })
 }
 
@@ -610,6 +631,7 @@ mod tests {
             "prompt", "trades", "buffs", "shop_buy", "shop_sell", "popup", "book", "party",
             "quest_arrow", "weather", "season", "light", "war", "last_attack", "combatant",
             "corpse_of", "corpse_equip", "map_index", "aos", "opl", "recent_damage", "spellbooks",
+            "map_gumps",
         ] {
             assert!(v.get(k).is_some(), "missing key {k}");
         }
@@ -700,6 +722,37 @@ mod tests {
     fn observation_json_spellbooks_empty_by_default() {
         let v = observation_to_json(&Observation::default());
         assert!(v["spellbooks"].as_array().unwrap().is_empty());
+    }
+
+    /// Schema v6: `map_gumps` — a treasure/decoration map window (0x90/0xF5 +
+    /// 0x56), with pins carried straight through in pixel space.
+    #[test]
+    fn observation_serializes_map_gumps() {
+        use anima_core::world::World;
+        let mut w = World::default();
+        w.set_map_view(0x4000_1234, 0x139D, 3, 520, 0, 2580, 2050, 400, 400);
+        w.apply_map_command(0x4000_1234, 1, 0, 100, 120); // the chest pin
+        w.apply_map_command(0x4000_1234, 7, 1, 0, 0); // editable = true
+        let v = observation_to_json(&w.observe(&mut 0));
+
+        assert_eq!(v["map_gumps"].as_array().unwrap().len(), 1);
+        let mv = &v["map_gumps"][0];
+        assert_eq!(mv["serial"], 0x4000_1234);
+        assert_eq!(mv["open_seq"], 1);
+        assert_eq!(mv["gump_art"], 0x139D);
+        assert_eq!(mv["facet"], 3);
+        assert_eq!(mv["bounds"]["min_x"], 520);
+        assert_eq!(mv["bounds"]["max_y"], 2050);
+        assert_eq!((mv["width"].as_u64().unwrap(), mv["height"].as_u64().unwrap()), (400, 400));
+        assert_eq!(mv["pins"][0][0], 100);
+        assert_eq!(mv["pins"][0][1], 120);
+        assert_eq!(mv["editable"], true);
+    }
+
+    #[test]
+    fn observation_json_map_gumps_empty_by_default() {
+        let v = observation_to_json(&Observation::default());
+        assert!(v["map_gumps"].as_array().unwrap().is_empty());
     }
 
     #[test]

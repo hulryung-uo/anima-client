@@ -12,8 +12,8 @@
 use crate::gump_layout::GumpElement;
 use crate::types::Position;
 use crate::world::{
-    Book, Buff, JournalEntry, Party, PopupMenu, PromptState, ShopBuy, ShopSell, SpellbookContent,
-    TargetCursor, TradeState, Weather, World,
+    Book, Buff, JournalEntry, MapView, Party, PopupMenu, PromptState, ShopBuy, ShopSell,
+    SpellbookContent, TargetCursor, TradeState, Weather, World,
 };
 
 /// A skill value, in human units (50.0 == GM-half). Derived from [`crate::world::Skill`].
@@ -197,6 +197,14 @@ pub struct Observation {
     /// against `offset` (both carried in [`SpellbookContent`]) rather than
     /// assuming every spell is known.
     pub spellbooks: Vec<(u32, SpellbookContent)>,
+    /// Open treasure/decoration map windows (0x90/0xF5 + 0x56), each `(map
+    /// item serial, view)`, sorted by serial. See [`MapView`] — a brain can
+    /// read a pin's pixel coords against `bounds`/`width`/`height` to derive
+    /// the world tile it marks (the inverse of ServUO's own `MapItem.
+    /// ConvertToWorld`: `worldX = bounds.width * pinX / width + bounds.min_x`,
+    /// same for Y), e.g. to walk to a decoded treasure map's chest (pin index
+    /// 0) without a human reading the parchment.
+    pub map_gumps: Vec<(u32, MapView)>,
 }
 
 /// A read-only view of an open server gump/dialog.
@@ -469,6 +477,11 @@ impl World {
             self.spellbooks.iter().map(|(&s, sb)| (s, *sb)).collect();
         spellbooks.sort_by_key(|&(s, _)| s);
 
+        // HashMap iteration order isn't stable — sorted by serial, like `opl`/`spellbooks`.
+        let mut map_gumps: Vec<(u32, MapView)> =
+            self.map_gumps.iter().map(|(&s, mv)| (s, mv.clone())).collect();
+        map_gumps.sort_by_key(|&(s, _)| s);
+
         Observation {
             player,
             mobiles,
@@ -499,6 +512,7 @@ impl World {
             opl,
             recent_damage: self.recent_damage.clone(),
             spellbooks,
+            map_gumps,
         }
     }
 }

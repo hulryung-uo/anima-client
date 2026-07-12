@@ -1446,6 +1446,36 @@ fn container_opens_json(world: &World) -> Value {
     Value::Array(opens)
 }
 
+/// Build the `maps` array: every open treasure/decoration map window
+/// (0x90/0xF5 DisplayMap(New) + 0x56 MapCommand — [`anima_core::world::
+/// MapView`]), sorted by serial for a stable order (the source is a
+/// `HashMap`). `openSeq` bumps on every 0x90/0xF5 for that serial, even a
+/// byte-identical resend (see [`anima_core::world::MapView::open_seq`]'s
+/// doc) — the web client opens a window only when it sees a NEW `openSeq`
+/// for a serial (mirrors `paperdoll`'s `seq`/`containerOpens`' ring), so a
+/// user-closed map window doesn't pop back open on every poll. `pins` are
+/// `[x, y]` pairs already in `w`×`h` PIXEL space (ServUO converts
+/// bounds↔pixel server-side before a pin ever hits the wire — see
+/// `MapView`'s doc) — the renderer draws each one straight onto the map art
+/// with no rescale.
+fn maps_json(world: &World) -> Value {
+    let mut maps: Vec<(&u32, &anima_core::world::MapView)> = world.map_gumps.iter().collect();
+    maps.sort_by_key(|&(serial, _)| *serial);
+    let maps: Vec<Value> = maps
+        .iter()
+        .map(|&(serial, mv)| {
+            json!({
+                "serial": serial, "openSeq": mv.open_seq, "gumpArt": mv.gump_art, "facet": mv.facet,
+                "bounds": { "minX": mv.min_x, "minY": mv.min_y, "maxX": mv.max_x, "maxY": mv.max_y },
+                "w": mv.width, "h": mv.height,
+                "pins": mv.pins.iter().map(|&(x, y)| json!([x, y])).collect::<Vec<_>>(),
+                "editable": mv.editable,
+            })
+        })
+        .collect();
+    Value::Array(maps)
+}
+
 /// Serialize the current world + a map window (walkability/Z + real terrain
 /// color) + entities + journal to the JSON the web renderer consumes.
 #[allow(clippy::too_many_arguments)]
@@ -2258,6 +2288,8 @@ pub fn build_scene(
     let facet = s.world.map_index;
     // Every open secure-trade session (0x6F), or []. See `trades_json`'s doc.
     let trades = serde_json::to_string(&trades_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    // Open treasure/decoration map windows (0x90/0xF5 + 0x56), or []. See `maps_json`'s doc.
+    let maps = serde_json::to_string(&maps_json(&s.world)).unwrap_or_else(|_| "[]".into());
     format!(
         "{{\"player\":{player},\
          \"map\":{{\"cx\":{px},\"cy\":{py},\"radius\":{RADIUS},\"tiles\":[{tiles}],\"maxZ\":{max_z},\"dbg\":{dbg}}},\
@@ -2267,7 +2299,7 @@ pub fn build_scene(
          \"popup\":{popup},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"containerOpens\":{container_opens},\"swings\":{swings},\
-         \"paperdoll\":{paperdoll},\"facet\":{facet},\"trades\":{trades},\
+         \"paperdoll\":{paperdoll},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",
         s.confirms, s.denies
     )
@@ -2491,6 +2523,32 @@ mod tests {
                 "warmode": true, "canLift": false,
             })
         );
+    }
+
+    #[test]
+    fn maps_json_empty_then_reports_bounds_and_pins() {
+        let mut w = World::default();
+        assert_eq!(maps_json(&w), json!([]), "no map window open yet");
+
+        w.set_map_view(0x4000_1234, 0x139D, 3, 520, 0, 2580, 2050, 400, 400);
+        w.apply_map_command(0x4000_1234, 1, 0, 100, 120); // chest pin, index 0
+        assert_eq!(
+            maps_json(&w),
+            json!([{
+                "serial": 0x4000_1234u32, "openSeq": 1, "gumpArt": 0x139D, "facet": 3,
+                "bounds": { "minX": 520, "minY": 0, "maxX": 2580, "maxY": 2050 },
+                "w": 400, "h": 400,
+                "pins": [[100, 120]],
+                "editable": false,
+            }])
+        );
+
+        // A re-decode/re-click bumps `openSeq` — the web client's seq-gate is
+        // what tells it to reopen a closed window.
+        w.set_map_view(0x4000_1234, 0x139D, 3, 520, 0, 2580, 2050, 400, 400);
+        let v = maps_json(&w);
+        assert_eq!(v[0]["openSeq"], 2);
+        assert_eq!(v[0]["pins"].as_array().unwrap().len(), 0, "a resend resets pins");
     }
 
     #[test]
