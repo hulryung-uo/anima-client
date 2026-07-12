@@ -702,10 +702,11 @@ const TURN_DELAY = 100;       // ClassicUO Constants.TURN_DELAY
 const MAX_STEPS = 5;          // ClassicUO Constants.MAX_STEP_COUNT
 // ClassicUO MovementSpeed.TimeToCompleteMovement: mounted halves, run halves again.
 const stepDelay = (run, mounted) => (mounted ? (run ? 100 : 200) : (run ? 200 : 400));
-// Vertical (rz) catch-up rate for the player's own step easing — see the doc at
-// its use in `processSteps`. Same constant/style already proven for the OTHER
-// mobiles' glide below (`st.rz += (tz - st.rz) * ... * 2.5`).
-const RZ_CATCHUP = 2.5;
+// Fraction of a step over which the player's render Z (rz) eases from the source
+// tile's Z to the step target — see the doc at its use in `processSteps`. < 1 so Z
+// fully resolves BEFORE the tile boundary (ClassicUO does it in the first ~4 of a
+// step's frames), leaving no residual to carry/bounce on a staircase.
+const ZEASE_FRAC = 0.6;
 // Don't enqueue a step whose tile would sit more than this far ahead of the last
 // known server position — bounds how far the queue can lead (and thus the worst-
 // case correction) without stalling at tile boundaries between polls.
@@ -1846,29 +1847,28 @@ function processSteps(now, dt) {
       if (freshSz !== null) s.z = freshSz;
       pred.rx = pred.x + (s.x - pred.x) * prog;
       pred.ry = pred.y + (s.y - pred.y) * prog;
-      // Z is *not* locked to `prog` like x/y. Real UO staircases are built from
-      // unevenly-sized riser statics (each stair tile's standing Z is a Bridge
-      // tile's HALF height — see `calculate_new_z`'s doc), so consecutive steps'
-      // Z deltas genuinely differ (e.g. +2, +5, +3 units for the same fixed
-      // `dur`). Locking rz to `prog` (ClassicUO Mobile.ProcessSteps' literal
-      // `Offset.Z = (step.Z - Z) * prog`) makes the vertical speed visibly lurch
-      // at each tile boundary. Chasing it exponentially instead smooths that
-      // jump: with RZ_CATCHUP=2.5 the residual gap after one full `dur` is ~8%
-      // of the step's delta (same margin already proven below for other
-      // mobiles' rz), so it settles well within the step and never reads as
-      // desynced from x/y — this only softens the *feel*, not the resolved Z.
-      pred.rz += (s.z - pred.rz) * Math.min(1, (dt / dur) * RZ_CATCHUP);
+      // Z eases from the SOURCE tile's Z (`pred.z`, still the pre-step tile until
+      // this step commits) to the step's target `s.z`, but FASTER than x/y — it
+      // fully resolves within the first `ZEASE_FRAC` of the step (ClassicUO's
+      // `Offset.Z = (destZ-srcZ) * x * 4/frames`: Z is done in the first ~4
+      // frames, well before the tile boundary). An ease-out shapes it so the
+      // vertical speed doesn't lurch at the start. This is FRAME-RATE INDEPENDENT
+      // (locked to `prog`, not accumulated per `dt`) and, crucially, reaches the
+      // target BEFORE the step commits — so nothing trails into the next step:
+      // the old exponential chase left ~8% unresolved every step, which on a
+      // real staircase (+5 risers) read as the avatar floating ~2-3px below the
+      // steps while climbing, then a snap-up at the top step's commit followed by
+      // the descent — the "climbs, jerks up, then comes down" bounce.
+      const zt = Math.min(1, prog / ZEASE_FRAC);
+      const ze = 1 - (1 - zt) * (1 - zt); // ease-out quad
+      pred.rz = pred.z + (s.z - pred.z) * ze;
       pred.dir = s.dir; pred.moving = true;
     }
     if (prog >= 1) {                       // step complete → commit base, carry remainder
-      // Hard-commit rz to the step's resolved z along with the base (was only
-      // ever *chased* toward it — RZ_CATCHUP leaves ~8% of the delta unresolved
-      // at `dur`, see above). Without this the residual carries into the next
-      // queued step's chase as extra distance to make up, which COMPOUNDS over
-      // a multi-step climb/staircase (verified live: consecutive height-
-      // changing steps grew an increasing rz-vs-z gap). Committing exactly here
-      // matches ClassicUO's step-boundary behavior (`Offset.Z = 0` on commit)
-      // without touching the mid-step ease that avoids a per-tile speed lurch.
+      // Commit the base; rz is already at s.z (the mid-step ease resolves Z within
+      // the first ZEASE_FRAC of the step), so setting it here is just a belt-and-
+      // braces exactness — no residual to snap, which is what removes the
+      // staircase bounce.
       if (!s.turn) { pred.x = s.x; pred.y = s.y; pred.z = s.z; pred.rz = s.z; }
       pred.dir = s.dir;
       // ClassicUO model: WE are the pacer. Each committed step (the prediction
