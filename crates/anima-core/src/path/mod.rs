@@ -15,6 +15,23 @@ pub trait Terrain {
     /// If an entity at `from_z` can step onto `(x, y)`, return the Z it would
     /// stand at; otherwise `None`.
     fn walkable_step(&mut self, x: u32, y: u32, from_z: i32) -> Option<i32>;
+
+    /// Serial of a **closed door** item genuinely blocking a real (non-planning)
+    /// step onto `(x, y)` at `current_z`, if this terrain distinguishes "a wall"
+    /// from "a closed door we could open". Route PLANNING already treats a
+    /// closed door as passable (a `walkable_step` implementor that models
+    /// dynamic items — e.g. `anima-net`'s `MapTerrain` — returns `Some` for a
+    /// closed-door tile, same as `anima-net::scene::tile_walkable_for_planning`),
+    /// so `find_path`/`find_path_near` may legitimately route straight through
+    /// one; a route EXECUTOR calls this on the chosen next hop to decide
+    /// whether to `Use` the door first instead of walking into what the real
+    /// server would just deny. Default: no door awareness — a bare grid
+    /// (tests) or a static-only terrain (`anima_assets::MapData` alone) has no
+    /// dynamic items layered on top of it, so every tile it allows really is
+    /// just walkable.
+    fn door_at(&mut self, _x: u32, _y: u32, _current_z: i32) -> Option<u32> {
+        None
+    }
 }
 
 /// A* back-pointer: for a node, the (previous node, direction taken, Z reached).
@@ -384,6 +401,15 @@ mod tests {
             blocked,
         };
         assert!(find_path(&mut g, (0, 0, 0), (5, 5), 10_000).is_none());
+    }
+
+    #[test]
+    fn terrain_default_door_at_is_no_door_awareness() {
+        // A plain `Terrain` impl (like `Grid` here, or `anima_assets::MapData`
+        // alone) only ever models the static map — it has no concept of a
+        // dynamic door item sitting on top, so the default must say "no door".
+        let mut g = Grid { w: 5, h: 5, blocked: Default::default() };
+        assert_eq!(Terrain::door_at(&mut g, 0, 0, 0), None);
     }
 
     #[test]

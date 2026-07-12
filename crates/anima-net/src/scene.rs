@@ -3,11 +3,13 @@
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
+use std::time::{Duration, Instant};
 
 use anima_assets::{
     Anim, AnimData, Art, Cliloc, Image, MapData, Multis, RadarCol, StaticTile, ZReason, MAP_HEIGHT, MAP_WIDTH,
 };
 use anima_core::gump_layout::{self, GumpElement, HtmlText};
+use anima_core::path::Terrain;
 use anima_core::World;
 use serde_json::{json, Value};
 
@@ -271,6 +273,121 @@ pub fn door_blocking_at(world: &World, map: &MapData, x: i64, y: i64, current_z:
                 && map.item_blocks(it.graphic, it.pos.z as i32, current_z)
         })
         .map(|it| it.serial)
+}
+
+/// [`Terrain`] over the live map + dynamic world items, with a blacklist of tiles
+/// the server has *denied* (static map says walkable, a building/blocker disagrees)
+/// so re-paths route around them. Mirrors `Session::navigate_to`'s `Avoiding`.
+/// Shared by `play_server`'s click-to-walk executor and `lib.rs`'s `Route` (the
+/// headless `anima-agent`/`anima2` driver) — both plan a route the same way, so
+/// this is the ONE place that combines the static map with `World`'s dynamic
+/// items for A* planning; see [`tile_walkable_for_planning`]'s doc.
+pub(crate) struct MapTerrain<'a> {
+    pub(crate) world: &'a World,
+    pub(crate) map: &'a mut MapData,
+    pub(crate) blocked: &'a HashSet<(u32, u32)>,
+    pub(crate) multis: Option<&'a Multis>,
+}
+
+impl Terrain for MapTerrain<'_> {
+    fn walkable_step(&mut self, x: u32, y: u32, from_z: i32) -> Option<i32> {
+        if self.blocked.contains(&(x, y)) {
+            return None;
+        }
+        // Planning, not a real committed step: a closed door doesn't block a
+        // *route* (see `tile_walkable_for_planning`'s doc) — the auto-walk
+        // executor opens any door it actually needs to step through.
+        tile_walkable_for_planning(self.world, self.map, self.multis, x as i64, y as i64, from_z)
+    }
+
+    /// `Terrain::door_at`'s real (dynamic-item-aware) implementation — reuses
+    /// [`door_blocking_at`] so this can never drift from `play_server`'s own
+    /// door check. Shared by `play_server`'s click-to-walk executor (which
+    /// still calls `door_blocking_at` directly, having `world`/`map` in hand
+    /// already) and `lib.rs`'s `Route` (via this generic `Terrain` hook,
+    /// which is all a headless driver has).
+    fn door_at(&mut self, x: u32, y: u32, current_z: i32) -> Option<u32> {
+        door_blocking_at(self.world, self.map, x as i64, y as i64, current_z)
+    }
+}
+
+/// A closed door blocking the next hop gets this many `Use` (open) attempts,
+/// one per cadence tick, before we give up and treat its tile like any other
+/// wall (blacklist + re-path around it). Bounds the case a real UO player
+/// would also fail at — a *locked* door — so that still ends in "boxed in"
+/// instead of hammering `Use` on it forever. Shared by `play_server`'s
+/// click-to-walk executor and `lib.rs`'s `Route` — both open a door the same
+/// way (see [`decide_blocked_step`]).
+pub(crate) const MAX_DOOR_OPEN_ATTEMPTS: u32 = 3;
+
+/// How long to wait after sending `Use` on a door before resending it, if the
+/// door's own state hasn't visibly changed in the meantime — comfortably
+/// above a realistic RTT + server processing time, so a slow (but eventually
+/// successful) round trip doesn't get its own toggle undone by an impatient
+/// resend (see [`BlockedStepAction::AwaitDoor`]'s doc). Well above the 400ms
+/// cadence tick both `play_server` and `Route` check this on.
+pub(crate) const DOOR_USE_COOLDOWN: Duration = Duration::from_millis(1200);
+
+/// What the auto-walk executor should do about a next-hop tile that the
+/// *strict* (real-movement) check just denied. Pulled out as a pure function
+/// so the door-vs-wall decision is unit-testable without a live map/session.
+/// Shared by `play_server`'s click-to-walk loop and `lib.rs`'s `Route`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlockedStepAction {
+    /// Send `Use` on this door serial instead of walking — it may just be
+    /// closed, not locked, and this tick hasn't tried (enough), and either
+    /// we've never sent one yet or the previous one has had a full
+    /// [`DOOR_USE_COOLDOWN`] to land with no visible effect.
+    OpenDoor(u32),
+    /// A `Use` for this door was sent recently and hasn't had time to show
+    /// an effect yet — do nothing this tick. ServUO's `Use` TOGGLES a door,
+    /// so blindly resending every cadence tick (400ms) would close what a
+    /// slower-than-usual round trip (RTT > 400ms) had *just* opened.
+    AwaitDoor,
+    /// Give up on this tile like any other wall: blacklist it so the next
+    /// re-path routes around (or "boxed in" if that was the only way).
+    Blacklist,
+}
+
+/// Per-blocked-tile bookkeeping for the door-open retry loop (see
+/// [`decide_blocked_step`]): how many `Use` attempts have been sent so far,
+/// when the most recent one was sent, and the door's own graphic at that
+/// moment. The graphic is ServUO's usual tell that a door's state actually
+/// changed (open/closed swap the item's graphic — a `0x1A`/delta update
+/// arrives for it), so comparing it against the door's CURRENT graphic is
+/// how the executor knows a sent `Use` already landed instead of guessing
+/// off a fixed timer alone.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DoorUseAttempt {
+    pub(crate) count: u32,
+    pub(crate) sent_at: Instant,
+    pub(crate) graphic_at_send: u16,
+}
+
+/// Decide what to do about a blocked next-hop tile. A closed door gets up to
+/// [`MAX_DOOR_OPEN_ATTEMPTS`] `Use` attempts (it might open); anything else —
+/// including a door we've already tried enough times (probably locked) — is
+/// treated like a wall. Among those attempts, a fresh `Use` is only sent once
+/// either the door's state has visibly changed since the last one we sent
+/// (`door_state_changed`) or [`DOOR_USE_COOLDOWN`] has elapsed with no such
+/// change (`pending_use_sent_at`, `now`) — otherwise we're still waiting on
+/// the previous `Use` and must not resend (see [`BlockedStepAction::AwaitDoor`]).
+pub(crate) fn decide_blocked_step(
+    door: Option<u32>,
+    attempts_so_far: u32,
+    pending_use_sent_at: Option<Instant>,
+    door_state_changed: bool,
+    now: Instant,
+) -> BlockedStepAction {
+    match door {
+        Some(serial) if attempts_so_far < MAX_DOOR_OPEN_ATTEMPTS => match pending_use_sent_at {
+            Some(sent_at) if !door_state_changed && now.duration_since(sent_at) < DOOR_USE_COOLDOWN => {
+                BlockedStepAction::AwaitDoor
+            }
+            _ => BlockedStepAction::OpenDoor(serial),
+        },
+        _ => BlockedStepAction::Blacklist,
+    }
 }
 
 /// A dead player is a ghost (human ghost body 402/403). Ghosts walk through doors.

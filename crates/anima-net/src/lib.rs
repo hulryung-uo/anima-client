@@ -6,7 +6,7 @@
 //! [`World`] from the server's game-packet stream. The browser build will have
 //! an analogous WebSocket driver; the core stays identical.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -16,6 +16,7 @@ pub mod play_server;
 pub mod regions;
 pub mod scene;
 
+use anima_assets::MapData;
 use anima_core::agent::{Action, Observation};
 use anima_core::net::outgoing::{
     build_attack, build_book_page_request, build_buy, build_cast_spell, build_double_click,
@@ -31,8 +32,14 @@ use anima_core::net::{
     apply_packet, build_client_version, FramingError, LoginConfig, LoginDirective, LoginError,
     LoginMachine, LoginResult, StreamDecoder, Walker,
 };
-use anima_core::path::{find_path, Terrain, DEFAULT_MAX_EXPANSIONS};
+use anima_core::path::{find_path, find_path_near, Terrain, DEFAULT_MAX_EXPANSIONS};
 use anima_core::world::World;
+
+// `DOOR_USE_COOLDOWN`/`MAX_DOOR_OPEN_ATTEMPTS` are only referenced by
+// `route_tests` below (production code only needs `decide_blocked_step` to
+// already have them baked in) — imported there, not here, so a non-test
+// build doesn't warn about unused imports.
+use crate::scene::{decide_blocked_step, BlockedStepAction, MapTerrain};
 
 /// Client version we report to the server (must match the login seed version).
 const CLIENT_VERSION: &str = "7.0.102.3";
@@ -95,6 +102,12 @@ const ROUTE_STEP: Duration = Duration::from_millis(400);
 /// Give up a route after this many issued steps (runaway guard, mirrors
 /// `play.rs`'s `AUTO_WALK_MAX_STEPS`).
 const ROUTE_MAX_STEPS: u32 = 200;
+/// Like `play_server`'s `WALKTO_GOAL_SLOP`: a route whose *exact* goal tile
+/// turns out unreachable (a wall decoration, a tree, a crate someone dropped
+/// on it) still resolves to the nearest reachable tile within this many
+/// Chebyshev tiles instead of giving up outright — see
+/// `anima_core::path::find_path_near`'s doc.
+const ROUTE_GOAL_SLOP: u32 = 2;
 
 /// What [`Route::advance`] wants the caller ([`Session::advance_route`]) to do.
 /// Kept separate from the actual packet send so the state machine itself is
@@ -105,6 +118,13 @@ enum RouteStep {
     Wait,
     /// Walk one step in this direction next.
     Walk(u8),
+    /// The next hop is a closed door (see [`Terrain::door_at`]) — send `Use`
+    /// on this serial instead of walking into it. Unlike `Walk`, the caller
+    /// doesn't need to report back whether the packet actually landed (a
+    /// `Use` has no `Walker`-style pending-step budget to gate it) — `advance`
+    /// itself owns all the open/await/give-up bookkeeping (see
+    /// [`Route::door_attempts`]).
+    OpenDoor(u32),
     /// The goal is reached, or no path remains given what we've learned —
     /// drop the route.
     Done,
@@ -132,14 +152,32 @@ struct Candidate {
     is_move: bool,
 }
 
+/// Per-tile door-open retry bookkeeping for [`Route::advance`] — a lighter
+/// mirror of `scene::DoorUseAttempt` (attempt count + when the last `Use` was
+/// sent), minus the door's own graphic: `Route` never sees a live [`World`],
+/// so it has no way to tell "this `Use` already landed and toggled the door"
+/// the way `play_server`'s executor can (see `decide_blocked_step`'s
+/// `door_state_changed` doc) — it always takes that function's cooldown-only
+/// path instead. Safe (just occasionally a little slower to react to a door
+/// that already reopened than `play_server`'s human-facing loop would be).
+#[derive(Debug, Clone, Copy)]
+struct DoorAttempt {
+    count: u32,
+    sent_at: Instant,
+}
+
 #[derive(Debug)]
 struct Route {
     goal: (u32, u32),
     /// Tiles the server has *denied* (static map said walkable, a
     /// building/dynamic blocker disagreed) — re-paths route around them, like
-    /// `navigate_to`'s `Avoiding`.
+    /// `navigate_to`'s `Avoiding`. Also gains a tile whose closed door never
+    /// opened after [`MAX_DOOR_OPEN_ATTEMPTS`] tries (see `advance`'s
+    /// door-handling arm) — treated like any other wall from then on.
     blocked: HashSet<(u32, u32)>,
-    /// Steps successfully issued so far (the runaway guard).
+    /// Steps successfully issued so far (the runaway guard). Only real walks
+    /// count — a door `Use` attempt does not (mirrors `play_server`'s
+    /// `auto_steps`, which likewise only increments on an actual walk send).
     steps: u32,
     last_step: Instant,
     /// Whether the last *armed* (successfully sent) step was a real move (not
@@ -152,6 +190,9 @@ struct Route {
     /// `advance`'s most recent proposed step, awaiting `step_sent` to say
     /// whether it actually went out. See [`Candidate`].
     candidate: Option<Candidate>,
+    /// Closed doors currently blocking the route's next hop, keyed by tile —
+    /// see [`DoorAttempt`] and `advance`'s door-handling arm.
+    door_attempts: HashMap<(u32, u32), DoorAttempt>,
 }
 
 impl Route {
@@ -167,6 +208,7 @@ impl Route {
             from: (0, 0),
             target: (0, 0),
             candidate: None,
+            door_attempts: HashMap::new(),
         }
     }
 
@@ -175,7 +217,19 @@ impl Route {
     /// caller reports back via [`Route::step_sent`] once it knows whether the
     /// packet actually went out (a zero movement-prediction budget can mean it
     /// didn't); only then does `step_sent` arm the deny-detection bookkeeping
-    /// below (see [`Candidate`]).
+    /// below (see [`Candidate`]). A [`RouteStep::OpenDoor`]/an internally
+    /// abandoned door tile, by contrast, is fully decided here — see
+    /// [`RouteStep::OpenDoor`]'s doc.
+    ///
+    /// Uses [`find_path_near`] (not the exact-goal-only `find_path`) so a
+    /// goal whose precise tile isn't reachable still resolves to the nearest
+    /// standable tile within [`ROUTE_GOAL_SLOP`] instead of hard-rejecting —
+    /// ClassicUO parity, mirroring `play_server`'s own `WalkTo` handling (see
+    /// `find_path_near`'s doc). `terrain`'s [`Terrain::door_at`] — a no-op
+    /// default for a plain grid/`MapData`, real for `scene::MapTerrain` —
+    /// is what actually gives this door awareness; the pathfinding itself
+    /// doesn't need to know about doors (planning already treats a closed
+    /// one as passable).
     fn advance<T: Terrain>(&mut self, terrain: &mut T, pos: (u16, u16, i8), facing: u8) -> RouteStep {
         let (px, py, pz) = pos;
         if (px as u32, py as u32) == self.goal {
@@ -192,23 +246,79 @@ impl Route {
         }
         self.pending_move = false;
 
-        let path = {
-            let mut avoid = Avoiding { inner: terrain, blocked: &self.blocked };
-            find_path(&mut avoid, (px as u32, py as u32, pz as i32), self.goal, DEFAULT_MAX_EXPANSIONS)
-        };
-        match path {
-            Some(steps) if !steps.is_empty() => {
-                let step = steps[0];
-                // Not armed yet — just proposed. `step_sent` decides whether this
-                // becomes the next `advance`'s deny check.
-                self.candidate = Some(Candidate {
-                    from: (px, py),
-                    target: (step.x, step.y),
-                    is_move: facing == step.dir,
-                });
-                RouteStep::Walk(step.dir)
+        // Loops only on `BlockedStepAction::Blacklist` (a door that gave up):
+        // that permanently adds one more tile to `self.blocked` before
+        // re-pathing, so this terminates — bounded by the (finite) number of
+        // distinct door tiles any candidate route could ever offer up.
+        loop {
+            let resolved = {
+                let mut avoid = Avoiding { inner: terrain, blocked: &self.blocked };
+                find_path_near(
+                    &mut avoid,
+                    (px as u32, py as u32, pz as i32),
+                    self.goal,
+                    ROUTE_GOAL_SLOP,
+                    DEFAULT_MAX_EXPANSIONS,
+                )
+            };
+            let Some((_resolved_goal, steps)) = resolved else {
+                return RouteStep::Done; // nothing reachable at all, even nearby — give up
+            };
+            if steps.is_empty() {
+                // Already standing at the nearest reachable tile — a legitimate
+                // "arrived" (mirrors `find_path_near`'s empty-path semantics), not
+                // a failure just because the exact goal itself is unstandable.
+                return RouteStep::Done;
             }
-            _ => RouteStep::Done, // no route given what we've learned
+            let step = steps[0];
+            let tile = (step.x, step.y);
+
+            // Is the chosen next hop a closed door right now? Planning already
+            // treats it as passable (see `Terrain::door_at`'s doc), so negotiate
+            // actually opening it instead of walking into what the real server
+            // would just deny.
+            if let Some(serial) = terrain.door_at(step.x, step.y, pz as i32) {
+                let prior = self.door_attempts.get(&tile).copied();
+                let attempts = prior.map_or(0, |a| a.count);
+                let sent_at = prior.map(|a| a.sent_at);
+                // `door_state_changed` is always `false` here — see
+                // `DoorAttempt`'s doc for why `Route` can't tell any better.
+                let action = decide_blocked_step(Some(serial), attempts, sent_at, false, Instant::now());
+                match action {
+                    BlockedStepAction::OpenDoor(serial) => {
+                        self.door_attempts.insert(tile, DoorAttempt { count: attempts + 1, sent_at: Instant::now() });
+                        // Consumes this tick's cadence, like a real walk attempt.
+                        self.last_step = Instant::now();
+                        return RouteStep::OpenDoor(serial);
+                    }
+                    BlockedStepAction::AwaitDoor => {
+                        self.last_step = Instant::now();
+                        return RouteStep::Wait;
+                    }
+                    BlockedStepAction::Blacklist => {
+                        // Not a decision worth reporting to the caller — prune this
+                        // dead-end tile and immediately re-path around it, same as
+                        // if the server had denied it (see the `pending_move` check
+                        // above). No cadence cost: whatever this loop lands on next
+                        // (a detour, or truly `Done`) is this tick's real answer.
+                        self.blocked.insert(tile);
+                        self.door_attempts.remove(&tile);
+                        continue;
+                    }
+                }
+            }
+            // No longer (or never) blocked by a door here — drop any stale
+            // bookkeeping (harmless no-op if absent).
+            self.door_attempts.remove(&tile);
+
+            // Not armed yet — just proposed. `step_sent` decides whether this
+            // becomes the next `advance`'s deny check.
+            self.candidate = Some(Candidate {
+                from: (px, py),
+                target: (step.x, step.y),
+                is_move: facing == step.dir,
+            });
+            return RouteStep::Walk(step.dir);
         }
     }
 
@@ -444,13 +554,18 @@ impl Session {
     /// Advance the active [`Action::WalkTo`] route by at most one step, paced
     /// at [`ROUTE_STEP`] — call this once per tick (e.g. right after
     /// [`Session::observe`]) so a headless brain's `WalkTo` actually walks. A
-    /// no-op if no route is active. `terrain` is the map + static walkability
-    /// oracle (the runner owns it, same as [`Session::navigate_to`]); dynamic
-    /// world blockers are the caller's `terrain` impl's concern, exactly like
-    /// `navigate_to`. Re-paths around a server deny, mirrors `navigate_to`'s
-    /// `Avoiding` for a tile the static map says is walkable but the server
-    /// disagreed with.
-    pub fn advance_route<T: Terrain>(&mut self, terrain: &mut T) -> Result<(), DriverError> {
+    /// no-op if no route is active. `map` is the runner-owned static map data;
+    /// this builds a [`scene::MapTerrain`] over it *and* `self.world` — the
+    /// SAME door/dynamic-item-aware planning oracle `play_server`'s
+    /// click-to-walk executor uses (see its doc), so a route can path through
+    /// a closed door and, via `route.advance`'s [`RouteStep::OpenDoor`] arm
+    /// below, actually open it on approach — not just the play-server's
+    /// human-facing loop. Re-paths around a server deny, mirrors
+    /// [`Session::navigate_to`]'s `Avoiding` for a tile the static map says is
+    /// walkable but the server disagreed with (layered on top of, not
+    /// instead of, `MapTerrain`'s own blacklist parameter, which is left
+    /// empty here — `Route` owns the one blacklist that matters).
+    pub fn advance_route(&mut self, map: &mut MapData) -> Result<(), DriverError> {
         let Some(mut route) = self.route.take() else { return Ok(()) };
         let Some(p) = self.world.player_mobile() else {
             self.route = Some(route); // not in the world yet — try again next tick
@@ -458,7 +573,14 @@ impl Session {
         };
         let pos = (p.pos.x, p.pos.y, p.pos.z);
         let facing = p.direction;
-        match route.advance(terrain, pos, facing) {
+        // Scoped so `terrain`'s borrow of `self.world` ends before the match
+        // arms below need `&mut self` (e.g. `self.walk`/`self.apply_action`).
+        let step = {
+            let empty = HashSet::new();
+            let mut terrain = MapTerrain { world: &self.world, map, blocked: &empty, multis: None };
+            route.advance(&mut terrain, pos, facing)
+        };
+        match step {
             RouteStep::Wait => self.route = Some(route),
             RouteStep::Done => {} // arrived, or no path left — drop the route
             RouteStep::Walk(dir) => {
@@ -467,6 +589,18 @@ impl Session {
                 if route.steps <= ROUTE_MAX_STEPS {
                     self.route = Some(route);
                 }
+            }
+            RouteStep::OpenDoor(serial) => {
+                // Mirrors `play_server`'s `BlockedStepAction::OpenDoor` arm: a
+                // closed door on the next hop — `Use` it instead of walking
+                // into what the real server would just deny. `route.advance`
+                // already owns the attempt/cooldown bookkeeping, so this is a
+                // fire-and-forget send; the route stays live either way.
+                if std::env::var("ANIMA_DEBUG").is_ok() {
+                    eprintln!("anima-net: route to {:?} opening door {serial:#x}", route.goal);
+                }
+                self.apply_action(&Action::Use { serial })?;
+                self.route = Some(route);
             }
         }
         Ok(())
@@ -750,6 +884,14 @@ impl<T: Terrain> Terrain for Avoiding<'_, T> {
             self.inner.walkable_step(x, y, from_z)
         }
     }
+
+    // Forwarded unchanged: a tile this wrapper blacklists never reaches
+    // `find_path`/`find_path_near` as a candidate next hop in the first place
+    // (its `walkable_step` above already denies it), so there's nothing
+    // door-related to special-case here.
+    fn door_at(&mut self, x: u32, y: u32, current_z: i32) -> Option<u32> {
+        self.inner.door_at(x, y, current_z)
+    }
 }
 
 fn connect(e: &Endpoint) -> Result<TcpStream, DriverError> {
@@ -886,5 +1028,161 @@ mod route_tests {
         let next = route.advance(&mut terrain, (0, 0, 0), 2); // deny: still at (0,0)
         assert!(route.blocked.contains(&(1, 0)));
         assert_eq!(next, RouteStep::Done);
+    }
+
+    // ------------------------------------------------------------------
+    // Door awareness + `find_path_near` — mirrors `play_server`'s own
+    // `find_path_routes_through_a_closed_door` / `decide_blocked_step_*` /
+    // `find_path_near_*` tests, but exercised through `Route::advance` itself
+    // (the actual thing a headless brain drives), using `scene`'s door
+    // constants directly so a tuning change there can't silently desync the
+    // two suites.
+    // ------------------------------------------------------------------
+    use crate::scene::{DOOR_USE_COOLDOWN, MAX_DOOR_OPEN_ATTEMPTS};
+
+    /// A single-row corridor (like [`advance_gives_up_once_fully_boxed_in`]'s
+    /// `Corridor`) whose only connection at `door_tile` is a closed door —
+    /// PLANNING (`walkable_step`) treats it as passable (mirrors
+    /// `tile_walkable_for_planning`'s door exception) so a route can be found
+    /// through it at all; `door_at` reports the door only while `open` is
+    /// `false`, letting a test flip it to simulate the server's `Use` response
+    /// landing.
+    struct DoorCorridor {
+        door_tile: (u32, u32),
+        door_serial: u32,
+        open: std::cell::Cell<bool>,
+    }
+    impl Terrain for DoorCorridor {
+        fn walkable_step(&mut self, _x: u32, y: u32, _from_z: i32) -> Option<i32> {
+            if y == 0 { Some(0) } else { None }
+        }
+        fn door_at(&mut self, x: u32, y: u32, _current_z: i32) -> Option<u32> {
+            if (x, y) == self.door_tile && !self.open.get() { Some(self.door_serial) } else { None }
+        }
+    }
+
+    #[test]
+    fn advance_plans_a_route_through_a_closed_door_only_connection() {
+        // The door is the ONLY connection in this corridor — if planning
+        // treated a closed door as an ordinary wall, this would report `Done`
+        // (no path) immediately, exactly like `advance_gives_up_once_fully_boxed_in`'s
+        // sealed corridor. Instead it must recognize the door and negotiate
+        // opening it, not give up.
+        let mut terrain = DoorCorridor { door_tile: (1, 0), door_serial: 0xDEAD, open: false.into() };
+        let mut route = Route::new(5, 0);
+        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::OpenDoor(0xDEAD));
+    }
+
+    #[test]
+    fn advance_opens_the_door_on_approach_then_walks_through_once_open() {
+        let mut terrain = DoorCorridor { door_tile: (1, 0), door_serial: 0xDEAD, open: false.into() };
+        let mut route = Route::new(5, 0);
+        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::OpenDoor(0xDEAD));
+        // A door-open attempt is not a walk step — mirrors `play_server`'s
+        // `auto_steps`, which likewise only increments on an actual walk send.
+        assert_eq!(route.steps, 0);
+
+        // The door "opens" (as if the server's `Use` response — and the
+        // resulting item update — already landed). Once due again, `advance`
+        // must actually walk onto it instead of negotiating forever.
+        terrain.open.set(true);
+        route.last_step = Instant::now() - ROUTE_STEP;
+        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::Walk(2));
+    }
+
+    #[test]
+    fn advance_awaits_a_recent_door_use_before_resending() {
+        // Mirrors `decide_blocked_step_awaits_a_recent_use_with_no_visible_change`:
+        // a `Use` was JUST sent (well within `DOOR_USE_COOLDOWN`) — even though
+        // the route's own (much shorter) `ROUTE_STEP` cadence is due again, it
+        // must not resend yet (ServUO's `Use` toggles a door, so an impatient
+        // resend could close what the first `Use` is about to open).
+        let mut terrain = DoorCorridor { door_tile: (1, 0), door_serial: 0xDEAD, open: false.into() };
+        let mut route = Route::new(5, 0);
+        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::OpenDoor(0xDEAD));
+
+        route.last_step = Instant::now() - ROUTE_STEP; // only the route cadence elapses
+        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::Wait);
+        // Still only the one attempt — the await did not resend.
+        assert_eq!(route.door_attempts.get(&(1, 0)).map(|a| a.count), Some(1));
+    }
+
+    #[test]
+    fn advance_resends_the_door_use_once_the_cooldown_elapses() {
+        let mut terrain = DoorCorridor { door_tile: (1, 0), door_serial: 0xDEAD, open: false.into() };
+        let mut route = Route::new(5, 0);
+        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::OpenDoor(0xDEAD));
+
+        // Force BOTH the route cadence and the door cooldown to have elapsed.
+        route.last_step = Instant::now() - ROUTE_STEP;
+        if let Some(a) = route.door_attempts.get_mut(&(1, 0)) {
+            a.sent_at = Instant::now() - DOOR_USE_COOLDOWN;
+        }
+        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::OpenDoor(0xDEAD));
+        assert_eq!(route.door_attempts.get(&(1, 0)).map(|a| a.count), Some(2));
+    }
+
+    #[test]
+    fn advance_gives_up_on_a_door_past_the_attempt_cap_and_blacklists_it() {
+        // Mirrors `decide_blocked_step_gives_up_on_a_door_past_the_cap`: a door
+        // that never opens (a locked door, in real UO terms) still ends in
+        // "boxed in" instead of hammering `Use` on it forever.
+        let mut terrain = DoorCorridor { door_tile: (1, 0), door_serial: 0xDEAD, open: false.into() };
+        let mut route = Route::new(5, 0);
+
+        for attempt in 0..MAX_DOOR_OPEN_ATTEMPTS {
+            let step = route.advance(&mut terrain, (0, 0, 0), 2);
+            assert_eq!(step, RouteStep::OpenDoor(0xDEAD), "attempt {attempt}");
+            // Simulate the cooldown elapsing with no visible effect, so the
+            // NEXT `advance` is willing to retry rather than await.
+            if let Some(a) = route.door_attempts.get_mut(&(1, 0)) {
+                a.sent_at = Instant::now() - DOOR_USE_COOLDOWN;
+            }
+            route.last_step = Instant::now() - ROUTE_STEP;
+        }
+        // The cap is reached — treat the tile like any other wall: blacklist
+        // it, and (being the corridor's only connection) abandon the route.
+        let next = route.advance(&mut terrain, (0, 0, 0), 2);
+        assert!(route.blocked.contains(&(1, 0)));
+        assert_eq!(next, RouteStep::Done);
+    }
+
+    #[test]
+    fn advance_walks_to_nearest_reachable_tile_when_exact_goal_is_blocked() {
+        // Mirrors `find_path_near`'s ClassicUO-parity fallback (and
+        // `play_server`'s own `WalkTo` adjustment): the exact goal tile is
+        // unstandable (a wall decoration, a tree, a crate), but `Route` must
+        // still walk up to it and stop adjacent instead of refusing to move
+        // at all (the OLD `find_path`-only behavior: no path to the exact
+        // goal → `Done` at zero steps issued).
+        struct BlockedGoal;
+        impl Terrain for BlockedGoal {
+            fn walkable_step(&mut self, x: u32, y: u32, _from_z: i32) -> Option<i32> {
+                if (x, y) == (5, 5) { None } else { Some(0) }
+            }
+        }
+        let mut terrain = BlockedGoal;
+        let mut route = Route::new(5, 5);
+        let mut pos = (0u16, 0u16, 0i8);
+        let mut facing = 2u8;
+        let mut walked = 0;
+        for _ in 0..20 {
+            route.last_step = Instant::now() - ROUTE_STEP;
+            match route.advance(&mut terrain, pos, facing) {
+                RouteStep::Walk(dir) => {
+                    route.step_sent(true);
+                    walked += 1;
+                    let (dx, dy) = anima_core::net::movement::direction_delta(dir);
+                    pos = ((pos.0 as i32 + dx) as u16, (pos.1 as i32 + dy) as u16, 0);
+                    facing = dir;
+                }
+                RouteStep::Done => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(walked > 0, "must actually walk toward the blocked goal, not give up at step 0");
+        let cheb = (pos.0 as i32 - 5).unsigned_abs().max((pos.1 as i32 - 5).unsigned_abs());
+        assert_eq!(cheb, 1, "should stop exactly adjacent to the blocked goal");
+        assert_ne!((pos.0 as u32, pos.1 as u32), (5, 5), "must not walk onto the unstandable goal tile itself");
     }
 }

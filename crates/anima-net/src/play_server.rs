@@ -25,15 +25,15 @@ use anima_assets::{
     Anim, AnimData, Art, Cliloc, Gumps, Hues, MapData, Multis, RadarCol, Sounds, Texmaps, TileData, ZReason,
 };
 use anima_core::net::LoginConfig;
-use anima_core::path::{find_path, find_path_near, Terrain};
+use anima_core::path::{find_path, find_path_near};
 use anima_core::Action;
 use include_dir::{include_dir, Dir};
 use tiny_http::{Header, Method, Response, Server};
 
 use crate::regions::GuardRect;
 use crate::scene::{
-    build_scene, calculate_new_z, can_walk, door_blocking_at, explain_tile_walkable, render_worldmap,
-    tile_walkable_for_planning, StepDeny, WORLDMAP_STEP,
+    build_scene, calculate_new_z, can_walk, decide_blocked_step, door_blocking_at, explain_tile_walkable,
+    render_worldmap, BlockedStepAction, DoorUseAttempt, MapTerrain, StepDeny, WORLDMAP_STEP,
 };
 use crate::{Endpoint, Session};
 
@@ -71,39 +71,11 @@ const AUTO_WALK_MAX_RANGE: u32 = 32;
 const AUTO_WALK_MAX_EXPANSIONS: usize = 4_000;
 /// Give up after this many issued steps (prevents a runaway route).
 const AUTO_WALK_MAX_STEPS: u32 = 200;
-/// A closed door blocking the next hop gets this many `Use` (open) attempts,
-/// one per cadence tick, before we give up and treat its tile like any other
-/// wall (blacklist + re-path around it). Bounds the case a real UO player
-/// would also fail at — a *locked* door — so that still ends in "boxed in"
-/// instead of hammering `Use` on it forever.
-const MAX_DOOR_OPEN_ATTEMPTS: u32 = 3;
 /// A `WalkTo` whose *exact* clicked tile isn't reachable (a wall decoration,
 /// a tree, a crate someone dropped on it) falls back to the nearest tile
 /// within this many Chebyshev tiles instead of rejecting outright — see
 /// `anima_core::path::find_path_near`'s doc for why (ClassicUO parity).
 const WALKTO_GOAL_SLOP: u32 = 2;
-
-/// [`Terrain`] over the live map + dynamic world items, with a blacklist of tiles
-/// the server has *denied* (static map says walkable, a building/blocker disagrees)
-/// so re-paths route around them. Mirrors `Session::navigate_to`'s `Avoiding`.
-struct MapTerrain<'a> {
-    world: &'a anima_core::World,
-    map: &'a mut MapData,
-    blocked: &'a std::collections::HashSet<(u32, u32)>,
-    multis: Option<&'a Multis>,
-}
-
-impl Terrain for MapTerrain<'_> {
-    fn walkable_step(&mut self, x: u32, y: u32, from_z: i32) -> Option<i32> {
-        if self.blocked.contains(&(x, y)) {
-            return None;
-        }
-        // Planning, not a real committed step: a closed door doesn't block a
-        // *route* (see `tile_walkable_for_planning`'s doc) — the auto-walk
-        // executor opens any door it actually needs to step through.
-        tile_walkable_for_planning(self.world, self.map, self.multis, x as i64, y as i64, from_z)
-    }
-}
 
 /// ANIMA_DEBUG-only: probe the player's 8 neighbor tiles and print one compact
 /// ALLOW/DENY line per direction, explaining exactly why a denied tile is
@@ -155,75 +127,6 @@ fn debug_probe_neighbors(
                 eprintln!("[pathdbg] dir={dir} ({ux},{uy}): DENY dynamic g=0x{graphic:04X} item_z={item_z}");
             }
         }
-    }
-}
-
-/// What the auto-walk executor should do about a next-hop tile that the
-/// *strict* (real-movement) check just denied. Pulled out as a pure function
-/// so the door-vs-wall decision is unit-testable without a live map/session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BlockedStepAction {
-    /// Send `Use` on this door serial instead of walking — it may just be
-    /// closed, not locked, and this tick hasn't tried (enough), and either
-    /// we've never sent one yet or the previous one has had a full
-    /// [`DOOR_USE_COOLDOWN`] to land with no visible effect.
-    OpenDoor(u32),
-    /// A `Use` for this door was sent recently and hasn't had time to show
-    /// an effect yet — do nothing this tick. ServUO's `Use` TOGGLES a door,
-    /// so blindly resending every cadence tick (400ms) would close what a
-    /// slower-than-usual round trip (RTT > 400ms) had *just* opened.
-    AwaitDoor,
-    /// Give up on this tile like any other wall: blacklist it so the next
-    /// re-path routes around (or "boxed in" if that was the only way).
-    Blacklist,
-}
-
-/// How long to wait after sending `Use` on a door before resending it, if the
-/// door's own state hasn't visibly changed in the meantime — comfortably
-/// above a realistic RTT + server processing time, so a slow (but eventually
-/// successful) round trip doesn't get its own toggle undone by an impatient
-/// resend (see [`BlockedStepAction::AwaitDoor`]'s doc). Well above the
-/// 400ms cadence tick this is checked on.
-const DOOR_USE_COOLDOWN: Duration = Duration::from_millis(1200);
-
-/// Per-blocked-tile bookkeeping for the door-open retry loop (see
-/// [`decide_blocked_step`]): how many `Use` attempts have been sent so far,
-/// when the most recent one was sent, and the door's own graphic at that
-/// moment. The graphic is ServUO's usual tell that a door's state actually
-/// changed (open/closed swap the item's graphic — a `0x1A`/delta update
-/// arrives for it), so comparing it against the door's CURRENT graphic is
-/// how the executor knows a sent `Use` already landed instead of guessing
-/// off a fixed timer alone.
-#[derive(Debug, Clone, Copy)]
-struct DoorUseAttempt {
-    count: u32,
-    sent_at: Instant,
-    graphic_at_send: u16,
-}
-
-/// Decide what to do about a blocked next-hop tile. A closed door gets up to
-/// [`MAX_DOOR_OPEN_ATTEMPTS`] `Use` attempts (it might open); anything else —
-/// including a door we've already tried enough times (probably locked) — is
-/// treated like a wall. Among those attempts, a fresh `Use` is only sent once
-/// either the door's state has visibly changed since the last one we sent
-/// (`door_state_changed`) or [`DOOR_USE_COOLDOWN`] has elapsed with no such
-/// change (`pending_use_sent_at`, `now`) — otherwise we're still waiting on
-/// the previous `Use` and must not resend (see [`BlockedStepAction::AwaitDoor`]).
-fn decide_blocked_step(
-    door: Option<u32>,
-    attempts_so_far: u32,
-    pending_use_sent_at: Option<Instant>,
-    door_state_changed: bool,
-    now: Instant,
-) -> BlockedStepAction {
-    match door {
-        Some(serial) if attempts_so_far < MAX_DOOR_OPEN_ATTEMPTS => match pending_use_sent_at {
-            Some(sent_at) if !door_state_changed && now.duration_since(sent_at) < DOOR_USE_COOLDOWN => {
-                BlockedStepAction::AwaitDoor
-            }
-            _ => BlockedStepAction::OpenDoor(serial),
-        },
-        _ => BlockedStepAction::Blacklist,
     }
 }
 
@@ -1967,6 +1870,11 @@ mod csrf_tests {
 #[cfg(test)]
 mod walkto_pathing_tests {
     use super::*;
+    // Test-only: the door pacing constants live in `scene` and the `Terrain` trait
+    // is only implemented by a test double below — neither is used by this module's
+    // non-test code, so importing them here (not at the top) keeps the lib build warning-free.
+    use crate::scene::{DOOR_USE_COOLDOWN, MAX_DOOR_OPEN_ATTEMPTS};
+    use anima_core::path::Terrain;
 
     #[test]
     fn decide_blocked_step_opens_a_fresh_door() {

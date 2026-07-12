@@ -716,6 +716,254 @@ let lastWalkSentAt = 0;       // perf-time of the last walk we sent. The server'
 const RECONCILE_HOLDOFF = 500; // ms after a walk before a small at-rest offset is trusted
 const mounted = () => !!(scene && scene.player && scene.player.mounted);
 const cheby = (a, b) => Math.max(Math.abs(a), Math.abs(b));
+
+// ---- sitting (chairs/benches/stools/thrones) ----
+// Real UO (and ClassicUO, which we verified against) never sends a packet for this:
+// ServUO's chair items (Scripts/Items/Decorative/{Chairs,Stools,Benchs,Thrones}.cs)
+// have no OnDoubleClick override at all, so double-clicking one server-side is a
+// no-op. The classic 2D client instead recomputes, PURELY IN THE RENDERER every
+// frame, whether the mobile it's drawing currently occupies the same map tile as an
+// object whose GRAPHIC is one of a hardcoded set of "chair" ids (ClassicUO
+// `ChairTable`/`Mobile.TryGetSittingInfo`) — if so it draws that mobile seated
+// instead of standing, using a per-graphic table of allowed facings + pixel offsets.
+// We port that table + its offset math faithfully, but trigger it from an explicit
+// double-click-while-adjacent gesture instead of true same-tile occupancy: our
+// walk predictor never actually steps the avatar onto the seat's tile (CLAUDE.md:
+// the renderer never mutates World/prediction), so we fake the visual "step onto
+// the chair" as a render-only overlay — `sitting` below — that's read *only* by
+// drawMobs()/the camera/transparencyPass, never by the movement/prediction code.
+// Ported from ClassicUO src/ClassicUO.Client/Game/Data/ChairTable.cs (_defaultTable), 171 entries.
+// graphic -> [d1,d2,d3,d4,offsetY,mirrorOffsetY] (the 8th 'drawback' field — a rare
+// cloak-behind-the-seat nuance for a handful of graphics — is not ported; skipping it
+// only affects whether a worn cloak draws in front of or behind certain seats).
+const CHAIR_TABLE = new Map([
+  [0x0459, [0, -1, 4, -1, 2, 2]],
+  [0x045A, [-1, 2, -1, 6, 2, 2]],
+  [0x045B, [0, -1, 4, -1, 2, 2]],
+  [0x045C, [-1, 2, -1, 6, 2, 2]],
+  [0x0A2A, [0, 2, 4, 6, -4, -4]],
+  [0x0A2B, [0, 2, 4, 6, -8, -8]],
+  [0x0B2C, [-1, 2, -1, 6, 2, 2]],
+  [0x0B2D, [0, -1, 4, -1, 2, 2]],
+  [0x0B2E, [4, 4, 4, 4, 0, 0]],
+  [0x0B2F, [2, 2, 2, 2, 6, 6]],
+  [0x0B30, [6, 6, 6, 6, -8, 8]],
+  [0x0B31, [0, 0, 0, 0, 0, 4]],
+  [0x0B32, [4, 4, 4, 4, 0, 0]],
+  [0x0B33, [2, 2, 2, 2, 0, 0]],
+  [0x0B4E, [2, 2, 2, 2, 0, 0]],
+  [0x0B4F, [4, 4, 4, 4, 0, 0]],
+  [0x0B50, [0, 0, 0, 0, 0, 0]],
+  [0x0B51, [6, 6, 6, 6, 0, 0]],
+  [0x0B52, [2, 2, 2, 2, 0, 0]],
+  [0x0B53, [4, 4, 4, 4, 0, 0]],
+  [0x0B54, [0, 0, 0, 0, 0, 0]],
+  [0x0B55, [6, 6, 6, 6, 0, 0]],
+  [0x0B56, [2, 2, 2, 2, 4, 4]],
+  [0x0B57, [4, 4, 4, 4, 4, 4]],
+  [0x0B58, [6, 6, 6, 6, 0, 8]],
+  [0x0B59, [0, 0, 0, 0, 0, 8]],
+  [0x0B5A, [2, 2, 2, 2, 8, 8]],
+  [0x0B5B, [4, 4, 4, 4, 8, 8]],
+  [0x0B5C, [0, 0, 0, 0, 0, 8]],
+  [0x0B5D, [6, 6, 6, 6, 0, 8]],
+  [0x0B5E, [0, 2, 4, 6, -8, -8]],
+  [0x0B5F, [-1, 2, -1, 6, 3, 14]],
+  [0x0B60, [-1, 2, -1, 6, 3, 14]],
+  [0x0B61, [-1, 2, -1, 6, 3, 14]],
+  [0x0B62, [-1, 2, -1, 6, 3, 10]],
+  [0x0B63, [-1, 2, -1, 6, 3, 10]],
+  [0x0B64, [-1, 2, -1, 6, 3, 10]],
+  [0x0B65, [0, -1, 4, -1, 3, 10]],
+  [0x0B66, [0, -1, 4, -1, 3, 10]],
+  [0x0B67, [0, -1, 4, -1, 3, 10]],
+  [0x0B68, [0, -1, 4, -1, 3, 10]],
+  [0x0B69, [0, -1, 4, -1, 3, 10]],
+  [0x0B6A, [0, -1, 4, -1, 3, 10]],
+  [0x0B91, [4, 4, 4, 4, 6, 6]],
+  [0x0B92, [4, 4, 4, 4, 6, 6]],
+  [0x0B93, [2, 2, 2, 2, 6, 6]],
+  [0x0B94, [2, 2, 2, 2, 6, 6]],
+  [0x0CF3, [-1, 2, -1, 6, 2, 8]],
+  [0x0CF4, [-1, 2, -1, 6, 2, 8]],
+  [0x0CF6, [0, -1, 4, -1, 2, 8]],
+  [0x0CF7, [0, -1, 4, -1, 2, 8]],
+  [0x0E50, [4, 4, 4, 4, 4, 4]],
+  [0x0E51, [4, 4, 4, 4, 4, 4]],
+  [0x0E52, [2, 2, 2, 2, 0, 0]],
+  [0x0E53, [2, 2, 2, 2, 0, 0]],
+  [0x1049, [-1, 2, -1, 6, 2, 2]],
+  [0x104A, [0, -1, 4, -1, 2, 2]],
+  [0x11FC, [0, 2, 4, 6, 2, 7]],
+  [0x1207, [0, -1, 4, -1, 3, 10]],
+  [0x1208, [0, -1, 4, -1, 3, 10]],
+  [0x1209, [0, -1, 4, -1, 3, 10]],
+  [0x120A, [0, -1, 4, -1, 3, 10]],
+  [0x120B, [0, -1, 4, -1, 3, 10]],
+  [0x120C, [0, -1, 4, -1, 3, 10]],
+  [0x1218, [4, 4, 4, 4, 4, 4]],
+  [0x1219, [2, 2, 2, 2, 4, 4]],
+  [0x121A, [0, 0, 0, 0, 0, 8]],
+  [0x121B, [6, 6, 6, 6, 0, 8]],
+  [0x1527, [2, 2, 2, 2, 0, 0]],
+  [0x1771, [0, 2, 4, 6, 0, 0]],
+  [0x1776, [0, 2, 4, 6, 0, 0]],
+  [0x1779, [0, 2, 4, 6, 0, 0]],
+  [0x1DC7, [-1, 2, -1, 6, 3, 10]],
+  [0x1DC8, [-1, 2, -1, 6, 3, 10]],
+  [0x1DC9, [-1, 2, -1, 6, 3, 10]],
+  [0x1DCA, [0, -1, 4, -1, 3, 10]],
+  [0x1DCB, [0, -1, 4, -1, 3, 10]],
+  [0x1DCC, [0, -1, 4, -1, 3, 10]],
+  [0x1DCD, [-1, 2, -1, 6, 3, 10]],
+  [0x1DCE, [-1, 2, -1, 6, 3, 10]],
+  [0x1DCF, [-1, 2, -1, 6, 3, 10]],
+  [0x1DD0, [0, -1, 4, -1, 3, 10]],
+  [0x1DD1, [0, -1, 4, -1, 3, 10]],
+  [0x1DD2, [-1, 2, -1, 6, 3, 10]],
+  [0x2A58, [4, 4, 4, 4, 0, 0]],
+  [0x2A59, [2, 2, 2, 2, 0, 0]],
+  [0x2A5A, [0, 2, 4, 6, 0, 0]],
+  [0x2A5B, [0, 2, 4, 6, 10, 10]],
+  [0x2A7F, [0, 2, 4, 6, 0, 0]],
+  [0x2A80, [0, 2, 4, 6, 0, 0]],
+  [0x2DDF, [0, 2, 4, 6, 2, 2]],
+  [0x2DE0, [0, 2, 4, 6, 2, 2]],
+  [0x2DE3, [2, 2, 2, 2, 4, 4]],
+  [0x2DE4, [4, 4, 4, 4, 4, 4]],
+  [0x2DE5, [6, 6, 6, 6, 4, 4]],
+  [0x2DE6, [0, 0, 0, 0, 4, 4]],
+  [0x2DEB, [0, 0, 0, 0, 4, 4]],
+  [0x2DEC, [4, 4, 4, 4, 4, 4]],
+  [0x2DED, [2, 2, 2, 2, 4, 4]],
+  [0x2DEE, [6, 6, 6, 6, 4, 4]],
+  [0x2DF5, [0, 2, 4, 6, 4, 4]],
+  [0x2DF6, [0, 2, 4, 6, 4, 4]],
+  [0x3088, [0, 2, 4, 6, 4, 4]],
+  [0x3089, [0, 2, 4, 6, 4, 4]],
+  [0x308A, [0, 2, 4, 6, 4, 4]],
+  [0x308B, [0, 2, 4, 6, 4, 4]],
+  [0x319A, [-1, 2, -1, 6, 2, 2]],
+  [0x319B, [0, -1, 4, -1, 2, 2]],
+  [0x35ED, [0, 2, 4, 6, 0, 0]],
+  [0x35EE, [0, 2, 4, 6, 0, 0]],
+  [0x3DFF, [0, -1, 4, -1, 2, 2]],
+  [0x3E00, [-1, 2, -1, 6, 2, 2]],
+  [0x4023, [4, 4, 4, 4, 4, 4]],
+  [0x4024, [2, 2, 2, 2, 0, 0]],
+  [0x4027, [4, 4, 4, 4, 4, 4]],
+  [0x4028, [4, 4, 4, 4, 4, 4]],
+  [0x4029, [2, 2, 2, 2, 0, 0]],
+  [0x402A, [2, 2, 2, 2, 0, 0]],
+  [0x4BDC, [4, 4, 4, 4, 4, 4]],
+  [0x4C1B, [4, 4, 4, 4, 4, 4]],
+  [0x4C1E, [2, 2, 2, 2, 6, 6]],
+  [0x4C80, [4, 4, 4, 4, 4, 4]],
+  [0x4C81, [2, 2, 2, 2, 0, 0]],
+  [0x4C82, [4, 4, 4, 4, 4, 4]],
+  [0x4C83, [4, 4, 4, 4, 4, 4]],
+  [0x4C84, [2, 2, 2, 2, 0, 0]],
+  [0x4C85, [2, 2, 2, 2, 0, 0]],
+  [0x4C86, [4, 4, 4, 4, 4, 4]],
+  [0x4C87, [4, 4, 4, 4, 4, 4]],
+  [0x4C88, [2, 2, 2, 2, 0, 0]],
+  [0x4C89, [2, 2, 2, 2, 0, 0]],
+  [0x4C8A, [2, 2, 2, 2, 0, 0]],
+  [0x4C8B, [2, 2, 2, 2, 0, 0]],
+  [0x4C8C, [2, 2, 2, 2, 0, 0]],
+  [0x4C8D, [4, 4, 4, 4, 4, 4]],
+  [0x4C8E, [4, 4, 4, 4, 4, 4]],
+  [0x4C8F, [4, 4, 4, 4, 4, 4]],
+  [0x4DE0, [2, 2, 2, 2, 0, 0]],
+  [0x63BC, [0, -1, 4, -1, 3, 10]],
+  [0x63BD, [0, -1, 4, -1, 3, 10]],
+  [0x63C3, [-1, 2, -1, 6, 3, 14]],
+  [0x63C4, [-1, 2, -1, 6, 3, 14]],
+  [0x996C, [4, 4, 4, 4, 4, 4]],
+  [0x9977, [2, 2, 2, 2, 0, 0]],
+  [0x9C57, [6, 6, 6, 6, 6, 4]],
+  [0x9C58, [6, 6, 6, 6, 6, 4]],
+  [0x9C59, [0, 0, 0, 0, 4, 4]],
+  [0x9C5A, [0, 0, 0, 0, 4, 4]],
+  [0x9C5D, [6, 6, 6, 6, 6, 4]],
+  [0x9C5E, [6, 6, 6, 6, 6, 4]],
+  [0x9C5F, [6, 6, 6, 6, 6, 4]],
+  [0x9C60, [0, 0, 0, 0, 4, 4]],
+  [0x9C61, [0, 0, 0, 0, 4, 4]],
+  [0x9C62, [0, 0, 0, 0, 4, 4]],
+  [0x9E8E, [0, 0, 0, 0, 4, 4]],
+  [0x9E8F, [6, 6, 6, 6, 6, 4]],
+  [0x9E90, [2, 2, 2, 2, 0, 0]],
+  [0x9E91, [4, 4, 4, 4, 4, 4]],
+  [0x9E9F, [0, 0, 0, 0, 4, 4]],
+  [0x9EA0, [6, 6, 6, 6, 6, 4]],
+  [0x9EA1, [4, 4, 4, 4, 4, 4]],
+  [0x9EA2, [2, 2, 2, 2, 0, 0]],
+  [0xA05C, [6, 6, 6, 6, 6, 4]],
+  [0xA05D, [4, 4, 4, 4, 4, 4]],
+  [0xA05E, [0, 0, 0, 0, 4, 4]],
+  [0xA05F, [2, 2, 2, 2, 0, 0]],
+  [0xA211, [0, 2, 4, 6, -4, -4]],
+  [0xA4EA, [4, 4, 4, 4, 4, 4]],
+  [0xA4EB, [2, 2, 2, 2, 0, 0]],
+  [0xA586, [4, 4, 4, 4, 4, 4]],
+  [0xA587, [2, 2, 2, 2, 0, 0]],
+]);
+
+// ClassicUO Mobile.FixSittingDirection: snap the mobile's CURRENT facing to the
+// nearest facing the chair actually supports (a chair often only allows 1 or 2 of
+// the 4 cardinals — e.g. a bench against a wall only faces its own front/back).
+// Then ClassicUO's GetSittingAnimDirection folds that resolved N/E/S/W onto one of
+// only two real body-sprite directions people art has dedicated frames for (the
+// other 6 of the 8 facings are mirrors) — N/W reuse the ONMOUNT_STAND group (a
+// seated-leg pose that happens to read as "sitting" even off a horse); E/S have no
+// good sit art at all, so CUO's fallback is "hold the plain Stand frame at the
+// chair's pixel offset", which is what we do for those two (skipping ClassicUO's
+// further per-pixel vertical-band squish shader — a deliberate, documented loss of
+// fidelity; the task brief explicitly sanctions this "hold a stand frame" fallback).
+// Offsets below fold in FixSittingDirection's SITTING_OFFSET_X=8 / SIT_OFFSET_Y=4
+// constants, so the caller just adds {dx,dy} to the chair tile's screen position.
+function chairSeatFor(rawDir, entry) {
+  const [d1, d2, d3, d4, offsetY, mirrorOffsetY] = entry;
+  let dir;
+  switch (rawDir & 7) {
+    case 7: case 0: dir = d1 !== -1 ? d1 : (rawDir === 7 ? d4 : d2); break;
+    case 1: case 2: dir = d2 !== -1 ? d2 : (rawDir === 1 ? d1 : d3); break;
+    case 3: case 4: dir = d3 !== -1 ? d3 : (rawDir === 3 ? d2 : d4); break;
+    default:        dir = d4 !== -1 ? d4 : (rawDir === 5 ? d3 : d1); break; // 5, 6
+  }
+  switch (dir) {
+    case 0: return { dir, group: 25, dx: 4, dy: 29 + mirrorOffsetY };  // North: mirror=true
+    case 6: return { dir, group: 25, dx: -3, dy: 27 + mirrorOffsetY }; // West: mirror=false
+    case 2: return { dir, group: 4, dx: 0, dy: 13 + offsetY };         // East: mirror=true
+    default: return { dir, group: 4, dx: -9, dy: 14 + offsetY };       // South (4): mirror=false
+  }
+}
+
+// { x, y, z, graphic, dir, group, dx, dy } of the chair we're seated on, or null.
+// Render-overlay ONLY — see the comment above. Nothing outside drawMobs()/the
+// camera math/transparencyPass ever reads this, and it never touches World state,
+// `pred`, or the walk queue, so it can never desync movement.
+let sitting = null;
+function trySit(it) {
+  if (!scene || !scene.player) return false;
+  if (mounted()) return false; // ClassicUO: TryGetSittingInfo requires !IsMounted && !IsFlying
+  const entry = CHAIR_TABLE.get(it.g | 0);
+  if (!entry) return false;
+  const ddx = (it.x | 0) - (scene.player.x | 0), ddy = (it.y | 0) - (scene.player.y | 0);
+  if (cheby(ddx, ddy) > 1) return false; // must be standing on/adjacent to the chair
+  if (Math.abs((it.z | 0) - (scene.player.z | 0)) > 2) return false; // ClassicUO gates same-tile sits at |Z diff| <= 1; a little slack since we sit from beside it, not on it
+  const rawDir = ((pred ? pred.dir : scene.player.dir) | 0) & 7;
+  const seat = chairSeatFor(rawDir, entry);
+  sitting = { x: it.x | 0, y: it.y | 0, z: it.z | 0, graphic: it.g | 0, ...seat };
+  markDirty();
+  return true;
+}
+function standUp() {
+  if (!sitting) return;
+  sitting = null;
+  markDirty();
+}
 // Leg-cycle fraction advanced per tile of ground covered. Walking = half a stride
 // cycle per tile (one footstep → 80ms/frame for a 10-frame walk over a 400ms tile,
 // matching ClassicUO). Running takes *bigger strides* (fewer cycles per tile), so
@@ -1119,6 +1367,12 @@ function updateDeathUI(s) {
 function updateAnimStates(s) {
   const now = performance.now();
   const seen = new Set();
+  // The chair we're seated on disappeared/moved/changed graphic (someone else used
+  // it, a GM deleted it, …) — stand up rather than leave the avatar seated on thin
+  // air. Cheap: once per poll (~150ms), not per rendered frame.
+  if (sitting && !(s.items || []).some((it) => (it.x | 0) === sitting.x && (it.y | 0) === sitting.y && (it.g | 0) === sitting.graphic)) {
+    standUp();
+  }
   const touch = (id, x, y, z, dir, body, fb) => {
     seen.add(id);
     let st = anim.get(id);
@@ -1624,6 +1878,10 @@ function renderFrame(dt) {
   if (!scene) return;
   const now = performance.now();
   moveIntent = activeMove();   // mouse (RMB) or held keys → drives prediction
+  // Safety net: a teleport/recall/GM move while seated (activeMove() only stands us
+  // up on a fresh movement *intent*, not on the real position jumping under us) —
+  // don't leave the avatar looking stuck on a now-distant chair.
+  if (sitting && pred && cheby(Math.round(pred.x) - sitting.x, Math.round(pred.y) - sitting.y) > 1) standUp();
   // Player: append predicted steps while a key is held, then interpolate the queue.
   const me = anim.get("self");
   if (me && pred) {
@@ -1668,10 +1926,15 @@ function renderFrame(dt) {
     if (dist <= step) { st.rx = st.tx; st.ry = st.ty; }
     else { st.rx += (dx / dist) * step; st.ry += (dy / dist) * step; }
   }
-  // camera follows the eased player so the avatar stays centered (eased z too)
+  // camera follows the eased player so the avatar stays centered (eased z too).
+  // Seated: follow the chair TILE (not the sprite's small pixel nudge, see
+  // trySit()/chairSeatFor()) so the camera settles exactly like it would after any
+  // other one-tile step, with the avatar still centered.
   const self = anim.get("self");
   if (self) {
-    app.stage.position.set(app.screen.width / 2 - isoX(self.rx, self.ry), app.screen.height / 2 - isoY(self.rx, self.ry, self.rz ?? self.z));
+    const camX = sitting ? isoX(sitting.x, sitting.y) : isoX(self.rx, self.ry);
+    const camY = sitting ? isoY(sitting.x, sitting.y, sitting.z) : isoY(self.rx, self.ry, self.rz ?? self.z);
+    app.stage.position.set(app.screen.width / 2 - camX, app.screen.height / 2 - camY);
   }
   // Cycle animated statics (flames/fountains/water wheels) to their current frame.
   tickAnimatedStatics(now);
@@ -1740,7 +2003,8 @@ let transparencyDirty = true;
 let lastCotKey = null;
 function transparencyPass() {
   let ptx, pty, pz;
-  if (pred) { ptx = Math.round(pred.rx); pty = Math.round(pred.ry); pz = pred.z; }
+  if (sitting) { ptx = sitting.x; pty = sitting.y; pz = sitting.z; } // seated: fade around the chair, not the (unmoved) real tile
+  else if (pred) { ptx = Math.round(pred.rx); pty = Math.round(pred.ry); pz = pred.z; }
   else if (scene && scene.player) { ptx = scene.player.x; pty = scene.player.y; pz = scene.player.z; }
   else return;
   const cotKey = ptx + "," + pty + "," + (pz | 0);
@@ -1893,10 +2157,14 @@ function drawMobs() {
       if (performance.now() < st.faceOverride.until) faceDir = st.faceOverride.dir;
       else st.faceOverride = null;
     }
-    const d = faceDir & 7;
     // We only know run/mount state for our own player; other mobiles walk/stand.
     const isSelf = id === "self";
-    const moving = !!st.animMoving; // set in renderFrame (glide + held/mouse)
+    // Sitting (chair double-click, see trySit()) is a pure render overlay: while
+    // seated, the local avatar's facing/pose come from the chair-table resolution
+    // instead of the real predicted state — nothing below this ever touches World
+    // or `pred`.
+    const d = (isSelf && sitting) ? sitting.dir : (faceDir & 7);
+    const moving = (isSelf && sitting) ? false : !!st.animMoving; // set in renderFrame (glide + held/mouse)
     const running = isSelf && !!(moveIntent && moveIntent.run);
     // Look up this entity's scene record (self → player; else mobile) for skin hue,
     // worn equipment, and mount state. Mount is per-entity: self uses player.mounted,
@@ -1966,6 +2234,16 @@ function drawMobs() {
         for (let f = 0; f < frames; f++) texFor(`anim/${bodyAnim}/${group}/${d}/${f}.png`);
         st.prevFrameKey = `${group}/${d}`;
       }
+    }
+    // Seated overrides whatever the above picked (even a pending action anim —
+    // ClassicUO's TryGetSittingInfo/seated-draw path takes priority unconditionally
+    // too): frame 0 of chairSeatFor()'s group, always. framesFor() here just kicks
+    // off loading that (group,d)'s frame-count/centers so centerFor() below
+    // positions the sprite correctly instead of falling back to the foot anchor.
+    if (isSelf && sitting) {
+      group = sitting.group;
+      frames = framesFor(bodyAnim, group, d);
+      frame = 0;
     }
     const skinHue = ent && ent.hue ? ent.hue : 0;
     // Compose the character from stable PARTS (mount, body, each worn layer). Two
@@ -2038,13 +2316,19 @@ function drawMobs() {
           1 + layerRank(e.layer, d), false, e.anim, group, frame);
       }
     }
-    const x = isoX(st.rx, st.ry), y = isoY(st.rx, st.ry, st.rz ?? st.z);
+    // Seated: draw at the chair's tile + ClassicUO's pixel nudge (chairSeatFor())
+    // instead of the real predicted position — the avatar visually "sits down" onto
+    // the seat while the actual World/prediction state never changes (trySit()).
+    const x = (isSelf && sitting) ? isoX(sitting.x, sitting.y) + sitting.dx : isoX(st.rx, st.ry);
+    const y = (isSelf && sitting) ? isoY(sitting.x, sitting.y, sitting.z) + sitting.dy : isoY(st.rx, st.ry, st.rz ?? st.z);
     if (entries.length) {
       entries.sort((a, b) => a.rank - b.rank);
       // zIndex only changes when the mobile crosses a tile (assigning it forces a
       // re-sort). All parts share the body's depth; a rank epsilon (≪ the per-z step
       // of 16) keeps them back→front regardless of which parts are present this frame.
-      const zi = depthZ(Math.round(st.rx), Math.round(st.ry), st.z + 1, 8);
+      const zi = (isSelf && sitting)
+        ? depthZ(sitting.x, sitting.y, sitting.z + 1, 8)
+        : depthZ(Math.round(st.rx), Math.round(st.ry), st.z + 1, 8);
       for (const e of entries) {
         const key = id + "#" + e.key;
         let sp = mobSprites.get(key);
@@ -5754,8 +6038,8 @@ function mouseMove() {
 // What the player wants to do this frame (single source for prediction + send).
 function activeMove() {
   if (chatting || wmOn) return null;   // don't walk while typing or with the world map open
-  if (rightDown) { const m = mouseMove(); if (m) return m; }
-  if (held.size) return { dir: [...held].pop(), run: shiftHeld };
+  if (rightDown) { const m = mouseMove(); if (m) { standUp(); return m; } }
+  if (held.size) { standUp(); return { dir: [...held].pop(), run: shiftHeld }; }
   return null;
 }
 
@@ -5795,6 +6079,9 @@ function onEntityPointerDown(serial, e, isItem) {
   }
   if (clickPend && clickPend.serial === serial) {  // second click in time → double-click
     clearTimeout(clickPend.timer); clickPend = null;
+    // Any double-click ends a sit (see trySit()) before deciding what this one does —
+    // double-clicking the same chair again just re-resolves and re-sits below.
+    standUp();
     // War mode: double-clicking another mobile attacks it (ClassicUO behaviour),
     // instead of "use" (which would open its paperdoll).
     if (!isItem && scene && scene.war && (serial >>> 0) !== ((scene.player && scene.player.serial) >>> 0)) {
@@ -5808,6 +6095,7 @@ function onEntityPointerDown(serial, e, isItem) {
     if (isItem) {
       const it = (scene.items || []).find((x) => (x.serial >>> 0) === (serial >>> 0));
       if (it && it.c) openContainer(serial);
+      else if (it) trySit(it); // no-op unless `it.g` is a chair/bench/stool/throne we're next to
     } else {
       // Double-clicked a MOBILE → open its paperdoll (humanoid bodies only, like UO).
       const m = (scene.mobiles || []).find((x) => (x.serial >>> 0) === (serial >>> 0));
