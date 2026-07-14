@@ -679,7 +679,10 @@ function oplName(serial) {
 function snoopBackpack(serial) {
   sendInput("use:" + (serial >>> 0));   // double-click their pack = snoop attempt
   openContainer(serial);                // show the loot window if the snoop succeeds
-  addOverhead("self", "⚠ Snooping is a crime — you may be flagged criminal!", 0xff5555, performance.now());
+  // (id, text, type, hue, now) — type 9 = yell → red default colour; hue 0 uses it.
+  // Passing performance.now() as `hue` (the old 4-arg signature) made every warning a
+  // random colour AND left `born` undefined, so `age` was NaN and it never expired.
+  addOverhead("self", "⚠ Snooping is a crime — you may be flagged criminal!", 9, 0, performance.now());
 }
 // ---- per-entity interp state ----
 const anim = new Map();       // id -> {rx,ry,tx,ty,z,dir,body,fallback,moveUntil}
@@ -1489,32 +1492,39 @@ function syncWorld(s) {
       // including tiles this loop never revisits, e.g. pruneFar's hysteresis
       // ring — is stamped once per poll in one blanket pass; see
       // forEachLiveTexUrl()/touchTex() at the end of this function.)
-      if (e && e.g === t.g && e.z === z0) continue;
-      // corner heights (ClassicUO: top=this, right=(x+1,y), bottom=(x+1,y+1), left=(x,y+1))
-      const z1 = zAt(x + 1, y), z2 = zAt(x + 1, y + 1), z3 = zAt(x, y + 1);
-      if (z1 === null || z2 === null || z3 === null) continue; // await neighbours
+      // A colour-fallback tile is always re-evaluated so it upgrades to real art.
+      if (e && e.g === t.g && e.z === z0 && !e.fallback) continue;
+      // corner heights (ClassicUO: top=this, right=(x+1,y), bottom=(x+1,y+1), left=(x,y+1)).
+      // At the window's SE edge a neighbour falls outside the grid (null); rather than
+      // skip the tile — which flashes the black page background at the diamond's rim —
+      // fall back to this tile's own Z so it still renders (flat).
+      const z1 = zAt(x + 1, y) ?? z0, z2 = zAt(x + 1, y + 1) ?? z0, z3 = zAt(x, y + 1) ?? z0;
       const sloped = !(z0 === z1 && z1 === z2 && z2 === z3);
 
-      let sp, texUrl;
+      // Until the art/texmap PNG has streamed in, draw a flat diamond in the tile's
+      // server-provided average colour instead of `continue`-ing (which would leave the
+      // black page background showing through). The `fallback` flag makes the unchanged-
+      // check above re-evaluate it every poll until the real texture resolves.
+      let sp, texUrl, fallback = false;
       if (!sloped) {
         texUrl = `art/land/${t.g}.png`;
         const tex = texFor(texUrl);
-        if (!tex) continue;
-        sp = makeFlatTile(x, y, z0, tex);
+        if (tex) sp = makeFlatTile(x, y, z0, tex);
+        else { sp = makeColorTile(x, y, z0, z0, z0, z0, t.c); fallback = true; }
       } else if (t.tx > 0) {
         texUrl = `texmap/${t.tx}.png`; // seamless texture for slopes
         const tex = texFor(texUrl);
-        if (!tex) continue;
-        sp = makeStretchedTile(x, y, z0, z1, z2, z3, tex, true);
+        if (tex) sp = makeStretchedTile(x, y, z0, z1, z2, z3, tex, true);
+        else { sp = makeColorTile(x, y, z0, z1, z2, z3, t.c); fallback = true; }
       } else {
         texUrl = `art/land/${t.g}.png`; // no texmap → stretch the art
         const tex = texFor(texUrl);
-        if (!tex) continue;
-        sp = makeStretchedTile(x, y, z0, z1, z2, z3, tex, false);
+        if (tex) sp = makeStretchedTile(x, y, z0, z1, z2, z3, tex, false);
+        else { sp = makeColorTile(x, y, z0, z1, z2, z3, t.c); fallback = true; }
       }
       if (e) { world.removeChild(e.sp); e.sp.destroy(); }
       world.addChild(sp);
-      tilePool.set(key, { sp, g: t.g, z: z0, url: texUrl });
+      tilePool.set(key, { sp, g: t.g, z: z0, url: texUrl, fallback });
     }
   }
   for (const st of s.statics || []) {
@@ -1704,6 +1714,25 @@ function makeStretchedTile(x, y, z0, z1, z2, z3, tex, square) {
   const avgZ = Math.abs(z0 - z2) <= Math.abs(z3 - z1) ? (z0 + z2) >> 1 : (z3 + z1) >> 1;
   mesh.zIndex = depthZ(x, y, avgZ - 2, 0);
   return mesh;
+}
+
+// A flat-colour diamond placeholder for a land tile whose art/texmap PNG hasn't
+// streamed in yet (or a window-edge tile with no neighbour to slope against). Uses
+// the server-provided average colour `c` so terrain never flashes the black page
+// background during load/scroll; replaced by the textured tile on a later poll once
+// texFor() resolves. Corner heights follow the same layout as makeStretchedTile.
+function makeColorTile(x, y, z0, z1, z2, z3, c) {
+  const Bx = (x - y) * HALF, By = (x + y) * HALF;
+  const g = new PIXI.Graphics();
+  g.poly([
+    Bx,        By - HALF - z0 * ZSTEP, // top
+    Bx + HALF, By        - z1 * ZSTEP, // right
+    Bx,        By + HALF - z2 * ZSTEP, // bottom
+    Bx - HALF, By        - z3 * ZSTEP, // left
+  ]).fill(Array.isArray(c) && c.length === 3 ? ((c[0] << 16) | (c[1] << 8) | c[2]) : 0x101418);
+  const avgZ = Math.abs(z0 - z2) <= Math.abs(z3 - z1) ? (z0 + z2) >> 1 : (z3 + z1) >> 1;
+  g.zIndex = depthZ(x, y, avgZ - 2, 0);
+  return g;
 }
 
 // Is world tile (x,y) walkable per the latest scene? (outside the window → assume yes)
