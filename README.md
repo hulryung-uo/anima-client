@@ -3,6 +3,14 @@
 A **new, from-scratch Ultima Online client**, built AI-native and cross-platform
 (Windows + macOS). Companion to the [`anima`](../anima) AI player project.
 
+![anima-client running against a live ServUO shard — real isometric UO terrain
+and sprites, minimap, and HUD](docs/img/screenshot.png)
+
+*The web/PixiJS renderer running live against a ServUO shard: real
+`artLegacyMUL`/`anim` sprites in isometric projection, minimap, and a full HUD
+(stats, journal, controls). The same headless `anima-core` also drives AI agents
+and the Tauri desktop app.*
+
 > **New here? Read [`docs/DESIGN.md`](docs/DESIGN.md)** — the full design & handoff
 > doc (decision history, architecture, roadmap, protocol notes, references). This
 > project is resumable from that doc alone.
