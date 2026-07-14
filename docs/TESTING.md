@@ -61,10 +61,10 @@ movement/pathfinding debug logging on:
 ```bash
 cd ~/dev/uo/anima-client
 cargo build -p anima-net --bin play          # only needed once / after changes
-ANIMA_DEBUG=1 ./target/debug/play 127.0.0.1 2594 animagm <pass> 8788
+ANIMA_DEBUG=1 ./target/debug/play 127.0.0.1 2594 <gm-account> <pass> 8788
 ```
 
-- `animagm` is the dedicated GM test account (see §3 to activate it as
+- `<gm-account>` is the dedicated GM test account (see §3 to activate it as
   GameMaster+). Until it's activated, this still logs in and plays fine as a
   normal Player — `[` commands just get silently ignored by ServUO (see the
   gap noted in §3).
@@ -95,15 +95,15 @@ ANIMA_DEBUG=1 ./target/debug/play 127.0.0.1 2594 animagm <pass> 8788
 
 ## 3. GM account activation
 
-Two ways to make `animagm` GameMaster+ on the account. **(A) is recommended**
+Two ways to make `<gm-account>` GameMaster+ on the account. **(A) is recommended**
 — it's the method already used successfully in this environment, requires no
 server restart, and can't corrupt `accounts.xml`.
 
 ### (A) Recommended: `[admin` while logged in as Owner
 
-1. Log in to the shard as `hulryung` (the only Owner-level account) — via the
+1. Log in to the shard as `<owner-account>` (the only Owner-level account) — via the
    desktop app, `play`, or a real UO client.
-2. `[admin` → **ACCOUNT LIST** → select `animagm` (if `AutoAccountCreation` in
+2. `[admin` → **ACCOUNT LIST** → select `<gm-account>` (if `AutoAccountCreation` in
    `Config/Accounts.cfg` already created it from a prior login attempt) or
    type/select to create it → set **Access Level** to **GameMaster**.
 3. No restart needed — ServUO's account-list gump edits the live in-memory
@@ -124,8 +124,8 @@ edit that happened in between.
 
    ```xml
    <account>
-     <username>animagm</username>
-     <password>animagm</password>
+     <username><gm-account></username>
+     <password><gm-pass></password>
      <accessLevel>GameMaster</accessLevel>
    </account>
    ```
@@ -150,21 +150,21 @@ redacted — this is the shape to match, not to copy):
 
 ```xml
 <account>
-  <username>hulryung</username>
+  <username><owner-account></username>
   <newCryptPassword>16-B4-E0-0A-...-FC</newCryptPassword>
   <accessLevel>Owner</accessLevel>
   <created>2026-06-25T13:19:55.571126Z</created>
 </account>
 ```
 
-Either way, once `animagm` is GameMaster+, **`say:[<command>`** through
+Either way, once `<gm-account>` is GameMaster+, **`say:[<command>`** through
 `/input` (see §1, §4) executes real GM commands — no other plumbing needed;
 `play_server`'s `/input` → `Action::Say` → normal chat packet is exactly what
 a real client sends, and ServUO's `Server/Commands.cs` (`m_Prefix = "["`)
 parses any chat message starting with `[` as a command if the sender's
 `AccessLevel` clears the command's registered level.
 
-**Gap to watch for:** if `animagm` is still Player-level, ServUO's command
+**Gap to watch for:** if `<gm-account>` is still Player-level, ServUO's command
 parser (`CommandSystem`) just says "you don't have access to that command"
 back in the chat channel — check the `play` process's log
 (`ANIMA_DEBUG=1` prints server text; also visible via any in-page chat log)
@@ -222,7 +222,7 @@ real client. Our headless harness can't click, but has two ways round it:
 | `tele` | Counselor | yes (tile, no `Self`) | Teleport by clicking a destination tile (alternative to `go x y` when you want on-screen picking). `Commands.cs:531,535` (`TeleCommand`, `Supports = Simple` only — no `Self`, since "teleport to yourself" is meaningless). |
 | `bank` | GameMaster | yes (mobile, no `Self`) | Open a mobile's bank box remotely — container/paperdoll/drag tests without walking to an actual bank. `Handlers.cs:61,380` (`Bank_OnCommand`, raw `BankTarget`). Answer with `target:<your own serial>` to open your own. |
 | `Range <N> Remove where <Type>` | GameMaster | no (area) | Bulk-delete every object of `<Type>` within `<N>` tiles — the cleanup tool for anything you spawned to test with (a boat, a pile of test items). **The `where <Type>` clause is not optional in practice**: `ObjectConditional.Parse` (`Scripts/Commands/Generic/Implementors/ObjectConditional.cs:83-107`) only restricts the match when it finds a literal `where` token in the arguments; a bare `[Range N Remove]` risks sweeping up everything else nearby (other players' items, unrelated mobiles) instead of just what you meant to remove — always scope it, e.g. `Range 20 Remove where SmallBoat`. `RangeCommandImplementor.cs:14` (`Usage = "Range <range> <command> [condition]"`). |
-| *(hazard, not a command)* concurrent `animagm` logins | — | — | `animagm` is a single shared GM test account — a second `play`/client login to it drops the first connection (ServUO enforces one session per account, same as any normal login). Before launching a new `play` instance, confirm no other one is already using it (`ps aux \| grep "target/debug/play.*animagm"`, or check for a stray listener on the port you intend to reuse) — otherwise you'll silently kick your own (or someone else's) in-progress test session. |
+| *(hazard, not a command)* concurrent `<gm-account>` logins | — | — | `<gm-account>` is a single shared GM test account — a second `play`/client login to it drops the first connection (ServUO enforces one session per account, same as any normal login). Before launching a new `play` instance, confirm no other one is already using it (`ps aux \| grep "target/debug/play.*<gm-account>"`, or check for a stray listener on the port you intend to reuse) — otherwise you'll silently kick your own (or someone else's) in-progress test session. |
 
 ---
 
@@ -380,8 +380,8 @@ limit for stress testing, that's a ServUO-side setting, not a client change.
   ServUO's `CommandSystem` parses the `[` prefix) plus the existing
   `target:`/`targetxy:` actions. Nothing in `crates/` needed to change for
   this harness to work.
-- **`animagm` must actually be GameMaster+** before any `[` command does
-  anything (§3) — this doc can't do that step for you (needs `hulryung`
+- **`<gm-account>` must actually be GameMaster+** before any `[` command does
+  anything (§3) — this doc can't do that step for you (needs `<owner-account>`
   logged in, or ServUO stopped).
 - **Multi-word region names via bare `go`** are untested end-to-end here
   (quoting *should* work per `CommandSystem.Split`'s quote-awareness, but
