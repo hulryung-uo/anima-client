@@ -2094,6 +2094,7 @@ pub fn build_scene(
     let mut player = json!({
         "serial": p.serial,
         "x": p.pos.x, "y": p.pos.y, "z": p.pos.z, "dir": p.direction, "body": p_body, "at": atype(p_body), "name": p.name,
+        "noto": p.notoriety,  // self notoriety (innocent/criminal/murderer…) → name-overhead colour
         "hue": p_hue,
         "mounted": mounted, "mountAnim": player_mount_anim,
         "hits": p.hits, "hitsMax": p.hits_max, "mana": p.mana, "manaMax": p.mana_max,

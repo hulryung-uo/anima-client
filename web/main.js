@@ -1006,6 +1006,7 @@ async function main() {
   app.canvas.style.imageRendering = "pixelated"; // crisp nearest-neighbor upscale
   window.addEventListener("resize", () => { const r = renderSize(); app.renderer.resize(r.w, r.h); markDirty(); });
   document.getElementById("map").appendChild(app.canvas);
+  buildGameCursors();  // UO-style arrow / target-reticle mouse cursors over the game
   world = new PIXI.Container(); world.sortableChildren = true;
   entLayer = new PIXI.Graphics();
   mobs = new PIXI.Container();
@@ -2390,14 +2391,19 @@ function drawMobs() {
           sp = new PIXI.Sprite(e.tex);
           sp.anchor.set(0.5, 1.0);
           // Only the body is the click target; mount/clothing/hair never eat clicks.
-          if (id !== "self" && e.interactive) {
+          // Clicking YOURSELF is a real interaction too (single-click = your name in
+          // your notoriety colour, double-click = your paperdoll), so the "self" body
+          // is a click target like any other mobile — its serial comes from scene.player.
+          const clickSerial = id === "self"
+            ? (scene.player ? ((scene.player.serial >>> 0) + "") : null)
+            : (e.interactive ? id.slice(1) : null);
+          if (clickSerial != null) {
             sp.eventMode = "static";
             sp.cursor = "pointer";
-            const serial = id.slice(1);
-            sp.on("pointerdown", (ev) => onEntityPointerDown(serial, ev));
+            sp.on("pointerdown", (ev) => onEntityPointerDown(clickSerial, ev));
             // OPL tooltip on hover (same flow as world items) + target highlight.
-            sp.on("pointerover", () => { hoverEntity(serial); targetHighlightOn(sp); });
-            sp.on("pointerout", () => { hoverOut(serial); targetHighlightOff(sp); });
+            sp.on("pointerover", () => { hoverEntity(clickSerial); targetHighlightOn(sp); });
+            sp.on("pointerout", () => { hoverOut(clickSerial); targetHighlightOff(sp); });
           } else {
             sp.eventMode = "none";
           }
@@ -3028,8 +3034,44 @@ function addOverhead(id, text, type, hue, now) {
 // Set the overhead's color (only writes the DOM when it actually changes, so a
 // late-arriving hue from the async hue table recolors it on a later frame).
 function applyOverheadColor(o) {
-  const c = msgColor(o.type, o.hue);
+  const c = o.fc || msgColor(o.type, o.hue); // fc = a forced colour (e.g. notoriety name)
   if (o._c !== c) { o.el.style.color = c; o._c = c; }
+}
+
+// Float a mobile's name above its head in its notoriety colour (single-click, like
+// ClassicUO). Works for yourself too (scene.player carries `noto`); for others the
+// name/notoriety come from the mobile (or its OPL if the name hasn't loaded yet).
+function showNameOverhead(serial, tries) {
+  if (!scene) return;
+  const sv = serial >>> 0;
+  const isSelf = scene.player && sv === (scene.player.serial >>> 0);
+  let name, noto;
+  // ServUO doesn't send your OWN notoriety (self arrives via 0x20/0x22, which carry
+  // no noto byte), so it comes through as 0 — default yourself to Innocent (blue), the
+  // classic "your name" colour. Other mobiles carry real notoriety (crim/murderer/…).
+  if (isSelf) { name = scene.player.name; noto = (scene.player.noto | 0) || 1; }
+  else {
+    const m = (scene.mobiles || []).find((x) => (x.serial >>> 0) === sv);
+    if (!m) return;
+    name = m.name || (scene.opl && scene.opl[sv] && scene.opl[sv][0]) || "";
+    noto = m.noto | 0;
+  }
+  if (!name) {                       // name not loaded yet — the server click fetches its
+    if ((tries | 0) < 2) setTimeout(() => showNameOverhead(sv, (tries | 0) + 1), 400); // OPL; retry
+    return;
+  }
+  name = name.replace(/\s+/g, " ").trim(); // OPL names can carry tabs ("Carl\tthe tailor")
+  const id = isSelf ? "self" : "m" + sv;
+  if (!anim.has(id)) return;         // not in view
+  const el = document.createElement("div");
+  el.className = "oh-label oh-name";
+  el.textContent = name;
+  namesEl().appendChild(el);
+  const o = { id, text: name, type: 6, hue: 0, born: performance.now(), ttl: 3000, el, _c: null,
+              fc: cssColor(notoColor(noto)) };
+  applyOverheadColor(o);
+  overheads.push(o);
+  while (overheads.length > 40) { const x = overheads.shift(); if (x.el) x.el.remove(); }
 }
 
 // Position each floating line above its speaker (screen coords = camera + canvas→CSS
@@ -6242,7 +6284,11 @@ function onEntityPointerDown(serial, e, isItem) {
     }
   } else {
     if (clickPend) clearTimeout(clickPend.timer);
-    clickPend = { serial, timer: setTimeout(() => { sendInput("click:" + serial); clickPend = null; }, DBLCLICK_MS) };
+    clickPend = { serial, timer: setTimeout(() => {
+      sendInput("click:" + serial);   // ask the server (OPL / name for other mobiles)
+      if (!isItem) showNameOverhead(serial); // float the name now, in its notoriety colour
+      clickPend = null;
+    }, DBLCLICK_MS) };
     // Arm a ground-item pointer-drag: a left-press on a world item may turn into a
     // drag once the cursor moves past DRAG_THRESHOLD (see setupItemDnD). Until then
     // this stays a normal click; starting a drag cancels the pending name-request.
@@ -6296,12 +6342,62 @@ function clientToGlobal(clientX, clientY) {
 }
 // Crosshair + banner while the server waits for a target; Esc/answer hide it.
 function endTargetUI() { targetUIHidden = true; updateTargetUI(); }
+// ---- UO-style mouse cursors ------------------------------------------------
+// Drawn to an offscreen canvas → PNG data URI, so there's no dependency on cursor
+// gump art the play server doesn't ship. PIXI owns the canvas cursor (it swaps to
+// `cursorStyles[mode]` as you hover entities), so we drive it through cursorStyles
+// rather than fighting it with a raw style.cursor that PIXI would overwrite.
+let CURSOR_ARROW = "auto", CURSOR_TARGET = "crosshair", CURSOR_TARGET_WAR = "crosshair";
+function cursorFromCanvas(size, hotx, hoty, paint) {
+  const c = document.createElement("canvas"); c.width = c.height = size;
+  const g = c.getContext("2d"); paint(g);
+  return `url("${c.toDataURL("image/png")}") ${hotx} ${hoty}, auto`;
+}
+function buildGameCursors() {
+  // Gold arrow pointer — hotspot at the tip (1,1); dark outline reads on any terrain.
+  CURSOR_ARROW = cursorFromCanvas(28, 1, 1, (g) => {
+    const pts = [[1,1],[1,20],[6,15],[10,23],[13,22],[9,14],[16,14]];
+    g.beginPath(); g.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]);
+    g.closePath();
+    g.lineJoin = "round";
+    g.lineWidth = 3; g.strokeStyle = "#1a1206"; g.stroke();   // dark halo
+    g.fillStyle = "#f0d27a"; g.fill();                        // gold body
+    g.lineWidth = 1; g.strokeStyle = "#8a6a1e"; g.stroke();   // rim
+  });
+  const reticle = (color) => cursorFromCanvas(32, 16, 16, (g) => {
+    g.translate(16, 16); g.lineCap = "round";
+    for (const [w, col] of [[3.5, "#12100a"], [1.6, color]]) { // dark halo, then colour
+      g.lineWidth = w; g.strokeStyle = col; g.fillStyle = col;
+      g.beginPath(); g.arc(0, 0, 9, 0, Math.PI * 2); g.stroke();            // ring
+      for (const [dx, dy] of [[0,-1],[0,1],[-1,0],[1,0]]) {                 // ticks + centre gap
+        g.beginPath(); g.moveTo(dx*4, dy*4); g.lineTo(dx*13, dy*13); g.stroke();
+      }
+      g.beginPath(); g.arc(0, 0, 1.4, 0, Math.PI * 2); g.fill();            // centre dot
+    }
+  });
+  CURSOR_TARGET = reticle("#ffd23f");     // amber reticle — neutral/beneficial target
+  CURSOR_TARGET_WAR = reticle("#ff4d4d"); // red reticle — war / harmful target
+  applyCursorMode();
+}
+// Point the canvas cursor at the arrow, or the target reticle while a target cursor
+// is up (red in war mode). Updates PIXI's cursorStyles so it survives entity hovers,
+// and sets the style directly for an immediate switch (PIXI only re-applies on move).
+function applyCursorMode() {
+  if (!app || !app.renderer) return;
+  const targeting = !!(scene && scene.target && scene.target.active === 1 && !targetUIHidden);
+  const base = targeting ? ((scene && scene.war) ? CURSOR_TARGET_WAR : CURSOR_TARGET) : CURSOR_ARROW;
+  const cs = app.renderer.events && app.renderer.events.cursorStyles;
+  if (cs) { cs.default = base; cs.pointer = targeting ? base : CURSOR_ARROW; }
+  if (app.canvas) app.canvas.style.cursor = base;
+}
+
 function updateTargetUI() {
   const active = !!(scene && scene.target && scene.target.active === 1);
   if (active && !prevTargetActive) targetUIHidden = false; // fresh request → show again
   prevTargetActive = active;
   const show = active && !targetUIHidden;
-  if (app && app.canvas) app.canvas.style.cursor = show ? "crosshair" : "";
+  applyCursorMode();               // arrow ↔ target reticle (red in war mode)
   const hint = document.getElementById("targethint");
   if (hint) hint.style.display = show ? "block" : "none";
   if (!show) clearTargetHighlight();   // target resolved/cancelled → drop any highlight
