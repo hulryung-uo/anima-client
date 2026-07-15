@@ -1493,8 +1493,14 @@ function syncWorld(s) {
       // including tiles this loop never revisits, e.g. pruneFar's hysteresis
       // ring — is stamped once per poll in one blanket pass; see
       // forEachLiveTexUrl()/touchTex() at the end of this function.)
-      // A colour-fallback tile is always re-evaluated so it upgrades to real art.
-      if (e && e.g === t.g && e.z === z0 && !e.fallback) continue;
+      // Unchanged real tile: nothing to rebuild. A colour-fallback tile is re-evaluated
+      // so it can upgrade to real art — but only rebuild it once the texture actually
+      // arrives; while it's still pending (or the art is missing) keep the existing
+      // placeholder instead of re-creating an identical Graphics every poll.
+      if (e && e.g === t.g && e.z === z0) {
+        if (!e.fallback) continue;
+        if (texFor(e.url) == null) continue;
+      }
       // corner heights (ClassicUO: top=this, right=(x+1,y), bottom=(x+1,y+1), left=(x,y+1)).
       // At the window's SE edge a neighbour falls outside the grid (null); rather than
       // skip the tile — which flashes the black page background at the diamond's rim —
