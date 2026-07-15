@@ -1155,7 +1155,10 @@ fn popup_json(world: &World, cliloc: Option<&Cliloc>) -> Value {
                         .and_then(|c| c.get(e.cliloc))
                         .map(str::to_string)
                         .unwrap_or_else(|| format!("#{}", e.cliloc));
-                    json!({ "index": e.index, "text": text })
+                    // `hl`: ClassicUO shows entries flagged 0x01 in a highlight hue
+                    // (0x0386) — the menu's default/primary action. Pass it through so
+                    // the renderer can accent it. (0x02 = submenu arrow; unsupported.)
+                    json!({ "index": e.index, "text": text, "hl": e.flags & 0x01 != 0 })
                 })
                 .collect();
             json!({ "serial": menu.serial, "entries": entries })

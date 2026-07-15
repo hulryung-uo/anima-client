@@ -222,6 +222,7 @@
         padding: 4px; border: 1px solid #2a2f37; border-radius: 8px;
         background: rgba(11, 13, 16, .96); backdrop-filter: blur(3px);
         box-shadow: 0 6px 24px rgba(0, 0, 0, .6); color: #d6dae0;
+        transform-origin: top left; animation: popup-in .09s ease-out;
         font-size: 12px; user-select: none;
       }
       .popup-row {
@@ -229,6 +230,8 @@
         overflow: hidden; text-overflow: ellipsis;
       }
       .popup-row:hover { background: rgba(138, 180, 248, .18); color: #fff; }
+      .popup-row-hl { color: #9ecbff; font-weight: 600; }  /* 0x01 flag: default/primary action */
+      @keyframes popup-in { from { opacity: 0; transform: scale(.96) translateY(-2px); } to { opacity: 1; transform: none; } }
       /* ---- gump-style overlay windows (paperdoll + containers) ---- */
       .gump-win {
         position: fixed; z-index: 18; min-width: 180px;

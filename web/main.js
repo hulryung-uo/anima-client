@@ -5190,7 +5190,7 @@ function refreshPopup(scene) {
   el.style.top = Math.max(4, y) + "px";
   for (const e of p.entries) {
     const row = document.createElement("div");
-    row.className = "popup-row";
+    row.className = "popup-row" + (e.hl ? " popup-row-hl" : ""); // 0x01 = highlighted default action
     row.textContent = e.text || ("#" + e.index);
     const index = e.index | 0;
     row.addEventListener("click", (ev) => {
