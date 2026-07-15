@@ -380,8 +380,13 @@ fn mobile_moving(world: &mut World, frame: &[u8]) -> PResult<()> {
     // The Walker owns the player's own position/facing (prediction + ConfirmWalk).
     // A server MobileMoving *about us* must never overwrite it — that resets our
     // facing to a stale value and fights the walker, causing the turn/stall
-    // direction oscillation. Mirror anima: ignore self here.
+    // direction oscillation. Mirror anima: ignore self's pos/dir here — but
+    // notoriety/hidden are visual attrs (crime flag, invisibility), not movement, so
+    // still refresh them so e.g. going criminal recolours your own name.
     if world.is_player(serial) {
+        let m = world.mobile_mut(serial);
+        m.notoriety = notoriety;
+        m.hidden = flags & FLAG_HIDDEN != 0;
         return Ok(());
     }
 
@@ -443,12 +448,16 @@ fn mobile_incoming(world: &mut World, frame: &[u8]) -> PResult<()> {
         // e.g. re-entering view after a facet change while hidden). Poisoned is
         // the same story: re-derive it for self too.
         m.hidden = flags & FLAG_HIDDEN != 0;
+        // Notoriety is a visual attribute (like body/hue/hidden), not movement state,
+        // so capture it for self too — ServUO sends the player their own noto here (and
+        // on crime deltas), which is what colours your own single-click name. pos/dir
+        // stay walker-owned for self (see mobile_moving).
+        m.notoriety = notoriety;
         if !is_self {
             m.pos.x = x;
             m.pos.y = y;
             m.pos.z = z;
             m.direction = direction;
-            m.notoriety = notoriety;
         }
     }
 
