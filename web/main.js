@@ -5170,13 +5170,19 @@ function refreshGumps(scene) {
 // click-away / Esc / the popup clearing also hides it.
 let popupEl = null;            // the live menu element (null = hidden)
 let popupSerial = 0;           // serial the menu was opened for
-function hidePopup() {
+let popupDismissed = 0;        // serial the user closed (Esc / click-away). The server keeps
+                               // its popup set until we select or its target is removed, so
+                               // without this refreshPopup would re-open the menu next poll.
+                               // Cleared on a fresh popupreq (below) or when the server drops it.
+function hidePopup(dismissed) {
+  if (dismissed && popupSerial) popupDismissed = popupSerial;
   if (popupEl) { popupEl.remove(); popupEl = null; popupSerial = 0; }
 }
 function refreshPopup(scene) {
   const p = scene && scene.popup;
-  if (!p || !p.entries || !p.entries.length) { hidePopup(); return; }
+  if (!p || !p.entries || !p.entries.length) { hidePopup(); popupDismissed = 0; return; }
   const serial = p.serial >>> 0;
+  if (serial === popupDismissed) return;   // user closed this one — wait for a new/cleared popup
   // Already showing this exact menu? Leave it where the user put it.
   if (popupEl && popupSerial === serial) return;
   hidePopup();
@@ -6670,7 +6676,7 @@ function setupInput() {
     if (e.code === "Escape" && spellbookOn) { e.preventDefault(); closeSpellbook(); return; }
     if (e.code === "Escape" && skillsOn) { e.preventDefault(); closeSkills(); return; }
     if (e.code === "Escape" && shopWin) { e.preventDefault(); shopDismissed = true; closeShop(); return; }
-    if (e.code === "Escape" && popupEl) { e.preventDefault(); hidePopup(); return; }
+    if (e.code === "Escape" && popupEl) { e.preventDefault(); hidePopup(true); return; }
     if (e.code === "Escape" && bookWin) { e.preventDefault(); closeBook(); return; }
     // Esc cancels targeting: tell the SERVER to drop the cursor (so the spell/skill
     // waiting for a target is aborted, not left hanging) and hide the local UI.
@@ -6764,14 +6770,14 @@ function setupInput() {
     // If it steered, the character moved and NO menu pops. Either way it's resolved.
     if (rmbEntity) {
       if (rmbEntity.timer) { clearTimeout(rmbEntity.timer); rmbEntity.timer = null; }
-      if (!rmbEntity.steering) { lastMenuX = e.clientX; lastMenuY = e.clientY; sendInput("popupreq:" + rmbEntity.serial); }
+      if (!rmbEntity.steering) { lastMenuX = e.clientX; lastMenuY = e.clientY; popupDismissed = 0; sendInput("popupreq:" + rmbEntity.serial); }
       rmbEntity = null;
     }
   });
   // Click anywhere outside an open context menu dismisses it (row clicks stop
   // propagation and dismiss themselves before this fires).
   window.addEventListener("mousedown", (e) => {
-    if (popupEl && !popupEl.contains(e.target)) hidePopup();
+    if (popupEl && !popupEl.contains(e.target)) hidePopup(true);
   }, true);
   // While the cursor is over a DOM gump/panel (paperdoll, shop, dialog, worldmap…)
   // the canvas stops receiving mousemove, so PIXI never fires the entity pointerout

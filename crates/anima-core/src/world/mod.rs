@@ -1193,6 +1193,12 @@ impl World {
         self.corpse_of.remove(&serial);
         self.corpse_equip.remove(&serial);
         self.map_gumps.remove(&serial);
+        // A context menu open for a just-removed entity (it died, despawned, or
+        // walked out of view — all arrive as 0x1D) is stale: drop it so the renderer,
+        // which keys the popup by serial, stops showing / re-opening it.
+        if self.popup.as_ref().is_some_and(|p| p.serial == serial) {
+            self.popup = None;
+        }
         was_mobile
     }
 
