@@ -556,6 +556,15 @@ fn world_item(world: &mut World, frame: &[u8]) -> PResult<()> {
 /// 0x0B Damage — `[id][serial:u32][damage:u16]` (7 bytes). `serial` just took
 /// `damage` HP; the renderer floats a number over it. (ClassicUO `Damage` /
 /// `case 0x0B`.)
+///
+/// NOTE: floating damage numbers are an **AOS+** feature. ServUO gates the send on
+/// `Mobile.VisibleDamageType`, which `CurrentExpansion` sets to `Related` only when
+/// `Core.AOS`, else `None` (which sends *nothing*). So on a **pre-AOS (e.g. T2A)**
+/// shard this packet never arrives — verified by a uo_proxy capture of live combat:
+/// HP drains via 0xA1 vitals, but no 0x0B/0xBF-0x22 damage packet is ever on the
+/// wire. This handler is correct and lights up unchanged against an AOS+ shard;
+/// don't chase a "missing damage floater" as a client bug until you've confirmed
+/// the shard's expansion. (See DESIGN.md.)
 fn damage(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     let serial = r.u32()?;
