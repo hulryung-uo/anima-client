@@ -11,8 +11,10 @@
 //! returns. This keeps it WASM/native-agnostic and unit-testable without IO.
 //!
 //! Spec source: `anima/anima/client/{packets,connection}.py`. Character
-//! create/delete are not yet implemented (see `TODO`s) — the happy path assumes
-//! an existing character.
+//! creation (`LoginConfig::create_if_missing`) and one-shot deletion
+//! (`LoginConfig::delete_existing`, mirroring the Python client's
+//! delete-then-recreate login flow) are both implemented; the happy path
+//! otherwise assumes an existing character.
 
 use super::packet::{PacketReader, PacketWriter};
 
@@ -83,6 +85,23 @@ pub fn build_play_character(name: &str, slot: u32, client_ip: u32, client_flags:
         .zeros(24)
         .u32(slot)
         .u32(client_ip);
+    w.into_vec()
+}
+
+/// DeleteCharacter `0x83` (39 bytes) — request deletion of the character in
+/// `slot`.
+///
+/// Layout: `[0x83][30 zero bytes][slot:u32 BE][clientIP:u32 BE]`. The 30-byte
+/// field is **all zeros** — it is NOT the account password. Modern clients
+/// (ClassicUO `Send_DeleteCharacter`) stopped putting the password on the
+/// wire here, and ServUO's `PacketHandlers.DeleteCharacter` simply
+/// `Seek(30, ...)`s past it before reading the slot; writing a real password
+/// into this field would only leak it to anything that *does* read those 30
+/// bytes. (`anima` `build_delete_character` keeps a vestigial `password`
+/// parameter for call-site compatibility — we don't imitate that here.)
+pub fn build_delete_character(slot: u32, client_ip: u32) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x83).zeros(30).u32(slot).u32(client_ip);
     w.into_vec()
 }
 
@@ -295,8 +314,28 @@ pub enum LoginError {
     /// We reached the character list but there were no characters and creation
     /// is not yet implemented.
     NoCharacterAndCreateUnsupported,
+    /// Server rejected our `0x83` DeleteCharacter with DeleteResult `0x85`.
+    /// `reason` is the raw `DeleteResultType` byte; `text` is a human-readable
+    /// gloss for logs/UI.
+    CharacterDeleteRejected { reason: u8, text: &'static str },
     /// Got a packet that doesn't belong in the current state in a way we can't ignore.
     Unexpected { state: &'static str, id: u8 },
+}
+
+/// Maps ServUO's `DeleteResultType` (`Server/Network/Packets.cs`) byte order
+/// to a human-readable reason. Order verified against ServUO source:
+/// `PasswordInvalid=0, CharNotExist=1, CharBeingPlayed=2, CharTooYoung=3,
+/// CharQueued=4, BadRequest=5`.
+fn delete_result_text(reason: u8) -> &'static str {
+    match reason {
+        0 => "password invalid",
+        1 => "character does not exist",
+        2 => "character is currently being played",
+        3 => "character is too young to delete",
+        4 => "character deletion is queued",
+        5 => "bad request",
+        _ => "unknown delete-result reason",
+    }
 }
 
 /// Inputs that vary per login attempt.
@@ -312,6 +351,12 @@ pub struct LoginConfig {
     pub client_ip: u32,
     /// When the account has no character, create one from this appearance.
     pub create_if_missing: bool,
+    /// Mirrors the Python client's login-flow `delete_existing` option
+    /// (`anima/anima/client/connection.py`): once, delete the character that
+    /// WOULD have been selected (by `character_slot`, falling back to the
+    /// first named slot), then proceed with the refreshed character list
+    /// ServUO sends back — normally empty, so `create_if_missing` takes over.
+    pub delete_existing: bool,
     pub appearance: CharacterAppearance,
 }
 
@@ -326,6 +371,7 @@ impl Default for LoginConfig {
             character_slot: 0,
             client_ip: 0x7F00_0001, // 127.0.0.1
             create_if_missing: true,
+            delete_existing: false,
             appearance: CharacterAppearance::default(),
         }
     }
@@ -360,6 +406,10 @@ pub struct LoginMachine {
     /// AOS expansion advertised by the server's SupportedFeatures `0xB9`. Drives
     /// client-side gating of AOS-only UI (e.g. the weapon special-ability bar).
     aos: bool,
+    /// Latches once we've sent the one-shot `cfg.delete_existing` DeleteCharacter,
+    /// so a subsequent (refreshed) character list is selected/created normally
+    /// instead of looping the delete forever.
+    delete_sent: bool,
 }
 
 impl LoginMachine {
@@ -373,6 +423,7 @@ impl LoginMachine {
             state: State::AwaitServerList,
             auth_key: 0,
             aos: false,
+            delete_sent: false,
         };
         (m, initial)
     }
@@ -438,6 +489,18 @@ impl LoginMachine {
                         .find(|s| s.index == self.cfg.character_slot)
                         .or_else(|| slots.first());
                     match chosen {
+                        Some(slot) if self.cfg.delete_existing && !self.delete_sent => {
+                            // Python-flow mirror (`anima/anima/client/connection.py`):
+                            // delete the character that WOULD have been selected,
+                            // once, then keep waiting — ServUO re-sends the
+                            // character list (0x86) and we run this selection
+                            // again against the refreshed (usually now-empty) list.
+                            self.delete_sent = true;
+                            Ok(vec![LoginDirective::Send(build_delete_character(
+                                slot.index as u32,
+                                self.cfg.client_ip,
+                            ))])
+                        }
                         Some(slot) => {
                             self.state = State::AwaitLoginConfirm;
                             Ok(vec![LoginDirective::Send(build_play_character(
@@ -457,6 +520,17 @@ impl LoginMachine {
                         }
                         None => Err(LoginError::NoCharacterAndCreateUnsupported),
                     }
+                } else if id == 0x85 && self.delete_sent {
+                    // DeleteResult: our 0x83 DeleteCharacter was rejected. Fail the
+                    // login rather than spin — the account still has the character
+                    // we were trying to get rid of. Gated on `delete_sent`: a 0x85
+                    // we never solicited (stray proxy echo, odd shard) must stay
+                    // ignorable chatter on the default path, exactly as before.
+                    let reason = frame.get(1).copied().unwrap_or(0);
+                    Err(LoginError::CharacterDeleteRejected {
+                        reason,
+                        text: delete_result_text(reason),
+                    })
                 } else {
                     Ok(vec![]) // e.g. 0xB9 SupportedFeatures, 0xBD version req, etc.
                 }
@@ -491,6 +565,21 @@ mod tests {
         assert_eq!(build_game_seed(0xDEAD_BEEF).len(), 4);
         assert_eq!(build_game_login(0, "user", "pass").len(), 65);
         assert_eq!(build_play_character("Anima", 0, 0x7F00_0001, 0x3F).len(), 73);
+        assert_eq!(build_delete_character(0, 0x7F00_0001).len(), 39);
+    }
+
+    #[test]
+    fn delete_character_layout() {
+        // 0x83, 30 zero bytes, then slot:u32 and clientIP:u32, big-endian.
+        let p = build_delete_character(3, 0x7F00_0001);
+        assert_eq!(p.len(), 39);
+        assert_eq!(p[0], 0x83);
+        assert!(p[1..31].iter().all(|&b| b == 0)); // reserved — NOT the password
+        assert_eq!(u32::from_be_bytes([p[31], p[32], p[33], p[34]]), 3);
+        assert_eq!(
+            u32::from_be_bytes([p[35], p[36], p[37], p[38]]),
+            0x7F00_0001
+        );
     }
 
     #[test]
@@ -601,5 +690,119 @@ mod tests {
         let cfg = LoginConfig::default();
         let (mut m, _) = LoginMachine::start(cfg);
         assert_eq!(m.on_packet(&[0x82, 0x03]), Err(LoginError::Denied(3)));
+    }
+
+    /// Drives past phase 1 into `AwaitCharacterList` and returns the machine.
+    fn machine_at_character_list(cfg: LoginConfig) -> LoginMachine {
+        let (mut m, _initial) = LoginMachine::start(cfg);
+        m.on_packet(&[0xA8, 0x00, 0x06, 0x00, 0x01, 0x00]).unwrap();
+        let redirect = [0x8C, 127, 0, 0, 1, 0x0A, 0x21, 0x11, 0x22, 0x33, 0x44];
+        m.on_packet(&redirect).unwrap();
+        m
+    }
+
+    /// Builds a well-formed CharacterList frame (`0xA9`/`0x86`) for the given
+    /// (index-order) names; empty names are skipped in the parsed result but
+    /// still occupy a slot on the wire, matching real server frames.
+    fn build_character_list_frame(id: u8, names: &[&str]) -> Vec<u8> {
+        let mut w = PacketWriter::new();
+        w.u8(id).u16(0).u8(names.len() as u8);
+        for name in names {
+            w.fixed_ascii(name, 30).zeros(30);
+        }
+        let mut frame = w.into_vec();
+        let total = frame.len() as u16;
+        frame[1] = (total >> 8) as u8;
+        frame[2] = (total & 0xFF) as u8;
+        frame
+    }
+
+    #[test]
+    fn delete_existing_sends_delete_then_awaits_refresh() {
+        let cfg = LoginConfig {
+            username: "test5".into(),
+            password: "test5".into(),
+            delete_existing: true,
+            ..Default::default()
+        };
+        let mut m = machine_at_character_list(cfg);
+
+        // One character "Anima" in slot 0 — the one that would have been
+        // selected, so it's the one we delete.
+        let char_list = build_character_list_frame(0xA9, &["Anima"]);
+        let d = m.on_packet(&char_list).unwrap();
+        assert_eq!(
+            d,
+            vec![LoginDirective::Send(build_delete_character(
+                0,
+                0x7F00_0001
+            ))]
+        );
+        assert!(!m.is_done()); // stayed in AwaitCharacterList, waiting for the resend
+
+        // ServUO re-sends the character list after the delete — now empty —
+        // and create_if_missing (the default) kicks in.
+        let empty_list = build_character_list_frame(0x86, &[]);
+        let d = m.on_packet(&empty_list).unwrap();
+        assert_eq!(
+            d,
+            vec![LoginDirective::Send(build_create_character(
+                &CharacterAppearance::default(),
+                0,
+                ALL_FACET_CLIENT_FLAGS,
+            ))]
+        );
+    }
+
+    #[test]
+    fn delete_result_rejected_fails_login() {
+        let cfg = LoginConfig {
+            delete_existing: true,
+            ..Default::default()
+        };
+        let mut m = machine_at_character_list(cfg);
+
+        // An UNSOLICITED 0x85 (we haven't sent 0x83 yet) is ignorable chatter —
+        // the default path never hard-fails on a stray DeleteResult.
+        assert_eq!(m.on_packet(&[0x85, 2]).unwrap(), vec![]);
+
+        // Drive the realistic sequence: the char list makes the machine send its
+        // 0x83 delete; ONLY THEN does a DeleteResult mean our delete was rejected.
+        // Reason=2 = CharBeingPlayed in ServUO's DeleteResultType.
+        m.on_packet(&build_character_list_frame(0xA9, &["Anima"])).unwrap();
+        let err = m.on_packet(&[0x85, 2]).unwrap_err();
+        assert_eq!(
+            err,
+            LoginError::CharacterDeleteRejected {
+                reason: 2,
+                text: "character is currently being played",
+            }
+        );
+    }
+
+    #[test]
+    fn delete_existing_false_leaves_selection_untouched() {
+        // Default config (delete_existing = false) must behave exactly like
+        // before: the character list resolves straight to PlayCharacter, no
+        // DeleteCharacter ever sent.
+        let cfg = LoginConfig {
+            username: "test5".into(),
+            password: "test5".into(),
+            ..Default::default()
+        };
+        assert!(!cfg.delete_existing);
+        let mut m = machine_at_character_list(cfg);
+
+        let char_list = build_character_list_frame(0xA9, &["Anima"]);
+        let d = m.on_packet(&char_list).unwrap();
+        assert_eq!(
+            d,
+            vec![LoginDirective::Send(build_play_character(
+                "Anima",
+                0,
+                0x7F00_0001,
+                ALL_FACET_CLIENT_FLAGS
+            ))]
+        );
     }
 }

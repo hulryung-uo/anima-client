@@ -1,7 +1,11 @@
 //! `anima-login` — connect to a UO server, log in, observe, and print perception.
 //!
-//! Usage: `anima-login [host] [port] [username] [password]`
+//! Usage: `anima-login [host] [port] [username] [password] [--delete-existing]`
 //! Defaults: 127.0.0.1 2594 animatest animatest (ServUO auto-creates accounts).
+//! `--delete-existing` is opt-in and off by default: it deletes the character
+//! that would have been selected, once, before letting the normal
+//! select-or-create logic run against the refreshed character list (see
+//! `LoginConfig::delete_existing`).
 
 use std::time::Duration;
 
@@ -9,7 +13,18 @@ use anima_core::net::LoginConfig;
 use anima_net::{Endpoint, Session};
 
 fn main() {
-    let mut args = std::env::args().skip(1);
+    // Split flags out FIRST so `--delete-existing` works in any position — pulled
+    // positionally it would silently become the username and the flag would be
+    // dropped (login as the literal account "--delete-existing", no warning).
+    let (flags, positional): (Vec<String>, Vec<String>) =
+        std::env::args().skip(1).partition(|a| a.starts_with("--"));
+    let delete_existing = flags.iter().any(|a| a == "--delete-existing");
+    if let Some(unknown) = flags.iter().find(|a| *a != "--delete-existing") {
+        eprintln!("unknown flag: {unknown}");
+        eprintln!("usage: anima-login [host] [port] [username] [password] [--delete-existing]");
+        std::process::exit(2);
+    }
+    let mut args = positional.into_iter();
     let host = args.next().unwrap_or_else(|| "127.0.0.1".to_string());
     let port: u16 = args.next().and_then(|s| s.parse().ok()).unwrap_or(2594);
     let username = args.next().unwrap_or_else(|| "animatest".to_string());
@@ -18,6 +33,7 @@ fn main() {
     let cfg = LoginConfig {
         username: username.clone(),
         password,
+        delete_existing,
         ..Default::default()
     };
 
