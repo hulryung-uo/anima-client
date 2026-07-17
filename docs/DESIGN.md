@@ -79,9 +79,13 @@ treasure maps, and **custom housing** (0xD8 viewing: plane parse/zlib → deferr
 mode-0/1/2 decode against multi.mul bounds → design tiles replace the foundation's
 components in both scene emission and the walkability fold; auto 0xBF/0x1E refresh
 on 0xBF/0x1D revision notices; live-verified against ServUO placement → DesignInsert
-→ delete). What actually remains (see §6 Phase 3 for detail): richer/RL/LLM brains,
-browser WASM + WebSocket↔TCP relay (`anima-wasm` exists; the relay service doesn't),
-and delete-character (0x83).
+→ delete). What actually remains (see §6 Phase 3 for detail): richer/RL/LLM brains and the
+browser WASM + WebSocket↔TCP relay (`anima-wasm` exists; the relay service doesn't).
+delete-character (0x83) is done too: `build_delete_character` (30 zeroed bytes —
+NOT the password, ClassicUO parity) + a `LoginConfig::delete_existing` flow that
+deletes-once then re-runs select/create against the refreshed 0x86 list, with 0x85
+DeleteResult reasons mapped (live-verified: ServUO accepted the 0x83 and answered
+CharTooYoung per its Accounts.cfg RestrictDeletion/DeleteDelay policy).
 
 ### Verified end-to-end against ServUO (127.0.0.1:2594)
 - Two-phase login: account → server select → reconnect → game login → **char create**
@@ -378,8 +382,8 @@ shell for a true standalone desktop app.
 
 **Remaining tail:** richer brains (RL/LLM over the contract); browser WASM +
 WebSocket↔TCP relay (`anima-wasm` itself is done — the relay service and its
-browser wiring aren't); delete-character (0x83). (Previously listed here and since
-completed: the `multi.mul` reader + placed-multi resolution, sitting, treasure
+browser wiring aren't). (Previously listed here and since
+completed: delete-character (0x83), the `multi.mul` reader + placed-multi resolution, sitting, treasure
 maps, the Tauri shell, and custom housing — 0xD8 viewing with design tiles
 replacing foundation components in scene + walkability, live-verified.)
 
