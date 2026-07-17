@@ -72,12 +72,16 @@ real `up`-state gump art instead of a numbered box; paperdoll/backpack/container
 vendor buy-sell/spellbook/skills(sort + T2A/AOS grouping)/books/party/stack-split-
 on-drag are all implemented over `gumpartLegacyMUL.uop`.
 
-Everything above was previously listed as the Phase 3 "tail" — it is now done. What
-actually remains (see §6 Phase 3 for detail): richer/RL/LLM brains, browser WASM +
-WebSocket↔TCP relay (`anima-wasm` exists; the relay service doesn't), a Tauri
-standalone shell,
-`multi.mul` dynamic house placement, sitting, treasure maps, delete-character
-(0x83), and custom housing.
+Everything above was previously listed as the Phase 3 "tail" — it is now done, as
+are the Tauri standalone shell (`crates/anima-desktop`), `multi.mul` dynamic house/
+boat placement (`anima-assets::multis` + the scene/walkability fold), sitting,
+treasure maps, and **custom housing** (0xD8 viewing: plane parse/zlib → deferred
+mode-0/1/2 decode against multi.mul bounds → design tiles replace the foundation's
+components in both scene emission and the walkability fold; auto 0xBF/0x1E refresh
+on 0xBF/0x1D revision notices; live-verified against ServUO placement → DesignInsert
+→ delete). What actually remains (see §6 Phase 3 for detail): richer/RL/LLM brains,
+browser WASM + WebSocket↔TCP relay (`anima-wasm` exists; the relay service doesn't),
+and delete-character (0x83).
 
 ### Verified end-to-end against ServUO (127.0.0.1:2594)
 - Two-phase login: account → server select → reconnect → game login → **char create**
@@ -372,11 +376,12 @@ shell for a true standalone desktop app.
   Python brain; `Session::advance_route` gives any driver a non-blocking
   `Action::WalkTo`.
 
-**Remaining tail:** `multi.mul` house/multi resolution (no reader exists yet —
-placed/custom housing today only renders whatever ordinary statics the server
-sends, not a resolved multi-component structure); sitting; treasure maps; richer brains (RL/LLM over the contract);
-browser WASM + WebSocket↔TCP relay (`anima-wasm` itself is done — the relay
-service and its browser wiring aren't); a Tauri standalone shell.
+**Remaining tail:** richer brains (RL/LLM over the contract); browser WASM +
+WebSocket↔TCP relay (`anima-wasm` itself is done — the relay service and its
+browser wiring aren't); delete-character (0x83). (Previously listed here and since
+completed: the `multi.mul` reader + placed-multi resolution, sitting, treasure
+maps, the Tauri shell, and custom housing — 0xD8 viewing with design tiles
+replacing foundation components in scene + walkability, live-verified.)
 
 ---
 

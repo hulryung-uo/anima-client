@@ -18,9 +18,10 @@ renderers/agents/desktop sit on top. Companion to `../anima` (Python AI player).
 -p anima-net --bin play -- 127.0.0.1 2594 <u> <p>`, open `:8090`) renders real
 terrain + full iso sprites, walk/attack/typed mobile animation (legacy + UOP,
 Body/Bodyconv/Corpse/Equipconv.def remap), gumps, audio, and secure trading. 5
-crates (core/assets/net/wasm/agent) + `web/`. **Remaining:** richer/RL/LLM brains,
-browser WASM+relay, Tauri, `multi.mul` houses, sitting,
-treasure maps, custom housing. See DESIGN.md §6.
+crates (core/assets/net/wasm/agent) + `web/` + `crates/anima-desktop` (Tauri).
+**Remaining:** richer/RL/LLM brains, browser WASM+relay, delete-character (0x83).
+(Tauri shell, `multi.mul` houses/boats, sitting, treasure maps, and custom
+housing (0xD8 viewing) are done.) See DESIGN.md §6.
 
 ## Conventions
 - **Rust**, edition 2021. Core stays **near-zero-dep: one documented exception**
