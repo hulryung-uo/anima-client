@@ -36,6 +36,21 @@ pub fn build_opl_request(serials: &[u32]) -> Vec<u8> {
     data
 }
 
+/// CustomHouse design-details request. GeneralInfo `0xBF`, subcommand
+/// `0x001E` (9 bytes, fixed). Ask ServUO to (re)send the 0xD8 design for
+/// `serial`'s house foundation — ServUO only ever emits 0xD8 in reply to
+/// this; the unsolicited 0xBF/0x1D revision notice never carries the design
+/// itself, only a counter telling us ours is stale (see [`crate::net::game`]'s
+/// 0x1D handler, which queues the serials this builds a request for).
+/// `[0xBF][len:u16=0x0009][0x001E][serial:u32]`.
+pub fn build_house_design_request(serial: u32) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(9); // id + fixed length (always 9 bytes for this subcommand)
+    w.u16(0x001E); // subcommand: request custom house design details
+    w.u32(serial);
+    w.into_vec()
+}
+
 /// Attack `0x05` (5 bytes).
 pub fn build_attack(serial: u32) -> Vec<u8> {
     let mut w = PacketWriter::new();

@@ -471,6 +471,135 @@ pub struct TradeState {
     pub balance_platinum: u32,
 }
 
+/// One decompressed 0xD8 CustomHouse design plane, not yet position-decoded.
+/// A mode-2 (grid) plane needs the foundation's multi.mul bounds to turn its
+/// bare graphic list into `(dx,dy)` positions, and core has no multi.mul
+/// access (no asset pipeline here) — the embedder (`anima-net`, via `Multis`)
+/// calls [`decode_house_planes`] once it knows the foundation item's graphic.
+#[derive(Debug, Clone)]
+pub struct HousePlane {
+    pub mode: u8,
+    pub plane_z: u8,
+    pub data: Vec<u8>,
+}
+
+/// A custom house design (0xD8 CustomHouse), keyed by the foundation item's
+/// serial in [`World::house_designs`]. Pruned like [`World::spellbooks`]:
+/// dropped on delete ([`World::remove`]) and on a facet purge
+/// ([`World::on_map_change`]).
+#[derive(Debug, Clone, Default)]
+pub struct HouseDesign {
+    /// The design's revision counter (also carried by the unsolicited
+    /// 0xBF/0x1D notice) — lets the 0x1D handler tell "already current" from
+    /// "stale, re-request" without ever comparing plane bytes.
+    pub revision: u32,
+    pub planes: Vec<HousePlane>,
+    /// `(dx,dy) → [(graphic,dz)]`, relative to the foundation item's own
+    /// position (same convention as a `multi.mul` `MultiComponent`). Empty
+    /// until the embedder calls [`decode_house_planes`] (it alone has the
+    /// multi.mul bounds mode-2 planes need) and stores the result here,
+    /// flipping `tiles_ready`.
+    pub tiles: HashMap<(i8, i8), Vec<(u16, i8)>>,
+    pub tiles_ready: bool,
+}
+
+/// Decode 0xD8 CustomHouse planes into `(dx,dy) → [(graphic,dz)]` tiles,
+/// relative to the foundation item's own position. `min_x`/`min_y`/`max_y` are
+/// the foundation multi's bounds, folded over ALL its components (MAX
+/// coordinates, not sizes — ClassicUO `MultiInfo` convention); core has no
+/// multi.mul access, so the embedder computes these and calls this function
+/// only once the foundation item itself is known.
+///
+/// Ported from ClassicUO `PacketHandlers.cs CustomHouse` + ServUO
+/// `HouseFoundation`'s design-packing writer (`Server/Multis/
+/// HouseFoundation.cs`). A plane's `mode` selects its entry shape:
+/// - **mode 0**: 5-byte entries `[graphic:u16 BE][dx:i8][dy:i8][dz:i8]` —
+///   fixed position AND height per entry. Stair sections (and anything else
+///   ServUO couldn't fit into a grid) demote to this mode regardless of which
+///   plane index they arrive on, so `plane_z` is not meaningful here.
+/// - **mode 1**: 4-byte entries `[graphic:u16 BE][dx:i8][dy:i8]`; height is
+///   derived from the plane's own z-band via `z_of` below.
+/// - **mode 2**: 2-byte `[graphic:u16 BE]`-only entries on an implicit grid,
+///   with y as the FAST axis (`index = dx_index * mh + dy_index`). Grid
+///   origin/height depend on which z-band the plane covers (ground vs. a
+///   floor vs. a roof) — see the match below. A plane whose computed height
+///   is non-positive is unusable (a plot too small/degenerate to have one)
+///   and is skipped outright.
+///
+/// In every mode, an entry with `graphic == 0` still consumes its bytes but
+/// contributes no tile (a "hole" in the grid, or an explicit gap). A
+/// truncated trailing entry (not a full chunk) is silently dropped.
+pub fn decode_house_planes(
+    planes: &[HousePlane],
+    min_x: i16,
+    min_y: i16,
+    max_y: i16,
+) -> HashMap<(i8, i8), Vec<(u16, i8)>> {
+    // Plane z-band -> render dz. Bands 1-4 are floors 1-4 (z 7/27/47/67);
+    // bands 5-8 are the ROOF grids for those same four floors, not additional
+    // floors above them, hence the `% 4` wrap. Band 0 (ground) is dz 0.
+    let z_of = |pz: u8| -> i8 {
+        if pz > 0 {
+            (((pz as i32 - 1) % 4) * 20 + 7) as i8
+        } else {
+            0
+        }
+    };
+
+    let mut tiles: HashMap<(i8, i8), Vec<(u16, i8)>> = HashMap::new();
+    for plane in planes {
+        match plane.mode {
+            0 => {
+                for chunk in plane.data.chunks_exact(5) {
+                    let graphic = u16::from_be_bytes([chunk[0], chunk[1]]);
+                    if graphic == 0 {
+                        continue;
+                    }
+                    let (dx, dy, dz) = (chunk[2] as i8, chunk[3] as i8, chunk[4] as i8);
+                    tiles.entry((dx, dy)).or_default().push((graphic, dz));
+                }
+            }
+            1 => {
+                let dz = z_of(plane.plane_z);
+                for chunk in plane.data.chunks_exact(4) {
+                    let graphic = u16::from_be_bytes([chunk[0], chunk[1]]);
+                    if graphic == 0 {
+                        continue;
+                    }
+                    let (dx, dy) = (chunk[2] as i8, chunk[3] as i8);
+                    tiles.entry((dx, dy)).or_default().push((graphic, dz));
+                }
+            }
+            2 => {
+                // Ground (0) keeps the extra south stair row; floors 1-4 inset
+                // by one tile on both axes; roofs 5-8 inset by none but drop
+                // the extra row. Exact OSI asymmetry — see plan risk #3; any
+                // deviation shifts a whole floor by a tile.
+                let (off_x, off_y, mh): (i32, i32, i32) = match plane.plane_z {
+                    0 => (min_x as i32, min_y as i32, max_y as i32 - min_y as i32 + 2),
+                    1..=4 => (min_x as i32 + 1, min_y as i32 + 1, max_y as i32 - min_y as i32),
+                    _ => (min_x as i32, min_y as i32, max_y as i32 - min_y as i32 + 1),
+                };
+                if mh <= 0 {
+                    continue;
+                }
+                let dz = z_of(plane.plane_z);
+                for (i, chunk) in plane.data.chunks_exact(2).enumerate() {
+                    let graphic = u16::from_be_bytes([chunk[0], chunk[1]]);
+                    if graphic == 0 {
+                        continue;
+                    }
+                    let i = i as i32;
+                    let (dx, dy) = ((i / mh + off_x) as i8, (i % mh + off_y) as i8);
+                    tiles.entry((dx, dy)).or_default().push((graphic, dz));
+                }
+            }
+            _ => {} // unknown mode — ignore rather than guess a shape
+        }
+    }
+    tiles
+}
+
 /// The whole observable game state.
 #[derive(Debug, Default)]
 pub struct World {
@@ -680,6 +809,17 @@ pub struct World {
     /// serial) its [`MapView::open_seq`] — a single shared ring, like
     /// [`World::container_open_seq`], not one counter per map.
     pub map_open_seq: u64,
+    /// Custom house designs (0xD8 CustomHouse), keyed by the foundation
+    /// item's serial. See [`HouseDesign`]. Pruned like [`World::spellbooks`]:
+    /// dropped on delete ([`World::remove`]) and on a facet purge
+    /// ([`World::on_map_change`]).
+    pub house_designs: HashMap<u32, HouseDesign>,
+    /// Foundation serials needing a 0xBF/0x1E design-details request — core
+    /// never sends bytes, so the session layer drains this every poll via
+    /// [`World::take_house_design_requests`] and sends
+    /// [`crate::net::outgoing::build_house_design_request`] for each. Deduped
+    /// on push by the 0xBF/0x1D handler in [`crate::net::game`].
+    pub pending_house_design_requests: Vec<u32>,
 }
 
 /// Notoriety values treated as hostile for auto-attack selection:
@@ -1178,12 +1318,21 @@ impl World {
         }
     }
 
+    /// Take every serial with a pending 0xBF/0x1E design-details request
+    /// (driver pumps this each loop, like [`crate::net::movement::MovementState::take_resync`]),
+    /// leaving the queue empty. Core never sends bytes itself — this is how
+    /// the session layer learns what to send.
+    pub fn take_house_design_requests(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.pending_house_design_requests)
+    }
+
     /// Remove an entity (mobile or item) by serial. Returns true if it was a mobile.
     /// A deleted corpse item also drops its [`World::corpse_of`]/
     /// [`World::corpse_equip`] entries (corpses despawn, so these must not outlive
     /// the item they describe). A deleted spellbook likewise drops its
-    /// [`World::spellbooks`] entry, and a deleted map item drops its
-    /// [`World::map_gumps`] window.
+    /// [`World::spellbooks`] entry, a deleted map item drops its
+    /// [`World::map_gumps`] window, and a deleted house foundation drops its
+    /// [`World::house_designs`] entry plus any queued re-request for it.
     pub fn remove(&mut self, serial: u32) -> bool {
         let was_mobile = self.mobiles.remove(&serial).is_some();
         self.items.remove(&serial);
@@ -1193,6 +1342,8 @@ impl World {
         self.corpse_of.remove(&serial);
         self.corpse_equip.remove(&serial);
         self.map_gumps.remove(&serial);
+        self.house_designs.remove(&serial);
+        self.pending_house_design_requests.retain(|s| *s != serial);
         // A context menu open for a just-removed entity (it died, despawned, or
         // walked out of view — all arrive as 0x1D) is stale: drop it so the renderer,
         // which keys the popup by serial, stops showing / re-opening it.
@@ -1253,6 +1404,8 @@ impl World {
             self.opl_revision.clear();
             self.spellbooks.clear();
             self.map_gumps.clear();
+            self.house_designs.clear();
+            self.pending_house_design_requests.clear();
             self.popup = None;
             return;
         };
@@ -1277,6 +1430,8 @@ impl World {
         self.opl_revision.retain(|serial, _| alive(serial));
         self.spellbooks.retain(|serial, _| alive(serial));
         self.map_gumps.retain(|serial, _| alive(serial));
+        self.house_designs.retain(|serial, _| alive(serial));
+        self.pending_house_design_requests.retain(|s| alive(s));
         if self.popup.as_ref().is_some_and(|p| !alive(&p.serial)) {
             self.popup = None;
         }
@@ -1440,6 +1595,45 @@ mod tests {
         w.set_map_view(0x4000_6666, 0x139D, 0, 0, 0, 400, 400, 200, 200);
         w.on_map_change(1); // facet switch — not rooted at the player, so it's purged
         assert!(w.map_gumps.is_empty(), "a facet switch must purge a map view we're not carrying");
+    }
+
+    #[test]
+    fn house_design_pruned_on_delete_and_facet_purge() {
+        // The "not actually in the world yet" clear branch of `on_map_change`
+        // (no player set at all) — must also drop house state, not just the
+        // no-player entities it already clears.
+        let mut w = World::new();
+        w.house_designs.insert(0x4000_7777, HouseDesign::default());
+        w.pending_house_design_requests.push(0x4000_7777);
+        w.on_map_change(1);
+        assert!(w.house_designs.is_empty(), "no-player facet switch must clear house designs");
+        assert!(
+            w.pending_house_design_requests.is_empty(),
+            "no-player facet switch must clear pending design requests"
+        );
+
+        // World::remove (0x1D delete).
+        let mut w = World::new();
+        w.enter_world(&LoginResult { serial: 0x1, x: 0, y: 0, z: 0, direction: 0, body: 0x190, aos: false });
+        w.house_designs.insert(0x4000_5555, HouseDesign::default());
+        w.pending_house_design_requests.push(0x4000_5555);
+        w.remove(0x4000_5555);
+        assert!(w.house_designs.is_empty(), "0x1D delete must prune the house design");
+        assert!(
+            w.pending_house_design_requests.is_empty(),
+            "0x1D delete must prune the pending design request"
+        );
+
+        // The alive-retain branch of `on_map_change` (player present, but the
+        // design/request belong to some other serial, not the player).
+        w.house_designs.insert(0x4000_6666, HouseDesign::default());
+        w.pending_house_design_requests.push(0x4000_6666);
+        w.on_map_change(1); // facet switch — not rooted at the player, so purged
+        assert!(w.house_designs.is_empty(), "a facet switch must purge a house design we're not carrying");
+        assert!(
+            w.pending_house_design_requests.is_empty(),
+            "a facet switch must purge a pending design request we're not carrying"
+        );
     }
 
     #[test]

@@ -20,9 +20,9 @@ use anima_assets::MapData;
 use anima_core::agent::{Action, Observation};
 use anima_core::net::outgoing::{
     build_attack, build_book_page_request, build_buy, build_cast_spell, build_double_click,
-    build_drop, build_equip, build_gump_response, build_opl_request, build_party_accept,
-    build_party_decline, build_party_invite, build_party_leave, build_party_message,
-    build_pick_up,
+    build_drop, build_equip, build_gump_response, build_house_design_request, build_opl_request,
+    build_party_accept, build_party_decline, build_party_invite, build_party_leave,
+    build_party_message, build_pick_up,
     build_popup_request, build_popup_select, build_prompt_response, build_say, build_sell,
     build_single_click, build_skill_lock, build_status_request, build_target_response,
     build_trade_accept, build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability,
@@ -696,6 +696,11 @@ impl Session {
                 Ok(None) => break,
                 Err(e) => return Err(DriverError::Framing(e)),
             }
+        }
+        // 0xBF/0x1D revision notices (applied above) only *queue* a design
+        // request — core never sends bytes, so drain and answer them here.
+        for serial in self.world.take_house_design_requests() {
+            self.send(&build_house_design_request(serial))?;
         }
         Ok(applied)
     }

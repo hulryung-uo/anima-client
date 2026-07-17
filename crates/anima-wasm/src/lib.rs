@@ -101,6 +101,14 @@ impl WasmClient {
                 apply_packet(&mut self.world, frame);
             }
         }
+        // Custom-house design requests queue in World (a 0xBF/0x1D revision notice
+        // marks a design stale); core never sends bytes, so each embedder drains
+        // them itself — the native Session does this in pump_once, and here they
+        // ride the same outbox as the 0xBD version reply above.
+        for serial in self.world.take_house_design_requests() {
+            self.outbox
+                .extend(anima_core::net::outgoing::build_house_design_request(serial));
+        }
     }
 
     /// Take queued bytes to send to the server (clears the queue).

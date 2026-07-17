@@ -10,8 +10,8 @@
 
 use super::packet::{PacketReader, Result as PResult};
 use crate::world::{
-    Effect, Gump, JournalEntry, PopupEntry, PopupMenu, PromptState, Skill, TargetCursor, TradeState,
-    World,
+    Effect, Gump, HouseDesign, HousePlane, JournalEntry, PopupEntry, PopupMenu, PromptState, Skill,
+    TargetCursor, TradeState, World,
 };
 
 /// Decode one framed game packet (id byte included) into `world`.
@@ -85,6 +85,8 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x90 => display_map(world, frame, false)?,
         0xF5 => display_map(world, frame, true)?,
         0x56 => map_command(world, frame)?,
+        0x99 => multi_target_cursor(world, frame)?,
+        0xD8 => custom_house(world, frame)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -164,6 +166,24 @@ fn target_cursor(world: &mut World, frame: &[u8]) -> PResult<()> {
     } else {
         Some(TargetCursor { target_type, cursor_id, cursor_flag })
     };
+    Ok(())
+}
+
+/// 0x99 TargetMultiPlacement — the cursor ServUO sends while a multi
+/// placement tool (e.g. the house placement tool) is waiting for a spot,
+/// fixed 30 bytes (`lengths.rs`): `[id][allowGround:u8][cursorId:u32]` then a
+/// multi-id/offset/hue preview tail we don't need for viewing — the
+/// resulting 0xF3 + 0xD8 carry everything we actually store.
+/// We store it identically to a plain ground target (`target_type: 1`) so
+/// the brain answers with an ordinary 0x6C ground target reply
+/// (`Action::TargetGround` in `agent.rs`) — ServUO doesn't care that the
+/// request arrived as 0x99, only that the reply matches `cursor_id` with
+/// cursor-type ground.
+fn multi_target_cursor(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]); // skip id
+    let _allow_ground = r.u8()?;
+    let cursor_id = r.u32()?;
+    world.pending_target = Some(TargetCursor { target_type: 1, cursor_id, cursor_flag: 0 });
     Ok(())
 }
 
@@ -956,6 +976,92 @@ fn read_zlib_block(r: &mut PacketReader) -> PResult<Vec<u8>> {
     Ok(miniz_oxide::inflate::decompress_to_vec_zlib(zlib).unwrap_or_default())
 }
 
+/// Defensive cap on [`World::house_designs`], mirroring `World::set_corpse_of`'s
+/// `MAX_CORPSE_LINKS` pattern — a missed prune (or a very long multi-house
+/// session) must not grow this map forever.
+const MAX_HOUSE_DESIGNS: usize = 64;
+
+/// 0xD8 CustomHouse — normally sent in reply to our own 0xBF/0x1E design-details
+/// request ([`crate::net::outgoing::build_house_design_request`]); ServUO also
+/// pushes one unsolicited to the house OWNER entering customization mode
+/// (`HouseFoundation.BeginCustomize`), which this handler absorbs identically.
+/// Variable: `[id][len:u16][compression:u8][enableResponse:u8]
+/// [serial:u32][revision:u32][tileCount:u16][bufferLength:u16][planeCount:u8]`
+/// then `planeCount` × `[header:u32][zlib bytes: clen]`. Ported from
+/// ClassicUO `PacketHandlers.cs CustomHouse` + ServUO `HouseFoundation`'s
+/// design-packing writer (`Server/Multis/HouseFoundation.cs`).
+///
+/// Each plane's 32-bit header packs `mode`/`plane_z` as two 4-bit nibbles and
+/// TWO 12-bit lengths (decompressed `dlen`, compressed `clen`) split across
+/// the remaining three bytes: `dlen`'s low byte and `clen`'s low byte each get
+/// a whole byte, and their two high nibbles share the header's last byte.
+/// Get the nibble packing backwards and every plane decodes garbage lengths —
+/// this exact split is ClassicUO-exact (`PacketHandlers.cs` `CustomHouse`) and
+/// ServUO-writer-compatible (`HouseFoundation.cs`).
+///
+/// `clen == 0` means the plane was skipped server-side and consumes NO
+/// payload bytes at all (distinct from a `graphic == 0` entry INSIDE a plane,
+/// which consumes its bytes but decodes to nothing — see
+/// [`crate::world::decode_house_planes`]). We store the design even when the
+/// foundation item itself is unknown yet — position-decoding is deferred
+/// regardless (mode-2 planes need multi.mul bounds core doesn't have), and
+/// the purge sites ([`World::remove`]/[`World::on_map_change`]) cover cleanup
+/// if the item never shows up.
+fn custom_house(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[3..]); // variable: skip id + 2-byte length
+    let _compression = r.u8()?; // ServUO always writes 3 (zlib); ClassicUO ignores it too
+    let _enable_response = r.u8()?;
+    let serial = r.u32()?;
+    let revision = r.u32()?;
+    r.skip(4)?; // advisory tile count (u16) + buffer length (u16) — never trust either
+    let plane_count = r.u8()?;
+
+    let mut planes = Vec::with_capacity(plane_count as usize);
+    for _ in 0..plane_count {
+        let header = r.u32()?;
+        let mode = ((header >> 28) & 0x0F) as u8;
+        let plane_z = ((header >> 24) & 0x0F) as u8;
+        let dlen = (((header & 0x00FF_0000) >> 16) | ((header & 0x0000_00F0) << 4)) as usize;
+        let clen = (((header & 0x0000_FF00) >> 8) | ((header & 0x0000_000F) << 8)) as usize;
+        if clen == 0 {
+            continue; // a skipped plane consumes no payload bytes
+        }
+        let zbytes = r.bytes(clen)?; // EOF-safe: errors bubble up, apply_packet swallows them
+        // Inflate with `dlen` as a HARD output cap: both writers (ServUO/ClassicUO)
+        // treat dlen as the exact decompressed size, and an unbounded inflate would
+        // let a hostile plane zlib-bomb ~4 MB out of 4 KB of payload (deflate is up
+        // to ~1032:1) — and a plain truncate() would still retain that capacity
+        // inside `World::house_designs`. A stream that overruns dlen is corrupt by
+        // definition; drop it to an empty plane like any other inflate error.
+        let data = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(zbytes, dlen)
+            .unwrap_or_default();
+        planes.push(HousePlane { mode, plane_z, data });
+    }
+
+    if world.house_designs.len() >= MAX_HOUSE_DESIGNS && !world.house_designs.contains_key(&serial) {
+        // Prefer evicting a design that never got decoded (its foundation isn't in
+        // view) over an arbitrary one — evicting a tiles_ready design would silently
+        // revert an ON-SCREEN house to its stock foundation, and ServUO only re-sends
+        // the 0x1D revision notice when the multi re-enters view.
+        let victim = world
+            .house_designs
+            .iter()
+            .find(|(_, d)| !d.tiles_ready)
+            .map(|(k, _)| *k)
+            .or_else(|| world.house_designs.keys().next().copied());
+        if let Some(k) = victim {
+            world.house_designs.remove(&k);
+        }
+    }
+    world.house_designs.insert(
+        serial,
+        HouseDesign { revision, planes, tiles: std::collections::HashMap::new(), tiles_ready: false },
+    );
+    // We just got the freshest design for this serial — any queued request is moot.
+    world.pending_house_design_requests.retain(|s| *s != serial);
+    Ok(())
+}
+
 /// Read `count` gump text lines, each `[charLen:u16][text: utf16-be, charLen*2
 /// bytes]`. `charLen` is a UTF-16 code-unit count (not a byte count). Stops early
 /// if the buffer runs out (a truncated/odd line yields an empty string).
@@ -1655,6 +1761,31 @@ fn general_info(world: &mut World, frame: &[u8]) -> PResult<()> {
         0x08 => world.on_map_change(r.u8()?),
         0x14 => parse_popup(world, &mut r)?,
         0x1B => parse_spellbook_content(world, &mut r)?,
+        // 0x1D CustomHouseNotification — `[serial:u32][revision:u32]`. ServUO
+        // resends this on EVERY `SendInfoTo` of the multi (Server/Multis/
+        // HouseFoundation.cs), not just after an edit, so it must not itself
+        // trigger a request every time — only queue a fresh 0xBF/0x1E when
+        // the revision we're holding (if any) is actually stale, and only
+        // once (dedup). This packet never carries the design itself; ServUO
+        // answers 0x1E with 0xD8, which is where the payload lives.
+        0x1D => {
+            let serial = r.u32()?;
+            let revision = r.u32()?;
+            if !world.items.contains_key(&serial) {
+                // CUO parity (`HouseManager.Remove`): a notice for an item we
+                // no longer know about means the house is gone (deleted, or
+                // just out of view) — drop any design we were holding for
+                // it. The staleness check below then naturally re-queues a
+                // request (current becomes `None`); if the item never
+                // reappears the request just sits harmlessly unanswered,
+                // and if it does, `net::scene`'s decode self-heals (plan risk #10).
+                world.house_designs.remove(&serial);
+            }
+            let current = world.house_designs.get(&serial).map(|d| d.revision);
+            if current != Some(revision) && !world.pending_house_design_requests.contains(&serial) {
+                world.pending_house_design_requests.push(serial);
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -2029,6 +2160,180 @@ mod tests {
         d.u8(0x1D).u32(0x4000_0010);
         assert!(apply_packet(&mut w, &d.into_vec()));
         assert!(!w.spellbooks.contains_key(&0x4000_0010));
+    }
+
+    #[test]
+    fn custom_house_parses_and_decodes_planes() {
+        // Plane A: mode 0 (a "stair section" header, per real ServUO plane
+        // numbering — see the module's `custom_house` doc), one 5-byte entry:
+        // graphic 0x0063, dx=-3, dy=3, dz=0.
+        let raw_a: Vec<u8> = vec![0x00, 0x63, 0xFD /* -3 */, 0x03, 0x00];
+        let comp_a = miniz_oxide::deflate::compress_to_vec_zlib(&raw_a, 6);
+        let dlen_a = raw_a.len() as u32;
+        let clen_a = comp_a.len() as u32;
+        let header_a: u32 = (0 << 28)
+            | (9 << 24)
+            | ((dlen_a & 0xFF) << 16)
+            | ((clen_a & 0xFF) << 8)
+            | (((dlen_a >> 8) & 0xF) << 4)
+            | ((clen_a >> 8) & 0xF);
+
+        // Plane B: mode 2 (grid), plane_z 0 — six graphic-only entries, one a
+        // graphic-0 hole. With bounds min_x=min_y=-1, max_y=1 (a 3x3 footprint),
+        // `mh = max_y - min_y + 2 = 4` (the ground plane's extra south stair
+        // row) and y is the fast axis: i=0->(-1,-1), 1->(-1,0), 2->(-1,1)
+        // (the hole), 3->(-1,2), 4->(0,-1), 5->(0,0).
+        let raw_b: Vec<u8> = vec![
+            0x00, 0x10, // i=0 -> (-1,-1)
+            0x00, 0x11, // i=1 -> (-1,0)
+            0x00, 0x00, // i=2 -> (-1,1) hole: graphic 0
+            0x00, 0x12, // i=3 -> (-1,2)
+            0x00, 0x13, // i=4 -> (0,-1)
+            0x00, 0x14, // i=5 -> (0,0)
+        ];
+        let comp_b = miniz_oxide::deflate::compress_to_vec_zlib(&raw_b, 6);
+        let dlen_b = raw_b.len() as u32;
+        let clen_b = comp_b.len() as u32;
+        let header_b: u32 = (2 << 28)
+            | (0 << 24)
+            | ((dlen_b & 0xFF) << 16)
+            | ((clen_b & 0xFF) << 8)
+            | (((dlen_b >> 8) & 0xF) << 4)
+            | ((clen_b >> 8) & 0xF);
+
+        // Plane C: clen == 0 — a skipped plane must consume no payload bytes.
+        let header_c: u32 = 1 << 28;
+
+        // Plane D: mode 1, plane_z 1, 76 identical 4-byte entries = 304 bytes —
+        // dlen 0x130 exercises the 12-bit length's HIGH NIBBLE through the real
+        // parser (real ground planes are width*height*2 > 255 bytes, so a swapped
+        // nibble split corrupts most actual houses while every <256-byte test
+        // plane still passes). dz = ((1-1)%4)*20+7 = 7.
+        let raw_d: Vec<u8> = [0x0B, 0xBB, 0x05, 0xFA /* -6 */].repeat(76);
+        let comp_d = miniz_oxide::deflate::compress_to_vec_zlib(&raw_d, 6);
+        let dlen_d = raw_d.len() as u32; // 304 = 0x130: high nibble is non-zero
+        let clen_d = comp_d.len() as u32;
+        let header_d: u32 = (1 << 28)
+            | (1 << 24)
+            | ((dlen_d & 0xFF) << 16)
+            | ((clen_d & 0xFF) << 8)
+            | (((dlen_d >> 8) & 0xF) << 4)
+            | ((clen_d >> 8) & 0xF);
+
+        let serial = 0x4001_0001u32;
+        let mut p = PacketWriter::new();
+        p.u8(0xD8).u16(0); // id + length placeholder
+        p.u8(0x03); // compression flag (ServUO always writes 3)
+        p.u8(0x01); // enable-response flag
+        p.u32(serial).u32(1); // revision 1
+        p.u16(0).u16(0); // advisory tile count / buffer length — untrusted, ignored
+        p.u8(4); // plane_count
+        p.u32(header_a).bytes(&comp_a);
+        p.u32(header_b).bytes(&comp_b);
+        p.u32(header_c); // clen == 0: no payload bytes follow
+        p.u32(header_d).bytes(&comp_d);
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+
+        let mut w = World::new();
+        assert!(apply_packet(&mut w, &frame));
+
+        let design = w.house_designs.get(&serial).expect("design stored");
+        assert_eq!(design.revision, 1);
+        assert_eq!(design.planes.len(), 3, "the clen==0 plane must be skipped, not stored");
+        assert_eq!(design.planes[0].mode, 0);
+        assert_eq!(design.planes[0].data, raw_a, "inflate must reproduce the exact original bytes");
+        assert_eq!(design.planes[1].mode, 2);
+        assert_eq!(design.planes[1].data, raw_b);
+        assert_eq!(design.planes[2].data, raw_d, ">255-byte plane pins the split 12-bit dlen");
+
+        // Exercise the pure decoder directly, adding a mode-1 floor plane plus
+        // mode-2 planes for BOTH remaining grid branches, so every offset
+        // asymmetry is pinned in one call. plane_z 2 -> dz = ((2-1)%4)*20+7 = 27.
+        let mut planes = design.planes.clone();
+        planes.push(HousePlane { mode: 1, plane_z: 2, data: vec![0x00, 0xAA, 0x02, 0xFE /* -2 */] });
+        // Plane E: mode 2, plane_z 1 — floors 1-4 use INSET offsets (min+1) and
+        // mh = max_y - min_y = 2: i=1 -> (0,1), i=2 -> (1,0); i=0 is a hole.
+        // dz = z_of(1) = 7. The ground-plane branch would land these on B's keys.
+        planes.push(HousePlane { mode: 2, plane_z: 1, data: vec![0, 0, 0, 0x21, 0, 0x22] });
+        // Plane F: mode 2, plane_z 5 — roof grids use UN-inset offsets with
+        // mh = max_y - min_y + 1 = 3, and z_of's %4 wraps plane 5 back to dz 7
+        // (not 87). i=6 -> (1,-1); i=0..5 are holes.
+        planes.push(HousePlane {
+            mode: 2,
+            plane_z: 5,
+            data: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x31],
+        });
+        let tiles = crate::world::decode_house_planes(&planes, -1, -1, 1); // 3x3 footprint bounds
+
+        assert_eq!(tiles.get(&(-3, 3)), Some(&vec![(0x0063, 0)])); // mode 0
+        assert_eq!(tiles.get(&(2, -2)), Some(&vec![(0x00AA, 27)])); // mode 1, plane_z 2 -> dz 27
+        assert_eq!(tiles.get(&(-1, -1)), Some(&vec![(0x0010, 0)])); // mode 2, i=0
+        // i=3 -> (-1,2) pins Y as the FAST axis (a transposed decode puts it at
+        // (2,-1)) AND the ground plane's mh = max_y-min_y+2 south stair row.
+        assert_eq!(tiles.get(&(-1, 2)), Some(&vec![(0x0012, 0)]));
+        assert_eq!(tiles.get(&(0, 0)), Some(&vec![(0x0014, 0)])); // mode 2, i=5
+        assert_eq!(tiles.get(&(-1, 1)), None, "graphic 0 is a hole, not a tile");
+        // Plane D: 76 stacked entries at (5,-6), all dz 7 (plane_z 1).
+        let d_tiles = tiles.get(&(5, -6)).expect("mode-1 >255-byte plane decoded");
+        assert_eq!(d_tiles.len(), 76);
+        assert_eq!(d_tiles[0], (0x0BBB, 7));
+        // Plane E: inset floor-grid branch (off = min+1, mh = 2).
+        assert_eq!(tiles.get(&(0, 1)), Some(&vec![(0x0021, 7)]));
+        assert_eq!(tiles.get(&(1, 0)), Some(&vec![(0x0022, 7)]));
+        // Plane F: roof-grid branch (off = min, mh = 3) + the %4 height wrap.
+        assert_eq!(tiles.get(&(1, -1)), Some(&vec![(0x0031, 7)]));
+    }
+
+    #[test]
+    fn house_revision_notice_queues_request_once() {
+        let mut w = World::new();
+        let serial = 0x4001_0002u32;
+        w.item_mut(serial).is_multi = true; // the foundation must be a known item
+
+        let notice = |revision: u32| {
+            let mut p = PacketWriter::new();
+            p.u8(0xBF).u16(0).u16(0x001D).u32(serial).u32(revision);
+            let mut frame = p.into_vec();
+            let len = frame.len() as u16;
+            frame[1] = (len >> 8) as u8;
+            frame[2] = (len & 0xFF) as u8;
+            frame
+        };
+
+        assert!(apply_packet(&mut w, &notice(5)));
+        assert_eq!(w.pending_house_design_requests, vec![serial]);
+
+        // A repeat notice (ServUO resends on every SendInfoTo) must not
+        // duplicate the queued request.
+        assert!(apply_packet(&mut w, &notice(5)));
+        assert_eq!(w.pending_house_design_requests, vec![serial]);
+
+        // Once the design itself arrives at that revision, the request drains.
+        let mut d = PacketWriter::new();
+        d.u8(0xD8).u16(0);
+        d.u8(0x03).u8(0x01).u32(serial).u32(5);
+        d.u16(0).u16(0);
+        d.u8(0); // zero planes
+        let mut dframe = d.into_vec();
+        let dlen = dframe.len() as u16;
+        dframe[1] = (dlen >> 8) as u8;
+        dframe[2] = (dlen & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &dframe));
+        assert!(w.pending_house_design_requests.is_empty());
+        assert_eq!(w.house_designs.get(&serial).map(|d| d.revision), Some(5));
+
+        // A further notice at the SAME (now-current) revision must not
+        // re-trigger a request — otherwise every keepalive loops forever.
+        assert!(apply_packet(&mut w, &notice(5)));
+        assert!(w.pending_house_design_requests.is_empty());
+
+        assert_eq!(
+            crate::net::outgoing::build_house_design_request(0x4001_0001),
+            vec![0xBF, 0, 9, 0, 0x1E, 0x40, 0x01, 0x00, 0x01]
+        );
     }
 
     fn party_frame(body: &[u8]) -> Vec<u8> {

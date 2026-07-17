@@ -88,10 +88,29 @@ pub enum StepDeny {
 /// only ever *draws* visible components.
 fn multi_components_at(world: &World, multis: &Multis, x: i64, y: i64) -> Vec<(u16, i32)> {
     let mut out = Vec::new();
-    for it in world.items.values().filter(|it| it.is_multi) {
+    for (serial, it) in world.items.iter().filter(|(_, it)| it.is_multi) {
         let (dx, dy) = (x - it.pos.x as i64, y - it.pos.y as i64);
         if dx < i16::MIN as i64 || dx > i16::MAX as i64 || dy < i16::MIN as i64 || dy > i16::MAX as i64 {
             continue; // absurdly far from this multi's origin — never one of its tiles
+        }
+        // A decoded custom-house design (0xD8) REPLACES the foundation's
+        // multi.mul components entirely for THIS multi — it's the
+        // authoritative piece list once ready (ServUO's own server-side
+        // collision is the design, not the stock foundation shape), so once
+        // `tiles_ready` this is the ONLY source, never a fallback/merge. Keyed
+        // i8 (house footprints are tiny — 18x18 max), so a dx/dy outside i8
+        // range is never a design tile either way. This is the WALKABILITY
+        // fold — see `ensure_house_tiles`'s and this fn's own doc; the
+        // rendering loop in `build_scene` performs the identical swap.
+        if let Some(d) = world.house_designs.get(serial).filter(|d| d.tiles_ready) {
+            if dx >= i8::MIN as i64 && dx <= i8::MAX as i64 && dy >= i8::MIN as i64 && dy <= i8::MAX as i64 {
+                if let Some(tiles) = d.tiles.get(&(dx as i8, dy as i8)) {
+                    for &(g, dz) in tiles {
+                        out.push((g, it.pos.z as i32 + dz as i32));
+                    }
+                }
+            }
+            continue;
         }
         for c in multis.components_at(it.graphic as u32, dx as i16, dy as i16) {
             if c.visible || c.is_origin {
@@ -1479,6 +1498,101 @@ fn maps_json(world: &World) -> Value {
     Value::Array(maps)
 }
 
+/// Decode any pending custom-house designs (0xD8) whose foundation item is
+/// already in `world` and whose bounds we can now resolve. `anima-core` can't
+/// do this itself — mode-2 grid planes need the foundation multi's `multi.mul`
+/// bounds ([`Multis`] has no bounds API `anima-core` could depend on anyway,
+/// keeping the near-zero-dep core free of asset-format knowledge). Folded over
+/// ALL of the multi's components (including invisible ones), matching
+/// ServUO's `MultiComponentList.Min/Max` and ClassicUO's `MultiInfo` — a
+/// partial fold would misplace whole floors.
+fn ensure_house_tiles(world: &mut World, multis: &Multis) {
+    let pending: Vec<(u32, u32)> = world
+        .items
+        .iter()
+        .filter(|(serial, it)| {
+            it.is_multi && world.house_designs.get(*serial).is_some_and(|d| !d.tiles_ready)
+        })
+        .map(|(serial, it)| (*serial, it.graphic as u32))
+        .collect();
+    for (serial, multi_id) in pending {
+        let Some(comps) = multis.components(multi_id) else { continue };
+        if comps.is_empty() {
+            continue; // nothing to bound
+        }
+        // Bounds start at the ORIGIN, not at extremes: both authorities implicitly
+        // include (0,0) in the fold (ServUO `MultiComponentList` inits Min/Max to
+        // Point2D.Zero; ClassicUO `Item.LoadMulti` inits to 0), and the packed
+        // mode-2 grids were sized against those origin-clamped bounds.
+        let (mut min_x, mut min_y, mut max_y) = (0i16, 0i16, 0i16);
+        for c in comps {
+            min_x = min_x.min(c.dx);
+            min_y = min_y.min(c.dy);
+            max_y = max_y.max(c.dy);
+        }
+        let d = world.house_designs.get_mut(&serial).unwrap();
+        d.tiles = anima_core::world::decode_house_planes(&d.planes, min_x, min_y, max_y);
+        d.tiles_ready = true;
+    }
+}
+
+/// Emit ONE resolved multi/design tile — `graphic` at absolute `cz` on world
+/// `(x, y)` — into the statics JSON stream, exactly like a real static:
+/// nodraw skip, roof/`max_z` cull (so standing under cover hides it), the
+/// same `pz` draw-sort rule (background sinks, height rises), the foliage
+/// flag, the animdata frame sequence, and light-source accounting. Shared by
+/// the multi.mul branch and the custom-house design branch below it so a
+/// design tile can never drift from a real component's treatment — before
+/// this helper existed the two were separate, hand-duplicated bodies.
+/// `visible`/nodraw gating for design tiles happens in the CALLER (design
+/// tiles have no `visible` flag — a graphic-0 entry was already dropped at
+/// decode) — this only applies the nodraw *tiledata* check both share.
+#[allow(clippy::too_many_arguments)]
+fn emit_multi_component(
+    map: &MapData,
+    animdata: Option<&AnimData>,
+    max_z: i32,
+    under_cover: bool,
+    x: i64,
+    y: i64,
+    graphic: u16,
+    cz: i32,
+    statics: &mut String,
+    n_statics: &mut usize,
+    lights: &mut Vec<Value>,
+    light_cap: usize,
+) {
+    if map.item_is_nodraw(graphic) {
+        return;
+    }
+    let is_roof = map.item_flags(graphic) & FLAG_ROOF != 0;
+    if cz >= max_z || (under_cover && is_roof) {
+        return;
+    }
+    let mut spz = cz;
+    if map.item_flags(graphic) & 0x1 != 0 {
+        spz -= 1; // Background
+    }
+    if map.item_height(graphic) != 0 {
+        spz += 1; // has height (wall/solid)
+    }
+    let foliage = if map.item_flags(graphic) & FLAG_FOLIAGE != 0 { ",\"f\":1" } else { "" };
+    // Same animdata frame-sequence lookup the real-statics loop does (via the
+    // shared `anim_suffix`) — an animated component (mill wheel, pennant) or
+    // design tile must cycle frames exactly like the identical graphic would
+    // as a real static, not freeze on frame 0.
+    let anim = anim_suffix(map, animdata, graphic);
+    let _ = write!(
+        statics,
+        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}}},",
+        x, y, cz, graphic, spz, foliage, anim
+    );
+    *n_statics += 1;
+    if lights.len() < light_cap && map.item_is_light(graphic) {
+        lights.push(json!({ "x": x, "y": y, "z": cz, "r": 3 }));
+    }
+}
+
 /// Serialize the current world + a map window (walkability/Z + real terrain
 /// color) + entities + journal to the JSON the web renderer consumes.
 #[allow(clippy::too_many_arguments)]
@@ -1492,6 +1606,13 @@ pub fn build_scene(
     multis: Option<&Multis>,
     journal: &[Value],
 ) -> String {
+    // Decode any newly-arrived custom-house designs before anything below reads
+    // `s.world` — needs `multis` for the foundation's `multi.mul` bounds, so it's
+    // a no-op (and every design stays `tiles_ready == false`, rendering as the
+    // stock foundation) when the caller has no `Multis` loaded at all.
+    if let Some(m) = multis {
+        ensure_house_tiles(&mut s.world, m);
+    }
     // `Body.def` remap (ClassicUO ReplaceBody): redirect an exotic body to its real
     // animation body so the renderer picks the right group + resolves a sprite. The
     // mobile's own hue wins; Body.def's hue is only a fallback for base creatures.
@@ -1882,20 +2003,22 @@ pub fn build_scene(
         // multi.mul — see `anima_assets::multis`'s module doc) so a multi whose
         // ORIGIN sits just outside the window can still have components drawn
         // over/walked over just inside it. Resolved once per scene build (not
-        // per tile) as `(x, y, z, multi_id)`; `Multis::components_at`'s own
+        // per tile) as `(x, y, z, multi_id, serial)` — the serial rides along so
+        // the per-tile loop below can look up a decoded custom-house design and
+        // swap it in for `multis.components_at`; `Multis::components_at`'s own
         // per-multi cache then makes each tile's lookup below O(components on
         // that ONE tile), not O(components on the whole multi).
         const MULTI_MARGIN: i64 = 32;
-        let near_multis: Vec<(i64, i64, i32, u32)> = if multis.is_some() {
+        let near_multis: Vec<(i64, i64, i32, u32, u32)> = if multis.is_some() {
             s.world
                 .items
-                .values()
-                .filter(|it| {
+                .iter()
+                .filter(|(_, it)| {
                     it.is_multi
                         && (it.pos.x as i64 - px).abs() <= RADIUS + MULTI_MARGIN
                         && (it.pos.y as i64 - py).abs() <= RADIUS + MULTI_MARGIN
                 })
-                .map(|it| (it.pos.x as i64, it.pos.y as i64, it.pos.z as i32, it.graphic as u32))
+                .map(|(serial, it)| (it.pos.x as i64, it.pos.y as i64, it.pos.z as i32, it.graphic as u32, *serial))
                 .collect()
         } else {
             Vec::new()
@@ -2037,46 +2160,63 @@ pub fn build_scene(
                     // so standing inside a boat/house still shows its own deck
                     // instead of the roof floating over nothing.
                     if let Some(multis) = multis {
-                        for &(mx, my, mz, multi_id) in &near_multis {
+                        for &(mx, my, mz, multi_id, mserial) in &near_multis {
                             let (cdx, cdy) = (x - mx, y - my);
                             if !(i16::MIN as i64..=i16::MAX as i64).contains(&cdx)
                                 || !(i16::MIN as i64..=i16::MAX as i64).contains(&cdy)
                             {
                                 continue;
                             }
+                            // A decoded custom-house design REPLACES this multi's
+                            // multi.mul components entirely — the identical swap
+                            // `multi_components_at` makes for walkability; see that
+                            // fn's doc for why the two must never merge. Design
+                            // tiles carry no `visible` flag (a graphic-0 entry was
+                            // already dropped at decode), so unlike the multi.mul
+                            // branch below there's no `!visible` check here.
+                            if let Some(d) = s.world.house_designs.get(&mserial).filter(|d| d.tiles_ready) {
+                                if (i8::MIN as i64..=i8::MAX as i64).contains(&cdx)
+                                    && (i8::MIN as i64..=i8::MAX as i64).contains(&cdy)
+                                {
+                                    if let Some(comp_tiles) = d.tiles.get(&(cdx as i8, cdy as i8)) {
+                                        for &(g, dz) in comp_tiles {
+                                            emit_multi_component(
+                                                map,
+                                                animdata,
+                                                max_z,
+                                                under_cover,
+                                                x,
+                                                y,
+                                                g,
+                                                mz + dz as i32,
+                                                &mut statics,
+                                                &mut n_statics,
+                                                &mut lights,
+                                                LIGHT_CAP,
+                                            );
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
                             for c in multis.components_at(multi_id, cdx as i16, cdy as i16) {
-                                if !c.visible || map.item_is_nodraw(c.graphic) {
+                                if !c.visible {
                                     continue;
                                 }
-                                let cz = mz + c.dz as i32;
-                                let is_roof = map.item_flags(c.graphic) & FLAG_ROOF != 0;
-                                if cz >= max_z || (under_cover && is_roof) {
-                                    continue;
-                                }
-                                let mut spz = cz;
-                                if map.item_flags(c.graphic) & 0x1 != 0 {
-                                    spz -= 1; // Background
-                                }
-                                if map.item_height(c.graphic) != 0 {
-                                    spz += 1; // has height (wall/solid)
-                                }
-                                let foliage =
-                                    if map.item_flags(c.graphic) & FLAG_FOLIAGE != 0 { ",\"f\":1" } else { "" };
-                                // Same animdata frame-sequence lookup the real-statics
-                                // loop above does (via the shared `anim_suffix`) — an
-                                // animated component (mill wheel, pennant) must cycle
-                                // frames exactly like the identical graphic would as a
-                                // real static, not freeze on frame 0.
-                                let anim = anim_suffix(map, animdata, c.graphic);
-                                let _ = write!(
-                                    statics,
-                                    "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}}},",
-                                    x, y, cz, c.graphic, spz, foliage, anim
+                                emit_multi_component(
+                                    map,
+                                    animdata,
+                                    max_z,
+                                    under_cover,
+                                    x,
+                                    y,
+                                    c.graphic,
+                                    mz + c.dz as i32,
+                                    &mut statics,
+                                    &mut n_statics,
+                                    &mut lights,
+                                    LIGHT_CAP,
                                 );
-                                n_statics += 1;
-                                if lights.len() < LIGHT_CAP && map.item_is_light(c.graphic) {
-                                    lights.push(json!({ "x": x, "y": y, "z": cz, "r": 3 }));
-                                }
                             }
                         }
                     }
@@ -3005,6 +3145,40 @@ mod tests {
         assert!(
             multi_components_at(&world, &multis, 50_000, 50_000).is_empty(),
             "way outside any multi's footprint must return nothing"
+        );
+    }
+
+    /// T4: once a custom-house design is decoded (`tiles_ready`), it must
+    /// REPLACE the foundation's multi.mul components for that multi entirely
+    /// — never merge with them — matching the identical swap the emission
+    /// loop in `build_scene` makes (§3c/§3d of the housing plan).
+    #[test]
+    fn multi_components_at_design_replaces_multi_mul_components() {
+        let mut world = anima_core::World::new();
+        world.items.insert(1, synth_item(1, 42, 1000, 1000, 0, true)); // graphic 42 = multi id
+
+        let multis = Multis::from_components(std::collections::HashMap::from([(
+            42,
+            vec![MultiComponent { graphic: 0x1000, dx: 0, dy: 0, dz: 0, visible: true, is_origin: true }],
+        )]));
+
+        // No design yet (or not decoded) → the stock multi.mul component wins.
+        assert_eq!(multi_components_at(&world, &multis, 1000, 1000), vec![(0x1000, 0)]);
+
+        let mut design = anima_core::world::HouseDesign::default();
+        design.tiles.insert((0, 0), vec![(0x4001, 5)]);
+        world.house_designs.insert(1, design); // tiles_ready still false — must be ignored
+        assert_eq!(
+            multi_components_at(&world, &multis, 1000, 1000),
+            vec![(0x1000, 0)],
+            "a design that isn't tiles_ready yet must not replace anything"
+        );
+
+        world.house_designs.get_mut(&1).unwrap().tiles_ready = true;
+        assert_eq!(
+            multi_components_at(&world, &multis, 1000, 1000),
+            vec![(0x4001, 5)],
+            "a tiles_ready design must replace the multi.mul component entirely, not merge"
         );
     }
 
