@@ -26,7 +26,7 @@ use anima_assets::{
     Anim, AnimData, Art, Cliloc, Gumps, Hues, MapData, Multis, RadarCol, Sounds, Texmaps, TileData,
     ZReason,
 };
-use anima_core::net::LoginConfig;
+use anima_core::net::{CharacterAppearance, LoginConfig};
 use anima_core::path::{find_path, find_path_near};
 use anima_core::Action;
 use include_dir::{include_dir, Dir};
@@ -183,12 +183,123 @@ pub struct PlayServer {
     tiledata: Option<Arc<TileData>>,
     scene: Arc<Mutex<String>>,
     rx: mpsc::Receiver<Option<Action>>,
-    login_rx: mpsc::Receiver<(String, u16, String, String)>,
+    login_rx: mpsc::Receiver<LoginAttempt>,
     sse_hub: SseHub,
     /// Current session facet (`World::map_index`), kept in step with the game
     /// loop so the `/regions.json` HTTP thread can filter guard-zone rects to
     /// the facet the player is actually on without touching `scene`'s JSON.
     facet: Arc<AtomicU8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoginAttempt {
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    /// `Some` means explicitly create a new character, even if other slots
+    /// are occupied. `None` keeps the existing select-or-create-if-empty flow.
+    create: Option<CharacterAppearance>,
+}
+
+fn starting_skills(profession: &str) -> Option<[(u8, u8); 4]> {
+    Some(match profession {
+        "warrior" => [(40, 50), (27, 50), (0, 0), (0, 0)], // swords + tactics
+        "mage" => [(25, 50), (16, 50), (0, 0), (0, 0)],    // magery + eval int
+        "ranger" => [(31, 50), (27, 50), (0, 0), (0, 0)],  // archery + tactics
+        "crafter" => [(7, 50), (45, 50), (0, 0), (0, 0)],  // smithing + mining
+        _ => return None,
+    })
+}
+
+/// Parse the browser's JSON login request. The legacy colon-separated body is
+/// retained for scripts and older embedded web assets.
+fn parse_login_attempt(body: &str) -> Result<LoginAttempt, &'static str> {
+    let body = body.trim();
+    if !body.starts_with('{') {
+        let mut fields = body.splitn(4, ':');
+        let host = fields.next().unwrap_or("").trim().to_string();
+        let port = fields
+            .next()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2593);
+        let username = fields.next().unwrap_or("").trim().to_string();
+        let password = fields.next().unwrap_or("").to_string();
+        if host.is_empty() || username.is_empty() {
+            return Err("server and account are required");
+        }
+        return Ok(LoginAttempt {
+            host,
+            port,
+            username,
+            password,
+            create: None,
+        });
+    }
+
+    let value: serde_json::Value = serde_json::from_str(body).map_err(|_| "invalid login JSON")?;
+    let text = |key| {
+        value
+            .get(key)
+            .and_then(|field| field.as_str())
+            .unwrap_or("")
+    };
+    let host = text("host").trim().to_string();
+    let username = text("username").trim().to_string();
+    if host.is_empty() || username.is_empty() {
+        return Err("server and account are required");
+    }
+    let port = value
+        .get("port")
+        .and_then(|field| field.as_u64())
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or("port must be between 0 and 65535")?;
+
+    let create = value.get("create").filter(|field| !field.is_null());
+    let create = if let Some(create) = create {
+        let create_text = |key| {
+            create
+                .get(key)
+                .and_then(|field| field.as_str())
+                .unwrap_or("")
+        };
+        let create_u8 = |key| {
+            create
+                .get(key)
+                .and_then(|field| field.as_u64())
+                .and_then(|number| u8::try_from(number).ok())
+        };
+        let mut appearance = CharacterAppearance {
+            name: create_text("name").trim().to_string(),
+            female: create
+                .get("female")
+                .and_then(|field| field.as_bool())
+                .unwrap_or(false),
+            strength: create_u8("strength").ok_or("invalid strength")?,
+            dexterity: create_u8("dexterity").ok_or("invalid dexterity")?,
+            intelligence: create_u8("intelligence").ok_or("invalid intelligence")?,
+            city_index: create
+                .get("city_index")
+                .and_then(|field| field.as_u64())
+                .and_then(|number| u16::try_from(number).ok())
+                .ok_or("invalid starting city")?,
+            ..Default::default()
+        };
+        appearance.skills =
+            starting_skills(create_text("profession")).ok_or("unknown starting profession")?;
+        appearance.validate()?;
+        Some(appearance)
+    } else {
+        None
+    };
+
+    Ok(LoginAttempt {
+        host,
+        port,
+        username,
+        password: text("password").to_string(),
+        create,
+    })
 }
 
 /// Load assets, bind the HTTP server (workers included), and return a
@@ -316,7 +427,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     // `/regions.json` HTTP thread can filter to the facet the player is on.
     let facet: Arc<AtomicU8> = Arc::new(AtomicU8::new(0));
     // Login credentials submitted by the web login page (host, port, user, pass).
-    let (login_tx, login_rx) = mpsc::channel::<(String, u16, String, String)>();
+    let (login_tx, login_rx) = mpsc::channel::<LoginAttempt>();
 
     // The HTTP server comes up FIRST so the login page is reachable before we've
     // connected to any game server. Bound to loopback by default — this process
@@ -413,26 +524,39 @@ impl PlayServer {
         // Connect to the game server. With login_page we serve the web login page
         // and wait for the browser to POST a server + account; otherwise we auto-login
         // with the configured host/port/user/pass (backward compatible with scripts/agents).
-        let connect = |h: String, p: u16, u: String, pw: String| {
+        let connect = |attempt: LoginAttempt| {
+            let LoginAttempt {
+                host,
+                port,
+                username,
+                password,
+                create,
+            } = attempt;
             let mut c = LoginConfig {
-                username: u,
-                password: pw,
+                username,
+                password,
+                create_new: create.is_some(),
                 ..Default::default()
             };
-            c.appearance.city_index = city_index;
-            Session::connect_and_login(&Endpoint::new(h, p), c)
+            if let Some(appearance) = create {
+                c.appearance = appearance;
+            } else {
+                c.appearance.city_index = city_index;
+            }
+            Session::connect_and_login(&Endpoint::new(host, port), c)
         };
         let mut session = if !cfg.login_page {
             println!(
                 "play: connecting to {}:{} as {} ...",
                 cfg.host, cfg.port, cfg.user
             );
-            match connect(
-                cfg.host.clone(),
-                cfg.port,
-                cfg.user.clone(),
-                cfg.pass.clone(),
-            ) {
+            match connect(LoginAttempt {
+                host: cfg.host.clone(),
+                port: cfg.port,
+                username: cfg.user.clone(),
+                password: cfg.pass.clone(),
+                create: None,
+            }) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("login failed: {e}");
@@ -446,16 +570,17 @@ impl PlayServer {
             *scene.lock().unwrap() = r#"{"auth":"login"}"#.into();
             println!("play: login page at http://127.0.0.1:{port}/  (enter server + account)");
             loop {
-                let (lh, lp, lu, lpw) = match login_rx.recv() {
+                let attempt = match login_rx.recv() {
                     Ok(v) => v,
                     // Sender dropped (the HTTP worker pool is gone) — nothing can
                     // submit the login form anymore. Same reasoning as above: return
                     // rather than exit, so an embedding GUI keeps control.
                     Err(e) => return Err(io::Error::other(e)),
                 };
+                let (lh, lp, lu) = (attempt.host.clone(), attempt.port, attempt.username.clone());
                 *scene.lock().unwrap() = r#"{"auth":"connecting"}"#.into();
                 println!("play: connecting to {lh}:{lp} as {lu} ...");
-                match connect(lh, lp, lu, lpw) {
+                match connect(attempt) {
                     Ok(s) => break s,
                     Err(e) => {
                         eprintln!("login failed: {e}");
@@ -1137,7 +1262,7 @@ struct SpawnHttp {
     web_dir: Option<PathBuf>,
     scene: Arc<Mutex<String>>,
     tx: mpsc::Sender<Option<Action>>,
-    login: mpsc::Sender<(String, u16, String, String)>,
+    login: mpsc::Sender<LoginAttempt>,
     art: Option<Arc<Mutex<Art>>>,
     anim: Option<Arc<Anim>>,
     gumps: Option<Arc<Gumps>>,
@@ -1240,7 +1365,7 @@ struct Ctx<'a> {
     web_dir: &'a Option<PathBuf>,
     scene: &'a Arc<Mutex<String>>,
     tx: &'a mpsc::Sender<Option<Action>>,
-    login: &'a mpsc::Sender<(String, u16, String, String)>,
+    login: &'a mpsc::Sender<LoginAttempt>,
     art: &'a Option<Arc<Mutex<Art>>>,
     anim: &'a Option<Arc<Anim>>,
     gumps: &'a Option<Arc<Gumps>>,
@@ -1334,9 +1459,8 @@ fn handle_request(ctx: Ctx) {
         }
         let _ = req.respond(Response::from_string("ok"));
     } else if is_post && url == "/login" {
-        // Web login page submitted a server + account: "host:port:user:pass" (the
-        // password is the remainder, so it may itself contain ':'). Hand it to the
-        // connect loop in `PlayServer::run`; ignored if we're already in-world.
+        // The browser sends JSON so an optional character-creation request can
+        // accompany the credentials. Colon-separated legacy requests remain valid.
         let body = match read_request_body(&mut req) {
             Ok(body) => body,
             Err((status, message)) => {
@@ -1344,16 +1468,14 @@ fn handle_request(ctx: Ctx) {
                 return;
             }
         };
-        let mut it = body.trim().splitn(4, ':');
-        let h = it.next().unwrap_or("").to_string();
-        let p: u16 = it.next().and_then(|s| s.parse().ok()).unwrap_or(2593);
-        let u = it.next().unwrap_or("").to_string();
-        let pw = it.next().unwrap_or("").to_string();
-        if h.is_empty() || u.is_empty() {
-            let _ = req.respond(Response::from_string("bad").with_status_code(400));
-        } else {
-            let _ = login.send((h, p, u, pw));
-            let _ = req.respond(Response::from_string("ok"));
+        match parse_login_attempt(&body) {
+            Ok(attempt) => {
+                let _ = login.send(attempt);
+                let _ = req.respond(Response::from_string("ok"));
+            }
+            Err(message) => {
+                let _ = req.respond(Response::from_string(message).with_status_code(400));
+            }
         }
     } else if url == "/scene.json" {
         let body = scene.lock().unwrap().clone();
@@ -2306,6 +2428,60 @@ mod resource_limit_tests {
     fn body_reader_rejects_invalid_utf8() {
         let mut invalid = Cursor::new(vec![0xFF]);
         assert!(read_text_limited(&mut invalid, 4).is_err());
+    }
+}
+
+#[cfg(test)]
+mod login_request_tests {
+    use super::{parse_login_attempt, starting_skills};
+
+    #[test]
+    fn legacy_login_body_remains_supported() {
+        let attempt = parse_login_attempt("127.0.0.1:2594:account:pass:with:colons").unwrap();
+        assert_eq!(attempt.host, "127.0.0.1");
+        assert_eq!(attempt.port, 2594);
+        assert_eq!(attempt.username, "account");
+        assert_eq!(attempt.password, "pass:with:colons");
+        assert!(attempt.create.is_none());
+    }
+
+    #[test]
+    fn json_login_body_carries_new_character_configuration() {
+        let attempt = parse_login_attempt(
+            r#"{
+                "host":"127.0.0.1","port":2594,
+                "username":"account","password":"secret",
+                "create":{"name":"New Hero","female":true,"profession":"mage",
+                    "strength":20,"dexterity":20,"intelligence":50,"city_index":3}
+            }"#,
+        )
+        .unwrap();
+        let appearance = attempt.create.unwrap();
+        assert_eq!(appearance.name, "New Hero");
+        assert!(appearance.female);
+        assert_eq!(
+            (
+                appearance.strength,
+                appearance.dexterity,
+                appearance.intelligence
+            ),
+            (20, 20, 50)
+        );
+        assert_eq!(appearance.skills, starting_skills("mage").unwrap());
+        assert_eq!(appearance.city_index, 3);
+    }
+
+    #[test]
+    fn json_login_rejects_invalid_creation_stats_before_connecting() {
+        let result = parse_login_attempt(
+            r#"{"host":"127.0.0.1","port":2594,"username":"account","password":"secret",
+                "create":{"name":"Bad Hero","female":false,"profession":"warrior",
+                    "strength":60,"dexterity":60,"intelligence":60,"city_index":3}}"#,
+        );
+        assert_eq!(
+            result,
+            Err("strength, dexterity, and intelligence must each be 10-60 and total 90")
+        );
     }
 }
 

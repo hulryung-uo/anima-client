@@ -17,15 +17,25 @@
         align-items: center; justify-content: center;
         background: radial-gradient(circle at 50% 35%, #10151d, #05070a); }
       #login.on { display: flex; }
-      .login-box { width: 280px; padding: 22px 22px 18px; border: 1px solid #2a2f37;
+      .login-box { width: 320px; max-height: calc(100vh - 32px); overflow: auto;
+        padding: 22px 22px 18px; border: 1px solid #2a2f37;
         border-radius: 10px; background: rgba(13,16,20,.96); box-shadow: 0 8px 40px rgba(0,0,0,.6);
         display: flex; flex-direction: column; gap: 9px; }
       .login-title { font-size: 16px; color: #8ab4f8; letter-spacing: .06em; text-align: center;
         margin-bottom: 6px; }
       .login-box label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: #8a929c; }
-      .login-box input { background: rgba(0,0,0,.4); border: 1px solid #2a3a4a; border-radius: 5px;
+      .login-box input, .login-box select { background: rgba(0,0,0,.4); border: 1px solid #2a3a4a; border-radius: 5px;
         color: #e6eaf0; padding: 7px 9px; font-size: 13px; outline: none; }
-      .login-box input:focus { border-color: #4a90d9; }
+      .login-box input:focus, .login-box select:focus { border-color: #4a90d9; }
+      .login-create-toggle { flex-direction: row !important; align-items: center; gap: 8px !important;
+        margin-top: 5px; color: #b9c7d8 !important; cursor: pointer; }
+      .login-create-toggle input { width: auto; margin: 0; accent-color: #4a90d9; }
+      #lg-create-panel { display: none; padding: 10px; border: 1px solid #28333f;
+        border-radius: 6px; background: rgba(20,28,36,.55); gap: 8px; }
+      #lg-create-panel.on { display: flex; flex-direction: column; }
+      .login-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+      .login-stats input { width: 100%; }
+      #lg-stat-total { font-size: 10px; color: #8896a5; text-align: right; }
       #lg-go { margin-top: 6px; padding: 9px; border-radius: 6px; cursor: pointer;
         border: 1px solid #2a3a4a; background: #1b2530; color: #8ab4f8; font-size: 13px; letter-spacing: .04em; }
       #lg-go:hover:not(:disabled) { background: rgba(138,180,248,.18); color: #fff; }
@@ -618,6 +628,30 @@
         <label>Port <input id="lg-port" value="2594" spellcheck="false" autocomplete="off"></label>
         <label>Account <input id="lg-user" spellcheck="false" autocomplete="username"></label>
         <label>Password <input id="lg-pass" type="password" autocomplete="current-password"></label>
+        <label class="login-create-toggle"><input id="lg-create" type="checkbox"> Create a new character</label>
+        <div id="lg-create-panel">
+          <label>Character name <input id="lg-char-name" maxlength="30" spellcheck="false" autocomplete="off"></label>
+          <label>Gender
+            <select id="lg-gender"><option value="male">Male</option><option value="female">Female</option></select>
+          </label>
+          <label>Profession
+            <select id="lg-profession">
+              <option value="warrior">Warrior — Swords / Tactics</option>
+              <option value="mage">Mage — Magery / Evaluating Intelligence</option>
+              <option value="ranger">Ranger — Archery / Tactics</option>
+              <option value="crafter">Crafter — Blacksmithing / Mining</option>
+            </select>
+          </label>
+          <div class="login-stats">
+            <label>STR <input id="lg-str" type="number" min="10" max="60" value="60"></label>
+            <label>DEX <input id="lg-dex" type="number" min="10" max="60" value="20"></label>
+            <label>INT <input id="lg-int" type="number" min="10" max="60" value="10"></label>
+          </div>
+          <div id="lg-stat-total">Total: 90 / 90</div>
+          <label>Starting city
+            <select id="lg-city"><option value="3">Britain</option><option value="0">New Haven</option></select>
+          </label>
+        </div>
         <button id="lg-go" type="button">Connect</button>
         <div id="lg-msg"></div>
       </div>

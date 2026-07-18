@@ -108,4 +108,9 @@ cargo run -p anima-net --bin scene -- 127.0.0.1 2594 <user> <pass> web/scene.jso
 ( cd web && python3 -m http.server 8011 )   # → http://127.0.0.1:8011/
 ```
 
+Browser login mode also supports explicit character creation. Enable **Create a
+new character**, then choose the name, gender, profession, stats, and starting
+city; the client creates it in the account's first empty slot without deleting
+existing characters.
+
 WASM module: `cargo install wasm-pack && wasm-pack build crates/anima-wasm --target web`.

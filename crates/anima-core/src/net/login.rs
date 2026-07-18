@@ -11,7 +11,7 @@
 //! returns. This keeps it WASM/native-agnostic and unit-testable without IO.
 //!
 //! Spec source: `anima/anima/client/{packets,connection}.py`. Character
-//! creation (`LoginConfig::create_if_missing`) and one-shot deletion
+//! creation (`LoginConfig::create_if_missing` / `LoginConfig::create_new`) and one-shot deletion
 //! (`LoginConfig::delete_existing`, mirroring the Python client's
 //! delete-then-recreate login flow) are both implemented; the happy path
 //! otherwise assumes an existing character.
@@ -147,6 +147,46 @@ impl Default for CharacterAppearance {
     }
 }
 
+impl CharacterAppearance {
+    /// Validate the fields that would otherwise make ServUO reject the whole
+    /// `0xF8` request without a useful client-side explanation.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let name = self.name.trim();
+        if name.is_empty() {
+            return Err("character name is required");
+        }
+        if name.len() > 30 || !name.bytes().all(|b| b.is_ascii_graphic() || b == b' ') {
+            return Err("character name must be at most 30 printable ASCII bytes");
+        }
+        if !(10..=60).contains(&self.strength)
+            || !(10..=60).contains(&self.dexterity)
+            || !(10..=60).contains(&self.intelligence)
+            || u16::from(self.strength) + u16::from(self.dexterity) + u16::from(self.intelligence)
+                != 90
+        {
+            return Err("strength, dexterity, and intelligence must each be 10-60 and total 90");
+        }
+        let mut skill_total = 0u16;
+        let mut used = [false; 256];
+        for (id, value) in self.skills {
+            if value > 50 {
+                return Err("a starting skill may not exceed 50");
+            }
+            skill_total += u16::from(value);
+            if value > 0 {
+                if used[id as usize] {
+                    return Err("starting skills with a non-zero value must be unique");
+                }
+                used[id as usize] = true;
+            }
+        }
+        if skill_total == 0 || skill_total > 120 {
+            return Err("starting skill values must total between 1 and 120");
+        }
+        Ok(())
+    }
+}
+
 /// Human race id in the gender+race byte. The modern (CV ≥ 7.0.0.0) encoding is
 /// `race * 2 + female`, so a human sends 2 (male) / 3 (female).
 const HUMAN_RACE_ID: u8 = 1;
@@ -248,6 +288,15 @@ pub struct CharSlot {
 /// header: `[count:u8]` then `count × ([name:ascii30][password/pad:30])`.
 /// Returns only the *named* (non-empty) slots.
 pub fn parse_character_list(frame: &[u8]) -> Result<Vec<CharSlot>, LoginError> {
+    Ok(parse_character_list_with_capacity(frame)?.slots)
+}
+
+struct ParsedCharacterList {
+    slots: Vec<CharSlot>,
+    slot_count: u8,
+}
+
+fn parse_character_list_with_capacity(frame: &[u8]) -> Result<ParsedCharacterList, LoginError> {
     let id = frame[0];
     let mut r = PacketReader::new(&frame[3..]); // skip id + u16 length
     let count = r.u8().map_err(|_| LoginError::Truncated(id))?;
@@ -259,7 +308,10 @@ pub fn parse_character_list(frame: &[u8]) -> Result<Vec<CharSlot>, LoginError> {
             slots.push(CharSlot { index: i, name });
         }
     }
-    Ok(slots)
+    Ok(ParsedCharacterList {
+        slots,
+        slot_count: count,
+    })
 }
 
 /// Parse LoginConfirm `0x1B` (37 bytes).
@@ -311,9 +363,14 @@ pub enum LoginError {
     Denied(u8),
     /// A packet ended before we'd read everything its layout requires.
     Truncated(u8),
-    /// We reached the character list but there were no characters and creation
-    /// is not yet implemented.
+    /// We reached the character list with no selectable character and automatic
+    /// creation was disabled.
     NoCharacterAndCreateUnsupported,
+    /// Explicit new-character creation was requested, but every advertised
+    /// character slot is already occupied.
+    CharacterSlotsFull,
+    /// The requested appearance violates client-known creation constraints.
+    InvalidCharacterAppearance(&'static str),
     /// Server rejected our `0x83` DeleteCharacter with DeleteResult `0x85`.
     /// `reason` is the raw `DeleteResultType` byte; `text` is a human-readable
     /// gloss for logs/UI.
@@ -351,6 +408,9 @@ pub struct LoginConfig {
     pub client_ip: u32,
     /// When the account has no character, create one from this appearance.
     pub create_if_missing: bool,
+    /// Create a new character in the first empty slot even when the account
+    /// already has other characters. Existing selection remains the default.
+    pub create_new: bool,
     /// Mirrors the Python client's login-flow `delete_existing` option
     /// (`anima/anima/client/connection.py`): once, delete the character that
     /// WOULD have been selected (by `character_slot`, falling back to the
@@ -371,6 +431,7 @@ impl Default for LoginConfig {
             character_slot: 0,
             client_ip: 0x7F00_0001, // 127.0.0.1
             create_if_missing: true,
+            create_new: false,
             delete_existing: false,
             appearance: CharacterAppearance::default(),
         }
@@ -483,12 +544,31 @@ impl LoginMachine {
             }
             State::AwaitCharacterList => {
                 if id == 0xA9 || id == 0x86 {
-                    let slots = parse_character_list(frame)?;
-                    let chosen = slots
+                    let parsed = parse_character_list_with_capacity(frame)?;
+                    let chosen = parsed
+                        .slots
                         .iter()
                         .find(|s| s.index == self.cfg.character_slot)
-                        .or_else(|| slots.first());
+                        .or_else(|| parsed.slots.first());
+                    let first_empty_slot = (0..parsed.slot_count)
+                        .find(|index| !parsed.slots.iter().any(|slot| slot.index == *index))
+                        // Some older shards advertise zero entries for a fresh
+                        // account instead of a fixed bank of empty slots.
+                        .or((parsed.slot_count == 0).then_some(0));
                     match chosen {
+                        _ if self.cfg.create_new => {
+                            self.cfg
+                                .appearance
+                                .validate()
+                                .map_err(LoginError::InvalidCharacterAppearance)?;
+                            let slot = first_empty_slot.ok_or(LoginError::CharacterSlotsFull)?;
+                            self.state = State::AwaitLoginConfirm;
+                            Ok(vec![LoginDirective::Send(build_create_character(
+                                &self.cfg.appearance,
+                                u16::from(slot),
+                                ALL_FACET_CLIENT_FLAGS,
+                            ))])
+                        }
                         Some(slot) if self.cfg.delete_existing && !self.delete_sent => {
                             // Python-flow mirror (`anima/anima/client/connection.py`):
                             // delete the character that WOULD have been selected,
@@ -511,10 +591,14 @@ impl LoginMachine {
                             ))])
                         }
                         None if self.cfg.create_if_missing => {
+                            self.cfg
+                                .appearance
+                                .validate()
+                                .map_err(LoginError::InvalidCharacterAppearance)?;
                             self.state = State::AwaitLoginConfirm;
                             Ok(vec![LoginDirective::Send(build_create_character(
                                 &self.cfg.appearance,
-                                0,
+                                u16::from(first_empty_slot.unwrap_or(0)),
                                 ALL_FACET_CLIENT_FLAGS,
                             ))])
                         }
@@ -812,6 +896,56 @@ mod tests {
                 0x7F00_0001,
                 ALL_FACET_CLIENT_FLAGS
             ))]
+        );
+    }
+
+    #[test]
+    fn explicit_creation_uses_first_empty_slot_without_deleting_existing() {
+        let appearance = CharacterAppearance {
+            name: "Second Hero".into(),
+            ..Default::default()
+        };
+        let cfg = LoginConfig {
+            create_new: true,
+            appearance: appearance.clone(),
+            ..Default::default()
+        };
+        let mut m = machine_at_character_list(cfg);
+
+        let list = build_character_list_frame(0xA9, &["Existing", "", "Other", "", ""]);
+        let directives = m.on_packet(&list).unwrap();
+        assert_eq!(
+            directives,
+            vec![LoginDirective::Send(build_create_character(
+                &appearance,
+                1,
+                ALL_FACET_CLIENT_FLAGS,
+            ))]
+        );
+    }
+
+    #[test]
+    fn explicit_creation_rejects_a_full_account() {
+        let cfg = LoginConfig {
+            create_new: true,
+            ..Default::default()
+        };
+        let mut m = machine_at_character_list(cfg);
+        let list = build_character_list_frame(0xA9, &["A", "B", "C", "D", "E"]);
+        assert_eq!(m.on_packet(&list), Err(LoginError::CharacterSlotsFull));
+    }
+
+    #[test]
+    fn character_appearance_validation_catches_bad_stats() {
+        let appearance = CharacterAppearance {
+            strength: 60,
+            dexterity: 30,
+            intelligence: 30,
+            ..Default::default()
+        };
+        assert_eq!(
+            appearance.validate(),
+            Err("strength, dexterity, and intelligence must each be 10-60 and total 90")
         );
     }
 }

@@ -1235,19 +1235,64 @@ let loginWired = false;
 function wireLogin() {
   if (loginWired) return; loginWired = true;
   const go = document.getElementById("lg-go");
-  const submit = () => {
+  const createToggle = document.getElementById("lg-create");
+  const createPanel = document.getElementById("lg-create-panel");
+  const statInputs = ["lg-str", "lg-dex", "lg-int"].map(id => document.getElementById(id));
+  const updateCreation = () => {
+    createPanel.classList.toggle("on", createToggle.checked);
+    const total = statInputs.reduce((sum, input) => sum + (Number(input.value) || 0), 0);
+    const totalEl = document.getElementById("lg-stat-total");
+    totalEl.textContent = `Total: ${total} / 90`;
+    totalEl.style.color = total === 90 ? "#8896a5" : "#e5a04d";
+  };
+  createToggle.addEventListener("change", updateCreation);
+  for (const input of statInputs) input.addEventListener("input", updateCreation);
+  updateCreation();
+
+  const submit = async () => {
     const host = (document.getElementById("lg-host").value || "127.0.0.1").trim();
-    const port = (document.getElementById("lg-port").value || "2594").trim();
-    const user = (document.getElementById("lg-user").value || "").trim();
-    const pass = document.getElementById("lg-pass").value || "";
-    if (!user) { document.getElementById("lg-msg").textContent = "Enter an account name."; return; }
-    document.getElementById("lg-msg").textContent = "Connecting…";
-    fetch("login", { method: "POST", body: `${host}:${port}:${user}:${pass}` }).catch(() => {});
+    const port = Number(document.getElementById("lg-port").value || 2594);
+    const username = (document.getElementById("lg-user").value || "").trim();
+    const password = document.getElementById("lg-pass").value || "";
+    const msg = document.getElementById("lg-msg");
+    if (!username) { msg.textContent = "Enter an account name."; return; }
+
+    let create = null;
+    if (createToggle.checked) {
+      const name = (document.getElementById("lg-char-name").value || "").trim();
+      const [strength, dexterity, intelligence] = statInputs.map(input => Number(input.value));
+      if (!name) { msg.textContent = "Enter a character name."; return; }
+      if ([strength, dexterity, intelligence].some(value => value < 10 || value > 60)
+          || strength + dexterity + intelligence !== 90) {
+        msg.textContent = "STR, DEX, and INT must each be 10–60 and total 90.";
+        return;
+      }
+      create = {
+        name,
+        female: document.getElementById("lg-gender").value === "female",
+        profession: document.getElementById("lg-profession").value,
+        strength, dexterity, intelligence,
+        city_index: Number(document.getElementById("lg-city").value),
+      };
+    }
+
+    msg.textContent = create ? "Creating character…" : "Connecting…";
+    go.disabled = true;
+    try {
+      const response = await fetch("login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ host, port, username, password, create }),
+      });
+      if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    } catch (error) {
+      msg.textContent = "Login request failed: " + error.message;
+      go.disabled = false;
+    }
   };
   go.addEventListener("click", submit);
-  for (const id of ["lg-host", "lg-port", "lg-user", "lg-pass"]) {
-    document.getElementById(id).addEventListener("keydown", (e) => { if (e.code === "Enter") submit(); });
-  }
+  for (const input of document.querySelectorAll("#login input, #login select"))
+    input.addEventListener("keydown", (e) => { if (e.code === "Enter") submit(); });
 }
 // True when a key event is going to a text field (login form, etc.), so the global
 // game-input handler must not consume it (otherwise letters like a/w/s/d/m/b/t —
