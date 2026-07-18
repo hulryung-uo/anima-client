@@ -57,11 +57,10 @@ anima-client/
 │   ├── anima-assets/          # .mul/.uop readers: map/tiledata/anim/art/gump/hues/sound/…
 │   ├── anima-net/             # native TCP driver (Session) + `anima-login`/`play`/`scene`/`anima-agent`/`cmd` bins
 │   ├── anima-wasm/            # wasm-bindgen wrapper: WasmClient (feed bytes → Observation JSON)
-│   └── anima-agent/           # in-process autonomous brains (Brain trait, WanderBrain)
+│   ├── anima-agent/           # in-process autonomous brains (Brain trait, WanderBrain)
+│   └── anima-desktop/         # Tauri standalone shell (native TCP + embedded web renderer)
 └── web/                       # plain JavaScript + PixiJS renderer (outside the Cargo workspace)
 ```
-Planned sibling: `crates/anima-desktop` (Tauri, standalone desktop shell) — not yet
-started; everything else above is built.
 
 ## Status — Phases 1–3 COMPLETE ✅, incl. the Phase 3 tail (validated against a live ServUO)
 
@@ -72,14 +71,16 @@ reds, grabs items) — the AI-native loop, the whole point. A human can also jus
 **play**: the `play` HTTP server renders real UO terrain, full isometric sprites,
 resolved mobile/monster animation (legacy + UOP), gumps (paperdoll/containers/
 vendor/spellbook/books/party), audio, and secure trading in a **web/PixiJS
-renderer**; `anima-core` also compiles to **WASM**. 170 tests, clippy clean.
+renderer**; `anima-core` also compiles to **WASM**. The workspace test and quality
+gates are kept green in CI.
 
 Crates: `anima-core` (protocol/world/path/contract — sans-IO, near-zero-dep: one
 exception (miniz_oxide, for the protocol-mandated 0xDD zlib), WASM-ready),
 `anima-assets` (.mul/.uop + art/anim/gump/sound readers), `anima-net` (TCP driver +
 `anima-login`/`play`/`scene`/`anima-agent`(NDJSON bridge)/`cmd` bins),
-`anima-wasm` (browser bindings), `anima-agent` (in-process autonomous brains); plus
-`web/` (PixiJS). Full detail + decision history: [`docs/DESIGN.md`](docs/DESIGN.md).
+`anima-wasm` (browser bindings), `anima-agent` (in-process autonomous brains),
+`anima-desktop` (Tauri shell); plus `web/` (PixiJS). Full detail + decision history:
+[`docs/DESIGN.md`](docs/DESIGN.md).
 
 ### Roadmap
 1. ✅ **Phase 1 — headless core:** protocol, world, perception, movement, assets,
@@ -89,13 +90,13 @@ exception (miniz_oxide, for the protocol-mandated 0xDD zlib), WASM-ready),
 3. ✅ **Phase 3 — AI + real art + human-playable polish:** `anima-agent` plays
    autonomously on the contract; the `play` server is a full human-playable client
    (real terrain/sprites/animation/gumps/audio/trading).
-   *Remaining:* richer/RL/LLM brains; browser WASM+relay; Tauri; `multi.mul` houses;
-   sitting; treasure maps. See [`docs/DESIGN.md`](docs/DESIGN.md) §6 for detail.
+   *Remaining:* richer/RL/LLM brains and the browser WASM+WebSocket relay. See
+   [`docs/DESIGN.md`](docs/DESIGN.md) §6 for detail.
 
 ## Build & run
 
 ```bash
-cargo build && cargo test --workspace   # 170 tests (+16 ignored real-data-file tests)
+cargo build && cargo test --workspace   # ignored tests require local real-data files
 # boot a local ServUO (port 2594), then pick one:
 cargo run -p anima-net --bin play -- 127.0.0.1 2594 <user> <pass>  # human-playable (open :8090)
 ANIMA_LOGIN=1 cargo run -p anima-net --bin play                    # same, but log in via the browser page

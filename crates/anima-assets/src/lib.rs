@@ -26,12 +26,12 @@ pub use art::{Art, Image};
 pub use cliloc::Cliloc;
 pub use gump::Gumps;
 pub use hues::{apply_hue, Hues};
+pub use map::{LandTile, MapData, StaticTile, ZReason, MAP_HEIGHT, MAP_WIDTH};
 pub use multis::{MultiComponent, Multis};
 pub use radarcol::RadarCol;
 pub use sound::Sounds;
 pub use texmap::Texmaps;
 pub use tiledata::TileData;
-pub use map::{LandTile, MapData, StaticTile, ZReason, MAP_HEIGHT, MAP_WIDTH};
 
 use anima_core::path::Terrain;
 

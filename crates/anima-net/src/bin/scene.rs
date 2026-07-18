@@ -21,7 +21,9 @@ fn main() {
     let pass = a.next().unwrap_or_else(|| "animascene".into());
     let out = a.next().unwrap_or_else(|| "web/scene.json".into());
     let home = std::env::var("HOME").unwrap_or_default();
-    let data_dir = a.next().unwrap_or_else(|| format!("{home}/dev/uo/uo-resource"));
+    let data_dir = a
+        .next()
+        .unwrap_or_else(|| format!("{home}/dev/uo/uo-resource"));
 
     let mut map = MapData::open(&data_dir).ok();
     let mut art = Art::open(&data_dir).ok();
@@ -63,7 +65,16 @@ fn main() {
             journal.remove(0);
         }
 
-        let scene = build_scene(&mut s, map.as_mut(), art.as_mut(), None, None, None, multis.as_ref(), &journal);
+        let scene = build_scene(
+            &mut s,
+            map.as_mut(),
+            art.as_mut(),
+            None,
+            None,
+            None,
+            multis.as_ref(),
+            &journal,
+        );
         write_atomic(&out, &scene);
     }
 }

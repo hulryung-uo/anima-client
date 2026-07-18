@@ -26,7 +26,10 @@ pub fn uop_hash(s: &str) -> u64 {
     let seed = (length as u32).wrapping_add(0xDEAD_BEEF);
     let (mut ebx, mut edi, mut esi) = (seed, seed, seed);
     let w = |x: &[u8], i: usize| -> u32 {
-        (x[i] as u32) | ((x[i + 1] as u32) << 8) | ((x[i + 2] as u32) << 16) | ((x[i + 3] as u32) << 24)
+        (x[i] as u32)
+            | ((x[i + 1] as u32) << 8)
+            | ((x[i + 2] as u32) << 16)
+            | ((x[i + 3] as u32) << 24)
     };
 
     let mut i = 0usize;
@@ -52,18 +55,42 @@ pub fn uop_hash(s: &str) -> u64 {
     let remaining = length - i;
     if remaining > 0 {
         let byte = |k: usize| b[i + k] as u32;
-        if remaining >= 12 { esi = esi.wrapping_add(byte(11) << 24); }
-        if remaining >= 11 { esi = esi.wrapping_add(byte(10) << 16); }
-        if remaining >= 10 { esi = esi.wrapping_add(byte(9) << 8); }
-        if remaining >= 9 { esi = esi.wrapping_add(byte(8)); }
-        if remaining >= 8 { edi = edi.wrapping_add(byte(7) << 24); }
-        if remaining >= 7 { edi = edi.wrapping_add(byte(6) << 16); }
-        if remaining >= 6 { edi = edi.wrapping_add(byte(5) << 8); }
-        if remaining >= 5 { edi = edi.wrapping_add(byte(4)); }
-        if remaining >= 4 { ebx = ebx.wrapping_add(byte(3) << 24); }
-        if remaining >= 3 { ebx = ebx.wrapping_add(byte(2) << 16); }
-        if remaining >= 2 { ebx = ebx.wrapping_add(byte(1) << 8); }
-        if remaining >= 1 { ebx = ebx.wrapping_add(byte(0)); }
+        if remaining >= 12 {
+            esi = esi.wrapping_add(byte(11) << 24);
+        }
+        if remaining >= 11 {
+            esi = esi.wrapping_add(byte(10) << 16);
+        }
+        if remaining >= 10 {
+            esi = esi.wrapping_add(byte(9) << 8);
+        }
+        if remaining >= 9 {
+            esi = esi.wrapping_add(byte(8));
+        }
+        if remaining >= 8 {
+            edi = edi.wrapping_add(byte(7) << 24);
+        }
+        if remaining >= 7 {
+            edi = edi.wrapping_add(byte(6) << 16);
+        }
+        if remaining >= 6 {
+            edi = edi.wrapping_add(byte(5) << 8);
+        }
+        if remaining >= 5 {
+            edi = edi.wrapping_add(byte(4));
+        }
+        if remaining >= 4 {
+            ebx = ebx.wrapping_add(byte(3) << 24);
+        }
+        if remaining >= 3 {
+            ebx = ebx.wrapping_add(byte(2) << 16);
+        }
+        if remaining >= 2 {
+            ebx = ebx.wrapping_add(byte(1) << 8);
+        }
+        if remaining >= 1 {
+            ebx = ebx.wrapping_add(byte(0));
+        }
 
         esi = (esi ^ edi).wrapping_sub(edi.rotate_left(14));
         let ecx = (esi ^ ebx).wrapping_sub(esi.rotate_left(11));
@@ -149,7 +176,9 @@ fn parse_uop_table<R: Read + Seek>(r: &mut R) -> std::io::Result<(HashMap<u64, E
         let Some(need) = need else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("uop: directory block claims {count} records but only {remaining} bytes remain"),
+                format!(
+                    "uop: directory block claims {count} records but only {remaining} bytes remain"
+                ),
             ));
         };
 
@@ -201,7 +230,11 @@ impl UopReader {
         let data = std::fs::read(path)?;
         let mut cursor = std::io::Cursor::new(&data);
         let (entries, order) = parse_uop_table(&mut cursor)?;
-        Ok(UopReader { data, entries, order })
+        Ok(UopReader {
+            data,
+            entries,
+            order,
+        })
     }
 
     /// Number of parsed entries.
@@ -243,7 +276,9 @@ impl UopReader {
     /// [`parse_uop_table`]'s doc comment) — hence walking `order`, not
     /// `entries.values()`.
     pub fn all_entries(&self) -> impl Iterator<Item = Vec<u8>> + '_ {
-        self.order.iter().filter_map(move |h| self.decode(self.entries.get(h)?))
+        self.order
+            .iter()
+            .filter_map(move |h| self.decode(self.entries.get(h)?))
     }
 
     /// Decompressed bytes for `pattern.format(index)`, e.g.
@@ -323,7 +358,10 @@ impl LazyUopReader {
         // vec is for `UopReader::all_entries`'s content scan, which
         // `LazyUopReader` doesn't offer (it's only ever looked up by hash).
         let (entries, _order) = parse_uop_table(&mut file)?;
-        Ok(LazyUopReader { file: Mutex::new(file), entries })
+        Ok(LazyUopReader {
+            file: Mutex::new(file),
+            entries,
+        })
     }
 
     /// Number of parsed entries.
@@ -406,7 +444,9 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(order, vec![uop_hash(path)]);
 
-        let e = entries.get(&uop_hash(path)).expect("entry present under its path hash");
+        let e = entries
+            .get(&uop_hash(path))
+            .expect("entry present under its path hash");
         assert_eq!(e.compressed_size, payload.len());
         assert_eq!(e.compression, 0);
         assert_eq!(&data[e.offset..e.offset + e.compressed_size], payload);
@@ -467,7 +507,10 @@ mod tests {
         data.truncate(data.len() - 5); // chop off the tail of the payload
 
         let dir = std::env::temp_dir();
-        let file_path = dir.join(format!("anima_uop_truncated_test_{}.uop", std::process::id()));
+        let file_path = dir.join(format!(
+            "anima_uop_truncated_test_{}.uop",
+            std::process::id()
+        ));
         std::fs::write(&file_path, &data).expect("write temp uop");
 
         let reader = UopReader::open(&file_path).expect("the table itself still parses fine");
@@ -480,7 +523,10 @@ mod tests {
     #[test]
     #[ignore] // needs ~/dev/uo/uo-resource (real AnimationFrame1.uop, ~100MB)
     fn lazy_reader_matches_eager_reader_on_real_file() {
-        let path = format!("{}/dev/uo/uo-resource/AnimationFrame1.uop", std::env::var("HOME").unwrap());
+        let path = format!(
+            "{}/dev/uo/uo-resource/AnimationFrame1.uop",
+            std::env::var("HOME").unwrap()
+        );
         let eager = UopReader::open(std::path::Path::new(&path)).expect("open eager");
         let lazy = LazyUopReader::open(std::path::Path::new(&path)).expect("open lazy");
         assert_eq!(eager.entry_count(), lazy.entry_count());
@@ -490,14 +536,19 @@ mod tests {
         let mut checked = 0;
         for body in 0u16..2000 {
             for action in 0u8..40 {
-                let hash = uop_hash(&format!("build/animationlegacyframe/{body:06}/{action:02}.bin"));
+                let hash = uop_hash(&format!(
+                    "build/animationlegacyframe/{body:06}/{action:02}.bin"
+                ));
                 match (eager.by_hash(hash), lazy.by_hash(hash)) {
                     (Some(a), Some(b)) => {
                         assert_eq!(a, b, "body {body} action {action} decoded differently");
                         checked += 1;
                     }
                     (None, None) => {}
-                    (a, b) => panic!("body {body} action {action}: mismatch presence eager={a:?} lazy_len={:?}", b.map(|v| v.len())),
+                    (a, b) => panic!(
+                        "body {body} action {action}: mismatch presence eager={a:?} lazy_len={:?}",
+                        b.map(|v| v.len())
+                    ),
                 }
                 if checked >= 20 {
                     break;
@@ -508,6 +559,9 @@ mod tests {
             }
         }
         println!("spot-checked {checked} matching entries");
-        assert!(checked > 0, "should find at least one real animation .bin to cross-check");
+        assert!(
+            checked > 0,
+            "should find at least one real animation .bin to cross-check"
+        );
     }
 }

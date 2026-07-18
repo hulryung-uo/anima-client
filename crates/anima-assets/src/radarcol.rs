@@ -44,7 +44,11 @@ impl RadarCol {
         let r = ((c >> 10) & 0x1F) as u8;
         let g = ((c >> 5) & 0x1F) as u8;
         let b = (c & 0x1F) as u8;
-        [(r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2)]
+        [
+            (r << 3) | (r >> 2),
+            (g << 3) | (g >> 2),
+            (b << 3) | (b >> 2),
+        ]
     }
 }
 
@@ -55,7 +59,9 @@ mod tests {
     #[test]
     fn decodes_argb1555_and_oob() {
         // 0x7FFF = all 5-bit channels max → white; index past the table → black.
-        let rc = RadarCol { colors: vec![0x7FFF] };
+        let rc = RadarCol {
+            colors: vec![0x7FFF],
+        };
         assert_eq!(rc.land_color(0), [255, 255, 255]);
         assert_eq!(rc.static_color(0), [0, 0, 0]); // index 0x4000 is OOB here
     }
@@ -66,7 +72,11 @@ mod tests {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let rc = RadarCol::open(&dir).expect("open radarcol");
         // Land index 0 decodes to *some* color; a wildly OOB static is black.
-        println!("land(0)={:?} static(0xFFFF)={:?}", rc.land_color(0), rc.static_color(0xFFFF));
+        println!(
+            "land(0)={:?} static(0xFFFF)={:?}",
+            rc.land_color(0),
+            rc.static_color(0xFFFF)
+        );
         assert_eq!(rc.static_color(0xFFFF), [0, 0, 0]);
     }
 }

@@ -136,7 +136,14 @@ fn parse_all(idx: &[u8], mul: &[u8], stride: usize) -> HashMap<u32, Vec<MultiCom
             let dy = i16::from_le_bytes([mul[rp + 4], mul[rp + 5]]);
             let dz = i16::from_le_bytes([mul[rp + 6], mul[rp + 7]]);
             let flags = u32::from_le_bytes([mul[rp + 8], mul[rp + 9], mul[rp + 10], mul[rp + 11]]);
-            comps.push(MultiComponent { graphic, dx, dy, dz, visible: flags != 0, is_origin: k == 0 });
+            comps.push(MultiComponent {
+                graphic,
+                dx,
+                dy,
+                dz,
+                visible: flags != 0,
+                is_origin: k == 0,
+            });
         }
         if !comps.is_empty() {
             out.insert(i as u32, comps);
@@ -206,7 +213,10 @@ impl Multis {
     /// list without a real `~/dev/uo/uo-resource` install. Real callers always
     /// go through [`Self::open`].
     pub fn from_components(components: HashMap<u32, Vec<MultiComponent>>) -> Multis {
-        Multis { components, tile_index: RefCell::new(HashMap::new()) }
+        Multis {
+            components,
+            tile_index: RefCell::new(HashMap::new()),
+        }
     }
 }
 
@@ -226,7 +236,15 @@ mod tests {
         idx
     }
 
-    fn push_component(mul: &mut Vec<u8>, stride: usize, graphic: u16, dx: i16, dy: i16, dz: i16, flags: u32) {
+    fn push_component(
+        mul: &mut Vec<u8>,
+        stride: usize,
+        graphic: u16,
+        dx: i16,
+        dy: i16,
+        dz: i16,
+        flags: u32,
+    ) {
         mul.extend_from_slice(&graphic.to_le_bytes());
         mul.extend_from_slice(&dx.to_le_bytes());
         mul.extend_from_slice(&dy.to_le_bytes());
@@ -249,11 +267,25 @@ mod tests {
         assert_eq!(comps.len(), 2);
         assert_eq!(
             comps[0],
-            MultiComponent { graphic: 0x1234, dx: -1, dy: 0, dz: 0, visible: true, is_origin: true }
+            MultiComponent {
+                graphic: 0x1234,
+                dx: -1,
+                dy: 0,
+                dz: 0,
+                visible: true,
+                is_origin: true
+            }
         );
         assert_eq!(
             comps[1],
-            MultiComponent { graphic: 0x5678, dx: 0, dy: 1, dz: 3, visible: false, is_origin: false }
+            MultiComponent {
+                graphic: 0x5678,
+                dx: 0,
+                dy: 1,
+                dz: 3,
+                visible: false,
+                is_origin: false
+            }
         );
     }
 
@@ -275,15 +307,36 @@ mod tests {
         assert_eq!(comps.len(), 3);
         assert_eq!(
             comps[0],
-            MultiComponent { graphic: 0x0FA0, dx: 2, dy: -2, dz: 5, visible: true, is_origin: true }
+            MultiComponent {
+                graphic: 0x0FA0,
+                dx: 2,
+                dy: -2,
+                dz: 5,
+                visible: true,
+                is_origin: true
+            }
         );
         assert_eq!(
             comps[1],
-            MultiComponent { graphic: 0x0FA1, dx: -2, dy: 2, dz: 0, visible: false, is_origin: false }
+            MultiComponent {
+                graphic: 0x0FA1,
+                dx: -2,
+                dy: 2,
+                dz: 0,
+                visible: false,
+                is_origin: false
+            }
         );
         assert_eq!(
             comps[2],
-            MultiComponent { graphic: 0x0FA2, dx: 0, dy: 0, dz: 0, visible: true, is_origin: false }
+            MultiComponent {
+                graphic: 0x0FA2,
+                dx: 0,
+                dy: 0,
+                dz: 0,
+                visible: true,
+                is_origin: false
+            }
         );
     }
 
@@ -301,9 +354,18 @@ mod tests {
 
         let comps = parse_all(&idx, &mul, 16);
         let comps = comps.get(&0).expect("id 0 present");
-        assert!(!comps[0].visible, "index 0 in this fixture is invisible (flags == 0)");
-        assert!(comps[0].is_origin, "index 0 must be is_origin regardless of its own visibility");
-        assert!(!comps[1].is_origin, "a later index is never is_origin even when visible");
+        assert!(
+            !comps[0].visible,
+            "index 0 in this fixture is invisible (flags == 0)"
+        );
+        assert!(
+            comps[0].is_origin,
+            "index 0 must be is_origin regardless of its own visibility"
+        );
+        assert!(
+            !comps[1].is_origin,
+            "a later index is never is_origin even when visible"
+        );
     }
 
     /// `detect_stride` picks 16 only when EVERY non-empty entry's length divides
@@ -371,14 +433,21 @@ mod tests {
         // ~50 records of nonsense (huge x/y, garbage flags), confirming this
         // install's records are HS-strided (see the module doc).
         for id in 0..4u32 {
-            let comps = m.components(id).unwrap_or_else(|| panic!("SmallBoat id {id} should resolve"));
+            let comps = m
+                .components(id)
+                .unwrap_or_else(|| panic!("SmallBoat id {id} should resolve"));
             assert_eq!(comps.len(), 38, "SmallBoat id {id} component count");
-            assert!(comps.iter().any(|c| c.visible), "id {id} should have at least one visible component");
+            assert!(
+                comps.iter().any(|c| c.visible),
+                "id {id} should have at least one visible component"
+            );
         }
 
         // SmallOldHouse / StonePlasterHouse (ServUO `Scripts/Multis/Houses.cs`,
         // `Scripts/Multis/Deeds.cs` `StonePlasterHouseDeed`): multi id 0x64.
-        let house = m.components(0x64).expect("StonePlasterHouse (0x64) should resolve");
+        let house = m
+            .components(0x64)
+            .expect("StonePlasterHouse (0x64) should resolve");
         assert_eq!(house.len(), 148, "StonePlasterHouse component count");
     }
 }

@@ -27,7 +27,12 @@ fn rgb1555(c: u16) -> [u8; 4] {
     let g = ((c >> 5) & 0x1F) as u8;
     let b = (c & 0x1F) as u8;
     // 5→8 bit expansion (replicate high bits into low), matching art.rs.
-    [(r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2), 255]
+    [
+        (r << 3) | (r >> 2),
+        (g << 3) | (g >> 2),
+        (b << 3) | (b >> 2),
+        255,
+    ]
 }
 
 impl Hues {

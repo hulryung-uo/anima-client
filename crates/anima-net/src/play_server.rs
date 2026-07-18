@@ -12,8 +12,9 @@
 //!
 //! Usage (bin): `play [host] [port] [user] [pass] [http_port] [web_dir] [data_dir]`
 
-use std::collections::HashMap;
-use std::io;
+use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc;
@@ -22,7 +23,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anima_assets::{
-    Anim, AnimData, Art, Cliloc, Gumps, Hues, MapData, Multis, RadarCol, Sounds, Texmaps, TileData, ZReason,
+    Anim, AnimData, Art, Cliloc, Gumps, Hues, MapData, Multis, RadarCol, Sounds, Texmaps, TileData,
+    ZReason,
 };
 use anima_core::net::LoginConfig;
 use anima_core::path::{find_path, find_path_near};
@@ -32,8 +34,9 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::regions::GuardRect;
 use crate::scene::{
-    build_scene, calculate_new_z, can_walk, decide_blocked_step, door_blocking_at, explain_tile_walkable,
-    render_worldmap, BlockedStepAction, DoorUseAttempt, MapTerrain, StepDeny, WORLDMAP_STEP,
+    build_scene, calculate_new_z, can_walk, decide_blocked_step, door_blocking_at,
+    explain_tile_walkable, render_worldmap, BlockedStepAction, DoorUseAttempt, MapTerrain,
+    StepDeny, WORLDMAP_STEP,
 };
 use crate::{Endpoint, Session};
 
@@ -118,7 +121,10 @@ fn debug_probe_neighbors(
                     (nearest_z - pz).abs()
                 );
             }
-            Err(StepDeny::Terrain(ZReason::Blocked { candidate_z, blocking_graphic })) => {
+            Err(StepDeny::Terrain(ZReason::Blocked {
+                candidate_z,
+                blocking_graphic,
+            })) => {
                 eprintln!(
                     "[pathdbg] dir={dir} ({ux},{uy}): DENY static g=0x{blocking_graphic:04X} cand_z={candidate_z} (player z={pz})"
                 );
@@ -199,7 +205,14 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     // dataset regardless of facet, so loaded once here (unlike `map`, which
     // reloads per facet in the game loop).
     let multis: Option<Multis> = Multis::open(&data_dir).ok();
-    println!("play: multis {}", if multis.is_some() { "loaded" } else { "not loaded" });
+    println!(
+        "play: multis {}",
+        if multis.is_some() {
+            "loaded"
+        } else {
+            "not loaded"
+        }
+    );
     // Art is shared: the game loop reads avg colors, the HTTP thread encodes PNGs.
     let art: Option<Arc<Mutex<Art>>> = Art::open(&data_dir).ok().map(|a| Arc::new(Mutex::new(a)));
     let anim: Option<Arc<Anim>> = Anim::open(&data_dir).ok().map(Arc::new);
@@ -208,22 +221,40 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     // Hue table (hues.mul) for recoloring sprites (skin/clothes/hair); standalone
     // TileData for the /iteminfo route (item graphic → equipment AnimID).
     let hues: Option<Arc<Hues>> = Hues::open(&data_dir).ok().map(Arc::new);
-    let tiledata: Option<Arc<TileData>> =
-        TileData::open(&data_dir.join("tiledata.mul")).ok().map(Arc::new);
+    let tiledata: Option<Arc<TileData>> = TileData::open(&data_dir.join("tiledata.mul"))
+        .ok()
+        .map(Arc::new);
     let texmaps: Option<Arc<Texmaps>> = Texmaps::open(&data_dir).ok().map(Arc::new);
     // Cliloc table (Cliloc.enu): localized text for context-menu labels (and reusable
     // for gump/system-message clilocs). Resolved into the scene when present.
     let cliloc: Option<Arc<Cliloc>> = Cliloc::open(&data_dir).ok().map(Arc::new);
-    println!("play: cliloc {}", cliloc.as_ref().map_or("not loaded".into(), |c| format!("loaded ({} entries)", c.len())));
+    println!(
+        "play: cliloc {}",
+        cliloc.as_ref().map_or("not loaded".into(), |c| format!(
+            "loaded ({} entries)",
+            c.len()
+        ))
+    );
     // animdata.mul: resolves a graphical effect's ART tile-id animation sequence +
     // frame interval (used by build_scene to bake `effects[].frames`/`interval`).
     // Read in the game-loop thread only, so a plain Option (no Arc) is enough.
     let animdata: Option<AnimData> = AnimData::open(&data_dir).ok();
-    println!("play: animdata {}", if animdata.is_some() { "loaded" } else { "not loaded" });
+    println!(
+        "play: animdata {}",
+        if animdata.is_some() {
+            "loaded"
+        } else {
+            "not loaded"
+        }
+    );
     // Sound effects (soundLegacyMUL.uop → WAV) and the music id → mp3 path map.
     let sounds: Option<Arc<Sounds>> = Sounds::open(&data_dir).ok().map(Arc::new);
     let music: Arc<HashMap<u16, PathBuf>> = Arc::new(load_music_map(&data_dir));
-    println!("play: {} sound assets, {} music tracks", if sounds.is_some() { "loaded" } else { "no" }, music.len());
+    println!(
+        "play: {} sound assets, {} music tracks",
+        if sounds.is_some() { "loaded" } else { "no" },
+        music.len()
+    );
 
     // Full-world map PNG, rendered once in a background thread with its *own*
     // MapData+Art so it never contends with the game loop. Served at /worldmap.png.
@@ -269,7 +300,11 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     let guard_rects: Arc<Vec<GuardRect>> = Arc::new(match std::fs::read_to_string(&regions_path) {
         Ok(xml) => {
             let rects = crate::regions::parse(&xml);
-            println!("play: regions loaded ({} guarded rects from {})", rects.len(), regions_path.display());
+            println!(
+                "play: regions loaded ({} guarded rects from {})",
+                rects.len(),
+                regions_path.display()
+            );
             rects
         }
         Err(_) => {
@@ -324,7 +359,22 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
         },
     );
 
-    Ok(PlayServer { cfg, port, map: map.take(), multis, art, anim, cliloc, animdata, tiledata, scene, rx, login_rx, sse_hub, facet })
+    Ok(PlayServer {
+        cfg,
+        port,
+        map: map.take(),
+        multis,
+        art,
+        anim,
+        cliloc,
+        animdata,
+        tiledata,
+        scene,
+        rx,
+        login_rx,
+        sse_hub,
+        facet,
+    })
 }
 
 impl PlayServer {
@@ -336,23 +386,53 @@ impl PlayServer {
     /// Log in (auto or via the served login page) and run the game loop.
     /// Blocks until the game connection closes.
     pub fn run(self) -> io::Result<()> {
-        let PlayServer { cfg, port, mut map, multis, art, anim, cliloc, animdata, tiledata, scene, rx, login_rx, sse_hub, facet } = self;
+        let PlayServer {
+            cfg,
+            port,
+            mut map,
+            multis,
+            art,
+            anim,
+            cliloc,
+            animdata,
+            tiledata,
+            scene,
+            rx,
+            login_rx,
+            sse_hub,
+            facet,
+        } = self;
 
         // Starting city for a newly-created character (ServUO honors the selection):
         // 0=Magincia/New Haven list-dependent, 3=Britain, ... Override via ANIMA_CITY.
-        let city_index: u16 = std::env::var("ANIMA_CITY").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
+        let city_index: u16 = std::env::var("ANIMA_CITY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3);
 
         // Connect to the game server. With login_page we serve the web login page
         // and wait for the browser to POST a server + account; otherwise we auto-login
         // with the configured host/port/user/pass (backward compatible with scripts/agents).
         let connect = |h: String, p: u16, u: String, pw: String| {
-            let mut c = LoginConfig { username: u, password: pw, ..Default::default() };
+            let mut c = LoginConfig {
+                username: u,
+                password: pw,
+                ..Default::default()
+            };
             c.appearance.city_index = city_index;
             Session::connect_and_login(&Endpoint::new(h, p), c)
         };
         let mut session = if !cfg.login_page {
-            println!("play: connecting to {}:{} as {} ...", cfg.host, cfg.port, cfg.user);
-            match connect(cfg.host.clone(), cfg.port, cfg.user.clone(), cfg.pass.clone()) {
+            println!(
+                "play: connecting to {}:{} as {} ...",
+                cfg.host, cfg.port, cfg.user
+            );
+            match connect(
+                cfg.host.clone(),
+                cfg.port,
+                cfg.user.clone(),
+                cfg.pass.clone(),
+            ) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("login failed: {e}");
@@ -407,11 +487,12 @@ impl PlayServer {
         // Bump `dirty` the instant any advances so the next poll (≤150ms) plays it.
         let mut last_event_seqs = (0u64, 0u64, 0u64); // (sound, damage, effect)
         let mut last_heartbeat = Instant::now(); // SSE keepalive + dead-connection reaper
-        // Click-to-walk (server-paced auto-walk) state. Unlike manual walk (browser-
-        // paced), the server owns the route: it re-paths to `auto_goal` each cadence,
-        // issues one step, and blacklists denied tiles so it routes around them.
+                                                 // Click-to-walk (server-paced auto-walk) state. Unlike manual walk (browser-
+                                                 // paced), the server owns the route: it re-paths to `auto_goal` each cadence,
+                                                 // issues one step, and blacklists denied tiles so it routes around them.
         let mut auto_goal: Option<(u32, u32)> = None;
-        let mut auto_blocked: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        let mut auto_blocked: std::collections::HashSet<(u32, u32)> =
+            std::collections::HashSet::new();
         // Bookkeeping for `Use` attempts sent to open a closed door blocking a
         // given tile on the current route — see `decide_blocked_step`, which
         // this feeds: how many attempts so far, when the most recent one was
@@ -455,9 +536,9 @@ impl PlayServer {
                             .map(|p| (p.direction, p.pos.x as i64, p.pos.y as i64, p.pos.z as i32))
                             .unwrap_or((dir & 7, 0, 0, 0));
                         let req = dir & 7;
-                        let resolved = map
-                            .as_mut()
-                            .and_then(|m| can_walk(&session.world, m, multis.as_ref(), px, py, pz, req));
+                        let resolved = map.as_mut().and_then(|m| {
+                            can_walk(&session.world, m, multis.as_ref(), px, py, pz, req)
+                        });
                         let send = if facing == req {
                             resolved.map(|(nd, _, _)| nd)
                         } else {
@@ -490,7 +571,9 @@ impl PlayServer {
                             if dist > AUTO_WALK_MAX_RANGE {
                                 // Always print — right now a walkto rejection is 100%
                                 // silent to both the log and the player; this is the fix.
-                                eprintln!("play: walkto ({gx},{gy}) rejected: out-of-range dist={dist}");
+                                eprintln!(
+                                    "play: walkto ({gx},{gy}) rejected: out-of-range dist={dist}"
+                                );
                                 session.world.push_system_note(format!(
                                     "walkto ({gx},{gy}) rejected: out of range ({dist} tiles, max {AUTO_WALK_MAX_RANGE})"
                                 ));
@@ -504,8 +587,12 @@ impl PlayServer {
                                 // `Pathfinder.WalkTo` (its `distance = 1` relaxation for a
                                 // blocked exact tile — see `find_path_near`'s doc).
                                 let empty = std::collections::HashSet::new();
-                                let mut terrain =
-                                    MapTerrain { world: &session.world, map: &mut *m, blocked: &empty, multis: multis.as_ref() };
+                                let mut terrain = MapTerrain {
+                                    world: &session.world,
+                                    map: &mut *m,
+                                    blocked: &empty,
+                                    multis: multis.as_ref(),
+                                };
                                 let resolved = find_path_near(
                                     &mut terrain,
                                     (px, py, pz),
@@ -538,7 +625,9 @@ impl PlayServer {
                                             // an empty path from `find_path_near` no longer implies
                                             // failure (only `None` does).
                                             if goal == (gx, gy) {
-                                                session.world.push_system_note(format!("walkto ({gx},{gy}): already there"));
+                                                session.world.push_system_note(format!(
+                                                    "walkto ({gx},{gy}): already there"
+                                                ));
                                             }
                                             auto_goal = None;
                                         } else {
@@ -547,7 +636,8 @@ impl PlayServer {
                                             auto_door_attempts.clear();
                                             auto_steps = 0;
                                             auto_pending_move = false;
-                                            last_step = Instant::now() - Duration::from_millis(AUTO_WALK_STEP_MS);
+                                            last_step = Instant::now()
+                                                - Duration::from_millis(AUTO_WALK_STEP_MS);
                                         }
                                     }
                                     None => {
@@ -559,7 +649,15 @@ impl PlayServer {
                                             // `empty`, not `auto_blocked`: this probe explains the
                                             // reachability check that just ran above, which (as a
                                             // fresh WalkTo, not an in-progress route) used no blacklist.
-                                            debug_probe_neighbors(&session.world, m, multis.as_ref(), &empty, px, py, pz);
+                                            debug_probe_neighbors(
+                                                &session.world,
+                                                m,
+                                                multis.as_ref(),
+                                                &empty,
+                                                px,
+                                                py,
+                                                pz,
+                                            );
                                         }
                                         auto_goal = None;
                                     }
@@ -621,8 +719,12 @@ impl PlayServer {
                         auto_pending_move = false;
 
                         let path = map.as_mut().and_then(|m| {
-                            let mut terrain =
-                                MapTerrain { world: &session.world, map: m, blocked: &auto_blocked, multis: multis.as_ref() };
+                            let mut terrain = MapTerrain {
+                                world: &session.world,
+                                map: m,
+                                blocked: &auto_blocked,
+                                multis: multis.as_ref(),
+                            };
                             find_path(
                                 &mut terrain,
                                 (px as u32, py as u32, pz as i32),
@@ -636,7 +738,15 @@ impl PlayServer {
                                 // Resolve like a manual key: a blocked diagonal slides to
                                 // a free cardinal; a turn precedes a move on a new facing.
                                 let resolved = map.as_mut().and_then(|m| {
-                                    can_walk(&session.world, m, multis.as_ref(), px as i64, py as i64, pz as i32, want)
+                                    can_walk(
+                                        &session.world,
+                                        m,
+                                        multis.as_ref(),
+                                        px as i64,
+                                        py as i64,
+                                        pz as i32,
+                                        want,
+                                    )
                                 });
                                 let send = if facing == want {
                                     resolved.map(|(nd, _, _)| nd)
@@ -664,7 +774,13 @@ impl PlayServer {
                                     // the tile like any other blocker.
                                     let tile = (p[0].x, p[0].y);
                                     let door = map.as_ref().and_then(|m| {
-                                        door_blocking_at(&session.world, m, tile.0 as i64, tile.1 as i64, pz as i32)
+                                        door_blocking_at(
+                                            &session.world,
+                                            m,
+                                            tile.0 as i64,
+                                            tile.1 as i64,
+                                            pz as i32,
+                                        )
                                     });
                                     let prior = auto_door_attempts.get(&tile).copied();
                                     let attempts = prior.map_or(0, |p| p.count);
@@ -683,8 +799,13 @@ impl PlayServer {
                                         _ => true,
                                     };
                                     let pending_use_sent_at = prior.map(|p| p.sent_at);
-                                    match decide_blocked_step(door, attempts, pending_use_sent_at, door_state_changed, Instant::now())
-                                    {
+                                    match decide_blocked_step(
+                                        door,
+                                        attempts,
+                                        pending_use_sent_at,
+                                        door_state_changed,
+                                        Instant::now(),
+                                    ) {
                                         BlockedStepAction::OpenDoor(serial) => {
                                             if std::env::var("ANIMA_DEBUG").is_ok() {
                                                 eprintln!(
@@ -692,11 +813,18 @@ impl PlayServer {
                                                     attempts + 1
                                                 );
                                             }
-                                            let graphic_at_send =
-                                                session.world.items.get(&serial).map_or(0, |it| it.graphic);
+                                            let graphic_at_send = session
+                                                .world
+                                                .items
+                                                .get(&serial)
+                                                .map_or(0, |it| it.graphic);
                                             auto_door_attempts.insert(
                                                 tile,
-                                                DoorUseAttempt { count: attempts + 1, sent_at: Instant::now(), graphic_at_send },
+                                                DoorUseAttempt {
+                                                    count: attempts + 1,
+                                                    sent_at: Instant::now(),
+                                                    graphic_at_send,
+                                                },
                                             );
                                             let _ = session.apply_action(&Action::Use { serial });
                                         }
@@ -720,9 +848,9 @@ impl PlayServer {
                             // this block from running again), so no spam risk.
                             _ => {
                                 eprintln!("play: walkto ({gx},{gy}) abandoned: boxed in");
-                                session
-                                    .world
-                                    .push_system_note(format!("walkto ({gx},{gy}) abandoned: boxed in"));
+                                session.world.push_system_note(format!(
+                                    "walkto ({gx},{gy}) abandoned: boxed in"
+                                ));
                                 auto_goal = None;
                             }
                         }
@@ -743,7 +871,9 @@ impl PlayServer {
             if map.as_ref().map(MapData::facet) != Some(want_facet) {
                 match MapData::open_facet(&cfg.data_dir, want_facet) {
                     Ok(m) => map = Some(m),
-                    Err(e) => eprintln!("play: facet {want_facet} map load failed: {e} (keeping current map)"),
+                    Err(e) => eprintln!(
+                        "play: facet {want_facet} map load failed: {e} (keeping current map)"
+                    ),
                 }
             }
 
@@ -786,8 +916,12 @@ impl PlayServer {
                     eprintln!(
                         "[srv {}] MOVED ({},{}) -> ({},{})  confirms={} denies={}",
                         trace_t0.elapsed().as_millis(),
-                        last_pos.0, last_pos.1, pos.0, pos.1,
-                        session.confirms, session.denies
+                        last_pos.0,
+                        last_pos.1,
+                        pos.0,
+                        pos.1,
+                        session.confirms,
+                        session.denies
                     );
                 }
                 // The server's ConfirmWalk (0x22) carries no Z; like ClassicUO
@@ -797,10 +931,19 @@ impl PlayServer {
                 // current Z with clearance. This is what makes stairs/ramps climb.
                 let mut nz = pos.2;
                 if let Some(m) = map.as_mut() {
-                    let dir = delta_dir(pos.0 as i64 - last_pos.0 as i64, pos.1 as i64 - last_pos.1 as i64);
-                    if let Some(z) =
-                        calculate_new_z(&session.world, m, multis.as_ref(), pos.0 as i64, pos.1 as i64, last_pos.2 as i32, dir)
-                    {
+                    let dir = delta_dir(
+                        pos.0 as i64 - last_pos.0 as i64,
+                        pos.1 as i64 - last_pos.1 as i64,
+                    );
+                    if let Some(z) = calculate_new_z(
+                        &session.world,
+                        m,
+                        multis.as_ref(),
+                        pos.0 as i64,
+                        pos.1 as i64,
+                        last_pos.2 as i32,
+                        dir,
+                    ) {
                         nz = z as i8;
                         if let Some(p) = session.world.player_mobile_mut() {
                             p.pos.z = nz;
@@ -816,7 +959,13 @@ impl PlayServer {
                                 .statics(pos.0 as u32, pos.1 as u32)
                                 .into_iter()
                                 .find(|s| (s.z as i32) <= z && z <= s.z as i32 + s.height as i32)
-                                .map(|s| format!("static g=0x{:04X} top={}", s.graphic, s.z as i32 + s.height as i32))
+                                .map(|s| {
+                                    format!(
+                                        "static g=0x{:04X} top={}",
+                                        s.graphic,
+                                        s.z as i32 + s.height as i32
+                                    )
+                                })
                                 .unwrap_or_else(|| "land surface accounts for it".to_string());
                             eprintln!(
                                 "play: step dir={dir} ({},{}) z {} -> {nz} (land z={land_z}, {static_note})",
@@ -844,8 +993,10 @@ impl PlayServer {
                         if seq > prev_sound {
                             sse_broadcast(
                                 &sse_hub,
-                                format!("data: {{\"seq\":{seq},\"id\":{id},\"x\":{x},\"y\":{y}}}\n\n")
-                                    .as_bytes(),
+                                format!(
+                                    "data: {{\"seq\":{seq},\"id\":{id},\"x\":{x},\"y\":{y}}}\n\n"
+                                )
+                                .as_bytes(),
                             );
                         }
                     }
@@ -890,7 +1041,11 @@ impl PlayServer {
             // Periodic diagnostics line.
             if diag_since.elapsed() >= Duration::from_secs(5) {
                 let reqs = REQ_COUNT.load(Ordering::Relaxed);
-                let avg = if builds > 0 { build_sum_us / builds as u128 } else { 0 };
+                let avg = if builds > 0 {
+                    build_sum_us / builds as u128
+                } else {
+                    0
+                };
                 eprintln!(
                     "[diag] 5s: scene builds={builds} avg={:.1}ms max={:.1}ms | http reqs={}",
                     avg as f64 / 1000.0,
@@ -908,18 +1063,74 @@ impl PlayServer {
     }
 }
 
+/// A byte-budgeted FIFO cache. PNG sizes vary widely, so an entry-count cap
+/// cannot provide a meaningful memory bound. Hits do not reorder entries: the
+/// cache is deliberately simple because decoded assets are cheap to refill and
+/// the main requirement is a hard upper bound for long sessions.
+struct ByteCache<K, V> {
+    entries: HashMap<K, (V, usize)>,
+    order: VecDeque<K>,
+    bytes: usize,
+    max_bytes: usize,
+}
+
+impl<K: Clone + Eq + Hash, V> ByteCache<K, V> {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            max_bytes,
+        }
+    }
+
+    fn get_cloned(&self, key: &K) -> Option<V>
+    where
+        V: Clone,
+    {
+        self.entries.get(key).map(|(value, _)| value.clone())
+    }
+
+    fn insert(&mut self, key: K, value: V, weight: usize) {
+        if weight > self.max_bytes {
+            return;
+        }
+        if let Some((_, old_weight)) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(old_weight);
+            self.order.retain(|queued| queued != &key);
+        }
+        while self.bytes.saturating_add(weight) > self.max_bytes {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some((_, old_weight)) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(old_weight);
+            }
+        }
+        self.bytes = self.bytes.saturating_add(weight);
+        self.order.push_back(key.clone());
+        self.entries.insert(key, (value, weight));
+    }
+}
+
+const TILE_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const ANIM_CACHE_BYTES: usize = 48 * 1024 * 1024;
+const GUMP_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const TEXMAP_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
 // Keyed by (is_static, graphic, hue) so hued effect frames don't collide with the
 // plain terrain/static art.
-type TileCache = Arc<Mutex<HashMap<(bool, u16, u16), Vec<u8>>>>;
+type TileCache = Arc<Mutex<ByteCache<(bool, u16, u16), Vec<u8>>>>;
 // Keyed by (body, group, dir, frame, hue) so hued + un-hued frames don't collide.
 // Cached anim frame: (PNG bytes, draw-center cx, cy). The center is sent to the
 // client as headers so it can position each part (body/equipment/mount) correctly.
-type AnimCache = Arc<Mutex<HashMap<(u16, u8, u8, u16, u16), (Vec<u8>, i16, i16)>>>;
-type TexmapCache = Arc<Mutex<HashMap<u16, Vec<u8>>>>;
-type GumpCache = Arc<Mutex<HashMap<(u32, u16), Vec<u8>>>>;
+type AnimCache = Arc<Mutex<ByteCache<(u16, u8, u8, u16, u16), (Vec<u8>, i16, i16)>>>;
+type TexmapCache = Arc<Mutex<ByteCache<u16, Vec<u8>>>>;
+type GumpCache = Arc<Mutex<ByteCache<(u32, u16), Vec<u8>>>>;
 
 /// HTTP requests served (for the periodic diagnostics line).
 static REQ_COUNT: AtomicU64 = AtomicU64::new(0);
+const MAX_POST_BODY_BYTES: usize = 16 * 1024;
 
 /// Startup args for [`spawn_http`] (grouped to dodge the arg-count lint).
 struct SpawnHttp {
@@ -944,11 +1155,29 @@ struct SpawnHttp {
 
 /// Spawn the worker-thread pool serving `server` (already bound by [`bind`]).
 fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
-    let SpawnHttp { web_dir, scene, tx, login, art, anim, gumps, hues, tiledata, texmaps, worldmap, sounds, music, sse_hub, pois, guard_rects, facet } = args;
-    let tile_cache: TileCache = Arc::new(Mutex::new(HashMap::new()));
-    let anim_cache: AnimCache = Arc::new(Mutex::new(HashMap::new()));
-    let texmap_cache: TexmapCache = Arc::new(Mutex::new(HashMap::new()));
-    let gump_cache: GumpCache = Arc::new(Mutex::new(HashMap::new()));
+    let SpawnHttp {
+        web_dir,
+        scene,
+        tx,
+        login,
+        art,
+        anim,
+        gumps,
+        hues,
+        tiledata,
+        texmaps,
+        worldmap,
+        sounds,
+        music,
+        sse_hub,
+        pois,
+        guard_rects,
+        facet,
+    } = args;
+    let tile_cache: TileCache = Arc::new(Mutex::new(ByteCache::new(TILE_CACHE_BYTES)));
+    let anim_cache: AnimCache = Arc::new(Mutex::new(ByteCache::new(ANIM_CACHE_BYTES)));
+    let texmap_cache: TexmapCache = Arc::new(Mutex::new(ByteCache::new(TEXMAP_CACHE_BYTES)));
+    let gump_cache: GumpCache = Arc::new(Mutex::new(ByteCache::new(GUMP_CACHE_BYTES)));
     // Worker threads: a burst of tile/sprite PNG requests must never block the
     // frequent /scene.json polls (tiny_http's Server is shareable across threads).
     for _ in 0..6 {
@@ -1034,8 +1263,28 @@ struct Ctx<'a> {
 fn handle_request(ctx: Ctx) {
     REQ_COUNT.fetch_add(1, Ordering::Relaxed);
     let Ctx {
-        mut req, web_dir, scene, tx, login, art, anim, gumps, hues, tiledata, texmaps, tile_cache,
-        anim_cache, texmap_cache, gump_cache, worldmap, sounds, music, sse_hub, pois, guard_rects, facet,
+        mut req,
+        web_dir,
+        scene,
+        tx,
+        login,
+        art,
+        anim,
+        gumps,
+        hues,
+        tiledata,
+        texmaps,
+        tile_cache,
+        anim_cache,
+        texmap_cache,
+        gump_cache,
+        worldmap,
+        sounds,
+        music,
+        sse_hub,
+        pois,
+        guard_rects,
+        facet,
     } = ctx;
     let raw_url = req.url().to_string();
     // Parse the optional `?hue=<n>` query before stripping it. 0 = no hue.
@@ -1051,22 +1300,33 @@ fn handle_request(ctx: Ctx) {
     // with `Host`. No `Origin` header (curl/scripts/same-origin form posts) is
     // let through unchanged — this only blocks cross-origin *browser* requests.
     if is_post && !origin_allowed(header_value(&req, "Origin"), header_value(&req, "Host")) {
-        let _ = req.respond(Response::from_string("cross-origin request rejected").with_status_code(403));
+        let _ = req
+            .respond(Response::from_string("cross-origin request rejected").with_status_code(403));
         return;
     }
 
     if is_post && url == "/log" {
         // Diagnostic trace from the browser: print verbatim so client + server
         // events interleave in one log (only when ANIMA_DEBUG is set).
-        let mut body = String::new();
-        let _ = req.as_reader().read_to_string(&mut body);
+        let body = match read_request_body(&mut req) {
+            Ok(body) => body,
+            Err((status, message)) => {
+                let _ = req.respond(Response::from_string(message).with_status_code(status));
+                return;
+            }
+        };
         if std::env::var("ANIMA_DEBUG").is_ok() {
             eprintln!("[cli] {}", body.trim());
         }
         let _ = req.respond(Response::from_string("ok"));
     } else if is_post && url == "/input" {
-        let mut body = String::new();
-        let _ = req.as_reader().read_to_string(&mut body);
+        let body = match read_request_body(&mut req) {
+            Ok(body) => body,
+            Err((status, message)) => {
+                let _ = req.respond(Response::from_string(message).with_status_code(status));
+                return;
+            }
+        };
         if body.trim() == "stop" {
             let _ = tx.send(None); // key released → stop pacing now
         } else if let Some(action) = parse_command(&body) {
@@ -1077,8 +1337,13 @@ fn handle_request(ctx: Ctx) {
         // Web login page submitted a server + account: "host:port:user:pass" (the
         // password is the remainder, so it may itself contain ':'). Hand it to the
         // connect loop in `PlayServer::run`; ignored if we're already in-world.
-        let mut body = String::new();
-        let _ = req.as_reader().read_to_string(&mut body);
+        let body = match read_request_body(&mut req) {
+            Ok(body) => body,
+            Err((status, message)) => {
+                let _ = req.respond(Response::from_string(message).with_status_code(status));
+                return;
+            }
+        };
         let mut it = body.trim().splitn(4, ':');
         let h = it.next().unwrap_or("").to_string();
         let p: u16 = it.next().and_then(|s| s.parse().ok()).unwrap_or(2593);
@@ -1161,9 +1426,16 @@ fn handle_request(ctx: Ctx) {
     } else if let Some((body, group, dir)) = parse_animinfo_url(&url) {
         // Per-frame draw-centers let the renderer position each part (body, worn
         // equipment, rider on mount) correctly instead of foot-anchoring them all.
-        let centers = anim.as_ref().and_then(|a| a.frame_centers(body, group, dir)).unwrap_or_default();
+        let centers = anim
+            .as_ref()
+            .and_then(|a| a.frame_centers(body, group, dir))
+            .unwrap_or_default();
         let frames = centers.len();
-        let c = centers.iter().map(|(cx, cy)| format!("[{cx},{cy}]")).collect::<Vec<_>>().join(",");
+        let c = centers
+            .iter()
+            .map(|(cx, cy)| format!("[{cx},{cy}]"))
+            .collect::<Vec<_>>()
+            .join(",");
         let mut r = Response::from_string(format!("{{\"frames\":{frames},\"c\":[{c}]}}"));
         r.add_header(ctype("application/json"));
         let _ = req.respond(r);
@@ -1176,16 +1448,51 @@ fn handle_request(ctx: Ctx) {
         serve_anim(anim, hues, anim_cache, body, group, dir, frame, hue, req);
     } else if let Some(id) = parse_gump_url(&url) {
         serve_gump(gumps, hues, gump_cache, id, hue, req);
-    } else if let Some(hid) = url.strip_prefix("/hue/").and_then(|s| s.strip_suffix(".json")).and_then(|s| s.parse::<u16>().ok()) {
+    } else if let Some(hid) = url
+        .strip_prefix("/hue/")
+        .and_then(|s| s.strip_suffix(".json"))
+        .and_then(|s| s.parse::<u16>().ok())
+    {
         // Resolve a hue id → a representative swatch colour (mid-bright ramp), so the
         // paperdoll can show the dye colour of hair/beard/clothing on hover.
-        let c = hues.as_ref().map(|h| h.color(hid, 24)).unwrap_or([0, 0, 0, 0]);
-        let mut r = Response::from_string(format!("{{\"rgb\":\"#{:02x}{:02x}{:02x}\"}}", c[0], c[1], c[2]));
+        let c = hues
+            .as_ref()
+            .map(|h| h.color(hid, 24))
+            .unwrap_or([0, 0, 0, 0]);
+        let mut r = Response::from_string(format!(
+            "{{\"rgb\":\"#{:02x}{:02x}{:02x}\"}}",
+            c[0], c[1], c[2]
+        ));
         r.add_header(ctype("application/json"));
         let _ = req.respond(r);
     } else {
         serve_static(web_dir, &url, req);
     }
+}
+
+fn read_request_body(req: &mut tiny_http::Request) -> Result<String, (u16, &'static str)> {
+    if req
+        .body_length()
+        .is_some_and(|length| length > MAX_POST_BODY_BYTES)
+    {
+        return Err((413, "request body too large"));
+    }
+    match read_text_limited(req.as_reader(), MAX_POST_BODY_BYTES) {
+        Ok(Some(body)) => Ok(body),
+        Ok(None) => Err((413, "request body too large")),
+        Err(_) => Err((400, "invalid request body")),
+    }
+}
+
+fn read_text_limited(reader: &mut dyn io::Read, max_bytes: usize) -> io::Result<Option<String>> {
+    let mut bytes = Vec::with_capacity(max_bytes.min(1024));
+    reader.take(max_bytes as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        return Ok(None);
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn respond_png(req: tiny_http::Request, bytes: Vec<u8>) {
@@ -1218,7 +1525,10 @@ fn respond_audio(req: tiny_http::Request, bytes: Vec<u8>, mime: &str) {
 
 /// Match `/sound/<id>.wav` → sound id.
 fn parse_sound_url(url: &str) -> Option<u16> {
-    url.strip_prefix("/sound/")?.strip_suffix(".wav")?.parse().ok()
+    url.strip_prefix("/sound/")?
+        .strip_suffix(".wav")?
+        .parse()
+        .ok()
 }
 
 fn serve_sound(sounds: &Option<Arc<Sounds>>, id: u16, req: tiny_http::Request) {
@@ -1232,7 +1542,10 @@ fn serve_sound(sounds: &Option<Arc<Sounds>>, id: u16, req: tiny_http::Request) {
 
 /// Match `/music/<id>.mp3` → music id.
 fn parse_music_url(url: &str) -> Option<u16> {
-    url.strip_prefix("/music/")?.strip_suffix(".mp3")?.parse().ok()
+    url.strip_prefix("/music/")?
+        .strip_suffix(".mp3")?
+        .parse()
+        .ok()
 }
 
 fn serve_music(music: &Arc<HashMap<u16, PathBuf>>, id: u16, req: tiny_http::Request) {
@@ -1255,12 +1568,18 @@ fn load_music_map(data_dir: &Path) -> HashMap<u16, PathBuf> {
     let mut by_stem: HashMap<String, PathBuf> = HashMap::new();
     let mut stack = vec![music_dir.clone()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("mp3")) {
+            } else if p
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| x.eq_ignore_ascii_case("mp3"))
+            {
                 if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
                     by_stem.insert(stem.to_ascii_lowercase(), p.clone());
                 }
@@ -1280,10 +1599,15 @@ fn load_music_map(data_dir: &Path) -> HashMap<u16, PathBuf> {
         }
         // Tokens split on space/comma/tab (e.g. "9 britainpos,loop").
         let mut toks = line.split([' ', ',', '\t']).filter(|s| !s.is_empty());
-        let Some(id) = toks.next().and_then(|t| t.parse::<u16>().ok()) else { continue };
+        let Some(id) = toks.next().and_then(|t| t.parse::<u16>().ok()) else {
+            continue;
+        };
         let Some(name) = toks.next() else { continue };
         // Strip any extension, then resolve case-insensitively to a real file.
-        let stem = Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+        let stem = Path::new(name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(name);
         if let Some(path) = by_stem.get(&stem.to_ascii_lowercase()) {
             map.insert(id, path.clone());
         }
@@ -1303,13 +1627,20 @@ fn parse_anim_url(url: &str) -> Option<(u16, u8, u8, u16)> {
 
 /// Match `/gump/<id>.png` → gump id.
 fn parse_gump_url(url: &str) -> Option<u32> {
-    url.strip_prefix("/gump/")?.strip_suffix(".png")?.parse().ok()
+    url.strip_prefix("/gump/")?
+        .strip_suffix(".png")?
+        .parse()
+        .ok()
 }
 
 /// Match `/animinfo/<body>/<group>/<dir>` → (body, group, dir).
 fn parse_animinfo_url(url: &str) -> Option<(u16, u8, u8)> {
     let mut p = url.strip_prefix("/animinfo/")?.split('/');
-    Some((p.next()?.parse().ok()?, p.next()?.parse().ok()?, p.next()?.parse().ok()?))
+    Some((
+        p.next()?.parse().ok()?,
+        p.next()?.parse().ok()?,
+        p.next()?.parse().ok()?,
+    ))
 }
 
 /// Match `/iteminfo/<graphic>` → graphic. Resolves a worn item's AnimID.
@@ -1319,7 +1650,9 @@ fn parse_iteminfo_url(url: &str) -> Option<u16> {
 
 /// Extract `hue=<n>` from a raw URL query string (`...?hue=123`). 0 if absent.
 fn parse_hue_query(raw_url: &str) -> u16 {
-    let Some(q) = raw_url.split('?').nth(1) else { return 0 };
+    let Some(q) = raw_url.split('?').nth(1) else {
+        return 0;
+    };
     for kv in q.split('&') {
         if let Some(v) = kv.strip_prefix("hue=") {
             return v.parse().unwrap_or(0);
@@ -1330,7 +1663,10 @@ fn parse_hue_query(raw_url: &str) -> u16 {
 
 /// Case-insensitively look up a request header's value.
 fn header_value<'a>(req: &'a tiny_http::Request, name: &'static str) -> Option<&'a str> {
-    req.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.as_str())
+    req.headers()
+        .iter()
+        .find(|h| h.field.equiv(name))
+        .map(|h| h.value.as_str())
 }
 
 /// CSRF guard: is a POST from this `Origin` (if any) allowed against this
@@ -1339,7 +1675,9 @@ fn header_value<'a>(req: &'a tiny_http::Request, name: &'static str) -> Option<&
 /// this blocks cross-origin browser requests without affecting anything else.
 /// Pure and unit-tested (`play_server` otherwise has none — see FIX 4).
 fn origin_allowed(origin: Option<&str>, host: Option<&str>) -> bool {
-    let (Some(origin), Some(host)) = (origin, host) else { return true };
+    let (Some(origin), Some(host)) = (origin, host) else {
+        return true;
+    };
     // `Origin` is `<scheme>://<host>[:<port>]`; strip the scheme to compare
     // against `Host`'s `<host>[:<port>]`.
     let origin_host = origin.split_once("://").map_or(origin, |(_, rest)| rest);
@@ -1359,7 +1697,7 @@ fn serve_anim(
     req: tiny_http::Request,
 ) {
     let key = (body, group, dir, frame, hue);
-    if let Some((b, cx, cy)) = cache.lock().unwrap().get(&key).cloned() {
+    if let Some((b, cx, cy)) = cache.lock().unwrap().get_cloned(&key) {
         return respond_png_center(req, b, cx, cy);
     }
     // Decode outside the cache lock so concurrent requests don't serialize.
@@ -1377,7 +1715,11 @@ fn serve_anim(
         });
     match out {
         Some((b, cx, cy)) => {
-            cache.lock().unwrap().insert(key, (b.clone(), cx, cy));
+            let weight = b.len();
+            cache
+                .lock()
+                .unwrap()
+                .insert(key, (b.clone(), cx, cy), weight);
             respond_png_center(req, b, cx, cy);
         }
         None => {
@@ -1395,7 +1737,7 @@ fn serve_gump(
     req: tiny_http::Request,
 ) {
     let key = (id, hue);
-    if let Some(b) = cache.lock().unwrap().get(&key).cloned() {
+    if let Some(b) = cache.lock().unwrap().get_cloned(&key) {
         return respond_png(req, b);
     }
     let bytes = gumps
@@ -1411,7 +1753,8 @@ fn serve_gump(
         });
     match bytes {
         Some(b) => {
-            cache.lock().unwrap().insert(key, b.clone());
+            let weight = b.len();
+            cache.lock().unwrap().insert(key, b.clone(), weight);
             respond_png(req, b);
         }
         None => {
@@ -1422,17 +1765,29 @@ fn serve_gump(
 
 /// Match `/texmap/<id>.png` → texmap id.
 fn parse_texmap_url(url: &str) -> Option<u16> {
-    url.strip_prefix("/texmap/")?.strip_suffix(".png")?.parse().ok()
+    url.strip_prefix("/texmap/")?
+        .strip_suffix(".png")?
+        .parse()
+        .ok()
 }
 
-fn serve_texmap(texmaps: &Option<Arc<Texmaps>>, cache: &TexmapCache, id: u16, req: tiny_http::Request) {
-    if let Some(b) = cache.lock().unwrap().get(&id).cloned() {
+fn serve_texmap(
+    texmaps: &Option<Arc<Texmaps>>,
+    cache: &TexmapCache,
+    id: u16,
+    req: tiny_http::Request,
+) {
+    if let Some(b) = cache.lock().unwrap().get_cloned(&id) {
         return respond_png(req, b);
     }
-    let bytes = texmaps.as_ref().and_then(|t| t.texmap(id)).map(|i| i.to_png());
+    let bytes = texmaps
+        .as_ref()
+        .and_then(|t| t.texmap(id))
+        .map(|i| i.to_png());
     match bytes {
         Some(b) => {
-            cache.lock().unwrap().insert(id, b.clone());
+            let weight = b.len();
+            cache.lock().unwrap().insert(id, b.clone(), weight);
             respond_png(req, b);
         }
         None => {
@@ -1463,7 +1818,7 @@ fn serve_art(
     req: tiny_http::Request,
 ) {
     let key = (is_static, g, hue);
-    if let Some(b) = cache.lock().unwrap().get(&key).cloned() {
+    if let Some(b) = cache.lock().unwrap().get_cloned(&key) {
         return respond_png(req, b);
     }
     // Hold the Art lock only for the raw decode, not the PNG encode. A nonzero hue
@@ -1488,7 +1843,8 @@ fn serve_art(
         });
     match bytes {
         Some(b) => {
-            cache.lock().unwrap().insert(key, b.clone());
+            let weight = b.len();
+            cache.lock().unwrap().insert(key, b.clone(), weight);
             respond_png(req, b);
         }
         None => {
@@ -1511,8 +1867,13 @@ fn parse_pois() -> String {
             continue;
         }
         // Header is a bare count (e.g. "3"); every POI line has a "category:" head.
-        let Some(colon) = line.find(':') else { continue };
-        let cat = line[..colon].trim_start_matches(['+', '-']).trim().to_ascii_lowercase();
+        let Some(colon) = line.find(':') else {
+            continue;
+        };
+        let cat = line[..colon]
+            .trim_start_matches(['+', '-'])
+            .trim()
+            .to_ascii_lowercase();
         if cat.is_empty() {
             continue;
         }
@@ -1520,7 +1881,9 @@ fn parse_pois() -> String {
         let (Some(xs), Some(ys), Some(_zs)) = (rest.next(), rest.next(), rest.next()) else {
             continue;
         };
-        let (Ok(x), Ok(y)) = (xs.parse::<i32>(), ys.parse::<i32>()) else { continue };
+        let (Ok(x), Ok(y)) = (xs.parse::<i32>(), ys.parse::<i32>()) else {
+            continue;
+        };
         let name = rest.collect::<Vec<_>>().join(" ");
         out.push(serde_json::json!({ "x": x, "y": y, "cat": cat, "name": name }));
     }
@@ -1538,7 +1901,10 @@ fn regions_json(rects: &[GuardRect], cur: u8) -> String {
             out.push(',');
         }
         first = false;
-        out.push_str(&format!("{{\"x\":{},\"y\":{},\"w\":{},\"h\":{}}}", r.x, r.y, r.w, r.h));
+        out.push_str(&format!(
+            "{{\"x\":{},\"y\":{},\"w\":{},\"h\":{}}}",
+            r.x, r.y, r.w, r.h
+        ));
     }
     out.push(']');
     out
@@ -1549,7 +1915,11 @@ fn regions_json(rects: &[GuardRect], cur: u8) -> String {
 /// in the binary at compile time ([`EMBEDDED_WEB`]) — this is what lets
 /// `anima-desktop` serve the renderer with no `web/` directory on disk at all.
 fn serve_static(web_dir: &Option<PathBuf>, url: &str, req: tiny_http::Request) {
-    let rel = if url == "/" { "index.html" } else { url.trim_start_matches('/') };
+    let rel = if url == "/" {
+        "index.html"
+    } else {
+        url.trim_start_matches('/')
+    };
     // Prevent path traversal.
     if rel.contains("..") {
         let _ = req.respond(Response::from_string("bad path").with_status_code(400));
@@ -1565,7 +1935,10 @@ fn serve_static(web_dir: &Option<PathBuf>, url: &str, req: tiny_http::Request) {
             r.add_header(ctype(content_type(rel)));
             // Never cache the app shell (index.html / main.js / css) — Safari caches
             // it aggressively without this, so code changes never reached the page.
-            r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"no-store, must-revalidate"[..]).unwrap());
+            r.add_header(
+                Header::from_bytes(&b"Cache-Control"[..], &b"no-store, must-revalidate"[..])
+                    .unwrap(),
+            );
             let _ = req.respond(r);
         }
         None => {
@@ -1629,20 +2002,36 @@ fn parse_command(body: &str) -> Option<Action> {
             let run = p.next() == Some("1");
             Some(Action::Walk { dir: dir & 7, run })
         }
-        "run" => Some(Action::Walk { dir: arg.parse::<u8>().ok()? & 7, run: true }),
+        "run" => Some(Action::Walk {
+            dir: arg.parse::<u8>().ok()? & 7,
+            run: true,
+        }),
         // walkto:<x>,<y> — click-to-walk: pathfind to a ground tile and auto-walk.
         // Accept either delimiter: the web client sends `x,y`, but the whole input
         // line is already colon-split, so a hand-typed `walkto:x:y` (the natural
         // guess, and what tripped up shell/GM testing) must not silently no-op.
         "walkto" => {
             let (x, y) = arg.split_once([',', ':'])?;
-            Some(Action::WalkTo { x: x.trim().parse().ok()?, y: y.trim().parse().ok()? })
+            Some(Action::WalkTo {
+                x: x.trim().parse().ok()?,
+                y: y.trim().parse().ok()?,
+            })
         }
-        "say" => Some(Action::Say { text: arg.to_string() }),
-        "party" => Some(Action::PartySay { text: arg.to_string() }),
-        "use" => Some(Action::Use { serial: parse_serial(arg)? }),
-        "click" => Some(Action::Click { serial: parse_serial(arg)? }),
-        "attack" => Some(Action::Attack { serial: parse_serial(arg)? }),
+        "say" => Some(Action::Say {
+            text: arg.to_string(),
+        }),
+        "party" => Some(Action::PartySay {
+            text: arg.to_string(),
+        }),
+        "use" => Some(Action::Use {
+            serial: parse_serial(arg)?,
+        }),
+        "click" => Some(Action::Click {
+            serial: parse_serial(arg)?,
+        }),
+        "attack" => Some(Action::Attack {
+            serial: parse_serial(arg)?,
+        }),
         // Auto-attack the best in-view hostile (last target, else nearest hostile).
         "autoattack" => Some(Action::AutoAttack),
         // Re-attack the remembered "last target".
@@ -1671,10 +2060,16 @@ fn parse_command(body: &str) -> Option<Action> {
             let layer = p.next().and_then(|s| s.parse().ok()).unwrap_or(0);
             Some(Action::Equip { serial, layer })
         }
-        "war" => Some(Action::WarMode { on: arg == "1" || arg == "on" }),
-        "cast" => Some(Action::CastSpell { spell: arg.parse().ok()? }),
+        "war" => Some(Action::WarMode {
+            on: arg == "1" || arg == "on",
+        }),
+        "cast" => Some(Action::CastSpell {
+            spell: arg.parse().ok()?,
+        }),
         // ability:<id> — arm a weapon special move (0 disarms). 0xD7 UseCombatAbility.
-        "ability" => Some(Action::UseAbility { ability: arg.parse().ok()? }),
+        "ability" => Some(Action::UseAbility {
+            ability: arg.parse().ok()?,
+        }),
         // buy:<vendor>:<serial>x<amt>,<serial>x<amt>,…  (amount defaults to 1)
         "buy" => {
             let (vendor, list) = arg.split_once(':')?;
@@ -1718,21 +2113,35 @@ fn parse_command(body: &str) -> Option<Action> {
                     }
                 }
             }
-            Some(Action::GumpResponse { serial, gump_id, button, switches, entries })
+            Some(Action::GumpResponse {
+                serial,
+                gump_id,
+                button,
+                switches,
+                entries,
+            })
         }
         // oplreq:<serial> — request an entity's Object Property List / tooltip (0xD6).
-        "oplreq" => Some(Action::OplRequest { serial: parse_serial(arg)? }),
+        "oplreq" => Some(Action::OplRequest {
+            serial: parse_serial(arg)?,
+        }),
         // partyinvite — invite a player (0xBF/0x06/0x01); the server opens a target cursor.
         "partyinvite" => Some(Action::PartyInvite),
         // partyleave — leave the party (0xBF/0x06/0x02, self serial filled by the driver).
         "partyleave" => Some(Action::PartyLeave),
         // partyaccept[:<leader>] — accept an invite (0xBF/0x06/0x08). Defaults to the
         // pending inviter when no serial is given (the UI omits it).
-        "partyaccept" => Some(Action::PartyAccept { leader: parse_serial(arg).unwrap_or(0) }),
+        "partyaccept" => Some(Action::PartyAccept {
+            leader: parse_serial(arg).unwrap_or(0),
+        }),
         // partydecline[:<leader>] — decline an invite (0xBF/0x06/0x09).
-        "partydecline" => Some(Action::PartyDecline { leader: parse_serial(arg).unwrap_or(0) }),
+        "partydecline" => Some(Action::PartyDecline {
+            leader: parse_serial(arg).unwrap_or(0),
+        }),
         // popupreq:<serial> — request the right-click context menu (0xBF/0x13).
-        "popupreq" => Some(Action::PopupRequest { serial: parse_serial(arg)? }),
+        "popupreq" => Some(Action::PopupRequest {
+            serial: parse_serial(arg)?,
+        }),
         // popupsel:<serial>:<index> — choose an entry from the open menu (0xBF/0x15).
         "popupsel" => {
             let mut p = arg.split(':');
@@ -1755,8 +2164,12 @@ fn parse_command(body: &str) -> Option<Action> {
             Some(Action::SkillLock { skill, lock })
         }
         // useskill:<id> — invoke an active skill (0x12 ActionRequest type 0x24).
-        "useskill" => Some(Action::UseSkill { skill: arg.parse().ok()? }),
-        "target" => Some(Action::TargetObject { serial: parse_serial(arg)? }),
+        "useskill" => Some(Action::UseSkill {
+            skill: arg.parse().ok()?,
+        }),
+        "target" => Some(Action::TargetObject {
+            serial: parse_serial(arg)?,
+        }),
         "targetcancel" => Some(Action::TargetCancel),
         "targetxy" => {
             let mut p = arg.split(':');
@@ -1769,7 +2182,9 @@ fn parse_command(body: &str) -> Option<Action> {
         }
         // prompt:<text> — answer a pending server text prompt (0xC2 UnicodePrompt:
         // pet rename, house sign, guild abbreviation, …).
-        "prompt" => Some(Action::PromptResponse { text: arg.to_string() }),
+        "prompt" => Some(Action::PromptResponse {
+            text: arg.to_string(),
+        }),
         // promptcancel — cancel a pending server text prompt (Esc).
         "promptcancel" => Some(Action::PromptCancel),
         // tradeaccept:<mycont>:<0|1> — toggle our accept checkbox on the secure
@@ -1782,7 +2197,9 @@ fn parse_command(body: &str) -> Option<Action> {
         }
         // tradecancel:<mycont> — cancel the secure trade session keyed by our
         // own container serial (0x6F action 1).
-        "tradecancel" => Some(Action::TradeCancel { container: parse_serial(arg)? }),
+        "tradecancel" => Some(Action::TradeCancel {
+            container: parse_serial(arg)?,
+        }),
         // tradegold:<mycont>:<gold>:<platinum> — set our virtual gold/platinum
         // offer on the session keyed by our own container serial. Parsed as u64
         // and saturated to u32::MAX rather than the usual `.ok()` "couldn't
@@ -1793,7 +2210,11 @@ fn parse_command(body: &str) -> Option<Action> {
             let container = parse_serial(p.next()?)?;
             let gold = p.next().and_then(parse_saturating_u32).unwrap_or(0);
             let platinum = p.next().and_then(parse_saturating_u32).unwrap_or(0);
-            Some(Action::TradeGold { container, gold, platinum })
+            Some(Action::TradeGold {
+                container,
+                gold,
+                platinum,
+            })
         }
         _ => None,
     }
@@ -1831,7 +2252,61 @@ fn parse_serial(s: &str) -> Option<u32> {
 /// "couldn't parse → 0" fallback — a huge-but-real offer should clamp, not
 /// silently vanish to zero.
 fn parse_saturating_u32(s: &str) -> Option<u32> {
-    s.trim().parse::<u64>().ok().map(|v| v.min(u32::MAX as u64) as u32)
+    s.trim()
+        .parse::<u64>()
+        .ok()
+        .map(|v| v.min(u32::MAX as u64) as u32)
+}
+
+#[cfg(test)]
+mod resource_limit_tests {
+    use super::{read_text_limited, ByteCache};
+    use std::io::Cursor;
+
+    #[test]
+    fn byte_cache_evicts_oldest_entries_to_stay_within_budget() {
+        let mut cache = ByteCache::new(6);
+        cache.insert(1, vec![1; 3], 3);
+        cache.insert(2, vec![2; 3], 3);
+        assert_eq!(cache.bytes, 6);
+
+        cache.insert(3, vec![3; 4], 4);
+        assert!(cache.get_cloned(&1).is_none());
+        assert!(cache.get_cloned(&2).is_none());
+        assert_eq!(cache.get_cloned(&3), Some(vec![3; 4]));
+        assert_eq!(cache.bytes, 4);
+    }
+
+    #[test]
+    fn byte_cache_replacement_and_oversized_values_keep_accounting_exact() {
+        let mut cache = ByteCache::new(5);
+        cache.insert("same", vec![1; 4], 4);
+        cache.insert("same", vec![2; 2], 2);
+        assert_eq!(cache.bytes, 2);
+        assert_eq!(cache.order.len(), 1);
+
+        cache.insert("too-large", vec![0; 6], 6);
+        assert!(cache.get_cloned(&"too-large").is_none());
+        assert_eq!(cache.bytes, 2);
+    }
+
+    #[test]
+    fn body_reader_accepts_limit_and_rejects_limit_plus_one() {
+        let mut exact = Cursor::new(b"1234".to_vec());
+        assert_eq!(
+            read_text_limited(&mut exact, 4).unwrap(),
+            Some("1234".to_string())
+        );
+
+        let mut too_large = Cursor::new(b"12345".to_vec());
+        assert_eq!(read_text_limited(&mut too_large, 4).unwrap(), None);
+    }
+
+    #[test]
+    fn body_reader_rejects_invalid_utf8() {
+        let mut invalid = Cursor::new(vec![0xFF]);
+        assert!(read_text_limited(&mut invalid, 4).is_err());
+    }
 }
 
 #[cfg(test)]
@@ -1846,17 +2321,26 @@ mod csrf_tests {
 
     #[test]
     fn matching_origin_is_allowed() {
-        assert!(origin_allowed(Some("http://127.0.0.1:8090"), Some("127.0.0.1:8090")));
+        assert!(origin_allowed(
+            Some("http://127.0.0.1:8090"),
+            Some("127.0.0.1:8090")
+        ));
     }
 
     #[test]
     fn scheme_is_ignored() {
-        assert!(origin_allowed(Some("https://127.0.0.1:8090"), Some("127.0.0.1:8090")));
+        assert!(origin_allowed(
+            Some("https://127.0.0.1:8090"),
+            Some("127.0.0.1:8090")
+        ));
     }
 
     #[test]
     fn mismatched_origin_is_rejected() {
-        assert!(!origin_allowed(Some("http://evil.example:1234"), Some("127.0.0.1:8090")));
+        assert!(!origin_allowed(
+            Some("http://evil.example:1234"),
+            Some("127.0.0.1:8090")
+        ));
     }
 
     #[test]
@@ -1915,7 +2399,10 @@ mod walkto_pathing_tests {
     #[test]
     fn decide_blocked_step_blacklists_a_non_door_blocker() {
         let now = Instant::now();
-        assert_eq!(decide_blocked_step(None, 0, None, false, now), BlockedStepAction::Blacklist);
+        assert_eq!(
+            decide_blocked_step(None, 0, None, false, now),
+            BlockedStepAction::Blacklist
+        );
     }
 
     /// FIX 5 regression: a `Use` sent recently (well within
@@ -1991,7 +2478,11 @@ mod walkto_pathing_tests {
                 serial: 1_073_751_127,
                 graphic: 0x06A5,
                 amount: 1,
-                pos: anima_core::types::Position { x: 1611, y: 1591, z: 0 },
+                pos: anima_core::types::Position {
+                    x: 1611,
+                    y: 1591,
+                    z: 0,
+                },
                 container: None,
                 layer: 0,
                 hue: 0,
@@ -2006,7 +2497,11 @@ mod walkto_pathing_tests {
                 serial: 1_073_751_128,
                 graphic: 0x06A7,
                 amount: 1,
-                pos: anima_core::types::Position { x: 1612, y: 1591, z: 0 },
+                pos: anima_core::types::Position {
+                    x: 1612,
+                    y: 1591,
+                    z: 0,
+                },
                 container: None,
                 layer: 0,
                 hue: 0,
@@ -2019,14 +2514,28 @@ mod walkto_pathing_tests {
         // (verified live against the real map data) so the double door above
         // is the ONLY connection left between start and goal — see the
         // companion strict-predicate assertion below, and this test's doc.
-        let sealed: std::collections::HashSet<(u32, u32)> =
-            (1583u32..=1599).flat_map(|y| (1625u32..=1640).map(move |x| (x, y))).collect();
+        let sealed: std::collections::HashSet<(u32, u32)> = (1583u32..=1599)
+            .flat_map(|y| (1625u32..=1640).map(move |x| (x, y)))
+            .collect();
 
         let path = {
-            let mut terrain = MapTerrain { world: &world, map: &mut map, blocked: &sealed, multis: None };
-            find_path(&mut terrain, (1620, 1595, 5), (1621, 1588), AUTO_WALK_MAX_EXPANSIONS)
+            let mut terrain = MapTerrain {
+                world: &world,
+                map: &mut map,
+                blocked: &sealed,
+                multis: None,
+            };
+            find_path(
+                &mut terrain,
+                (1620, 1595, 5),
+                (1621, 1588),
+                AUTO_WALK_MAX_EXPANSIONS,
+            )
         };
-        assert!(path.is_some_and(|p| !p.is_empty()), "a closed door must not make the goal unreachable");
+        assert!(
+            path.is_some_and(|p| !p.is_empty()),
+            "a closed door must not make the goal unreachable"
+        );
 
         // Companion assertion: with the SAME seal, the STRICT predicate (a
         // real committed step — `tile_walkable`, where a closed door
@@ -2044,14 +2553,20 @@ mod walkto_pathing_tests {
                 if self.blocked.contains(&(x, y)) {
                     return None;
                 }
-                if crate::scene::tile_walkable(self.world, self.map, None, x as i64, y as i64, from_z) {
+                if crate::scene::tile_walkable(
+                    self.world, self.map, None, x as i64, y as i64, from_z,
+                ) {
                     self.map.walkable_z(x, y, from_z)
                 } else {
                     None
                 }
             }
         }
-        let mut strict = StrictTerrain { world: &world, map: &mut map, blocked: &sealed };
+        let mut strict = StrictTerrain {
+            world: &world,
+            map: &mut map,
+            blocked: &sealed,
+        };
         assert!(
             find_path(&mut strict, (1620, 1595, 5), (1621, 1588), 200_000).is_none(),
             "the seal must make the closed door the ONLY connection — a strict path here would mean \
@@ -2081,11 +2596,26 @@ mod walkto_pathing_tests {
             "(1503,1618) from z=20 should be blocked by the real static in this repro"
         );
 
-        let mut terrain = MapTerrain { world: &world, map: &mut map, blocked: &empty, multis: None };
-        let resolved =
-            find_path_near(&mut terrain, (1500, 1620, 20), (1503, 1618), WALKTO_GOAL_SLOP, AUTO_WALK_MAX_EXPANSIONS);
-        let (goal, path) = resolved.expect("a nearby tile must be reachable even though the exact click wasn't");
-        assert_ne!(goal, (1503, 1618), "the exact tile is unstandable, so the resolved goal must differ");
+        let mut terrain = MapTerrain {
+            world: &world,
+            map: &mut map,
+            blocked: &empty,
+            multis: None,
+        };
+        let resolved = find_path_near(
+            &mut terrain,
+            (1500, 1620, 20),
+            (1503, 1618),
+            WALKTO_GOAL_SLOP,
+            AUTO_WALK_MAX_EXPANSIONS,
+        );
+        let (goal, path) =
+            resolved.expect("a nearby tile must be reachable even though the exact click wasn't");
+        assert_ne!(
+            goal,
+            (1503, 1618),
+            "the exact tile is unstandable, so the resolved goal must differ"
+        );
         assert!(!path.is_empty());
     }
 }

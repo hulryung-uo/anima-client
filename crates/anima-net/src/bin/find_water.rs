@@ -58,7 +58,10 @@ fn main() {
             // A fisher is GM-placed (teleport ignores walkability) and doesn't move,
             // so any dry tile in range works. Keep spots apart so fishers don't crowd.
             if chosen.iter().all(|c| {
-                (c.0 as i32 - x as i32).abs().max((c.1 as i32 - y as i32).abs()) > 6
+                (c.0 as i32 - x as i32)
+                    .abs()
+                    .max((c.1 as i32 - y as i32).abs())
+                    > 6
             }) {
                 chosen.push((x, y, lt.z as i32, wx, wy, wz));
             }
@@ -68,6 +71,8 @@ fn main() {
     for (x, y, z, wx, wy, wz) in chosen.iter().take(15) {
         println!("{x} {y} {z} {wx} {wy} {wz}");
     }
-    eprintln!("[find-water] {} shore spots ({n_water} water tiles) near ({cx},{cy}) r{r}",
-              chosen.len());
+    eprintln!(
+        "[find-water] {} shore spots ({n_water} water tiles) near ({cx},{cy}) r{r}",
+        chosen.len()
+    );
 }

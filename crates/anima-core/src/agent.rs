@@ -12,8 +12,8 @@
 use crate::gump_layout::GumpElement;
 use crate::types::Position;
 use crate::world::{
-    Book, Buff, JournalEntry, MapView, Party, PopupMenu, PromptState, ShopBuy, ShopSell,
-    SpellbookContent, TargetCursor, TradeState, Weather, World,
+    is_ghost_body, Book, Buff, JournalEntry, MapView, Party, PopupMenu, PromptState, ShopBuy,
+    ShopSell, SpellbookContent, TargetCursor, TradeState, Weather, World,
 };
 
 /// A skill value, in human units (50.0 == GM-half). Derived from [`crate::world::Skill`].
@@ -49,6 +49,14 @@ pub struct PlayerView {
     pub weight_max: u16,
     /// Armor rating (AR), [`crate::world::PlayerStats::armor`].
     pub armor: i16,
+    /// Current body graphic. ServUO changes this to a race-specific ghost body
+    /// on death, which is more stable than treating a transient zero-HP update
+    /// as the complete death contract.
+    pub body: u16,
+    /// Player health-bar poison flag (0x17 / mobile-update flag 0x04).
+    pub poisoned: bool,
+    /// True for every ghost body recognized by ServUO `Body.IsGhost`.
+    pub dead: bool,
 }
 
 /// A nearby creature.
@@ -276,7 +284,13 @@ pub enum Action {
     /// Lift `amount` from a stack/item.
     PickUp { serial: u32, amount: u16 },
     /// Drop a held item at `(x, y, z)` into `container` (0xFFFFFFFF = ground).
-    Drop { serial: u32, x: u16, y: u16, z: i16, container: u32 },
+    Drop {
+        serial: u32,
+        x: u16,
+        y: u16,
+        z: i16,
+        container: u32,
+    },
     /// Equip a held item onto the player at `layer` (UO 0x13 EquipRequest).
     Equip { serial: u32, layer: u8 },
     /// Toggle war mode.
@@ -287,7 +301,12 @@ pub enum Action {
     /// Answer a pending target cursor by selecting an object/mobile.
     TargetObject { serial: u32 },
     /// Answer a pending target cursor by selecting a ground location.
-    TargetGround { x: u16, y: u16, z: i16, graphic: u16 },
+    TargetGround {
+        x: u16,
+        y: u16,
+        z: i16,
+        graphic: u16,
+    },
     /// Cancel a pending target cursor (Esc): the server stops waiting for a target
     /// (the spell/skill awaiting one is aborted) instead of hanging.
     TargetCancel,
@@ -366,7 +385,11 @@ pub enum Action {
     /// if no session has that container. Only takes effect on a server/client
     /// pair that negotiated the AOS/TOL "account gold" feature (see
     /// [`crate::world::TradeState`]'s doc).
-    TradeGold { container: u32, gold: u32, platinum: u32 },
+    TradeGold {
+        container: u32,
+        gold: u32,
+        platinum: u32,
+    },
 }
 
 fn chebyshev(a: Position, b: Position) -> u32 {
@@ -374,9 +397,9 @@ fn chebyshev(a: Position, b: Position) -> u32 {
 }
 
 impl World {
-    /// Build an [`Observation`]. `journal_cursor` is the index into
-    /// [`World::journal`] already seen; it is advanced to the current length and
-    /// only newer lines are returned, so a brain sees each line once.
+    /// Build an [`Observation`]. `journal_cursor` is an absolute journal index;
+    /// it advances past the retained tail so trimming bounded history does not
+    /// replay entries. A lagging consumer receives every retained line.
     pub fn observe(&self, journal_cursor: &mut usize) -> Observation {
         let pm = self.player_mobile().cloned().unwrap_or_default();
         let player = PlayerView {
@@ -397,6 +420,9 @@ impl World {
             weight: self.player_stats.weight,
             weight_max: self.player_stats.weight_max,
             armor: self.player_stats.armor,
+            body: pm.body,
+            poisoned: pm.poisoned,
+            dead: is_ghost_body(pm.body),
         };
 
         let mut mobiles: Vec<MobileView> = self
@@ -432,9 +458,12 @@ impl World {
             .collect();
         items.sort_by_key(|it| it.distance);
 
-        let start = (*journal_cursor).min(self.journal.len());
+        let journal_end = self.journal_offset.saturating_add(self.journal.len());
+        let start = journal_cursor
+            .saturating_sub(self.journal_offset)
+            .min(self.journal.len());
         let new_journal = self.journal[start..].to_vec();
-        *journal_cursor = self.journal.len();
+        *journal_cursor = journal_end;
 
         let mut skills: Vec<SkillView> = self
             .skills
@@ -464,8 +493,11 @@ impl World {
         // deterministic order run to run (like `skills`, sorted by id).
         let mut corpse_of: Vec<(u32, u32)> = self.corpse_of.iter().map(|(&c, &k)| (c, k)).collect();
         corpse_of.sort_by_key(|&(c, _)| c);
-        let mut corpse_equip: Vec<(u32, Vec<(u8, u32)>)> =
-            self.corpse_equip.iter().map(|(&c, v)| (c, v.clone())).collect();
+        let mut corpse_equip: Vec<(u32, Vec<(u8, u32)>)> = self
+            .corpse_equip
+            .iter()
+            .map(|(&c, v)| (c, v.clone()))
+            .collect();
         corpse_equip.sort_by_key(|&(c, _)| c);
 
         let mut opl: Vec<(u32, Vec<(u32, String)>)> =
@@ -478,8 +510,11 @@ impl World {
         spellbooks.sort_by_key(|&(s, _)| s);
 
         // HashMap iteration order isn't stable — sorted by serial, like `opl`/`spellbooks`.
-        let mut map_gumps: Vec<(u32, MapView)> =
-            self.map_gumps.iter().map(|(&s, mv)| (s, mv.clone())).collect();
+        let mut map_gumps: Vec<(u32, MapView)> = self
+            .map_gumps
+            .iter()
+            .map(|(&s, mv)| (s, mv.clone()))
+            .collect();
         map_gumps.sort_by_key(|&(s, _)| s);
 
         Observation {
@@ -536,9 +571,17 @@ mod tests {
         });
         // Two mobiles at different distances.
         let far = w.mobile_mut(0xAA);
-        far.pos = Position { x: 110, y: 100, z: 0 };
+        far.pos = Position {
+            x: 110,
+            y: 100,
+            z: 0,
+        };
         let near = w.mobile_mut(0xBB);
-        near.pos = Position { x: 102, y: 100, z: 0 };
+        near.pos = Position {
+            x: 102,
+            y: 100,
+            z: 0,
+        };
 
         w.journal.push(JournalEntry {
             serial: 0,
@@ -555,6 +598,14 @@ mod tests {
         assert_eq!(obs.mobiles[0].serial, 0xBB); // nearest first
         assert_eq!(obs.mobiles[0].distance, 2);
         assert_eq!(obs.new_journal.len(), 1);
+
+        let player_mobile = w.mobile_mut(0x311);
+        player_mobile.body = 0x192;
+        player_mobile.poisoned = true;
+        let survival = w.observe(&mut cursor);
+        assert_eq!(survival.player.body, 0x192);
+        assert!(survival.player.poisoned);
+        assert!(survival.player.dead);
 
         // A second observe with the advanced cursor sees no repeat lines.
         let obs2 = w.observe(&mut cursor);

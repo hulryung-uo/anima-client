@@ -32,7 +32,10 @@ fn main() {
     let http_port: u16 = a.next().and_then(|s| s.parse().ok()).unwrap_or(8090);
     let web_dir = PathBuf::from(a.next().unwrap_or_else(|| "web".into()));
     let home = std::env::var("HOME").unwrap_or_default();
-    let data_dir = PathBuf::from(a.next().unwrap_or_else(|| format!("{home}/dev/uo/uo-resource")));
+    let data_dir = PathBuf::from(
+        a.next()
+            .unwrap_or_else(|| format!("{home}/dev/uo/uo-resource")),
+    );
     // With ANIMA_LOGIN set we serve the web login page and wait for the
     // browser to POST a server + account; otherwise we auto-login with the
     // CLI host/port/user/pass (backward compatible with scripts/agents).

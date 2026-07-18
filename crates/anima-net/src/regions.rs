@@ -138,7 +138,12 @@ pub fn parse(xml: &str) -> Vec<GuardRect> {
     // Stack of every currently-open `Facet`/`region` element. A synthetic
     // root frame absorbs anything outside the outermost element (never
     // guarded, so its "rects" — if any stray in — are simply dropped).
-    let mut stack: Vec<Frame> = vec![Frame { facet: 0, guarded: false, disabled: false, rects: Vec::new() }];
+    let mut stack: Vec<Frame> = vec![Frame {
+        facet: 0,
+        guarded: false,
+        disabled: false,
+        rects: Vec::new(),
+    }];
 
     let mut i = 0usize;
     while let Some(rel) = xml[i..].find('<') {
@@ -150,7 +155,9 @@ pub fn parse(xml: &str) -> Vec<GuardRect> {
             }
             continue;
         }
-        let Some(close_rel) = xml[i..].find('>') else { break };
+        let Some(close_rel) = xml[i..].find('>') else {
+            break;
+        };
         let tag = &xml[i + 1..i + close_rel];
         i += close_rel + 1;
 
@@ -168,19 +175,37 @@ pub fn parse(xml: &str) -> Vec<GuardRect> {
         }
 
         let self_closing = tag.trim_end().ends_with('/');
-        let body = if self_closing { tag.trim_end().trim_end_matches('/') } else { tag };
+        let body = if self_closing {
+            tag.trim_end().trim_end_matches('/')
+        } else {
+            tag
+        };
         let tag_name = body.split_whitespace().next().unwrap_or("");
 
         match tag_name {
             "Facet" if !self_closing => {
-                let facet = read_str_attr(body, "name").map(|n| facet_from_name(&n)).unwrap_or(0);
-                stack.push(Frame { facet, guarded: false, disabled: false, rects: Vec::new() });
+                let facet = read_str_attr(body, "name")
+                    .map(|n| facet_from_name(&n))
+                    .unwrap_or(0);
+                stack.push(Frame {
+                    facet,
+                    guarded: false,
+                    disabled: false,
+                    rects: Vec::new(),
+                });
             }
             "region" if !self_closing => {
                 let guarded = is_guarded_type(read_str_attr(body, "type").as_deref());
                 let parent_facet = stack.last().map(|f| f.facet).unwrap_or(0);
-                let facet = read_str_attr(body, "map").map(|m| facet_from_name(&m)).unwrap_or(parent_facet);
-                stack.push(Frame { facet, guarded, disabled: false, rects: Vec::new() });
+                let facet = read_str_attr(body, "map")
+                    .map(|m| facet_from_name(&m))
+                    .unwrap_or(parent_facet);
+                stack.push(Frame {
+                    facet,
+                    guarded,
+                    disabled: false,
+                    rects: Vec::new(),
+                });
             }
             "guards" => {
                 if read_str_attr(body, "disabled").as_deref() == Some("true") {
@@ -266,10 +291,29 @@ mod tests {
     #[test]
     fn nested_town_region_inherits_facet_and_skips_non_guarded_siblings() {
         let rects = parse(SAMPLE);
-        assert_eq!(rects.len(), 2, "expected only the TownRegion + its guarded child, got {rects:?}");
-        assert!(rects.contains(&GuardRect { facet: 1, x: 100, y: 200, w: 30, h: 40 }));
-        assert!(rects.contains(&GuardRect { facet: 1, x: 110, y: 210, w: 10, h: 10 }));
-        assert!(!rects.iter().any(|r| r.x == 900), "DungeonRegion's rect must be ignored");
+        assert_eq!(
+            rects.len(),
+            2,
+            "expected only the TownRegion + its guarded child, got {rects:?}"
+        );
+        assert!(rects.contains(&GuardRect {
+            facet: 1,
+            x: 100,
+            y: 200,
+            w: 30,
+            h: 40
+        }));
+        assert!(rects.contains(&GuardRect {
+            facet: 1,
+            x: 110,
+            y: 210,
+            w: 10,
+            h: 10
+        }));
+        assert!(
+            !rects.iter().any(|r| r.x == 900),
+            "DungeonRegion's rect must be ignored"
+        );
     }
 
     /// Mirrors real `Regions.xml`'s Buccaneer's Den: a guarded-type region
@@ -309,14 +353,24 @@ mod tests {
             "the disabled parent's guarded child (itself not disabled) must still be kept: {rects:?}"
         );
         assert!(
-            rects.contains(&GuardRect { facet: 0, x: 10, y: 20, w: 30, h: 40 }),
+            rects.contains(&GuardRect {
+                facet: 0,
+                x: 10,
+                y: 20,
+                w: 30,
+                h: 40
+            }),
             "Normal Town's own rect must be kept: {rects:?}"
         );
         assert!(
             !rects.iter().any(|r| r.x == 50),
             "Also Disabled Nested's rect must be dropped even though its parent isn't disabled: {rects:?}"
         );
-        assert_eq!(rects.len(), 2, "expected exactly Normal Town + Unrelated Nested Ward, got {rects:?}");
+        assert_eq!(
+            rects.len(),
+            2,
+            "expected exactly Normal Town + Unrelated Nested Ward, got {rects:?}"
+        );
     }
 
     /// ServUO's guarded-region set isn't just the literal `TownRegion`/
@@ -325,12 +379,25 @@ mod tests {
     /// extend `GuardedRegion` and must count as guarded too.
     #[test]
     fn guarded_subclass_types_are_recognized() {
-        for ty in ["NewMaginciaRegion", "TokunoDocksRegion", "BlackthornCastle", "CusteauPerronHouseRegion"] {
-            let xml = format!(r#"<region type="{ty}" name="X"><rect x="1" y="2" width="3" height="4" /></region>"#);
+        for ty in [
+            "NewMaginciaRegion",
+            "TokunoDocksRegion",
+            "BlackthornCastle",
+            "CusteauPerronHouseRegion",
+        ] {
+            let xml = format!(
+                r#"<region type="{ty}" name="X"><rect x="1" y="2" width="3" height="4" /></region>"#
+            );
             let rects = parse(&xml);
             assert_eq!(
                 rects,
-                vec![GuardRect { facet: 0, x: 1, y: 2, w: 3, h: 4 }],
+                vec![GuardRect {
+                    facet: 0,
+                    x: 1,
+                    y: 2,
+                    w: 3,
+                    h: 4
+                }],
                 "type={ty} should be recognized as a guarded subclass"
             );
         }
@@ -340,7 +407,16 @@ mod tests {
     fn facet_defaults_to_felucca_with_no_wrapping_facet_or_map() {
         let xml = r#"<region type="GuardedRegion" name="Bare"><rect x="1" y="2" width="3" height="4" /></region>"#;
         let rects = parse(xml);
-        assert_eq!(rects, vec![GuardRect { facet: 0, x: 1, y: 2, w: 3, h: 4 }]);
+        assert_eq!(
+            rects,
+            vec![GuardRect {
+                facet: 0,
+                x: 1,
+                y: 2,
+                w: 3,
+                h: 4
+            }]
+        );
     }
 
     #[test]
@@ -351,7 +427,8 @@ mod tests {
 
     #[test]
     fn region_with_no_type_attribute_is_not_guarded() {
-        let xml = r#"<region name="Britain Mine 1"><rect x="1" y="2" width="3" height="4" /></region>"#;
+        let xml =
+            r#"<region name="Britain Mine 1"><rect x="1" y="2" width="3" height="4" /></region>"#;
         assert!(parse(xml).is_empty());
     }
 
@@ -374,7 +451,16 @@ mod tests {
               <rect x="5" y="6" width="7" height="8" />
             </region>
         "#;
-        assert_eq!(parse(xml), vec![GuardRect { facet: 0, x: 5, y: 6, w: 7, h: 8 }]);
+        assert_eq!(
+            parse(xml),
+            vec![GuardRect {
+                facet: 0,
+                x: 5,
+                y: 6,
+                w: 7,
+                h: 8
+            }]
+        );
     }
 
     /// Real-file smoke test: parses the actual ServUO `Regions.xml` (not
@@ -393,24 +479,77 @@ mod tests {
         let xml = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("couldn't read {}: {e}", path.display()));
         let rects = parse(&xml);
-        println!("parsed {} guarded rects from {}", rects.len(), path.display());
-        assert!(rects.len() > 100, "expected more than 100 guarded rects, got {}", rects.len());
+        println!(
+            "parsed {} guarded rects from {}",
+            rects.len(),
+            path.display()
+        );
+        assert!(
+            rects.len() > 100,
+            "expected more than 100 guarded rects, got {}",
+            rects.len()
+        );
 
-        let britain = GuardRect { facet: 0, x: 1416, y: 1498, w: 324, h: 279 };
-        assert!(rects.contains(&britain), "expected Britain's guard-zone rect {britain:?} in the parsed set");
+        let britain = GuardRect {
+            facet: 0,
+            x: 1416,
+            y: 1498,
+            w: 324,
+            h: 279,
+        };
+        assert!(
+            rects.contains(&britain),
+            "expected Britain's guard-zone rect {britain:?} in the parsed set"
+        );
 
         // Buccaneer's Den (`type="TownRegion"`, `<guards disabled="true" />`
         // after its rects) must be dropped in both facets it's defined in.
-        let bucs_den_fel = GuardRect { facet: 0, x: 2612, y: 2057, w: 164, h: 210 };
-        let bucs_den_tram = GuardRect { facet: 1, x: 2612, y: 2057, w: 164, h: 210 };
-        assert!(!rects.contains(&bucs_den_fel), "Buccaneer's Den (Felucca) must be dropped: guards disabled");
-        assert!(!rects.contains(&bucs_den_tram), "Buccaneer's Den (Trammel) must be dropped: guards disabled");
+        let bucs_den_fel = GuardRect {
+            facet: 0,
+            x: 2612,
+            y: 2057,
+            w: 164,
+            h: 210,
+        };
+        let bucs_den_tram = GuardRect {
+            facet: 1,
+            x: 2612,
+            y: 2057,
+            w: 164,
+            h: 210,
+        };
+        assert!(
+            !rects.contains(&bucs_den_fel),
+            "Buccaneer's Den (Felucca) must be dropped: guards disabled"
+        );
+        assert!(
+            !rects.contains(&bucs_den_tram),
+            "Buccaneer's Den (Trammel) must be dropped: guards disabled"
+        );
 
         // New Magincia (`type="NewMaginciaRegion"`, a guarded subclass, not
         // disabled) must be present in both facets it's defined in.
-        let magincia_fel = GuardRect { facet: 0, x: 3632, y: 2032, w: 50, h: 70 };
-        let magincia_tram = GuardRect { facet: 1, x: 3632, y: 2032, w: 50, h: 70 };
-        assert!(rects.contains(&magincia_fel), "New Magincia (Felucca) must be present: guarded subclass");
-        assert!(rects.contains(&magincia_tram), "New Magincia (Trammel) must be present: guarded subclass");
+        let magincia_fel = GuardRect {
+            facet: 0,
+            x: 3632,
+            y: 2032,
+            w: 50,
+            h: 70,
+        };
+        let magincia_tram = GuardRect {
+            facet: 1,
+            x: 3632,
+            y: 2032,
+            w: 50,
+            h: 70,
+        };
+        assert!(
+            rects.contains(&magincia_fel),
+            "New Magincia (Felucca) must be present: guarded subclass"
+        );
+        assert!(
+            rects.contains(&magincia_tram),
+            "New Magincia (Trammel) must be present: guarded subclass"
+        );
     }
 }

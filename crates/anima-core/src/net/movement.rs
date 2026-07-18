@@ -190,7 +190,11 @@ impl Walker {
         }
 
         // Advance WalkSequence (1..255, FF→1, never 0 again until a deny resets it).
-        self.walk_sequence = if self.walk_sequence == 0xFF { 1 } else { self.walk_sequence + 1 };
+        self.walk_sequence = if self.walk_sequence == 0xFF {
+            1
+        } else {
+            self.walk_sequence + 1
+        };
         Some(packet)
     }
 

@@ -46,7 +46,12 @@ fn argb1555(c: u16) -> [u8; 4] {
     let g = ((c >> 5) & 0x1F) as u8;
     let b = (c & 0x1F) as u8;
     // 5→8 bit expansion (replicate high bits into low).
-    [(r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2), 255]
+    [
+        (r << 3) | (r >> 2),
+        (g << 3) | (g >> 2),
+        (b << 3) | (b >> 2),
+        255,
+    ]
 }
 
 fn rd_u16(d: &[u8], p: usize) -> u16 {
@@ -67,7 +72,6 @@ impl Art {
         })
     }
 
-
     /// Decode a land tile (graphic 0..0x3FFF) to a 44×44 RGBA image.
     pub fn land(&self, graphic: u16) -> Option<Image> {
         let data = self.uop.by_art((graphic & 0x3FFF) as usize)?;
@@ -84,7 +88,11 @@ impl Art {
             let start = 22 - (i + 1);
             for j in 0..count {
                 if p + 2 > data.len() {
-                    return Some(Image { width: 44, height: 44, rgba });
+                    return Some(Image {
+                        width: 44,
+                        height: 44,
+                        rgba,
+                    });
                 }
                 put(start + j, i, rd_u16(&data, p), &mut rgba);
                 p += 2;
@@ -102,7 +110,11 @@ impl Art {
                 p += 2;
             }
         }
-        Some(Image { width: 44, height: 44, rgba })
+        Some(Image {
+            width: 44,
+            height: 44,
+            rgba,
+        })
     }
 
     /// Average opaque color of a land tile, `[r, g, b, 255]` (cached).
@@ -204,7 +216,11 @@ mod tests {
         }
         // Grass (0x0003/0x0006): green channel should dominate red and blue.
         let c = art.land_avg_color(0x0006);
-        assert_ne!(c, [90, 90, 90, 255], "land 0x0006 should decode, not fall back");
+        assert_ne!(
+            c,
+            [90, 90, 90, 255],
+            "land 0x0006 should decode, not fall back"
+        );
         assert!(c[1] >= c[0] && c[1] >= c[2], "expected greenish, got {c:?}");
 
         // Land tile encodes to a valid PNG (signature check).
@@ -222,6 +238,9 @@ mod tests {
             }
         }
         println!("static tiles decoded non-empty in 0..400: {decoded}");
-        assert!(decoded > 20, "expected many decodable statics, got {decoded}");
+        assert!(
+            decoded > 20,
+            "expected many decodable statics, got {decoded}"
+        );
     }
 }

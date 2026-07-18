@@ -30,8 +30,18 @@ impl Texmaps {
         if o + 8 > self.idx.len() {
             return None;
         }
-        let pos = u32::from_le_bytes([self.idx[o], self.idx[o + 1], self.idx[o + 2], self.idx[o + 3]]);
-        let len = u32::from_le_bytes([self.idx[o + 4], self.idx[o + 5], self.idx[o + 6], self.idx[o + 7]]);
+        let pos = u32::from_le_bytes([
+            self.idx[o],
+            self.idx[o + 1],
+            self.idx[o + 2],
+            self.idx[o + 3],
+        ]);
+        let len = u32::from_le_bytes([
+            self.idx[o + 4],
+            self.idx[o + 5],
+            self.idx[o + 6],
+            self.idx[o + 7],
+        ]);
         if pos == 0xFFFF_FFFF || len == 0 {
             return None;
         }

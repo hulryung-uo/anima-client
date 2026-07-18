@@ -56,7 +56,14 @@ impl TileData {
     fn u64_at(&self, off: usize) -> u64 {
         let d = &self.data;
         u64::from_le_bytes([
-            d[off], d[off + 1], d[off + 2], d[off + 3], d[off + 4], d[off + 5], d[off + 6], d[off + 7],
+            d[off],
+            d[off + 1],
+            d[off + 2],
+            d[off + 3],
+            d[off + 4],
+            d[off + 5],
+            d[off + 6],
+            d[off + 7],
         ])
     }
 

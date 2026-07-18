@@ -20,9 +20,20 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GumpElement {
     /// A resizable background panel (`resizepic`).
-    Background { x: i64, y: i64, w: i64, h: i64, page: i64 },
+    Background {
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+        page: i64,
+    },
     /// Decorative art (`gumppic`); `graphic` is the gump art id.
-    Image { x: i64, y: i64, graphic: i64, page: i64 },
+    Image {
+        x: i64,
+        y: i64,
+        graphic: i64,
+        page: i64,
+    },
     /// A clickable button (`button`). `graphic` is the up-state gump art id;
     /// `pageflag` 0 = local page-jump (switch to `param`, nothing sent to the
     /// server — ClassicUO `ButtonAction.SwitchPage`); 1 = reply button
@@ -40,7 +51,13 @@ pub enum GumpElement {
     /// gump's own local text table (an index into the packet's string list —
     /// distinct from a Cliloc table). `w` is the wrap width for `croppedtext`,
     /// `None` for an unbounded `text`.
-    Text { x: i64, y: i64, w: Option<i64>, s: String, page: i64 },
+    Text {
+        x: i64,
+        y: i64,
+        w: Option<i64>,
+        s: String,
+        page: i64,
+    },
     /// An HTML block: `htmlgump` (already resolved from the gump's own local
     /// text table) or `xmfhtmlgump`/`xmfhtmlgumpcolor`/`xmfhtmltok`
     /// (cliloc-driven — see [`HtmlText::Cliloc`]). Either way the string still
@@ -49,14 +66,40 @@ pub enum GumpElement {
     /// — because interpreting them is a *display* concern (alignment, bold,
     /// color) that belongs to the renderer, not this protocol-data parser. See
     /// `web/main.js`'s `renderGumpHtml`.
-    Html { x: i64, y: i64, w: i64, h: i64, text: HtmlText, page: i64 },
+    Html {
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+        text: HtmlText,
+        page: i64,
+    },
     /// A checkbox (`checkbox`); `on` is the initial checked state (0/1).
-    Check { x: i64, y: i64, id: i64, on: i64, page: i64 },
+    Check {
+        x: i64,
+        y: i64,
+        id: i64,
+        on: i64,
+        page: i64,
+    },
     /// A radio button (`radio`); `on` is the initial selected state (0/1).
-    Radio { x: i64, y: i64, id: i64, on: i64, page: i64 },
+    Radio {
+        x: i64,
+        y: i64,
+        id: i64,
+        on: i64,
+        page: i64,
+    },
     /// A text entry field (`textentry`), pre-filled with `s` from the gump's
     /// local text table.
-    Entry { x: i64, y: i64, w: i64, id: i64, s: String, page: i64 },
+    Entry {
+        x: i64,
+        y: i64,
+        w: i64,
+        id: i64,
+        s: String,
+        page: i64,
+    },
 }
 
 /// The text of a [`GumpElement::Html`] block.
@@ -131,7 +174,12 @@ pub fn parse(layout: &str, text: &[String]) -> GumpLayout {
             }
             // gumppic x y gumpId [hue=…] — decorative art.
             "gumppic" => {
-                elements.push(GumpElement::Image { x: num(1), y: num(2), graphic: num(3), page });
+                elements.push(GumpElement::Image {
+                    x: num(1),
+                    y: num(2),
+                    graphic: num(3),
+                    page,
+                });
             }
             // button x y up down pageflag param reply-id
             "button" => {
@@ -151,14 +199,26 @@ pub fn parse(layout: &str, text: &[String]) -> GumpLayout {
             // text x y hue textId
             "text" => {
                 let (x, y) = (num(1), num(2));
-                elements.push(GumpElement::Text { x, y, w: None, s: get_text(4), page });
+                elements.push(GumpElement::Text {
+                    x,
+                    y,
+                    w: None,
+                    s: get_text(4),
+                    page,
+                });
                 max_x = max_x.max(x + 120);
                 max_y = max_y.max(y + 20);
             }
             // croppedtext x y w h hue textId
             "croppedtext" => {
                 let (x, y, w) = (num(1), num(2), num(3));
-                elements.push(GumpElement::Text { x, y, w: Some(w), s: get_text(6), page });
+                elements.push(GumpElement::Text {
+                    x,
+                    y,
+                    w: Some(w),
+                    s: get_text(6),
+                    page,
+                });
                 max_x = max_x.max(x + w);
                 max_y = max_y.max(y + num(4).max(20));
             }
@@ -204,14 +264,26 @@ pub fn parse(layout: &str, text: &[String]) -> GumpLayout {
             // checkbox x y up down state id
             "checkbox" => {
                 let (x, y, state, id) = (num(1), num(2), num(5), num(6));
-                elements.push(GumpElement::Check { x, y, id, on: state, page });
+                elements.push(GumpElement::Check {
+                    x,
+                    y,
+                    id,
+                    on: state,
+                    page,
+                });
                 max_x = max_x.max(x + 24);
                 max_y = max_y.max(y + 24);
             }
             // radio x y up down state id
             "radio" => {
                 let (x, y, state, id) = (num(1), num(2), num(5), num(6));
-                elements.push(GumpElement::Radio { x, y, id, on: state, page });
+                elements.push(GumpElement::Radio {
+                    x,
+                    y,
+                    id,
+                    on: state,
+                    page,
+                });
                 max_x = max_x.max(x + 24);
                 max_y = max_y.max(y + 24);
             }
@@ -219,7 +291,14 @@ pub fn parse(layout: &str, text: &[String]) -> GumpLayout {
             "textentry" => {
                 let (x, y, w, h, id) = (num(1), num(2), num(3), num(4), num(6));
                 let s = get_text(7);
-                elements.push(GumpElement::Entry { x, y, w, id, s, page });
+                elements.push(GumpElement::Entry {
+                    x,
+                    y,
+                    w,
+                    id,
+                    s,
+                    page,
+                });
                 max_x = max_x.max(x + w);
                 max_y = max_y.max(y + h.max(20));
             }
@@ -231,7 +310,11 @@ pub fn parse(layout: &str, text: &[String]) -> GumpLayout {
     // Clamp to a sane minimum so a degenerate gump is still draggable/closable.
     let width = win_w.max(max_x + 16).max(80);
     let height = win_h.max(max_y + 16).max(48);
-    GumpLayout { elements, width, height }
+    GumpLayout {
+        elements,
+        width,
+        height,
+    }
 }
 
 #[cfg(test)]
@@ -255,7 +338,9 @@ mod tests {
         match &layout.elements[1] {
             // pageflag 1 (reply) — this is what makes the button send a
             // GumpResponse instead of jumping pages locally.
-            GumpElement::Button { reply_id, pageflag, .. } => {
+            GumpElement::Button {
+                reply_id, pageflag, ..
+            } => {
                 assert_eq!(*reply_id, 7);
                 assert_eq!(*pageflag, 1);
             }
@@ -308,14 +393,18 @@ mod tests {
         assert_eq!(pages, [0, 1, 1, 2, 2]);
 
         match &layout.elements[2] {
-            GumpElement::Button { pageflag, param, .. } => {
+            GumpElement::Button {
+                pageflag, param, ..
+            } => {
                 assert_eq!(*pageflag, 0);
                 assert_eq!(*param, 2); // switches to page 2, contacts no server
             }
             other => panic!("expected Button, got {other:?}"),
         }
         match &layout.elements[4] {
-            GumpElement::Button { pageflag, reply_id, .. } => {
+            GumpElement::Button {
+                pageflag, reply_id, ..
+            } => {
                 assert_eq!(*pageflag, 1);
                 assert_eq!(*reply_id, 99); // reply id sent to the server on click
             }
@@ -332,13 +421,19 @@ mod tests {
         let text = vec!["<basefont color=#fff>Hello <b>world</b>".to_string()];
         let layout = parse(layout, &text);
         match &layout.elements[0] {
-            GumpElement::Html { text: HtmlText::Literal(s), .. } => {
+            GumpElement::Html {
+                text: HtmlText::Literal(s),
+                ..
+            } => {
                 assert_eq!(s, "<basefont color=#fff>Hello <b>world</b>")
             }
             other => panic!("expected literal Html, got {other:?}"),
         }
         match &layout.elements[1] {
-            GumpElement::Html { text: HtmlText::Cliloc { id, args }, .. } => {
+            GumpElement::Html {
+                text: HtmlText::Cliloc { id, args },
+                ..
+            } => {
                 assert_eq!(*id, 1015313); // cliloc reference, unresolved (no table here)
                 assert_eq!(*args, None);
             }

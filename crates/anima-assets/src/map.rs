@@ -86,14 +86,21 @@ pub enum ZReason {
     /// Every candidate within climb range was covered by an overlapping static
     /// (occupies the body-height span). Carries the nearest blocked candidate
     /// and the blocking static's graphic.
-    Blocked { candidate_z: i32, blocking_graphic: u16 },
+    Blocked {
+        candidate_z: i32,
+        blocking_graphic: u16,
+    },
 }
 
 /// Pure core of `walkable_z` (no I/O): given the land tile + statics already
 /// read for a tile, score standing-height candidates and report why none
 /// worked. Split out from `walkable_z` so this can be unit-tested with
 /// synthetic `LandTile`/`StaticTile` literals — no real map file needed.
-fn score_walkable_z(land: LandTile, statics: &[StaticTile], current_z: i32) -> Result<i32, ZReason> {
+fn score_walkable_z(
+    land: LandTile,
+    statics: &[StaticTile],
+    current_z: i32,
+) -> Result<i32, ZReason> {
     // Candidate standing heights: the land surface, plus any *standable* static
     // surface. ServUO: a standable surface is `Surface && !Impassable` — a
     // table is Impassable+Surface, so it is NOT standable.
@@ -136,7 +143,10 @@ fn score_walkable_z(land: LandTile, statics: &[StaticTile], current_z: i32) -> R
             }
         });
         match blocker {
-            Some(s) if nearest_blocked.is_none_or(|(bz, _)| (z - current_z).abs() < (bz - current_z).abs()) => {
+            Some(s)
+                if nearest_blocked
+                    .is_none_or(|(bz, _)| (z - current_z).abs() < (bz - current_z).abs()) =>
+            {
                 nearest_blocked = Some((z, s.graphic));
             }
             None if best.is_none_or(|b| (z - current_z).abs() < (b - current_z).abs()) => {
@@ -146,7 +156,10 @@ fn score_walkable_z(land: LandTile, statics: &[StaticTile], current_z: i32) -> R
         }
     }
     best.ok_or(match nearest_blocked {
-        Some((candidate_z, blocking_graphic)) => ZReason::Blocked { candidate_z, blocking_graphic },
+        Some((candidate_z, blocking_graphic)) => ZReason::Blocked {
+            candidate_z,
+            blocking_graphic,
+        },
         None => match nearest_oor {
             Some(nearest_z) => ZReason::OutOfReach { nearest_z },
             None => ZReason::NoSurface, // unreachable: candidates non-empty but neither reason set
@@ -243,11 +256,15 @@ impl MapData {
         let mut out: Vec<Vec<StaticTile>> = vec![Vec::new(); (BLOCK_SIZE * BLOCK_SIZE) as usize];
         if idx_off + 12 <= self.staidx.len() {
             let data_off = u32::from_le_bytes([
-                self.staidx[idx_off], self.staidx[idx_off + 1], self.staidx[idx_off + 2],
+                self.staidx[idx_off],
+                self.staidx[idx_off + 1],
+                self.staidx[idx_off + 2],
                 self.staidx[idx_off + 3],
             ]) as usize;
             let data_len = u32::from_le_bytes([
-                self.staidx[idx_off + 4], self.staidx[idx_off + 5], self.staidx[idx_off + 6],
+                self.staidx[idx_off + 4],
+                self.staidx[idx_off + 5],
+                self.staidx[idx_off + 6],
                 self.staidx[idx_off + 7],
             ]) as usize;
             if data_off != 0xFFFF_FFFF && data_len != 0 {
@@ -433,8 +450,16 @@ mod tests {
     fn item_flags_stackable_bit_matches_known_items() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let map = MapData::open(&dir).expect("open map data");
-        assert_ne!(map.item_flags(0x0EED) & 0x800, 0, "gold coins should be stackable");
-        assert_eq!(map.item_flags(0x0E75) & 0x800, 0, "a backpack should not be stackable");
+        assert_ne!(
+            map.item_flags(0x0EED) & 0x800,
+            0,
+            "gold coins should be stackable"
+        );
+        assert_eq!(
+            map.item_flags(0x0E75) & 0x800,
+            0,
+            "a backpack should not be stackable"
+        );
     }
 
     /// Each facet opens with its ClassicUO dimensions and can read a land tile
@@ -443,7 +468,13 @@ mod tests {
     #[ignore]
     fn open_facet_dimensions_and_readable() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
-        for (facet, w, h) in [(0u8, 7168u32, 4096u32), (2, 2304, 1600), (3, 2560, 2048), (4, 1448, 1448), (5, 1280, 4096)] {
+        for (facet, w, h) in [
+            (0u8, 7168u32, 4096u32),
+            (2, 2304, 1600),
+            (3, 2560, 2048),
+            (4, 1448, 1448),
+            (5, 1280, 4096),
+        ] {
             let mut map = MapData::open_facet(&dir, facet).expect("open facet");
             assert_eq!(map.facet(), facet);
             // land() near the facet's far corner must be in-bounds (non-void graphic possible, but no panic).
@@ -458,14 +489,24 @@ mod tests {
 
     #[test]
     fn score_walkable_flat_land_is_allowed() {
-        let land = LandTile { graphic: 3, z: 0, flags: 0, tex_id: 0 };
+        let land = LandTile {
+            graphic: 3,
+            z: 0,
+            flags: 0,
+            tex_id: 0,
+        };
         assert_eq!(score_walkable_z(land, &[], 0), Ok(0));
     }
 
     #[test]
     fn score_walkable_no_surface_at_all() {
         // Impassable land, no statics: nothing to stand on.
-        let land = LandTile { graphic: 3, z: 0, flags: flags::IMPASSABLE, tex_id: 0 };
+        let land = LandTile {
+            graphic: 3,
+            z: 0,
+            flags: flags::IMPASSABLE,
+            tex_id: 0,
+        };
         assert_eq!(score_walkable_z(land, &[], 0), Err(ZReason::NoSurface));
     }
 
@@ -473,8 +514,18 @@ mod tests {
     fn score_walkable_out_of_reach() {
         // Land impassable (not a candidate); one static surface far above the
         // climb limit is the only candidate, so it's out of reach.
-        let land = LandTile { graphic: 3, z: 0, flags: flags::IMPASSABLE, tex_id: 0 };
-        let statics = [StaticTile { graphic: 0x0100, z: 40, height: 0, flags: flags::SURFACE }];
+        let land = LandTile {
+            graphic: 3,
+            z: 0,
+            flags: flags::IMPASSABLE,
+            tex_id: 0,
+        };
+        let statics = [StaticTile {
+            graphic: 0x0100,
+            z: 40,
+            height: 0,
+            flags: flags::SURFACE,
+        }];
         assert_eq!(
             score_walkable_z(land, &statics, 0),
             Err(ZReason::OutOfReach { nearest_z: 40 })
@@ -490,19 +541,39 @@ mod tests {
     fn score_walkable_real_door_graphic_is_impassable_and_flagged_door() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let map = MapData::open(&dir).expect("open map data");
-        assert!(map.item_is_door(0x06A5), "0x06A5 (wooden door) should carry the Door flag");
-        assert_ne!(map.item_flags(0x06A5) & flags::IMPASSABLE, 0, "a closed door is impassable");
+        assert!(
+            map.item_is_door(0x06A5),
+            "0x06A5 (wooden door) should carry the Door flag"
+        );
+        assert_ne!(
+            map.item_flags(0x06A5) & flags::IMPASSABLE,
+            0,
+            "a closed door is impassable"
+        );
     }
 
     #[test]
     fn score_walkable_blocked_by_overlapping_static() {
         // Flat, walkable land at z=0, but an impassable pillar spans over it
         // (z=-2, height=20) so the body span [0, 16) overlaps it.
-        let land = LandTile { graphic: 3, z: 0, flags: 0, tex_id: 0 };
-        let statics = [StaticTile { graphic: 0x0999, z: -2, height: 20, flags: flags::IMPASSABLE }];
+        let land = LandTile {
+            graphic: 3,
+            z: 0,
+            flags: 0,
+            tex_id: 0,
+        };
+        let statics = [StaticTile {
+            graphic: 0x0999,
+            z: -2,
+            height: 20,
+            flags: flags::IMPASSABLE,
+        }];
         assert_eq!(
             score_walkable_z(land, &statics, 0),
-            Err(ZReason::Blocked { candidate_z: 0, blocking_graphic: 0x0999 })
+            Err(ZReason::Blocked {
+                candidate_z: 0,
+                blocking_graphic: 0x0999
+            })
         );
     }
 
@@ -518,10 +589,20 @@ mod tests {
         // Deep water: impassable land, no real statics at all — nothing to
         // stand on without something extra (this is the exact shape of a
         // SmallBoat deck tile over open water: FIX 1's root-cause bug).
-        let land = LandTile { graphic: 0x00A8, z: -5, flags: flags::IMPASSABLE, tex_id: 0 };
+        let land = LandTile {
+            graphic: 0x00A8,
+            z: -5,
+            flags: flags::IMPASSABLE,
+            tex_id: 0,
+        };
         // A boat "deck" component: Surface, NOT impassable, standing height 4
         // above its own z (-15..-11).
-        let deck = StaticTile { graphic: 0x0032, z: -15, height: 4, flags: flags::SURFACE };
+        let deck = StaticTile {
+            graphic: 0x0032,
+            z: -15,
+            height: 4,
+            flags: flags::SURFACE,
+        };
         assert_eq!(
             score_walkable_z(land, &[deck], -15),
             Ok(-11),
@@ -535,12 +616,30 @@ mod tests {
         // component whose span [−2, 18) overlaps the deck's body span [0, 16)
         // must deny exactly like a real static wall would (same rule, same
         // code path — `score_walkable_z` doesn't know the difference).
-        let land = LandTile { graphic: 3, z: 0, flags: flags::IMPASSABLE, tex_id: 0 };
-        let deck = StaticTile { graphic: 0x0032, z: 0, height: 0, flags: flags::SURFACE };
-        let hull = StaticTile { graphic: 0x0999, z: -2, height: 20, flags: flags::IMPASSABLE };
+        let land = LandTile {
+            graphic: 3,
+            z: 0,
+            flags: flags::IMPASSABLE,
+            tex_id: 0,
+        };
+        let deck = StaticTile {
+            graphic: 0x0032,
+            z: 0,
+            height: 0,
+            flags: flags::SURFACE,
+        };
+        let hull = StaticTile {
+            graphic: 0x0999,
+            z: -2,
+            height: 20,
+            flags: flags::IMPASSABLE,
+        };
         assert_eq!(
             score_walkable_z(land, &[deck, hull], 0),
-            Err(ZReason::Blocked { candidate_z: 0, blocking_graphic: 0x0999 })
+            Err(ZReason::Blocked {
+                candidate_z: 0,
+                blocking_graphic: 0x0999
+            })
         );
     }
 
@@ -556,12 +655,21 @@ mod tests {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let mut map = MapData::open(&dir).expect("open map data");
         let land = map.land(3503, 2574);
-        let inert = StaticTile { graphic: 0x1234, z: 40, height: 10, flags: 0 };
+        let inert = StaticTile {
+            graphic: 0x1234,
+            z: 40,
+            height: 10,
+            flags: 0,
+        };
         assert_eq!(
             map.walkable_z_explain(3503, 2574, land.z as i32, &[]),
             map.walkable_z_explain(3503, 2574, land.z as i32, &[inert]),
             "a flagless extra static is neither a candidate nor a blocker — must be a no-op"
         );
-        assert!(map.walkable_z_explain(3503, 2574, land.z as i32, &[]).is_ok(), "spawn tile should be walkable");
+        assert!(
+            map.walkable_z_explain(3503, 2574, land.z as i32, &[])
+                .is_ok(),
+            "spawn tile should be walkable"
+        );
     }
 }

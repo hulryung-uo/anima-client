@@ -6,7 +6,8 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use anima_assets::{
-    Anim, AnimData, Art, Cliloc, Image, MapData, Multis, RadarCol, StaticTile, ZReason, MAP_HEIGHT, MAP_WIDTH,
+    Anim, AnimData, Art, Cliloc, Image, MapData, Multis, RadarCol, StaticTile, ZReason, MAP_HEIGHT,
+    MAP_WIDTH,
 };
 use anima_core::gump_layout::{self, GumpElement, HtmlText};
 use anima_core::path::Terrain;
@@ -44,12 +45,20 @@ const FEMALE_GUMP_OFFSET: u32 = 60_000;
 fn equip_conv_gump(wearer_body: u16, gump: u16) -> u16 {
     let gump = gump as u32;
     let base = if gump > MALE_GUMP_OFFSET {
-        if gump >= FEMALE_GUMP_OFFSET { gump - FEMALE_GUMP_OFFSET } else { gump - MALE_GUMP_OFFSET }
+        if gump >= FEMALE_GUMP_OFFSET {
+            gump - FEMALE_GUMP_OFFSET
+        } else {
+            gump - MALE_GUMP_OFFSET
+        }
     } else {
         gump
     };
     let female = matches!(wearer_body, 401 | 403 | 606 | 667);
-    let offset = if female { FEMALE_GUMP_OFFSET } else { MALE_GUMP_OFFSET };
+    let offset = if female {
+        FEMALE_GUMP_OFFSET
+    } else {
+        MALE_GUMP_OFFSET
+    };
     (base + offset) as u16
 }
 
@@ -90,7 +99,11 @@ fn multi_components_at(world: &World, multis: &Multis, x: i64, y: i64) -> Vec<(u
     let mut out = Vec::new();
     for (serial, it) in world.items.iter().filter(|(_, it)| it.is_multi) {
         let (dx, dy) = (x - it.pos.x as i64, y - it.pos.y as i64);
-        if dx < i16::MIN as i64 || dx > i16::MAX as i64 || dy < i16::MIN as i64 || dy > i16::MAX as i64 {
+        if dx < i16::MIN as i64
+            || dx > i16::MAX as i64
+            || dy < i16::MIN as i64
+            || dy > i16::MAX as i64
+        {
             continue; // absurdly far from this multi's origin — never one of its tiles
         }
         // A decoded custom-house design (0xD8) REPLACES the foundation's
@@ -103,7 +116,11 @@ fn multi_components_at(world: &World, multis: &Multis, x: i64, y: i64) -> Vec<(u
         // fold — see `ensure_house_tiles`'s and this fn's own doc; the
         // rendering loop in `build_scene` performs the identical swap.
         if let Some(d) = world.house_designs.get(serial).filter(|d| d.tiles_ready) {
-            if dx >= i8::MIN as i64 && dx <= i8::MAX as i64 && dy >= i8::MIN as i64 && dy <= i8::MAX as i64 {
+            if dx >= i8::MIN as i64
+                && dx <= i8::MAX as i64
+                && dy >= i8::MIN as i64
+                && dy <= i8::MAX as i64
+            {
                 if let Some(tiles) = d.tiles.get(&(dx as i8, dy as i8)) {
                     for &(g, dz) in tiles {
                         out.push((g, it.pos.z as i32 + dz as i32));
@@ -127,7 +144,13 @@ fn multi_components_at(world: &World, multis: &Multis, x: i64, y: i64) -> Vec<(u
 /// deck then contributes a standing surface, and a hull wall genuinely
 /// blocks, using the EXACT SAME impassable/surface/bridge rules a real static
 /// gets (`StaticTile::impassable`/`::surface`), not a parallel ad hoc check.
-fn multi_statics_at(world: &World, multis: &Multis, map: &MapData, x: i64, y: i64) -> Vec<StaticTile> {
+fn multi_statics_at(
+    world: &World,
+    multis: &Multis,
+    map: &MapData,
+    x: i64,
+    y: i64,
+) -> Vec<StaticTile> {
     multi_components_at(world, multis, x, y)
         .into_iter()
         .map(|(graphic, z)| StaticTile {
@@ -181,7 +204,9 @@ pub fn explain_tile_walkable(
     if x < 0 || y < 0 {
         return Err(StepDeny::OffMap);
     }
-    let extra = multis.map(|m| multi_statics_at(world, m, map, x, y)).unwrap_or_default();
+    let extra = multis
+        .map(|m| multi_statics_at(world, m, map, x, y))
+        .unwrap_or_default();
     let z = map
         .walkable_z_explain(x as u32, y as u32, current_z, &extra)
         .map_err(StepDeny::Terrain)?;
@@ -194,10 +219,15 @@ pub fn explain_tile_walkable(
             && map.item_blocks(it.graphic, it.pos.z as i32, current_z)
             && !(ghost && map.item_is_door(it.graphic))
     }) {
-        return Err(StepDeny::DynamicItem { graphic: it.graphic, item_z: it.pos.z as i32 });
+        return Err(StepDeny::DynamicItem {
+            graphic: it.graphic,
+            item_z: it.pos.z as i32,
+        });
     }
     if let Some(multis) = multis {
-        if let Some((graphic, item_z)) = multi_blocker_at(world, multis, map, x, y, current_z, ghost) {
+        if let Some((graphic, item_z)) =
+            multi_blocker_at(world, multis, map, x, y, current_z, ghost)
+        {
             return Err(StepDeny::DynamicItem { graphic, item_z });
         }
     }
@@ -210,7 +240,14 @@ pub fn explain_tile_walkable(
 /// `w` flag and the play-server's pacing use this so we never try to step into
 /// an impassable object (it would just DenyWalk → snap back). Thin wrapper over
 /// [`explain_tile_walkable`] so the two can never drift apart.
-pub fn tile_walkable(world: &World, map: &mut MapData, multis: Option<&Multis>, x: i64, y: i64, current_z: i32) -> bool {
+pub fn tile_walkable(
+    world: &World,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    x: i64,
+    y: i64,
+    current_z: i32,
+) -> bool {
     explain_tile_walkable(world, map, multis, x, y, current_z).is_ok()
 }
 
@@ -257,13 +294,17 @@ pub fn tile_walkable_for_planning(
                     && map.item_blocks(it.graphic, it.pos.z as i32, current_z)
                     && !(ghost && map.item_is_door(it.graphic));
                 !blocks || map.item_is_door(it.graphic)
-            }) && multis.is_none_or(|m| multi_blocker_at(world, m, map, x, y, current_z, ghost).is_none());
+            }) && multis
+                .is_none_or(|m| multi_blocker_at(world, m, map, x, y, current_z, ghost).is_none());
             if all_blockers_are_doors {
                 // Every blocker on this tile is an openable door — recompute
                 // without dynamic items (the static base — real statics AND
                 // any multi-contributed surface — still applies).
-                let extra = multis.map(|m| multi_statics_at(world, m, map, x, y)).unwrap_or_default();
-                map.walkable_z_explain(x as u32, y as u32, current_z, &extra).ok()
+                let extra = multis
+                    .map(|m| multi_statics_at(world, m, map, x, y))
+                    .unwrap_or_default();
+                map.walkable_z_explain(x as u32, y as u32, current_z, &extra)
+                    .ok()
             } else {
                 None
             }
@@ -279,7 +320,13 @@ pub fn tile_walkable_for_planning(
 /// "walkable, given we act on it"). Multi components are never doors
 /// themselves (see [`multi_blocker_at`]'s doc), so this only ever needs to
 /// look at `World::items`.
-pub fn door_blocking_at(world: &World, map: &MapData, x: i64, y: i64, current_z: i32) -> Option<u32> {
+pub fn door_blocking_at(
+    world: &World,
+    map: &MapData,
+    x: i64,
+    y: i64,
+    current_z: i32,
+) -> Option<u32> {
     world
         .items
         .values()
@@ -316,7 +363,14 @@ impl Terrain for MapTerrain<'_> {
         // Planning, not a real committed step: a closed door doesn't block a
         // *route* (see `tile_walkable_for_planning`'s doc) — the auto-walk
         // executor opens any door it actually needs to step through.
-        tile_walkable_for_planning(self.world, self.map, self.multis, x as i64, y as i64, from_z)
+        tile_walkable_for_planning(
+            self.world,
+            self.map,
+            self.multis,
+            x as i64,
+            y as i64,
+            from_z,
+        )
     }
 
     /// `Terrain::door_at`'s real (dynamic-item-aware) implementation — reuses
@@ -400,7 +454,9 @@ pub(crate) fn decide_blocked_step(
 ) -> BlockedStepAction {
     match door {
         Some(serial) if attempts_so_far < MAX_DOOR_OPEN_ATTEMPTS => match pending_use_sent_at {
-            Some(sent_at) if !door_state_changed && now.duration_since(sent_at) < DOOR_USE_COOLDOWN => {
+            Some(sent_at)
+                if !door_state_changed && now.duration_since(sent_at) < DOOR_USE_COOLDOWN =>
+            {
                 BlockedStepAction::AwaitDoor
             }
             _ => BlockedStepAction::OpenDoor(serial),
@@ -409,9 +465,12 @@ pub(crate) fn decide_blocked_step(
     }
 }
 
-/// A dead player is a ghost (human ghost body 402/403). Ghosts walk through doors.
+/// A dead player uses one of ServUO's race-specific ghost bodies. Ghosts walk
+/// through doors.
 fn player_is_ghost(world: &World) -> bool {
-    world.player_mobile().is_some_and(|m| matches!(m.body, 402 | 403))
+    world
+        .player_mobile()
+        .is_some_and(|m| anima_core::world::is_ghost_body(m.body))
 }
 
 /// UO direction (0=N..7=NW) → (dx, dy) tile delta.
@@ -451,7 +510,15 @@ fn dir_from_delta(dx: i64, dy: i64) -> Option<u8> {
 /// when `multis` is given, multi component — boat hull/house wall) may sit on
 /// it. This is stricter (and ServUO-accurate) than the coarse direction-less
 /// `walkable_z` hint we still emit per-tile for the renderer.
-fn step_ok(world: &World, map: &mut MapData, multis: Option<&Multis>, fx: i64, fy: i64, fz: i32, dir: u8) -> bool {
+fn step_ok(
+    world: &World,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    fx: i64,
+    fy: i64,
+    fz: i32,
+    dir: u8,
+) -> bool {
     let (dx, dy) = delta(dir);
     let (tx, ty) = (fx + dx, fy + dy);
     if tx < 0 || ty < 0 {
@@ -599,9 +666,18 @@ fn anim_suffix(map: &MapData, animdata: Option<&AnimData>, graphic: u16) -> Stri
 /// no idea a multi is even there (see [`multi_components_at`]'s doc), so
 /// without this a boat/house roof would never cull and the interior would
 /// never show.
-fn roof_scan_tiles(world: &World, multis: Option<&Multis>, map: &mut MapData, x: i64, y: i64) -> Vec<(i32, u64)> {
-    let mut out: Vec<(i32, u64)> =
-        map.statics(x as u32, y as u32).into_iter().map(|s| (s.z as i32, s.flags)).collect();
+fn roof_scan_tiles(
+    world: &World,
+    multis: Option<&Multis>,
+    map: &mut MapData,
+    x: i64,
+    y: i64,
+) -> Vec<(i32, u64)> {
+    let mut out: Vec<(i32, u64)> = map
+        .statics(x as u32, y as u32)
+        .into_iter()
+        .map(|s| (s.z as i32, s.flags))
+        .collect();
     if let Some(multis) = multis {
         out.extend(
             multi_components_at(world, multis, x, y)
@@ -616,7 +692,14 @@ fn roof_scan_tiles(world: &World, multis: Option<&Multis>, map: &mut MapData, x:
 /// or upper floor over the player vanishes and the interior shows. 127 = draw all.
 /// `multis` widens both scans below to in-view multi components (a house roof
 /// is no different from a real static one) via [`roof_scan_tiles`].
-fn max_draw_z(world: &World, map: &mut MapData, multis: Option<&Multis>, px: i64, py: i64, pz: i32) -> i32 {
+fn max_draw_z(
+    world: &World,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    px: i64,
+    py: i64,
+    pz: i32,
+) -> i32 {
     if px < 0 || py < 0 {
         return 127;
     }
@@ -799,7 +882,13 @@ fn tiledata_path_obj(z: i32, height: i32, tile_flags: u64) -> Option<PathObj> {
     }
     // Bridges (stairs/ramps) stand at half height; surfaces at full.
     let avg = if is_bridge { height / 2 } else { height } + z;
-    Some(PathObj { flags, z, avg_z: avg, height, land_stretched: false })
+    Some(PathObj {
+        flags,
+        z,
+        avg_z: avg,
+        height,
+        land_stretched: false,
+    })
 }
 
 /// ClassicUO `Pathfinder.CreateItemList`: land + statics **and, when `multis`
@@ -810,7 +899,13 @@ fn tiledata_path_obj(z: i32, height: i32, tile_flags: u64) -> Option<PathObj> {
 /// onto/around a boat whose deck sits at a Z the static map alone knows
 /// nothing about would resolve the wrong standing Z (or none at all) and every
 /// step would look like a deny.
-fn create_item_list(world: &World, map: &mut MapData, multis: Option<&Multis>, x: i64, y: i64) -> Vec<PathObj> {
+fn create_item_list(
+    world: &World,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    x: i64,
+    y: i64,
+) -> Vec<PathObj> {
     let mut list = Vec::new();
     if x < 0 || y < 0 {
         return list;
@@ -907,7 +1002,12 @@ fn calc_min_max_z(
 /// bound from [`bound_min_max_z`], resolve the standing Z. `None` when nothing
 /// in the list has clearance to stand on (a real DenyWalk situation). Split out
 /// so a synthetic staircase can unit-test this without a real `MapData`.
-fn resolve_standing_z(mut list: Vec<PathObj>, min_z: i32, max_z: i32, current_z: i32) -> Option<i32> {
+fn resolve_standing_z(
+    mut list: Vec<PathObj>,
+    min_z: i32,
+    max_z: i32,
+    current_z: i32,
+) -> Option<i32> {
     if list.is_empty() {
         return None;
     }
@@ -1078,7 +1178,12 @@ pub fn render_worldmap(map: &mut MapData, radar: &RadarCol, _step: u32) -> Vec<u
         }
     }
 
-    Image { width: MAP_WIDTH, height: MAP_HEIGHT, rgba }.to_png()
+    Image {
+        width: MAP_WIDTH,
+        height: MAP_HEIGHT,
+        rgba,
+    }
+    .to_png()
 }
 
 /// Convert a core-parsed [`GumpElement`] into the renderer's positioned JSON
@@ -1097,14 +1202,34 @@ fn gump_element_json(e: &GumpElement, cliloc: Option<&Cliloc>) -> Value {
         GumpElement::Image { x, y, page, .. } => json!({"t":"bg","x":x,"y":y,"page":page}),
         // `graphic` (the normal-state art) lets the client draw the real button
         // art (a small gump) instead of the raw reply id as text.
-        GumpElement::Button { x, y, graphic, reply_id, pageflag, param, page } => json!({
+        GumpElement::Button {
+            x,
+            y,
+            graphic,
+            reply_id,
+            pageflag,
+            param,
+            page,
+        } => json!({
             "t":"button","x":x,"y":y,"g":graphic,"id":reply_id,"page":page,
             "pageflag":pageflag,"param":param,
         }),
-        GumpElement::Text { x, y, w: None, s, page } => {
+        GumpElement::Text {
+            x,
+            y,
+            w: None,
+            s,
+            page,
+        } => {
             json!({"t":"text","x":x,"y":y,"s":s,"page":page})
         }
-        GumpElement::Text { x, y, w: Some(w), s, page } => {
+        GumpElement::Text {
+            x,
+            y,
+            w: Some(w),
+            s,
+            page,
+        } => {
             json!({"t":"text","x":x,"y":y,"w":w,"s":s,"page":page})
         }
         // Resolve against the Cliloc table so NPC dialogs show real text, not
@@ -1114,10 +1239,20 @@ fn gump_element_json(e: &GumpElement, cliloc: Option<&Cliloc>) -> Value {
         // both). Any UO gump-HTML tags/entities in `s` (`<CENTER>`, `&amp;`,
         // …) are left as-is for the client to interpret — see
         // `GumpElement::Html`'s doc.
-        GumpElement::Html { x, y, w, text, page, .. } => {
+        GumpElement::Html {
+            x,
+            y,
+            w,
+            text,
+            page,
+            ..
+        } => {
             let s = match text {
                 HtmlText::Literal(s) => s.clone(),
-                HtmlText::Cliloc { id, args: Some(args) } => cliloc
+                HtmlText::Cliloc {
+                    id,
+                    args: Some(args),
+                } => cliloc
                     .and_then(|c| c.format(*id, args))
                     .unwrap_or_else(|| format!("#{id}")),
                 HtmlText::Cliloc { id, args: None } => cliloc
@@ -1132,7 +1267,14 @@ fn gump_element_json(e: &GumpElement, cliloc: Option<&Cliloc>) -> Value {
         GumpElement::Radio { x, y, id, on, page } => {
             json!({"t":"radio","x":x,"y":y,"id":id,"on":on,"page":page})
         }
-        GumpElement::Entry { x, y, w, id, s, page } => {
+        GumpElement::Entry {
+            x,
+            y,
+            w,
+            id,
+            s,
+            page,
+        } => {
             json!({"t":"entry","x":x,"y":y,"w":w,"id":id,"s":s,"page":page})
         }
     }
@@ -1147,8 +1289,11 @@ fn gumps_json(world: &World, cliloc: Option<&Cliloc>) -> String {
         .iter()
         .map(|g| {
             let layout = gump_layout::parse(&g.layout, &g.text);
-            let elements: Vec<Value> =
-                layout.elements.iter().map(|e| gump_element_json(e, cliloc)).collect();
+            let elements: Vec<Value> = layout
+                .elements
+                .iter()
+                .map(|e| gump_element_json(e, cliloc))
+                .collect();
             json!({
                 "serial": g.serial, "gumpId": g.gump_id,
                 "x": g.x, "y": g.y, "w": layout.width, "h": layout.height,
@@ -1511,12 +1656,18 @@ fn ensure_house_tiles(world: &mut World, multis: &Multis) {
         .items
         .iter()
         .filter(|(serial, it)| {
-            it.is_multi && world.house_designs.get(*serial).is_some_and(|d| !d.tiles_ready)
+            it.is_multi
+                && world
+                    .house_designs
+                    .get(*serial)
+                    .is_some_and(|d| !d.tiles_ready)
         })
         .map(|(serial, it)| (*serial, it.graphic as u32))
         .collect();
     for (serial, multi_id) in pending {
-        let Some(comps) = multis.components(multi_id) else { continue };
+        let Some(comps) = multis.components(multi_id) else {
+            continue;
+        };
         if comps.is_empty() {
             continue; // nothing to bound
         }
@@ -1576,7 +1727,11 @@ fn emit_multi_component(
     if map.item_height(graphic) != 0 {
         spz += 1; // has height (wall/solid)
     }
-    let foliage = if map.item_flags(graphic) & FLAG_FOLIAGE != 0 { ",\"f\":1" } else { "" };
+    let foliage = if map.item_flags(graphic) & FLAG_FOLIAGE != 0 {
+        ",\"f\":1"
+    } else {
+        ""
+    };
     // Same animdata frame-sequence lookup the real-statics loop does (via the
     // shared `anim_suffix`) — an animated component (mill wheel, pennant) or
     // design tile must cycle frames exactly like the identical graphic would
@@ -1683,17 +1838,24 @@ pub fn build_scene(
     // Does an item graphic carry the Foliage flag (tree/bush)? Used so the renderer
     // can fade it when it would occlude the player. Resolved through the shared
     // borrow before `map` is consumed by the tile loop below.
-    let item_foliage = |g: u16| map.as_deref().is_some_and(|m| m.item_flags(g) & FLAG_FOLIAGE != 0);
+    let item_foliage = |g: u16| {
+        map.as_deref()
+            .is_some_and(|m| m.item_flags(g) & FLAG_FOLIAGE != 0)
+    };
     // "nodraw" void-placeholder items (name starts "nodraw", e.g. graphic 0x1 staff
     // spawner/markers): ClassicUO culls these for items just like statics — without
     // this the "NO DRAW" placeholder bitmap shows on the ground for GM characters.
     let item_nodraw = |g: u16| map.as_deref().is_some_and(|m| m.item_is_nodraw(g));
     // Container (chest/bag/corpse 0x2006) → the client opens a loot window on
     // double-click; non-containers (doors, etc.) must NOT spawn an empty window.
-    let item_is_cont = |g: u16| g == 0x2006 || map.as_deref().is_some_and(|m| m.item_is_container(g));
+    let item_is_cont =
+        |g: u16| g == 0x2006 || map.as_deref().is_some_and(|m| m.item_is_container(g));
     // STACKABLE tiledata — the split-stack dialog should only ever offer to split
     // an item the server would actually accept a partial amount from.
-    let item_stackable = |g: u16| map.as_deref().is_some_and(|m| m.item_flags(g) & FLAG_STACKABLE != 0);
+    let item_stackable = |g: u16| {
+        map.as_deref()
+            .is_some_and(|m| m.item_flags(g) & FLAG_STACKABLE != 0)
+    };
     // Draw-sort priority for a dynamic item (same scheme as statics): base z, with
     // a background tile under, and a tile with height (a wall/door) over, same-tile flats.
     let item_pz = |g: u16, z: i32| -> i32 {
@@ -1770,7 +1932,10 @@ pub fn build_scene(
             // (`is_multi`) isn't a drawable item at all — its `graphic` is a
             // multi id, not an ART graphic; it's expanded into the statics
             // stream (see the tile loop below) instead of drawn directly here.
-            !it.is_multi && it.container.is_none() && !item_nodraw(it.graphic) && (it.pos.z as i32) < max_z
+            !it.is_multi
+                && it.container.is_none()
+                && !item_nodraw(it.graphic)
+                && (it.pos.z as i32) < max_z
         })
         .map(|it| {
             let mut v = json!({
@@ -2018,7 +2183,15 @@ pub fn build_scene(
                         && (it.pos.x as i64 - px).abs() <= RADIUS + MULTI_MARGIN
                         && (it.pos.y as i64 - py).abs() <= RADIUS + MULTI_MARGIN
                 })
-                .map(|(serial, it)| (it.pos.x as i64, it.pos.y as i64, it.pos.z as i32, it.graphic as u32, *serial))
+                .map(|(serial, it)| {
+                    (
+                        it.pos.x as i64,
+                        it.pos.y as i64,
+                        it.pos.z as i32,
+                        it.graphic as u32,
+                        *serial,
+                    )
+                })
                 .collect()
         } else {
             Vec::new()
@@ -2039,7 +2212,9 @@ pub fn build_scene(
             for dx in -RADIUS..=RADIUS {
                 let (x, y) = (px + dx, py + dy);
                 if x < 0 || y < 0 {
-                    tiles.push_str("{\"w\":0,\"z\":0,\"g\":0,\"tx\":0,\"c\":[10,10,12],\"h\":0,\"sz\":0},");
+                    tiles.push_str(
+                        "{\"w\":0,\"z\":0,\"g\":0,\"tx\":0,\"c\":[10,10,12],\"h\":0,\"sz\":0},",
+                    );
                     continue;
                 }
                 let walk = tile_walkable(&s.world, map, multis, x, y, pz);
@@ -2067,7 +2242,11 @@ pub fn build_scene(
                     // Land counts as a surface unless it's a "no-draw" hole graphic.
                     let land_surface = !land.impassable()
                         && ((g < 0x01AE && g != 2) || (g > 0x01B5 && g != 0x01DB));
-                    let mut best = if land_surface { Some(land.z as i32) } else { None };
+                    let mut best = if land_surface {
+                        Some(land.z as i32)
+                    } else {
+                        None
+                    };
                     for st in &tstatics {
                         let bridge = st.flags & FLAG_BRIDGE != 0;
                         let surface = st.flags & FLAG_SURFACE != 0;
@@ -2101,7 +2280,15 @@ pub fn build_scene(
                 let _ = write!(
                     tiles,
                     "{{\"w\":{},\"z\":{},\"g\":{},\"tx\":{},\"c\":[{},{},{}],\"h\":{},\"sz\":{}}},",
-                    walk as u8, land.z, land.graphic, land.tex_id, c[0], c[1], c[2], hidden as u8, sz
+                    walk as u8,
+                    land.z,
+                    land.graphic,
+                    land.tex_id,
+                    c[0],
+                    c[1],
+                    c[2],
+                    hidden as u8,
+                    sz
                 );
                 // Static objects on this tile (walls/trees/deco). Skip anything at
                 // or above max_z so a roof/upper floor over the player vanishes.
@@ -2132,7 +2319,11 @@ pub fn build_scene(
                         }
                         // Foliage (trees/bushes) get an `f` flag so the renderer fades
                         // them when they'd hide the player. Only emit when true.
-                        let foliage = if s.flags & FLAG_FOLIAGE != 0 { ",\"f\":1" } else { "" };
+                        let foliage = if s.flags & FLAG_FOLIAGE != 0 {
+                            ",\"f\":1"
+                        } else {
+                            ""
+                        };
                         // Animated statics (flames/fountains/water wheels) flagged
                         // `TileFlag.Animation` cycle through ART tiles from animdata.mul.
                         // Bake the frame tile-id sequence (`a`) + per-frame interval in
@@ -2174,7 +2365,12 @@ pub fn build_scene(
                             // tiles carry no `visible` flag (a graphic-0 entry was
                             // already dropped at decode), so unlike the multi.mul
                             // branch below there's no `!visible` check here.
-                            if let Some(d) = s.world.house_designs.get(&mserial).filter(|d| d.tiles_ready) {
+                            if let Some(d) = s
+                                .world
+                                .house_designs
+                                .get(&mserial)
+                                .filter(|d| d.tiles_ready)
+                            {
                                 if (i8::MIN as i64..=i8::MAX as i64).contains(&cdx)
                                     && (i8::MIN as i64..=i8::MAX as i64).contains(&cdy)
                                 {
@@ -2352,7 +2548,8 @@ pub fn build_scene(
     // Open server gumps/dialogs (0xB0/0xDD), each parsed into positioned elements.
     let gumps = gumps_json(&s.world, cliloc);
     // The open right-click context menu (0xBF/0x14), with cliloc labels resolved.
-    let popup = serde_json::to_string(&popup_json(&s.world, cliloc)).unwrap_or_else(|_| "null".into());
+    let popup =
+        serde_json::to_string(&popup_json(&s.world, cliloc)).unwrap_or_else(|_| "null".into());
     // The open book (0x93/0xD4 + 0x66), or null.
     let book = serde_json::to_string(&book_json(&s.world)).unwrap_or_else(|_| "null".into());
     // Known spellbook contents (0xBF/0x1B), one entry per book we've been told
@@ -2398,7 +2595,8 @@ pub fn build_scene(
     let aos = s.world.aos;
     // An outstanding server text prompt (0xC2 UnicodePrompt), or `{"active":0}`.
     // See [`prompt_json`]'s doc.
-    let prompt = serde_json::to_string(&prompt_json(&s.world)).unwrap_or_else(|_| "{\"active\":0}".into());
+    let prompt =
+        serde_json::to_string(&prompt_json(&s.world)).unwrap_or_else(|_| "{\"active\":0}".into());
     // Recent lift-rejection events (0x27 LiftRej): the client clears the drag-ghost
     // (without sending a drop — the item never left its source) and shows `reason`
     // as a system journal line, for each `seq` newer than the last it handled.
@@ -2414,7 +2612,8 @@ pub fn build_scene(
     // snoop, …). The client opens a window for each `seq` newer than the last it
     // handled (reusing the same `openContainer` it uses for its own double-clicks).
     // Filtered by `container_opens_json` to real container gumpIds — see its doc.
-    let container_opens = serde_json::to_string(&container_opens_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    let container_opens =
+        serde_json::to_string(&container_opens_json(&s.world)).unwrap_or_else(|_| "[]".into());
     // Recent Swing events (0x2F): `attacker` just swung at `defender`. Purely
     // cosmetic — the client briefly faces the attacker toward the defender.
     let swings: Vec<Value> = s
@@ -2426,7 +2625,8 @@ pub fn build_scene(
     let swings = serde_json::to_string(&swings).unwrap_or_else(|_| "[]".into());
     // The latest server-initiated paperdoll open/refresh (0x88), or null. See
     // `paperdoll_json`'s doc for the `seq` "fresh request" semantics.
-    let paperdoll = serde_json::to_string(&paperdoll_json(&s.world)).unwrap_or_else(|_| "null".into());
+    let paperdoll =
+        serde_json::to_string(&paperdoll_json(&s.world)).unwrap_or_else(|_| "null".into());
     // Current facet/map index (0xBF/0x08 MapChange); see `World::map_index`'s doc
     // for what a real per-facet `MapData` reload would additionally require.
     let facet = s.world.map_index;
@@ -2460,7 +2660,11 @@ mod tests {
                       { textentry 20 65 120 18 0 4 1 }";
         let text = vec!["Accept the quest?".to_string(), "Name".to_string()];
         let parsed = gump_layout::parse(layout, &text);
-        let els: Vec<Value> = parsed.elements.iter().map(|e| gump_element_json(e, None)).collect();
+        let els: Vec<Value> = parsed
+            .elements
+            .iter()
+            .map(|e| gump_element_json(e, None))
+            .collect();
         // Width comes straight from the resizepic; height grows to fit elements
         // that extend below it (the button at y=90 + padding).
         assert_eq!(parsed.width, 200);
@@ -2474,7 +2678,10 @@ mod tests {
         // instead of jumping pages locally.
         assert_eq!(els[1]["pageflag"], 1);
         assert_eq!(els[2]["s"], "Accept the quest?");
-        assert_eq!((els[3]["id"].as_i64(), els[3]["on"].as_i64()), (Some(3), Some(1)));
+        assert_eq!(
+            (els[3]["id"].as_i64(), els[3]["on"].as_i64()),
+            (Some(3), Some(1))
+        );
         assert_eq!(els[4]["id"], 4);
         assert_eq!(els[4]["s"], "Name");
     }
@@ -2494,7 +2701,11 @@ mod tests {
                       { button 10 30 247 248 1 0 99 }";
         let text = vec!["Page one".to_string(), "Page two".to_string()];
         let parsed = gump_layout::parse(layout, &text);
-        let els: Vec<Value> = parsed.elements.iter().map(|e| gump_element_json(e, None)).collect();
+        let els: Vec<Value> = parsed
+            .elements
+            .iter()
+            .map(|e| gump_element_json(e, None))
+            .collect();
 
         // bg(page0), text(page1), button(page1, pageflag0→page2), text(page2), button(page2, pageflag1, id99)
         let pages: Vec<i64> = els.iter().map(|e| e["page"].as_i64().unwrap()).collect();
@@ -2520,7 +2731,11 @@ mod tests {
         let layout = "{ htmlgump 5 5 180 40 0 0 0 }{ xmfhtmlgump 5 50 180 20 1015313 0 0 }";
         let text = vec!["<basefont color=#fff>Hello <b>world</b>".to_string()];
         let parsed = gump_layout::parse(layout, &text);
-        let els: Vec<Value> = parsed.elements.iter().map(|e| gump_element_json(e, None)).collect();
+        let els: Vec<Value> = parsed
+            .elements
+            .iter()
+            .map(|e| gump_element_json(e, None))
+            .collect();
         assert_eq!(els[0]["s"], "<basefont color=#fff>Hello <b>world</b>");
         assert_eq!(els[1]["s"], "#1015313"); // cliloc placeholder (no table)
     }
@@ -2532,10 +2747,10 @@ mod tests {
         // cases store a plain item graphic like 538 or 977.
         assert_eq!(equip_conv_gump(400, 538), 50_538); // male wearer
         assert_eq!(equip_conv_gump(401, 538), 60_538); // female wearer (401)
-        // A value already baked with SOME gender's offset gets that offset
-        // stripped and the wearer's ACTUAL gender's offset re-added (ClassicUO
-        // `GetAnimID`) — here the def literally stores the female-baked 61250 for
-        // a female (401) wearer, so it round-trips unchanged...
+                                                       // A value already baked with SOME gender's offset gets that offset
+                                                       // stripped and the wearer's ACTUAL gender's offset re-added (ClassicUO
+                                                       // `GetAnimID`) — here the def literally stores the female-baked 61250 for
+                                                       // a female (401) wearer, so it round-trips unchanged...
         assert_eq!(equip_conv_gump(401, 61_250), 61_250);
         // ...but a MALE wearer (400) re-bases it onto the male offset instead.
         assert_eq!(equip_conv_gump(400, 61_250), 51_250);
@@ -2571,7 +2786,7 @@ mod tests {
     use anima_core::world::{Book, PopupEntry, PopupMenu, PromptState, TradeState};
 
     #[test]
-    fn player_is_ghost_true_only_for_human_ghost_bodies() {
+    fn player_is_ghost_recognizes_all_servuo_ghost_bodies() {
         let mut w = World::default();
         assert!(!player_is_ghost(&w), "no player yet");
 
@@ -2579,10 +2794,10 @@ mod tests {
         w.mobile_mut(1).body = 400; // ordinary human male
         assert!(!player_is_ghost(&w));
 
-        w.mobile_mut(1).body = 402; // human ghost (male)
-        assert!(player_is_ghost(&w));
-        w.mobile_mut(1).body = 403; // human ghost (female)
-        assert!(player_is_ghost(&w));
+        for body in [402, 403, 607, 608, 694, 695, 970] {
+            w.mobile_mut(1).body = body;
+            assert!(player_is_ghost(&w), "body {body} must be a ghost");
+        }
     }
 
     #[test]
@@ -2624,7 +2839,10 @@ mod tests {
         let mut w = World::default();
         assert_eq!(prompt_json(&w), json!({ "active": 0 }), "no prompt pending");
 
-        w.prompt = Some(PromptState { sender_serial: 0x77, prompt_id: 42 });
+        w.prompt = Some(PromptState {
+            sender_serial: 0x77,
+            prompt_id: 42,
+        });
         assert_eq!(
             prompt_json(&w),
             json!({ "active": 1, "serial": 0x77, "promptId": 42 })
@@ -2638,12 +2856,20 @@ mod tests {
         // (spurious, empty) container window; the vendor's shop already opens
         // via `shop`/0x74/0x3B.
         w.push_container_open(0x1000_0055, 0x0030);
-        assert_eq!(container_opens_json(&w), json!([]), "vendor buy gumpId must not signal an open");
+        assert_eq!(
+            container_opens_json(&w),
+            json!([]),
+            "vendor buy gumpId must not signal an open"
+        );
 
         // DisplaySpellbook: gumpId 0xFFFF — must NOT open one either; the book
         // already opens via `spellbooks`/0xBF/0x1B.
         w.push_container_open(0x4000_0066, 0xFFFF);
-        assert_eq!(container_opens_json(&w), json!([]), "spellbook gumpId must not signal an open");
+        assert_eq!(
+            container_opens_json(&w),
+            json!([]),
+            "spellbook gumpId must not signal an open"
+        );
 
         // A normal container gumpId (e.g. a bank box) DOES open.
         w.push_container_open(0x4000_0077, 0x0048);
@@ -2659,7 +2885,12 @@ mod tests {
         let mut w = World::default();
         assert_eq!(paperdoll_json(&w), Value::Null, "no paperdoll signal yet");
 
-        w.set_paperdoll(0xDEAD_BEEFu32, "Anima the Adventurer".to_string(), true, false);
+        w.set_paperdoll(
+            0xDEAD_BEEFu32,
+            "Anima the Adventurer".to_string(),
+            true,
+            false,
+        );
         assert_eq!(
             paperdoll_json(&w),
             json!({
@@ -2692,7 +2923,11 @@ mod tests {
         w.set_map_view(0x4000_1234, 0x139D, 3, 520, 0, 2580, 2050, 400, 400);
         let v = maps_json(&w);
         assert_eq!(v[0]["openSeq"], 2);
-        assert_eq!(v[0]["pins"].as_array().unwrap().len(), 0, "a resend resets pins");
+        assert_eq!(
+            v[0]["pins"].as_array().unwrap().len(),
+            0,
+            "a resend resets pins"
+        );
     }
 
     #[test]
@@ -2715,8 +2950,11 @@ mod tests {
         // `Cliloc` only loads from a directory (`Cliloc::open`), so this writes a
         // minimal synthetic `Cliloc.enu` (6-byte header + one record — same shape
         // `anima_assets::cliloc`'s own tests build) to a scratch dir.
-        let dir = std::env::temp_dir()
-            .join(format!("anima_scene_test_cliloc_{}_{}", std::process::id(), line!()));
+        let dir = std::env::temp_dir().join(format!(
+            "anima_scene_test_cliloc_{}_{}",
+            std::process::id(),
+            line!()
+        ));
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         let id: u32 = 1_060_834;
         let text = "a hatchet";
@@ -2767,7 +3005,9 @@ mod tests {
     fn corpse_fields_carries_remapped_body_dir_and_death_group() {
         // Values here are already Corpse.def-remapped/resolved by the caller
         // (`build_scene`'s item loop) — this just checks the shaping.
-        let v = corpse_fields(/* body */ 26, /* hue */ 1102, /* dir */ 3, /* dg */ 8);
+        let v = corpse_fields(
+            /* body */ 26, /* hue */ 1102, /* dir */ 3, /* dg */ 8,
+        );
         assert_eq!(v, json!({ "body": 26, "dir": 3, "dg": 8, "hue": 1102 }));
     }
 
@@ -2805,7 +3045,11 @@ mod tests {
 
         w.popup = Some(PopupMenu {
             serial: 0x555,
-            entries: vec![PopupEntry { index: 0, cliloc: 3000123, flags: 0 }],
+            entries: vec![PopupEntry {
+                index: 0,
+                cliloc: 3000123,
+                flags: 0,
+            }],
         });
         let v = popup_json(&w, None);
         assert_eq!(v["serial"], 0x555);
@@ -2841,7 +3085,11 @@ mod tests {
         let mut w = World::default();
         assert_eq!(w.map_index, 0, "facet defaults to Felucca (0)");
         w.player = Some(Serial(1));
-        w.mobile_mut(1).pos = Position { x: 100, y: 100, z: 0 };
+        w.mobile_mut(1).pos = Position {
+            x: 100,
+            y: 100,
+            z: 0,
+        };
         w.on_map_change(2); // Ilshenar
         assert_eq!(w.map_index, 2);
     }
@@ -2863,7 +3111,13 @@ mod tests {
     // stair (+2, +5, +3) comes from THAT staircase's non-uniform geometry
     // (mixed static heights/bases), not from the algorithm.
     fn bridge_tile(z: i32, height: i32) -> PathObj {
-        PathObj { flags: POF_IMPASS | POF_SURFACE | POF_BRIDGE, z, avg_z: z + height / 2, height, land_stretched: false }
+        PathObj {
+            flags: POF_IMPASS | POF_SURFACE | POF_BRIDGE,
+            z,
+            avg_z: z + height / 2,
+            height,
+            land_stretched: false,
+        }
     }
 
     #[test]
@@ -2873,7 +3127,10 @@ mod tests {
         let list = vec![bridge_tile(0, 5)];
         let (min_z, max_z) = bound_min_max_z(&[bridge_tile(0, 5)], 0, 0);
         let z = resolve_standing_z(list, min_z, max_z, 0).expect("stands on the bridge tile");
-        assert_eq!(z, 2, "Bridge standing Z is z + height/2, not the top surface (5)");
+        assert_eq!(
+            z, 2,
+            "Bridge standing Z is z + height/2, not the top surface (5)"
+        );
     }
 
     #[test]
@@ -2892,17 +3149,26 @@ mod tests {
             z = resolve_standing_z(vec![tiles[i]], min_z, max_z, z).expect("climbs the next riser");
             seq.push(z);
         }
-        assert_eq!(seq, vec![4, 8, 12, 16, 20], "uniform risers climb by an even +4 delta each tile");
+        assert_eq!(
+            seq,
+            vec![4, 8, 12, 16, 20],
+            "uniform risers climb by an even +4 delta each tile"
+        );
 
         // Descend back down through 3..0 — must mirror the climb exactly.
         let mut z = tiles[4].avg_z; // 20
         let mut seq = vec![z];
         for i in (0..4).rev() {
             let (min_z, max_z) = bound_min_max_z(&[tiles[i + 1]], z, 0);
-            z = resolve_standing_z(vec![tiles[i]], min_z, max_z, z).expect("descends the next riser down");
+            z = resolve_standing_z(vec![tiles[i]], min_z, max_z, z)
+                .expect("descends the next riser down");
             seq.push(z);
         }
-        assert_eq!(seq, vec![20, 16, 12, 8, 4], "descent mirrors the climb exactly");
+        assert_eq!(
+            seq,
+            vec![20, 16, 12, 8, 4],
+            "descent mirrors the climb exactly"
+        );
     }
 
     // Real-data regression for the Britain West Bank staircase (facet 0, x=1495,
@@ -2965,19 +3231,29 @@ mod tests {
         let mut z = 10i32;
         let mut seq = vec![z];
         for y in [1628i64, 1627, 1626, 1625] {
-            z = calculate_new_z(&world, &mut map, None, X, y, z, NORTH).expect("stair climbs north");
+            z = calculate_new_z(&world, &mut map, None, X, y, z, NORTH)
+                .expect("stair climbs north");
             seq.push(z);
         }
-        assert_eq!(seq, vec![10, 10, 12, 17, 20], "climbing-north Z sequence (trivial 10->10 step included)");
+        assert_eq!(
+            seq,
+            vec![10, 10, 12, 17, 20],
+            "climbing-north Z sequence (trivial 10->10 step included)"
+        );
 
         // Descend south (y increasing), mirroring the climb exactly.
         let mut z = 20i32;
         let mut seq = vec![z];
         for y in [1626i64, 1627, 1628, 1629] {
-            z = calculate_new_z(&world, &mut map, None, X, y, z, SOUTH).expect("stair descends south");
+            z = calculate_new_z(&world, &mut map, None, X, y, z, SOUTH)
+                .expect("stair descends south");
             seq.push(z);
         }
-        assert_eq!(seq, vec![20, 17, 12, 10, 10], "descending-south Z sequence (trivial 10->10 step included)");
+        assert_eq!(
+            seq,
+            vec![20, 17, 12, 10, 10],
+            "descending-south Z sequence (trivial 10->10 step included)"
+        );
     }
 
     /// Root-cause regression for the live `walkto (1621,1588) rejected: no
@@ -2994,7 +3270,10 @@ mod tests {
     fn closed_door_blocks_strictly_but_not_for_planning() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let mut map = MapData::open(&dir).expect("open map data");
-        assert!(map.item_is_door(0x06A5), "0x06A5 should be a real door graphic");
+        assert!(
+            map.item_is_door(0x06A5),
+            "0x06A5 should be a real door graphic"
+        );
 
         let mut world = anima_core::World::new();
         let door_serial = 1_073_751_127;
@@ -3004,7 +3283,11 @@ mod tests {
                 serial: door_serial,
                 graphic: 0x06A5,
                 amount: 1,
-                pos: anima_core::types::Position { x: 1611, y: 1591, z: 0 },
+                pos: anima_core::types::Position {
+                    x: 1611,
+                    y: 1591,
+                    z: 0,
+                },
                 container: None,
                 layer: 0,
                 hue: 0,
@@ -3028,8 +3311,14 @@ mod tests {
         );
 
         // The executor can find the door to open.
-        assert_eq!(door_blocking_at(&world, &map, 1611, 1591, 5), Some(door_serial));
-        assert_eq!(door_blocking_at(&world, &map, 1611, 1591 /* unrelated tile */ + 1, 5), None);
+        assert_eq!(
+            door_blocking_at(&world, &map, 1611, 1591, 5),
+            Some(door_serial)
+        );
+        assert_eq!(
+            door_blocking_at(&world, &map, 1611, 1591 /* unrelated tile */ + 1, 5),
+            None
+        );
     }
 
     /// FIX 4 regression: a door AND a non-door blocker (e.g. a crate someone
@@ -3049,8 +3338,14 @@ mod tests {
     fn tile_walkable_for_planning_denies_a_door_tile_with_a_non_door_blocker_too() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let mut map = MapData::open(&dir).expect("open map data");
-        assert!(map.item_is_door(0x06A5), "0x06A5 should be a real door graphic");
-        assert!(!map.item_is_door(0x0E3D), "0x0E3D (crate) should not be a door");
+        assert!(
+            map.item_is_door(0x06A5),
+            "0x06A5 should be a real door graphic"
+        );
+        assert!(
+            !map.item_is_door(0x0E3D),
+            "0x0E3D (crate) should not be a door"
+        );
         assert!(
             map.item_blocks(0x0E3D, 5, 5),
             "0x0E3D (crate) should be an impassable blocker at these Zs"
@@ -3064,7 +3359,11 @@ mod tests {
                     serial: door_serial,
                     graphic: 0x06A5,
                     amount: 1,
-                    pos: anima_core::types::Position { x: 1611, y: 1591, z: 0 },
+                    pos: anima_core::types::Position {
+                        x: 1611,
+                        y: 1591,
+                        z: 0,
+                    },
                     container: None,
                     layer: 0,
                     hue: 0,
@@ -3079,7 +3378,11 @@ mod tests {
                     serial: crate_serial,
                     graphic: 0x0E3D,
                     amount: 1,
-                    pos: anima_core::types::Position { x: 1611, y: 1591, z: 5 },
+                    pos: anima_core::types::Position {
+                        x: 1611,
+                        y: 1591,
+                        z: 5,
+                    },
                     container: None,
                     layer: 0,
                     hue: 0,
@@ -3098,7 +3401,14 @@ mod tests {
 
     // ---- FIX 1/2/6/7: multi-component walkability + rendering -----------------
 
-    fn synth_item(serial: u32, graphic: u16, x: u16, y: u16, z: i8, is_multi: bool) -> anima_core::world::Item {
+    fn synth_item(
+        serial: u32,
+        graphic: u16,
+        x: u16,
+        y: u16,
+        z: i8,
+        is_multi: bool,
+    ) -> anima_core::world::Item {
         anima_core::world::Item {
             serial,
             graphic,
@@ -3122,26 +3432,71 @@ mod tests {
     #[test]
     fn multi_components_at_includes_invisible_origin_but_not_invisible_others() {
         let mut world = anima_core::World::new();
-        world.items.insert(1, synth_item(1, 42, 1000, 1000, -15, true)); // graphic 42 = multi id
-        world.items.insert(2, synth_item(2, 0x0BB8, 1000, 1000, 0, false)); // an ordinary item, ignored
+        world
+            .items
+            .insert(1, synth_item(1, 42, 1000, 1000, -15, true)); // graphic 42 = multi id
+        world
+            .items
+            .insert(2, synth_item(2, 0x0BB8, 1000, 1000, 0, false)); // an ordinary item, ignored
 
         let multis = Multis::from_components(std::collections::HashMap::from([(
             42,
             vec![
-                MultiComponent { graphic: 0x1000, dx: 0, dy: 0, dz: 0, visible: false, is_origin: true },
-                MultiComponent { graphic: 0x1001, dx: 0, dy: 0, dz: 4, visible: false, is_origin: false },
-                MultiComponent { graphic: 0x1002, dx: 0, dy: 0, dz: 8, visible: true, is_origin: false },
-                MultiComponent { graphic: 0x2000, dx: 1, dy: 0, dz: 0, visible: true, is_origin: false },
+                MultiComponent {
+                    graphic: 0x1000,
+                    dx: 0,
+                    dy: 0,
+                    dz: 0,
+                    visible: false,
+                    is_origin: true,
+                },
+                MultiComponent {
+                    graphic: 0x1001,
+                    dx: 0,
+                    dy: 0,
+                    dz: 4,
+                    visible: false,
+                    is_origin: false,
+                },
+                MultiComponent {
+                    graphic: 0x1002,
+                    dx: 0,
+                    dy: 0,
+                    dz: 8,
+                    visible: true,
+                    is_origin: false,
+                },
+                MultiComponent {
+                    graphic: 0x2000,
+                    dx: 1,
+                    dy: 0,
+                    dz: 0,
+                    visible: true,
+                    is_origin: false,
+                },
             ],
         )]));
 
         let here = multi_components_at(&world, &multis, 1000, 1000);
-        assert_eq!(here.len(), 2, "invisible origin + visible component only: {here:?}");
-        assert!(here.contains(&(0x1000, -15)), "invisible index-0 origin must still count for walkability");
+        assert_eq!(
+            here.len(),
+            2,
+            "invisible origin + visible component only: {here:?}"
+        );
+        assert!(
+            here.contains(&(0x1000, -15)),
+            "invisible index-0 origin must still count for walkability"
+        );
         assert!(here.contains(&(0x1002, -7)), "visible component must count");
-        assert!(!here.iter().any(|&(g, _)| g == 0x1001), "invisible NON-origin component must be excluded");
+        assert!(
+            !here.iter().any(|&(g, _)| g == 0x1001),
+            "invisible NON-origin component must be excluded"
+        );
 
-        assert_eq!(multi_components_at(&world, &multis, 1001, 1000), vec![(0x2000, -15)]);
+        assert_eq!(
+            multi_components_at(&world, &multis, 1001, 1000),
+            vec![(0x2000, -15)]
+        );
         assert!(
             multi_components_at(&world, &multis, 50_000, 50_000).is_empty(),
             "way outside any multi's footprint must return nothing"
@@ -3155,15 +3510,27 @@ mod tests {
     #[test]
     fn multi_components_at_design_replaces_multi_mul_components() {
         let mut world = anima_core::World::new();
-        world.items.insert(1, synth_item(1, 42, 1000, 1000, 0, true)); // graphic 42 = multi id
+        world
+            .items
+            .insert(1, synth_item(1, 42, 1000, 1000, 0, true)); // graphic 42 = multi id
 
         let multis = Multis::from_components(std::collections::HashMap::from([(
             42,
-            vec![MultiComponent { graphic: 0x1000, dx: 0, dy: 0, dz: 0, visible: true, is_origin: true }],
+            vec![MultiComponent {
+                graphic: 0x1000,
+                dx: 0,
+                dy: 0,
+                dz: 0,
+                visible: true,
+                is_origin: true,
+            }],
         )]));
 
         // No design yet (or not decoded) → the stock multi.mul component wins.
-        assert_eq!(multi_components_at(&world, &multis, 1000, 1000), vec![(0x1000, 0)]);
+        assert_eq!(
+            multi_components_at(&world, &multis, 1000, 1000),
+            vec![(0x1000, 0)]
+        );
 
         let mut design = anima_core::world::HouseDesign::default();
         design.tiles.insert((0, 0), vec![(0x4001, 5)]);
@@ -3206,8 +3573,14 @@ mod tests {
         for oy in -3i64..=3 {
             for ox in -3i64..=3 {
                 let (tx, ty) = ((1459 + ox) as u32, (1767 + oy) as u32);
-                assert!(map.land(tx, ty).impassable(), "({tx},{ty}) should be deep water");
-                assert!(map.statics(tx, ty).is_empty(), "({tx},{ty}) should have no real statics");
+                assert!(
+                    map.land(tx, ty).impassable(),
+                    "({tx},{ty}) should be deep water"
+                );
+                assert!(
+                    map.statics(tx, ty).is_empty(),
+                    "({tx},{ty}) should have no real statics"
+                );
             }
         }
 
@@ -3217,7 +3590,10 @@ mod tests {
         // within one climb-step of it), so it's used as-observed.
         let (boat_x, boat_y, boat_z): (i64, i64, i32) = (1459, 1767, -15);
         let mut world = anima_core::World::new();
-        world.items.insert(1, synth_item(1, 0, boat_x as u16, boat_y as u16, boat_z as i8, true));
+        world.items.insert(
+            1,
+            synth_item(1, 0, boat_x as u16, boat_y as u16, boat_z as i8, true),
+        );
 
         // Deck tile: must be walkable, `tile_walkable` (the renderer's `w`
         // flag) and `tile_walkable_for_planning` (the click-to-walk A*
@@ -3229,11 +3605,28 @@ mod tests {
             Ok(boat_z + 3),
             "the deck component must contribute a standing surface over open water"
         );
-        assert!(tile_walkable(&world, &mut map, Some(&multis), deck_x, deck_y, boat_z));
-        assert!(tile_walkable_for_planning(&world, &mut map, Some(&multis), deck_x, deck_y, boat_z).is_some());
+        assert!(tile_walkable(
+            &world,
+            &mut map,
+            Some(&multis),
+            deck_x,
+            deck_y,
+            boat_z
+        ));
+        assert!(tile_walkable_for_planning(
+            &world,
+            &mut map,
+            Some(&multis),
+            deck_x,
+            deck_y,
+            boat_z
+        )
+        .is_some());
         // Without the boat, the SAME tile is unwalkable open water — proves
         // the deck (not some coincidental real static) is what's carrying it.
-        assert!(!tile_walkable(&world, &mut map, None, deck_x, deck_y, boat_z));
+        assert!(!tile_walkable(
+            &world, &mut map, None, deck_x, deck_y, boat_z
+        ));
 
         // Hull tile: must deny. HONEST finding (this is exactly the FIX 3
         // re-verification the review asked for): the hull piece (0x3EB1) is
@@ -3251,7 +3644,14 @@ mod tests {
             Err(StepDeny::Terrain(ZReason::NoSurface)) => {}
             other => panic!("expected a NoSurface deny at the hull tile, got {other:?}"),
         }
-        assert!(!tile_walkable(&world, &mut map, Some(&multis), hull_x, hull_y, boat_z));
+        assert!(!tile_walkable(
+            &world,
+            &mut map,
+            Some(&multis),
+            hull_x,
+            hull_y,
+            boat_z
+        ));
     }
 
     /// FIX 2: a multi's own roof component must lift `max_draw_z`'s ceiling
@@ -3266,12 +3666,19 @@ mod tests {
     fn max_draw_z_culls_a_multi_roof_component_above_the_player() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let mut map = MapData::open(&dir).expect("open map data");
-        assert_ne!(map.item_flags(0x0586) & FLAG_ROOF, 0, "0x0586 should be a real roof graphic");
+        assert_ne!(
+            map.item_flags(0x0586) & FLAG_ROOF,
+            0,
+            "0x0586 should be a real roof graphic"
+        );
 
         // New Haven spawn: outdoors, open sky — baseline with no multi at all.
         let (px, py, pz) = (3503i64, 2574, 0i32);
         let baseline = max_draw_z(&anima_core::World::new(), &mut map, None, px, py, pz);
-        assert_eq!(baseline, 127, "open field with no roof over the player: draw everything");
+        assert_eq!(
+            baseline, 127,
+            "open field with no roof over the player: draw everything"
+        );
 
         // A synthetic multi whose one component (the real roof graphic) sits
         // directly over the tile the player faces into (px+1, py+1) — the
@@ -3279,15 +3686,32 @@ mod tests {
         let mut world = anima_core::World::new();
         world.items.insert(
             1,
-            synth_item(1, 999, (px + 1) as u16, (py + 1) as u16, (pz + 15) as i8, true),
+            synth_item(
+                1,
+                999,
+                (px + 1) as u16,
+                (py + 1) as u16,
+                (pz + 15) as i8,
+                true,
+            ),
         );
         let multis = Multis::from_components(std::collections::HashMap::from([(
             999,
-            vec![MultiComponent { graphic: 0x0586, dx: 0, dy: 0, dz: 0, visible: true, is_origin: true }],
+            vec![MultiComponent {
+                graphic: 0x0586,
+                dx: 0,
+                dy: 0,
+                dz: 0,
+                visible: true,
+                is_origin: true,
+            }],
         )]));
 
         let culled = max_draw_z(&world, &mut map, Some(&multis), px, py, pz);
-        assert!(culled < 127, "the multi's roof component must cull max_draw_z, got {culled}");
+        assert!(
+            culled < 127,
+            "the multi's roof component must cull max_draw_z, got {culled}"
+        );
     }
 
     /// FIX 6 (pure given real tiledata/animdata, no `Session` needed): an
@@ -3301,7 +3725,10 @@ mod tests {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let map = MapData::open(&dir).expect("open map data");
         let animdata = AnimData::open(&dir).expect("open animdata");
-        assert!(map.item_is_animated(0x03AE), "0x03AE should be a real animated graphic");
+        assert!(
+            map.item_is_animated(0x03AE),
+            "0x03AE should be a real animated graphic"
+        );
 
         let suffix = anim_suffix(&map, Some(&animdata), 0x03AE);
         assert!(suffix.contains("\"a\":[942,943,944]"), "suffix={suffix}");
@@ -3313,4 +3740,3 @@ mod tests {
         assert_eq!(anim_suffix(&map, None, 0x03AE), "");
     }
 }
-

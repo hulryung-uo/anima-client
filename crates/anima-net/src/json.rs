@@ -5,7 +5,7 @@
 //! shapes are the contract mirrored by `anima2/anima2/contract.py` — keep the
 //! two in lockstep.
 //!
-//! ## Schema (v6 — snake_case, versioned)
+//! ## Schema (v7 — snake_case, versioned)
 //!
 //! [`observation_to_json`] emits one object with these top-level keys, one per
 //! [`Observation`] field: `player`, `mobiles`, `items`, `new_journal`,
@@ -52,7 +52,9 @@
 //! before treating `graphic` as an ART id — see [`ItemView`]'s doc. v6: added
 //! `map_gumps` — treasure/decoration map windows (0x90/0xF5 DisplayMap(New) +
 //! 0x56 MapCommand), so a brain can locate a decoded treasure map's pins
-//! without a human reading the parchment.)
+//! without a human reading the parchment. v7: added `player.body`,
+//! `player.poisoned`, and `player.dead` so survival brains receive status that
+//! the core world already tracks.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
@@ -79,6 +81,7 @@ fn player_json(p: &PlayerView) -> Value {
         "mana": p.mana, "mana_max": p.mana_max, "stam": p.stam, "stam_max": p.stam_max,
         "strength": p.strength, "dexterity": p.dexterity, "intelligence": p.intelligence,
         "gold": p.gold, "weight": p.weight, "weight_max": p.weight_max, "armor": p.armor,
+        "body": p.body, "poisoned": p.poisoned, "dead": p.dead,
     })
 }
 
@@ -112,17 +115,37 @@ fn gump_element_json(e: &GumpElement) -> Value {
         GumpElement::Background { x, y, w, h, page } => {
             json!({"type": "background", "x": x, "y": y, "w": w, "h": h, "page": page})
         }
-        GumpElement::Image { x, y, graphic, page } => {
+        GumpElement::Image {
+            x,
+            y,
+            graphic,
+            page,
+        } => {
             json!({"type": "image", "x": x, "y": y, "graphic": graphic, "page": page})
         }
-        GumpElement::Button { x, y, graphic, reply_id, pageflag, param, page } => json!({
+        GumpElement::Button {
+            x,
+            y,
+            graphic,
+            reply_id,
+            pageflag,
+            param,
+            page,
+        } => json!({
             "type": "button", "x": x, "y": y, "graphic": graphic, "reply_id": reply_id,
             "pageflag": pageflag, "param": param, "page": page,
         }),
         GumpElement::Text { x, y, w, s, page } => {
             json!({"type": "text", "x": x, "y": y, "w": w, "s": s, "page": page})
         }
-        GumpElement::Html { x, y, w, h, text, page } => {
+        GumpElement::Html {
+            x,
+            y,
+            w,
+            h,
+            text,
+            page,
+        } => {
             let text = match text {
                 HtmlText::Literal(s) => json!({ "literal": s }),
                 HtmlText::Cliloc { id, args } => json!({ "cliloc": { "id": id, "args": args } }),
@@ -135,7 +158,14 @@ fn gump_element_json(e: &GumpElement) -> Value {
         GumpElement::Radio { x, y, id, on, page } => {
             json!({"type": "radio", "x": x, "y": y, "id": id, "on": on, "page": page})
         }
-        GumpElement::Entry { x, y, w, id, s, page } => {
+        GumpElement::Entry {
+            x,
+            y,
+            w,
+            id,
+            s,
+            page,
+        } => {
             json!({"type": "entry", "x": x, "y": y, "w": w, "id": id, "s": s, "page": page})
         }
     }
@@ -268,8 +298,10 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         .corpse_equip
         .iter()
         .map(|(corpse, entries)| {
-            let entries: Vec<Value> =
-                entries.iter().map(|(layer, serial)| json!({ "layer": layer, "serial": serial })).collect();
+            let entries: Vec<Value> = entries
+                .iter()
+                .map(|(layer, serial)| json!({ "layer": layer, "serial": serial }))
+                .collect();
             json!({ "corpse": corpse, "entries": entries })
         })
         .collect();
@@ -352,11 +384,19 @@ fn gump_entries_from_json(v: &Value) -> Vec<(u16, String)> {
         .filter_map(|e| {
             if let Some(o) = e.as_object() {
                 let id = o.get("id").and_then(Value::as_u64)? as u16;
-                let text = o.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+                let text = o
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 Some((id, text))
             } else if let Some(pair) = e.as_array() {
                 let id = pair.first().and_then(Value::as_u64)? as u16;
-                let text = pair.get(1).and_then(Value::as_str).unwrap_or("").to_string();
+                let text = pair
+                    .get(1)
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 Some((id, text))
             } else {
                 None
@@ -369,7 +409,10 @@ fn gump_entries_from_json(v: &Value) -> Vec<(u16, String)> {
 /// Every [`Action`] variant round-trips through this (see the table-driven
 /// test below) — keep this match exhaustive as the enum grows.
 pub fn action_from_json(v: &Value) -> Result<Action, String> {
-    let t = v.get("type").and_then(Value::as_str).ok_or("action missing 'type'")?;
+    let t = v
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or("action missing 'type'")?;
     let u32f = |k: &str| v.get(k).and_then(Value::as_u64).map(|n| n as u32);
     let req_u32 = |k: &str| u32f(k).ok_or_else(|| format!("action {t} missing u32 '{k}'"));
     // A missing/mistyped (wrong key case, float) coordinate must error rather
@@ -387,14 +430,23 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
             dir: v.get("dir").and_then(Value::as_u64).unwrap_or(0) as u8,
             run: v.get("run").and_then(Value::as_bool).unwrap_or(false),
         }),
-        "WalkTo" => Ok(Action::WalkTo { x: req_u16("x")?, y: req_u16("y")? }),
+        "WalkTo" => Ok(Action::WalkTo {
+            x: req_u16("x")?,
+            y: req_u16("y")?,
+        }),
         "Say" => Ok(Action::Say { text: text("text") }),
         "PartySay" => Ok(Action::PartySay { text: text("text") }),
-        "Attack" => Ok(Action::Attack { serial: req_u32("serial")? }),
+        "Attack" => Ok(Action::Attack {
+            serial: req_u32("serial")?,
+        }),
         "AutoAttack" => Ok(Action::AutoAttack),
         "AttackLast" => Ok(Action::AttackLast),
-        "Use" => Ok(Action::Use { serial: req_u32("serial")? }),
-        "Click" => Ok(Action::Click { serial: req_u32("serial")? }),
+        "Use" => Ok(Action::Use {
+            serial: req_u32("serial")?,
+        }),
+        "Click" => Ok(Action::Click {
+            serial: req_u32("serial")?,
+        }),
         "PickUp" => Ok(Action::PickUp {
             serial: req_u32("serial")?,
             amount: v.get("amount").and_then(Value::as_u64).unwrap_or(1) as u16,
@@ -416,7 +468,9 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         "CastSpell" => Ok(Action::CastSpell {
             spell: v.get("spell").and_then(Value::as_u64).unwrap_or(0) as u16,
         }),
-        "TargetObject" => Ok(Action::TargetObject { serial: req_u32("serial")? }),
+        "TargetObject" => Ok(Action::TargetObject {
+            serial: req_u32("serial")?,
+        }),
         "TargetGround" => Ok(Action::TargetGround {
             x: v.get("x").and_then(Value::as_u64).unwrap_or(0) as u16,
             y: v.get("y").and_then(Value::as_u64).unwrap_or(0) as u16,
@@ -446,12 +500,20 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         "UseSkill" => Ok(Action::UseSkill {
             skill: v.get("skill").and_then(Value::as_u64).unwrap_or(0) as u16,
         }),
-        "OplRequest" => Ok(Action::OplRequest { serial: req_u32("serial")? }),
+        "OplRequest" => Ok(Action::OplRequest {
+            serial: req_u32("serial")?,
+        }),
         "PartyInvite" => Ok(Action::PartyInvite),
         "PartyLeave" => Ok(Action::PartyLeave),
-        "PartyAccept" => Ok(Action::PartyAccept { leader: req_u32("leader")? }),
-        "PartyDecline" => Ok(Action::PartyDecline { leader: req_u32("leader")? }),
-        "PopupRequest" => Ok(Action::PopupRequest { serial: req_u32("serial")? }),
+        "PartyAccept" => Ok(Action::PartyAccept {
+            leader: req_u32("leader")?,
+        }),
+        "PartyDecline" => Ok(Action::PartyDecline {
+            leader: req_u32("leader")?,
+        }),
+        "PopupRequest" => Ok(Action::PopupRequest {
+            serial: req_u32("serial")?,
+        }),
         "PopupSelect" => Ok(Action::PopupSelect {
             serial: req_u32("serial")?,
             index: v.get("index").and_then(Value::as_u64).unwrap_or(0) as u16,
@@ -463,7 +525,11 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
             switches: v
                 .get("switches")
                 .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(|s| s.as_u64().map(|n| n as u32)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_u64().map(|n| n as u32))
+                        .collect()
+                })
                 .unwrap_or_default(),
             entries: gump_entries_from_json(v),
         }),
@@ -473,7 +539,9 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
             container: req_u32("container")?,
             accept: v.get("accept").and_then(Value::as_bool).unwrap_or(true),
         }),
-        "TradeCancel" => Ok(Action::TradeCancel { container: req_u32("container")? }),
+        "TradeCancel" => Ok(Action::TradeCancel {
+            container: req_u32("container")?,
+        }),
         "TradeGold" => Ok(Action::TradeGold {
             container: req_u32("container")?,
             gold: u32f("gold").unwrap_or(0),
@@ -493,57 +561,119 @@ mod tests {
     #[test]
     fn action_from_json_covers_every_variant() {
         let cases: Vec<(Value, Action)> = vec![
-            (json!({"type": "Walk", "dir": 3, "run": true}), Action::Walk { dir: 3, run: true }),
-            (json!({"type": "WalkTo", "x": 1200, "y": 800}), Action::WalkTo { x: 1200, y: 800 }),
-            (json!({"type": "Say", "text": "hi"}), Action::Say { text: "hi".into() }),
-            (json!({"type": "PartySay", "text": "go"}), Action::PartySay { text: "go".into() }),
-            (json!({"type": "Attack", "serial": 42}), Action::Attack { serial: 42 }),
+            (
+                json!({"type": "Walk", "dir": 3, "run": true}),
+                Action::Walk { dir: 3, run: true },
+            ),
+            (
+                json!({"type": "WalkTo", "x": 1200, "y": 800}),
+                Action::WalkTo { x: 1200, y: 800 },
+            ),
+            (
+                json!({"type": "Say", "text": "hi"}),
+                Action::Say { text: "hi".into() },
+            ),
+            (
+                json!({"type": "PartySay", "text": "go"}),
+                Action::PartySay { text: "go".into() },
+            ),
+            (
+                json!({"type": "Attack", "serial": 42}),
+                Action::Attack { serial: 42 },
+            ),
             (json!({"type": "AutoAttack"}), Action::AutoAttack),
             (json!({"type": "AttackLast"}), Action::AttackLast),
-            (json!({"type": "Use", "serial": 7}), Action::Use { serial: 7 }),
-            (json!({"type": "Click", "serial": 7}), Action::Click { serial: 7 }),
+            (
+                json!({"type": "Use", "serial": 7}),
+                Action::Use { serial: 7 },
+            ),
+            (
+                json!({"type": "Click", "serial": 7}),
+                Action::Click { serial: 7 },
+            ),
             (
                 json!({"type": "PickUp", "serial": 1073741825u64, "amount": 5}),
-                Action::PickUp { serial: 0x4000_0001, amount: 5 },
+                Action::PickUp {
+                    serial: 0x4000_0001,
+                    amount: 5,
+                },
             ),
             (
                 json!({"type": "Drop", "serial": 9, "x": 10, "y": 20, "z": -3, "container": 99}),
-                Action::Drop { serial: 9, x: 10, y: 20, z: -3, container: 99 },
+                Action::Drop {
+                    serial: 9,
+                    x: 10,
+                    y: 20,
+                    z: -3,
+                    container: 99,
+                },
             ),
             (
                 json!({"type": "Equip", "serial": 9, "layer": 2}),
-                Action::Equip { serial: 9, layer: 2 },
+                Action::Equip {
+                    serial: 9,
+                    layer: 2,
+                },
             ),
-            (json!({"type": "WarMode", "on": true}), Action::WarMode { on: true }),
-            (json!({"type": "CastSpell", "spell": 8}), Action::CastSpell { spell: 8 }),
+            (
+                json!({"type": "WarMode", "on": true}),
+                Action::WarMode { on: true },
+            ),
+            (
+                json!({"type": "CastSpell", "spell": 8}),
+                Action::CastSpell { spell: 8 },
+            ),
             (
                 json!({"type": "TargetObject", "serial": 4242}),
                 Action::TargetObject { serial: 4242 },
             ),
             (
                 json!({"type": "TargetGround", "x": 1000, "y": 2000, "z": -5, "graphic": 420}),
-                Action::TargetGround { x: 1000, y: 2000, z: -5, graphic: 420 },
+                Action::TargetGround {
+                    x: 1000,
+                    y: 2000,
+                    z: -5,
+                    graphic: 420,
+                },
             ),
             (json!({"type": "TargetCancel"}), Action::TargetCancel),
             (
                 json!({"type": "BuyItems", "vendor": 5, "items": [[1, 2]]}),
-                Action::BuyItems { vendor: 5, items: vec![(1, 2)] },
+                Action::BuyItems {
+                    vendor: 5,
+                    items: vec![(1, 2)],
+                },
             ),
             (
                 json!({"type": "SellItems", "vendor": 5, "items": [{"serial": 1, "amount": 3}]}),
-                Action::SellItems { vendor: 5, items: vec![(1, 3)] },
+                Action::SellItems {
+                    vendor: 5,
+                    items: vec![(1, 3)],
+                },
             ),
             (
                 json!({"type": "BookRequest", "serial": 3, "pages": 2}),
-                Action::BookRequest { serial: 3, pages: 2 },
+                Action::BookRequest {
+                    serial: 3,
+                    pages: 2,
+                },
             ),
-            (json!({"type": "UseAbility", "ability": 4}), Action::UseAbility { ability: 4 }),
+            (
+                json!({"type": "UseAbility", "ability": 4}),
+                Action::UseAbility { ability: 4 },
+            ),
             (
                 json!({"type": "SkillLock", "skill": 10, "lock": 2}),
                 Action::SkillLock { skill: 10, lock: 2 },
             ),
-            (json!({"type": "UseSkill", "skill": 21}), Action::UseSkill { skill: 21 }),
-            (json!({"type": "OplRequest", "serial": 8}), Action::OplRequest { serial: 8 }),
+            (
+                json!({"type": "UseSkill", "skill": 21}),
+                Action::UseSkill { skill: 21 },
+            ),
+            (
+                json!({"type": "OplRequest", "serial": 8}),
+                Action::OplRequest { serial: 8 },
+            ),
             (json!({"type": "PartyInvite"}), Action::PartyInvite),
             (json!({"type": "PartyLeave"}), Action::PartyLeave),
             (
@@ -560,7 +690,10 @@ mod tests {
             ),
             (
                 json!({"type": "PopupSelect", "serial": 6, "index": 1}),
-                Action::PopupSelect { serial: 6, index: 1 },
+                Action::PopupSelect {
+                    serial: 6,
+                    index: 1,
+                },
             ),
             (
                 json!({"type": "GumpResponse", "serial": 1, "gump_id": 2, "button": 3,
@@ -575,12 +708,17 @@ mod tests {
             ),
             (
                 json!({"type": "PromptResponse", "text": "Fido"}),
-                Action::PromptResponse { text: "Fido".into() },
+                Action::PromptResponse {
+                    text: "Fido".into(),
+                },
             ),
             (json!({"type": "PromptCancel"}), Action::PromptCancel),
             (
                 json!({"type": "TradeAccept", "container": 55, "accept": true}),
-                Action::TradeAccept { container: 55, accept: true },
+                Action::TradeAccept {
+                    container: 55,
+                    accept: true,
+                },
             ),
             (
                 json!({"type": "TradeCancel", "container": 55}),
@@ -588,7 +726,11 @@ mod tests {
             ),
             (
                 json!({"type": "TradeGold", "container": 55, "gold": 100, "platinum": 1}),
-                Action::TradeGold { container: 55, gold: 100, platinum: 1 },
+                Action::TradeGold {
+                    container: 55,
+                    gold: 100,
+                    platinum: 1,
+                },
             ),
         ];
         for (json, expected) in cases {
@@ -613,13 +755,36 @@ mod tests {
     #[test]
     fn observation_serializes_pending_target() {
         use anima_core::world::{TargetCursor, World};
-        let w = World {
-            pending_target: Some(TargetCursor { target_type: 1, cursor_id: 0xABCD, cursor_flag: 0 }),
-            ..World::default()
-        };
+        let mut w = World::default();
+        w.pending_target = Some(TargetCursor {
+            target_type: 1,
+            cursor_id: 0xABCD,
+            cursor_flag: 0,
+        });
         let v = observation_to_json(&w.observe(&mut 0));
         assert_eq!(v["pending_target"]["cursor_id"], 0xABCD);
         assert_eq!(v["pending_target"]["target_type"], 1);
+    }
+
+    #[test]
+    fn observation_serializes_player_survival_state_explicitly() {
+        let obs = Observation {
+            player: PlayerView {
+                body: 0x192,
+                poisoned: true,
+                dead: true,
+                ..PlayerView::default()
+            },
+            ..Observation::default()
+        };
+        let v = observation_to_json(&obs);
+        assert_eq!(v["player"]["body"], 0x192);
+        assert_eq!(v["player"]["poisoned"], true);
+        assert_eq!(v["player"]["dead"], true);
+
+        let default = observation_to_json(&Observation::default());
+        assert_eq!(default["player"]["poisoned"], false);
+        assert_eq!(default["player"]["dead"], false);
     }
 
     #[test]
@@ -627,16 +792,44 @@ mod tests {
         let obs = Observation::default();
         let v = observation_to_json(&obs);
         for k in [
-            "player", "mobiles", "items", "new_journal", "pending_target", "skills", "gumps",
-            "prompt", "trades", "buffs", "shop_buy", "shop_sell", "popup", "book", "party",
-            "quest_arrow", "weather", "season", "light", "war", "last_attack", "combatant",
-            "corpse_of", "corpse_equip", "map_index", "aos", "opl", "recent_damage", "spellbooks",
+            "player",
+            "mobiles",
+            "items",
+            "new_journal",
+            "pending_target",
+            "skills",
+            "gumps",
+            "prompt",
+            "trades",
+            "buffs",
+            "shop_buy",
+            "shop_sell",
+            "popup",
+            "book",
+            "party",
+            "quest_arrow",
+            "weather",
+            "season",
+            "light",
+            "war",
+            "last_attack",
+            "combatant",
+            "corpse_of",
+            "corpse_equip",
+            "map_index",
+            "aos",
+            "opl",
+            "recent_damage",
+            "spellbooks",
             "map_gumps",
         ] {
             assert!(v.get(k).is_some(), "missing key {k}");
         }
         assert!(v["player"].get("hits_max").is_some());
         assert!(v["player"].get("weight_max").is_some());
+        assert!(v["player"].get("body").is_some());
+        assert!(v["player"].get("poisoned").is_some());
+        assert!(v["player"].get("dead").is_some());
         // Nothing open by default: the Option-backed fields serialize to null.
         assert!(v["shop_buy"].is_null());
         assert!(v["book"].is_null());
@@ -656,7 +849,11 @@ mod tests {
             serial: 1,
             graphic: 0x0EED,
             amount: 1,
-            pos: Position { x: 100, y: 100, z: 0 },
+            pos: Position {
+                x: 100,
+                y: 100,
+                z: 0,
+            },
             container: None,
             layer: 0,
             distance: 3,
@@ -666,7 +863,11 @@ mod tests {
             serial: 2,
             graphic: 0x0002, // a real ART id too — the collision `is_multi` guards against
             amount: 1,
-            pos: Position { x: 1492, y: 1760, z: 0 },
+            pos: Position {
+                x: 1492,
+                y: 1760,
+                z: 0,
+            },
             container: None,
             layer: 0,
             distance: 5,
@@ -674,7 +875,11 @@ mod tests {
         };
         assert_eq!(item_json(&normal)["is_multi"], false);
         assert_eq!(item_json(&multi)["is_multi"], true);
-        assert_eq!(item_json(&multi)["graphic"], 2, "graphic is still emitted — just not an ART id here");
+        assert_eq!(
+            item_json(&multi)["graphic"],
+            2,
+            "graphic is still emitted — just not an ART id here"
+        );
     }
 
     #[test]
@@ -695,7 +900,10 @@ mod tests {
         assert_eq!(v["recent_damage"][0]["amount"], 12);
         assert_eq!(v["recent_damage"][1]["amount"], 7);
         // Monotonic seq lets a brain dedupe across polls.
-        assert!(v["recent_damage"][1]["seq"].as_u64().unwrap() > v["recent_damage"][0]["seq"].as_u64().unwrap());
+        assert!(
+            v["recent_damage"][1]["seq"].as_u64().unwrap()
+                > v["recent_damage"][0]["seq"].as_u64().unwrap()
+        );
     }
 
     #[test]
@@ -743,7 +951,13 @@ mod tests {
         assert_eq!(mv["facet"], 3);
         assert_eq!(mv["bounds"]["min_x"], 520);
         assert_eq!(mv["bounds"]["max_y"], 2050);
-        assert_eq!((mv["width"].as_u64().unwrap(), mv["height"].as_u64().unwrap()), (400, 400));
+        assert_eq!(
+            (
+                mv["width"].as_u64().unwrap(),
+                mv["height"].as_u64().unwrap()
+            ),
+            (400, 400)
+        );
         assert_eq!(mv["pins"][0][0], 100);
         assert_eq!(mv["pins"][0][1], 120);
         assert_eq!(mv["editable"], true);
@@ -763,7 +977,10 @@ mod tests {
             y: 2,
             w: 100,
             h: 20,
-            text: HtmlText::Cliloc { id: 1042971, args: Some("a\tb".into()) },
+            text: HtmlText::Cliloc {
+                id: 1042971,
+                args: Some("a\tb".into()),
+            },
             page: 0,
         };
         let v = gump_element_json(&el);

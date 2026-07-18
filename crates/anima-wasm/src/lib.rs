@@ -93,8 +93,14 @@ impl WasmClient {
             Some(0x21) if frame.len() >= 8 => {
                 let x = u16::from_be_bytes([frame[2], frame[3]]);
                 let y = u16::from_be_bytes([frame[4], frame[5]]);
-                self.walker
-                    .on_deny(&mut self.world, frame[1], x, y, frame[7] as i8, frame[6] & 7);
+                self.walker.on_deny(
+                    &mut self.world,
+                    frame[1],
+                    x,
+                    y,
+                    frame[7] as i8,
+                    frame[6] & 7,
+                );
             }
             Some(0xBD) => self.outbox.extend(build_client_version("7.0.102.3")),
             _ => {
@@ -107,7 +113,9 @@ impl WasmClient {
         // ride the same outbox as the 0xBD version reply above.
         for serial in self.world.take_house_design_requests() {
             self.outbox
-                .extend(anima_core::net::outgoing::build_house_design_request(serial));
+                .extend(anima_core::net::outgoing::build_house_design_request(
+                    serial,
+                ));
         }
     }
 

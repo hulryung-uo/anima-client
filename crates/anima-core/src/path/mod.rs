@@ -310,7 +310,11 @@ pub fn find_path_near(
     if best_cheb > max_radius {
         return None;
     }
-    let path = if best_node == (sx, sy) { Vec::new() } else { reconstruct(&came_from, best_node) };
+    let path = if best_node == (sx, sy) {
+        Vec::new()
+    } else {
+        reconstruct(&came_from, best_node)
+    };
     Some((best_node, path))
 }
 
@@ -386,15 +390,27 @@ mod tests {
             h: 10,
             blocked: Default::default(),
         };
-        assert_eq!(find_path(&mut g, (3, 3, 0), (3, 3), 10_000), Some(Vec::new()));
+        assert_eq!(
+            find_path(&mut g, (3, 3, 0), (3, 3), 10_000),
+            Some(Vec::new())
+        );
     }
 
     #[test]
     fn unreachable_returns_none() {
         // Fully enclose the goal.
-        let blocked = [(4, 4), (4, 5), (4, 6), (5, 4), (5, 6), (6, 4), (6, 5), (6, 6)]
-            .into_iter()
-            .collect();
+        let blocked = [
+            (4, 4),
+            (4, 5),
+            (4, 6),
+            (5, 4),
+            (5, 6),
+            (6, 4),
+            (6, 5),
+            (6, 6),
+        ]
+        .into_iter()
+        .collect();
         let mut g = Grid {
             w: 10,
             h: 10,
@@ -408,7 +424,11 @@ mod tests {
         // A plain `Terrain` impl (like `Grid` here, or `anima_assets::MapData`
         // alone) only ever models the static map — it has no concept of a
         // dynamic door item sitting on top, so the default must say "no door".
-        let mut g = Grid { w: 5, h: 5, blocked: Default::default() };
+        let mut g = Grid {
+            w: 5,
+            h: 5,
+            blocked: Default::default(),
+        };
         assert_eq!(Terrain::door_at(&mut g, 0, 0, 0), None);
     }
 
@@ -446,7 +466,11 @@ mod tests {
             blocked: Default::default(),
         };
         let (resolved, path) = find_path_near(&mut g, (0, 0, 0), (5, 5), 2, 10_000).unwrap();
-        assert_eq!(resolved, (5, 5), "an already-walkable goal must not be adjusted");
+        assert_eq!(
+            resolved,
+            (5, 5),
+            "an already-walkable goal must not be adjusted"
+        );
         assert_eq!(path.last().map(|s| (s.x, s.y)), Some((5, 5)));
     }
 
@@ -462,7 +486,11 @@ mod tests {
         };
         let (resolved, path) = find_path_near(&mut g, (0, 0, 0), (5, 5), 2, 10_000).unwrap();
         assert_ne!(resolved, (5, 5));
-        assert_eq!(chebyshev(resolved.0, resolved.1, 5, 5), 1, "nearest ring (radius 1) must win");
+        assert_eq!(
+            chebyshev(resolved.0, resolved.1, 5, 5),
+            1,
+            "nearest ring (radius 1) must win"
+        );
         assert_eq!(path.last().map(|s| (s.x, s.y)), Some(resolved));
     }
 
@@ -486,7 +514,11 @@ mod tests {
             blocked: [(5, 5)].into_iter().collect(),
         };
         let (resolved, path) = find_path_near(&mut g, (5, 6, 0), (5, 5), 2, 10_000).unwrap();
-        assert_eq!(resolved, (5, 6), "already adjacent to the blocked goal — must not walk anywhere");
+        assert_eq!(
+            resolved,
+            (5, 6),
+            "already adjacent to the blocked goal — must not walk anywhere"
+        );
         assert!(path.is_empty());
     }
 
@@ -500,9 +532,17 @@ mod tests {
             .into_iter()
             .chain(chebyshev_ring(5, 5, 1))
             .collect();
-        let mut g = Grid { w: 10, h: 10, blocked };
+        let mut g = Grid {
+            w: 10,
+            h: 10,
+            blocked,
+        };
         let (resolved, _path) = find_path_near(&mut g, (0, 0, 0), (5, 5), 2, 10_000).unwrap();
-        assert_eq!(chebyshev(resolved.0, resolved.1, 5, 5), 2, "radius-1 is fully blocked, so this must come from radius 2");
+        assert_eq!(
+            chebyshev(resolved.0, resolved.1, 5, 5),
+            2,
+            "radius-1 is fully blocked, so this must come from radius 2"
+        );
     }
 
     #[test]
@@ -515,7 +555,11 @@ mod tests {
             .into_iter()
             .chain(chebyshev_ring(5, 5, 2))
             .collect();
-        let mut g = Grid { w: 10, h: 10, blocked };
+        let mut g = Grid {
+            w: 10,
+            h: 10,
+            blocked,
+        };
         assert!(find_path_near(&mut g, (0, 0, 0), (5, 5), 2, 10_000).is_none());
     }
 
@@ -546,8 +590,15 @@ mod tests {
             .into_iter()
             .chain(chebyshev_ring(5, 5, 2))
             .collect();
-        let mut g = Grid { w: 10, h: 10, blocked };
-        let mut counting = Counting { inner: &mut g, calls: std::cell::Cell::new(0) };
+        let mut g = Grid {
+            w: 10,
+            h: 10,
+            blocked,
+        };
+        let mut counting = Counting {
+            inner: &mut g,
+            calls: std::cell::Cell::new(0),
+        };
 
         assert!(find_path_near(&mut counting, (0, 0, 0), (5, 5), 2, max_expansions).is_none());
 

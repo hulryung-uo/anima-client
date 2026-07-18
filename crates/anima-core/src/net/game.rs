@@ -164,7 +164,11 @@ fn target_cursor(world: &mut World, frame: &[u8]) -> PResult<()> {
     world.pending_target = if cursor_flag == 3 {
         None
     } else {
-        Some(TargetCursor { target_type, cursor_id, cursor_flag })
+        Some(TargetCursor {
+            target_type,
+            cursor_id,
+            cursor_flag,
+        })
     };
     Ok(())
 }
@@ -183,7 +187,11 @@ fn multi_target_cursor(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]); // skip id
     let _allow_ground = r.u8()?;
     let cursor_id = r.u32()?;
-    world.pending_target = Some(TargetCursor { target_type: 1, cursor_id, cursor_flag: 0 });
+    world.pending_target = Some(TargetCursor {
+        target_type: 1,
+        cursor_id,
+        cursor_flag: 0,
+    });
     Ok(())
 }
 
@@ -358,7 +366,11 @@ fn skills(world: &mut World, frame: &[u8]) -> PResult<()> {
         let value = r.u16()?;
         let base = r.u16()?;
         let lock = r.u8()?;
-        let cap = if has_cap && r.remaining() >= 2 { r.u16()? } else { 1000 };
+        let cap = if has_cap && r.remaining() >= 2 {
+            r.u16()?
+        } else {
+            1000
+        };
 
         let id = if adjust {
             match raw_id.checked_sub(1) {
@@ -375,7 +387,13 @@ fn skills(world: &mut World, frame: &[u8]) -> PResult<()> {
         };
 
         let s = world.skills.entry(id).or_default();
-        *s = Skill { id, value, base, cap, lock };
+        *s = Skill {
+            id,
+            value,
+            base,
+            cap,
+            lock,
+        };
 
         if is_single {
             break;
@@ -618,8 +636,8 @@ fn graphic_effect(world: &mut World, frame: &[u8], hued: bool) -> PResult<()> {
     r.skip(2)?; // unknown
     r.skip(1)?; // fixed direction
     r.skip(1)?; // explode flag
-    // 0xC0/0xC7 carry a 32-bit hue (only the low 16 bits matter); the renderMode
-    // u32 and any 0xC7 particle extras are ignored by the 2D client.
+                // 0xC0/0xC7 carry a 32-bit hue (only the low 16 bits matter); the renderMode
+                // u32 and any 0xC7 particle extras are ignored by the 2D client.
     let hue = if hued { r.u32()? as u16 } else { 0 };
     world.push_effect(Effect {
         seq: 0,
@@ -701,7 +719,11 @@ fn play_music(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     let music_id = r.u16()?;
     // 0xFFFF is the conventional "stop music" sentinel.
-    world.current_music = if music_id == 0xFFFF { None } else { Some(music_id) };
+    world.current_music = if music_id == 0xFFFF {
+        None
+    } else {
+        Some(music_id)
+    };
     Ok(())
 }
 
@@ -853,7 +875,11 @@ fn open_buy_window(world: &mut World, frame: &[u8]) -> PResult<()> {
     let count = r.u8()?;
     // The vendor mobile owns the for-sale container (set when it entered view as a
     // worn shop layer). 0 if we haven't seen the linkage yet.
-    let vendor = world.items.get(&container).and_then(|it| it.container).unwrap_or(0);
+    let vendor = world
+        .items
+        .get(&container)
+        .and_then(|it| it.container)
+        .unwrap_or(0);
     let mut entries = Vec::with_capacity(count as usize);
     for _ in 0..count {
         if r.remaining() < 5 {
@@ -867,7 +893,11 @@ fn open_buy_window(world: &mut World, frame: &[u8]) -> PResult<()> {
         let name = ascii_string(r.bytes(name_len)?);
         entries.push((price, name));
     }
-    world.shop_buy = Some(crate::world::ShopBuy { vendor, container, entries });
+    world.shop_buy = Some(crate::world::ShopBuy {
+        vendor,
+        container,
+        entries,
+    });
     Ok(())
 }
 
@@ -898,7 +928,14 @@ fn sell_list(world: &mut World, frame: &[u8]) -> PResult<()> {
             break;
         }
         let name = ascii_string(r.bytes(name_len)?);
-        items.push(crate::world::ShopSellItem { serial, graphic, hue, amount, price, name });
+        items.push(crate::world::ShopSellItem {
+            serial,
+            graphic,
+            hue,
+            amount,
+            price,
+            name,
+        });
     }
     world.shop_sell = Some(crate::world::ShopSell { vendor, items });
     Ok(())
@@ -924,7 +961,14 @@ fn display_gump(world: &mut World, frame: &[u8]) -> PResult<()> {
     let layout = ascii_string(r.bytes(layout_len)?);
     let count = r.u16()? as usize;
     let text = read_gump_text_lines(&mut r, count);
-    world.add_gump(Gump { serial, gump_id, x, y, layout, text });
+    world.add_gump(Gump {
+        serial,
+        gump_id,
+        x,
+        y,
+        layout,
+        text,
+    });
     Ok(())
 }
 
@@ -946,7 +990,9 @@ fn display_gump_packed(world: &mut World, frame: &[u8]) -> PResult<()> {
     let y = r.u32()? as i32;
 
     let layout_bytes = read_zlib_block(&mut r)?;
-    let layout = String::from_utf8_lossy(&layout_bytes).trim_end_matches('\0').to_string();
+    let layout = String::from_utf8_lossy(&layout_bytes)
+        .trim_end_matches('\0')
+        .to_string();
 
     let count = r.u32()? as usize;
     let text = if count > 0 {
@@ -956,7 +1002,14 @@ fn display_gump_packed(world: &mut World, frame: &[u8]) -> PResult<()> {
     } else {
         Vec::new()
     };
-    world.add_gump(Gump { serial, gump_id, x, y, layout, text });
+    world.add_gump(Gump {
+        serial,
+        gump_id,
+        x,
+        y,
+        layout,
+        text,
+    });
     Ok(())
 }
 
@@ -1027,18 +1080,23 @@ fn custom_house(world: &mut World, frame: &[u8]) -> PResult<()> {
             continue; // a skipped plane consumes no payload bytes
         }
         let zbytes = r.bytes(clen)?; // EOF-safe: errors bubble up, apply_packet swallows them
-        // Inflate with `dlen` as a HARD output cap: both writers (ServUO/ClassicUO)
-        // treat dlen as the exact decompressed size, and an unbounded inflate would
-        // let a hostile plane zlib-bomb ~4 MB out of 4 KB of payload (deflate is up
-        // to ~1032:1) — and a plain truncate() would still retain that capacity
-        // inside `World::house_designs`. A stream that overruns dlen is corrupt by
-        // definition; drop it to an empty plane like any other inflate error.
+                                     // Inflate with `dlen` as a HARD output cap: both writers (ServUO/ClassicUO)
+                                     // treat dlen as the exact decompressed size, and an unbounded inflate would
+                                     // let a hostile plane zlib-bomb ~4 MB out of 4 KB of payload (deflate is up
+                                     // to ~1032:1) — and a plain truncate() would still retain that capacity
+                                     // inside `World::house_designs`. A stream that overruns dlen is corrupt by
+                                     // definition; drop it to an empty plane like any other inflate error.
         let data = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(zbytes, dlen)
             .unwrap_or_default();
-        planes.push(HousePlane { mode, plane_z, data });
+        planes.push(HousePlane {
+            mode,
+            plane_z,
+            data,
+        });
     }
 
-    if world.house_designs.len() >= MAX_HOUSE_DESIGNS && !world.house_designs.contains_key(&serial) {
+    if world.house_designs.len() >= MAX_HOUSE_DESIGNS && !world.house_designs.contains_key(&serial)
+    {
         // Prefer evicting a design that never got decoded (its foundation isn't in
         // view) over an arbitrary one — evicting a tiles_ready design would silently
         // revert an ON-SCREEN house to its stock foundation, and ServUO only re-sends
@@ -1055,7 +1113,12 @@ fn custom_house(world: &mut World, frame: &[u8]) -> PResult<()> {
     }
     world.house_designs.insert(
         serial,
-        HouseDesign { revision, planes, tiles: std::collections::HashMap::new(), tiles_ready: false },
+        HouseDesign {
+            revision,
+            planes,
+            tiles: std::collections::HashMap::new(),
+            tiles_ready: false,
+        },
     );
     // We just got the freshest design for this serial — any queued request is moot.
     world.pending_house_design_requests.retain(|s| *s != serial);
@@ -1185,9 +1248,13 @@ fn open_book_new(world: &mut World, frame: &[u8]) -> PResult<()> {
     r.skip(1)?; // unknown
     let page_count = r.u16()?;
     let title_len = r.u16()? as usize;
-    let title = String::from_utf8_lossy(r.bytes(title_len)?).trim_end_matches('\0').to_string();
+    let title = String::from_utf8_lossy(r.bytes(title_len)?)
+        .trim_end_matches('\0')
+        .to_string();
     let author_len = r.u16()? as usize;
-    let author = String::from_utf8_lossy(r.bytes(author_len)?).trim_end_matches('\0').to_string();
+    let author = String::from_utf8_lossy(r.bytes(author_len)?)
+        .trim_end_matches('\0')
+        .to_string();
     world.book = Some(crate::world::Book {
         serial,
         title,
@@ -1327,7 +1394,10 @@ fn unicode_prompt(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[3..]); // skip id + 2-byte length
     let sender_serial = r.u32()?;
     let prompt_id = r.u32()?;
-    world.prompt = Some(PromptState { sender_serial, prompt_id });
+    world.prompt = Some(PromptState {
+        sender_serial,
+        prompt_id,
+    });
     Ok(())
 }
 
@@ -1383,7 +1453,11 @@ fn secure_trade(world: &mut World, frame: &[u8]) -> PResult<()> {
             let my_container = r.u32()?;
             let their_container = r.u32()?;
             r.skip(1)?; // "hasName" bool — ServUO always writes true (1)
-            let opponent_name = if r.remaining() >= 30 { r.fixed_ascii(30)? } else { String::new() };
+            let opponent_name = if r.remaining() >= 30 {
+                r.fixed_ascii(30)?
+            } else {
+                String::new()
+            };
             world.open_trade(TradeState {
                 opponent_serial,
                 opponent_name,
@@ -1563,7 +1637,9 @@ fn display_map(world: &mut World, frame: &[u8], has_facet: bool) -> PResult<()> 
     // writes one, so 0 (Felucca) is the only sane default (matches
     // `World::map_index`'s own encoding).
     let facet = if has_facet { r.u16()? as u8 } else { 0 };
-    world.set_map_view(serial, gump_art, facet, min_x, min_y, max_x, max_y, width, height);
+    world.set_map_view(
+        serial, gump_art, facet, min_x, min_y, max_x, max_y, width, height,
+    );
     Ok(())
 }
 
@@ -1903,7 +1979,11 @@ fn parse_popup(world: &mut World, r: &mut PacketReader) -> PResult<()> {
             }
             (index, cliloc, flags)
         };
-        entries.push(PopupEntry { index, cliloc, flags });
+        entries.push(PopupEntry {
+            index,
+            cliloc,
+            flags,
+        });
     }
     world.popup = Some(PopupMenu { serial, entries });
     Ok(())
@@ -1968,7 +2048,14 @@ fn decode_unicode(bytes: &[u8], big_endian: bool) -> String {
     out
 }
 
-fn push_journal(world: &mut World, serial: u32, name: String, text: String, msg_type: u8, hue: u16) {
+fn push_journal(
+    world: &mut World,
+    serial: u32,
+    name: String,
+    text: String,
+    msg_type: u8,
+    hue: u16,
+) {
     push_journal_cliloc(world, serial, name, text, msg_type, hue, 0);
 }
 
@@ -2005,8 +2092,12 @@ fn push_journal_cliloc(
         }
         return;
     }
-    let name = if name.is_empty() { "System".to_string() } else { name };
-    world.journal.push(JournalEntry {
+    let name = if name.is_empty() {
+        "System".to_string()
+    } else {
+        name
+    };
+    world.push_journal(JournalEntry {
         serial,
         name,
         text,
@@ -2109,8 +2200,22 @@ mod tests {
         let menu = w.popup.as_ref().expect("popup set");
         assert_eq!(menu.serial, 0xDEAD_BEEF);
         assert_eq!(menu.entries.len(), 2);
-        assert_eq!(menu.entries[0], PopupEntry { index: 0, cliloc: 3_000_122, flags: 0 });
-        assert_eq!(menu.entries[1], PopupEntry { index: 1, cliloc: 3_006_111, flags: 1 });
+        assert_eq!(
+            menu.entries[0],
+            PopupEntry {
+                index: 0,
+                cliloc: 3_000_122,
+                flags: 0
+            }
+        );
+        assert_eq!(
+            menu.entries[1],
+            PopupEntry {
+                index: 1,
+                cliloc: 3_006_111,
+                flags: 1
+            }
+        );
 
         // Legacy (version 1): [index u16][cliloc-3000000 u16][flags u16].
         let mut p = PacketWriter::new();
@@ -2124,7 +2229,14 @@ mod tests {
         assert!(apply_packet(&mut w, &frame));
         let menu = w.popup.as_ref().expect("popup set");
         assert_eq!(menu.serial, 0x0102_0304);
-        assert_eq!(menu.entries, vec![PopupEntry { index: 7, cliloc: 3_000_122, flags: 0 }]);
+        assert_eq!(
+            menu.entries,
+            vec![PopupEntry {
+                index: 7,
+                cliloc: 3_000_122,
+                flags: 0
+            }]
+        );
     }
 
     #[test]
@@ -2150,7 +2262,10 @@ mod tests {
         assert_eq!(frame.len(), 23); // ServUO NewSpellbookContent EnsureCapacity(23)
         assert!(apply_packet(&mut w, &frame));
 
-        let sb = w.spellbooks.get(&0x4000_0010).expect("spellbook content stored");
+        let sb = w
+            .spellbooks
+            .get(&0x4000_0010)
+            .expect("spellbook content stored");
         assert_eq!(sb.graphic, 0x0EFA);
         assert_eq!(sb.offset, 1);
         assert_eq!(sb.content, 0x9);
@@ -2171,8 +2286,7 @@ mod tests {
         let comp_a = miniz_oxide::deflate::compress_to_vec_zlib(&raw_a, 6);
         let dlen_a = raw_a.len() as u32;
         let clen_a = comp_a.len() as u32;
-        let header_a: u32 = (0 << 28)
-            | (9 << 24)
+        let header_a: u32 = (9 << 24)
             | ((dlen_a & 0xFF) << 16)
             | ((clen_a & 0xFF) << 8)
             | (((dlen_a >> 8) & 0xF) << 4)
@@ -2195,7 +2309,6 @@ mod tests {
         let dlen_b = raw_b.len() as u32;
         let clen_b = comp_b.len() as u32;
         let header_b: u32 = (2 << 28)
-            | (0 << 24)
             | ((dlen_b & 0xFF) << 16)
             | ((clen_b & 0xFF) << 8)
             | (((dlen_b >> 8) & 0xF) << 4)
@@ -2242,22 +2355,40 @@ mod tests {
 
         let design = w.house_designs.get(&serial).expect("design stored");
         assert_eq!(design.revision, 1);
-        assert_eq!(design.planes.len(), 3, "the clen==0 plane must be skipped, not stored");
+        assert_eq!(
+            design.planes.len(),
+            3,
+            "the clen==0 plane must be skipped, not stored"
+        );
         assert_eq!(design.planes[0].mode, 0);
-        assert_eq!(design.planes[0].data, raw_a, "inflate must reproduce the exact original bytes");
+        assert_eq!(
+            design.planes[0].data, raw_a,
+            "inflate must reproduce the exact original bytes"
+        );
         assert_eq!(design.planes[1].mode, 2);
         assert_eq!(design.planes[1].data, raw_b);
-        assert_eq!(design.planes[2].data, raw_d, ">255-byte plane pins the split 12-bit dlen");
+        assert_eq!(
+            design.planes[2].data, raw_d,
+            ">255-byte plane pins the split 12-bit dlen"
+        );
 
         // Exercise the pure decoder directly, adding a mode-1 floor plane plus
         // mode-2 planes for BOTH remaining grid branches, so every offset
         // asymmetry is pinned in one call. plane_z 2 -> dz = ((2-1)%4)*20+7 = 27.
         let mut planes = design.planes.clone();
-        planes.push(HousePlane { mode: 1, plane_z: 2, data: vec![0x00, 0xAA, 0x02, 0xFE /* -2 */] });
+        planes.push(HousePlane {
+            mode: 1,
+            plane_z: 2,
+            data: vec![0x00, 0xAA, 0x02, 0xFE /* -2 */],
+        });
         // Plane E: mode 2, plane_z 1 — floors 1-4 use INSET offsets (min+1) and
         // mh = max_y - min_y = 2: i=1 -> (0,1), i=2 -> (1,0); i=0 is a hole.
         // dz = z_of(1) = 7. The ground-plane branch would land these on B's keys.
-        planes.push(HousePlane { mode: 2, plane_z: 1, data: vec![0, 0, 0, 0x21, 0, 0x22] });
+        planes.push(HousePlane {
+            mode: 2,
+            plane_z: 1,
+            data: vec![0, 0, 0, 0x21, 0, 0x22],
+        });
         // Plane F: mode 2, plane_z 5 — roof grids use UN-inset offsets with
         // mh = max_y - min_y + 1 = 3, and z_of's %4 wraps plane 5 back to dz 7
         // (not 87). i=6 -> (1,-1); i=0..5 are holes.
@@ -2271,8 +2402,8 @@ mod tests {
         assert_eq!(tiles.get(&(-3, 3)), Some(&vec![(0x0063, 0)])); // mode 0
         assert_eq!(tiles.get(&(2, -2)), Some(&vec![(0x00AA, 27)])); // mode 1, plane_z 2 -> dz 27
         assert_eq!(tiles.get(&(-1, -1)), Some(&vec![(0x0010, 0)])); // mode 2, i=0
-        // i=3 -> (-1,2) pins Y as the FAST axis (a transposed decode puts it at
-        // (2,-1)) AND the ground plane's mh = max_y-min_y+2 south stair row.
+                                                                    // i=3 -> (-1,2) pins Y as the FAST axis (a transposed decode puts it at
+                                                                    // (2,-1)) AND the ground plane's mh = max_y-min_y+2 south stair row.
         assert_eq!(tiles.get(&(-1, 2)), Some(&vec![(0x0012, 0)]));
         assert_eq!(tiles.get(&(0, 0)), Some(&vec![(0x0014, 0)])); // mode 2, i=5
         assert_eq!(tiles.get(&(-1, 1)), None, "graphic 0 is a hole, not a tile");
@@ -2355,16 +2486,14 @@ mod tests {
         w.party.pending_invite = Some(0xAAAA);
 
         // 0x01 member list: count 2, leader then member. Clears pending invite.
-        let list =
-            party_frame(&[0x01, 2, 0, 0, 0x11, 0x11, 0, 0, 0x22, 0x22]);
+        let list = party_frame(&[0x01, 2, 0, 0, 0x11, 0x11, 0, 0, 0x22, 0x22]);
         assert!(apply_packet(&mut w, &list));
         assert_eq!(w.party.members, vec![0x0000_1111, 0x0000_2222]);
         assert_eq!(w.party.leader, 0x0000_1111);
         assert_eq!(w.party.pending_invite, None);
 
         // 0x02 remove: count 1, removed serial, then 1 remaining member.
-        let remove =
-            party_frame(&[0x02, 1, 0, 0, 0x22, 0x22, 0, 0, 0x11, 0x11]);
+        let remove = party_frame(&[0x02, 1, 0, 0, 0x22, 0x22, 0, 0, 0x11, 0x11]);
         assert!(apply_packet(&mut w, &remove));
         assert_eq!(w.party.members, vec![0x0000_1111]);
         assert_eq!(w.party.leader, 0x0000_1111);
@@ -2452,16 +2581,25 @@ mod tests {
         p.u16(1492).u16(1760).u8(0); // x, y, z
         p.u8(2).u16(0).u8(0); // direction (south), hue, flags
         apply_packet(&mut w, &p.into_vec());
-        let it = w.items.get(&0x4001_2345).expect("multi added to World.items");
+        let it = w
+            .items
+            .get(&0x4001_2345)
+            .expect("multi added to World.items");
         assert!(it.is_multi, "type==2 must set is_multi");
-        assert_eq!(it.graphic, 0x0002, "graphic is the plain multi id (never had a bank bit to strip)");
+        assert_eq!(
+            it.graphic, 0x0002,
+            "graphic is the plain multi id (never had a bank bit to strip)"
+        );
         assert_eq!((it.pos.x, it.pos.y, it.pos.z), (1492, 1760, 0));
 
         // Despawns (0x1D) exactly like any other item/mobile.
         let mut d = PacketWriter::new();
         d.u8(0x1D).u32(0x4001_2345);
         assert!(apply_packet(&mut w, &d.into_vec()));
-        assert!(!w.items.contains_key(&0x4001_2345), "0x1D must remove the multi like a normal item");
+        assert!(
+            !w.items.contains_key(&0x4001_2345),
+            "0x1D must remove the multi like a normal item"
+        );
     }
 
     #[test]
@@ -2478,7 +2616,10 @@ mod tests {
         p.u8(0); // z
         apply_packet(&mut w, &p.into_vec());
         let it = w.items.get(&0x4000_9999).expect("legacy multi added");
-        assert!(it.is_multi, "graphic >= 0x4000 must set is_multi on 0x1A too");
+        assert!(
+            it.is_multi,
+            "graphic >= 0x4000 must set is_multi on 0x1A too"
+        );
         assert_eq!(it.graphic, 0x0064);
     }
 
@@ -2505,8 +2646,14 @@ mod tests {
         p.u8(0); // z
         apply_packet(&mut w, &p.into_vec());
         let it = w.items.get(&0x4000_AAAA).expect("item added");
-        assert!(!it.is_multi, "pre-inc graphic 0x3FFE is below 0x4000 — must NOT classify as a multi");
-        assert_eq!(it.graphic, 0x4002, "non-multi keeps the full incremented graphic unmasked, like ClassicUO");
+        assert!(
+            !it.is_multi,
+            "pre-inc graphic 0x3FFE is below 0x4000 — must NOT classify as a multi"
+        );
+        assert_eq!(
+            it.graphic, 0x4002,
+            "non-multi keeps the full incremented graphic unmasked, like ClassicUO"
+        );
     }
 
     #[test]
@@ -2587,7 +2734,10 @@ mod tests {
         let mut w = World::new();
         w.mobiles.insert(
             0x1234,
-            crate::world::Mobile { serial: 0x1234, ..Default::default() },
+            crate::world::Mobile {
+                serial: 0x1234,
+                ..Default::default()
+            },
         );
         // 0xC1 MessageLocalized as ServUO sends a single-click name: type 6 (Label),
         // cliloc 1050045 (the OPL name header `~1_val~`), the name as the sole arg.
@@ -2602,7 +2752,10 @@ mod tests {
         apply_packet(&mut w, &p.into_vec());
         // Stored on the mobile (drives the overhead label / hover), NOT scrolled in chat.
         assert_eq!(w.mobiles.get(&0x1234).unwrap().name, "Zurghed");
-        assert!(w.journal.is_empty(), "a single-click name must not scroll in the journal");
+        assert!(
+            w.journal.is_empty(),
+            "a single-click name must not scroll in the journal"
+        );
     }
 
     #[test]
@@ -2610,7 +2763,11 @@ mod tests {
         let mut w = World::new();
         w.mobiles.insert(
             0x55,
-            crate::world::Mobile { serial: 0x55, name: "Guard".into(), ..Default::default() },
+            crate::world::Mobile {
+                serial: 0x55,
+                name: "Guard".into(),
+                ..Default::default()
+            },
         );
         // A normal (type 0) ascii talk from the same serial is chat, not a name.
         let mut p = PacketWriter::new();
@@ -2620,7 +2777,10 @@ mod tests {
         p.bytes(b"halt!\0");
         apply_packet(&mut w, &p.into_vec());
         assert_eq!(w.mobiles.get(&0x55).unwrap().name, "Guard"); // name unchanged
-        assert!(w.journal.iter().any(|e| e.text == "halt!"), "speech still journals");
+        assert!(
+            w.journal.iter().any(|e| e.text == "halt!"),
+            "speech still journals"
+        );
     }
 
     #[test]
@@ -2649,7 +2809,10 @@ mod tests {
         let mut w = World::new();
         apply_packet(&mut w, &target_packet(1, 0xDEAD_BEEF, 0));
         let t = w.pending_target.expect("cursor stored");
-        assert_eq!((t.target_type, t.cursor_id, t.cursor_flag), (1, 0xDEAD_BEEF, 0));
+        assert_eq!(
+            (t.target_type, t.cursor_id, t.cursor_flag),
+            (1, 0xDEAD_BEEF, 0)
+        );
 
         // flag == 3 is a withdrawal: it clears any pending cursor.
         apply_packet(&mut w, &target_packet(1, 0xDEAD_BEEF, 3));
@@ -2698,7 +2861,10 @@ mod tests {
     fn mobile_moving_hidden_flag_sets_and_clears() {
         let mut w = World::new();
         // Bit 0x80 set → hidden.
-        assert!(apply_packet(&mut w, &mobile_moving_frame(0xBEEF, FLAG_HIDDEN)));
+        assert!(apply_packet(
+            &mut w,
+            &mobile_moving_frame(0xBEEF, FLAG_HIDDEN)
+        ));
         assert!(w.mobiles[&0xBEEF].hidden);
 
         // A later update that omits the bit clears it back — not sticky.
@@ -2737,7 +2903,10 @@ mod tests {
     #[test]
     fn mobile_incoming_hidden_flag_sets_and_clears() {
         let mut w = World::new();
-        assert!(apply_packet(&mut w, &mobile_incoming_frame(0xABCD, FLAG_HIDDEN)));
+        assert!(apply_packet(
+            &mut w,
+            &mobile_incoming_frame(0xABCD, FLAG_HIDDEN)
+        ));
         assert!(w.mobiles[&0xABCD].hidden);
 
         // A fresh 0x78 without the bit flips it back — proves it's not sticky.
@@ -2798,7 +2967,10 @@ mod tests {
         // A yellow-healthbar update (type 2) must NOT touch the poison flag.
         assert!(apply_packet(&mut w, &build(1, 2))); // re-poison
         assert!(apply_packet(&mut w, &build(2, 1))); // blessed/yellow, type 2
-        assert!(w.mobiles[&0x0BAD].poisoned, "type-2 update left poison alone");
+        assert!(
+            w.mobiles[&0x0BAD].poisoned,
+            "type-2 update left poison alone"
+        );
     }
 
     #[test]
@@ -2806,7 +2978,10 @@ mod tests {
         // Hidden rides the mobile-flags byte (0x80); poison rides the 0x17
         // health-bar packet — setting one must not disturb the other.
         let mut w = World::new();
-        assert!(apply_packet(&mut w, &mobile_moving_frame(0xF00D, FLAG_HIDDEN)));
+        assert!(apply_packet(
+            &mut w,
+            &mobile_moving_frame(0xF00D, FLAG_HIDDEN)
+        ));
         assert!(w.mobiles[&0xF00D].hidden);
         assert!(!w.mobiles[&0xF00D].poisoned);
         let mut p = PacketWriter::new();
@@ -2895,8 +3070,12 @@ mod tests {
             .u32(0xAAAA) // src serial
             .u32(0xBBBB) // tgt serial
             .u16(0x36D4) // graphic
-            .u16(100).u16(200).u8(5i8 as u8) // src x,y,z
-            .u16(110).u16(210).u8(5i8 as u8) // tgt x,y,z
+            .u16(100)
+            .u16(200)
+            .u8(5i8 as u8) // src x,y,z
+            .u16(110)
+            .u16(210)
+            .u8(5i8 as u8) // tgt x,y,z
             .u8(7) // speed
             .u8(30) // duration
             .u16(0) // unknown
@@ -2923,12 +3102,20 @@ mod tests {
         let mut p = PacketWriter::new();
         p.u8(0xC0)
             .u8(3) // type = FixedFrom
-            .u32(0xCAFE).u32(0xCAFE)
+            .u32(0xCAFE)
+            .u32(0xCAFE)
             .u16(0x3728) // graphic
-            .u16(50).u16(60).u8(0)
-            .u16(50).u16(60).u8(0)
-            .u8(10).u8(20)
-            .u16(0).u8(0).u8(0)
+            .u16(50)
+            .u16(60)
+            .u8(0)
+            .u16(50)
+            .u16(60)
+            .u8(0)
+            .u8(10)
+            .u8(20)
+            .u16(0)
+            .u8(0)
+            .u8(0)
             .u32(0x0000_0021) // hue u32
             .u32(0); // renderMode (ignored)
         let frame = p.into_vec();
@@ -2987,7 +3174,7 @@ mod tests {
     fn weather_sets_and_resets() {
         let mut w = World::new();
         assert_eq!(w.weather.kind, 0xFF); // default = none
-        // Rain, 40 particles.
+                                          // Rain, 40 particles.
         let mut p = PacketWriter::new();
         p.u8(0x65).u8(0).u8(40).u8(70);
         assert!(apply_packet(&mut w, &p.into_vec()));
@@ -3004,7 +3191,7 @@ mod tests {
     fn season_sets_field() {
         let mut w = World::new();
         assert_eq!(w.season, 0); // default = Spring
-        // 0xBC: Winter (3), playMusic = 1.
+                                 // 0xBC: Winter (3), playMusic = 1.
         let mut p = PacketWriter::new();
         p.u8(0xBC).u8(3).u8(1);
         assert!(apply_packet(&mut w, &p.into_vec()));
@@ -3015,7 +3202,7 @@ mod tests {
     fn war_mode_sets_field() {
         let mut w = World::new();
         assert!(!w.war); // default = peace
-        // 0x72: war on, trailing fixed padding 0x00 0x32 0x00.
+                         // 0x72: war on, trailing fixed padding 0x00 0x32 0x00.
         let mut on = PacketWriter::new();
         on.u8(0x72).u8(1).u8(0x00).u8(0x32).u8(0x00);
         assert!(apply_packet(&mut w, &on.into_vec()));
@@ -3133,7 +3320,8 @@ mod tests {
     fn display_gump_parses_layout_and_text() {
         let mut w = World::new();
         // 0xB0: a tiny dialog — one button + one text line ("Hi").
-        let layout = "{ resizepic 0 0 5054 200 100 }{ button 20 70 247 248 1 0 1 }{ text 20 20 0 0 }";
+        let layout =
+            "{ resizepic 0 0 5054 200 100 }{ button 20 70 247 248 1 0 1 }{ text 20 20 0 0 }";
         let mut p = PacketWriter::new();
         p.u8(0xB0).u16(0); // id, len placeholder
         p.u32(0xDEAD_BEEF) // serial
@@ -3226,7 +3414,10 @@ mod tests {
         assert!(apply_packet(&mut w, &frame));
 
         let b = w.book.as_ref().expect("book present");
-        assert_eq!(b.pages[0], vec!["line one".to_string(), "line two".to_string()]);
+        assert_eq!(
+            b.pages[0],
+            vec!["line one".to_string(), "line two".to_string()]
+        );
         assert_eq!(b.pages[1], vec!["page two".to_string()]);
     }
 
@@ -3321,7 +3512,10 @@ mod tests {
         frame[1] = (len >> 8) as u8;
         frame[2] = (len & 0xFF) as u8;
         assert!(apply_packet(&mut w, &frame));
-        let entries = w.corpse_equip.get(&0x4000_0002).expect("corpse equip stored");
+        let entries = w
+            .corpse_equip
+            .get(&0x4000_0002)
+            .expect("corpse equip stored");
         assert_eq!(entries, &vec![(5, 0x4000_0003), (7, 0x4000_0004)]);
     }
 
@@ -3396,11 +3590,20 @@ mod tests {
     #[test]
     fn secure_trade_display_same_opponent_replaces_not_duplicates() {
         let mut w = World::new();
-        w.open_trade(TradeState { opponent_serial: 0xBEEF, my_container: 0x4000_0001, ..Default::default() });
+        w.open_trade(TradeState {
+            opponent_serial: 0xBEEF,
+            my_container: 0x4000_0001,
+            ..Default::default()
+        });
         // A second Display for the SAME opponent (ServUO's FindTradeContainer
         // dedupe: only one session per mobile pair) must replace, not append.
         let mut p = PacketWriter::new();
-        p.u8(0x6F).u16(0).u8(0x00).u32(0xBEEF).u32(0x4000_0003).u32(0x4000_0004);
+        p.u8(0x6F)
+            .u16(0)
+            .u8(0x00)
+            .u32(0xBEEF)
+            .u32(0x4000_0003)
+            .u32(0x4000_0004);
         p.u8(1).fixed_ascii("Bob", 30);
         assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
         assert_eq!(w.trades.len(), 1);
@@ -3410,8 +3613,16 @@ mod tests {
     #[test]
     fn secure_trade_close_clears_only_matching_session() {
         let mut w = World::new();
-        w.open_trade(TradeState { opponent_serial: 1, my_container: 0x4000_0001, ..Default::default() });
-        w.open_trade(TradeState { opponent_serial: 2, my_container: 0x4000_0002, ..Default::default() });
+        w.open_trade(TradeState {
+            opponent_serial: 1,
+            my_container: 0x4000_0001,
+            ..Default::default()
+        });
+        w.open_trade(TradeState {
+            opponent_serial: 2,
+            my_container: 0x4000_0002,
+            ..Default::default()
+        });
         // 0x6F action 1 (Close): container 0x4000_0001 — only that session drops.
         let mut p = PacketWriter::new();
         p.u8(0x6F).u16(0).u8(0x01).u32(0x4000_0001);
@@ -3433,7 +3644,7 @@ mod tests {
         // removal packet for the opponent's side — see `World::close_trade`'s doc).
         w.item_mut(0x5000_0001).container = Some(0x4000_0001); // mine
         w.item_mut(0x5000_0002).container = Some(0x4000_0002); // theirs
-        // An unrelated item elsewhere must survive the purge.
+                                                               // An unrelated item elsewhere must survive the purge.
         w.item_mut(0x5000_0003).container = Some(0x9999_0000);
         let mut p = PacketWriter::new();
         p.u8(0x6F).u16(0).u8(0x01).u32(0x4000_0001);
@@ -3449,22 +3660,46 @@ mod tests {
         // Open a session with B, then a second with C — two strangers can each
         // open a trade with us concurrently (no consent required).
         let mut open_b = PacketWriter::new();
-        open_b.u8(0x6F).u16(0).u8(0x00).u32(0xB0B).u32(0x4000_0001).u32(0x4000_0002);
+        open_b
+            .u8(0x6F)
+            .u16(0)
+            .u8(0x00)
+            .u32(0xB0B)
+            .u32(0x4000_0001)
+            .u32(0x4000_0002);
         open_b.u8(1).fixed_ascii("Bob", 30);
         assert!(apply_packet(&mut w, &patch_len(open_b.into_vec())));
 
         let mut open_c = PacketWriter::new();
-        open_c.u8(0x6F).u16(0).u8(0x00).u32(0xC0C).u32(0x4000_0003).u32(0x4000_0004);
+        open_c
+            .u8(0x6F)
+            .u16(0)
+            .u8(0x00)
+            .u32(0xC0C)
+            .u32(0x4000_0003)
+            .u32(0x4000_0004);
         open_c.u8(1).fixed_ascii("Carol", 30);
         assert!(apply_packet(&mut w, &patch_len(open_c.into_vec())));
         assert_eq!(w.trades.len(), 2);
 
         // C accepts and offers gold — must land on C's session only.
         let mut c_accept = PacketWriter::new();
-        c_accept.u8(0x6F).u16(0).u8(0x02).u32(0x4000_0003).u32(0).u32(1);
+        c_accept
+            .u8(0x6F)
+            .u16(0)
+            .u8(0x02)
+            .u32(0x4000_0003)
+            .u32(0)
+            .u32(1);
         assert!(apply_packet(&mut w, &patch_len(c_accept.into_vec())));
         let mut c_gold = PacketWriter::new();
-        c_gold.u8(0x6F).u16(0).u8(0x03).u32(0x4000_0003).u32(777).u32(3);
+        c_gold
+            .u8(0x6F)
+            .u16(0)
+            .u8(0x03)
+            .u32(0x4000_0003)
+            .u32(777)
+            .u32(3);
         assert!(apply_packet(&mut w, &patch_len(c_gold.into_vec())));
 
         // Close B (container 0x4000_0001) — C must survive untouched.
@@ -3534,7 +3769,10 @@ mod tests {
     #[test]
     fn secure_trade_unrecognized_action_is_a_noop() {
         let mut w = World::new();
-        w.open_trade(TradeState { my_container: 0x4000_0001, ..Default::default() });
+        w.open_trade(TradeState {
+            my_container: 0x4000_0001,
+            ..Default::default()
+        });
         let mut p = PacketWriter::new();
         p.u8(0x6F).u16(0).u8(0xFF); // no such action — must not panic or touch state
         assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
@@ -3636,7 +3874,11 @@ mod tests {
     #[test]
     fn end_vendor_closes_matching_buy_and_sell_windows() {
         let mut w = World::new();
-        w.shop_buy = Some(crate::world::ShopBuy { vendor: 0xAABB, container: 0x1, entries: vec![] });
+        w.shop_buy = Some(crate::world::ShopBuy {
+            vendor: 0xAABB,
+            container: 0x1,
+            entries: vec![],
+        });
         // 0x3B: EndVendorBuy/EndVendorSell, vendor 0xAABB, trailing unused byte.
         let mut p = PacketWriter::new();
         p.u8(0x3B).u16(0).u32(0xAABB).u8(0);
@@ -3646,11 +3888,17 @@ mod tests {
         assert!(w.shop_buy.is_none());
 
         // A 0x3B for a DIFFERENT vendor must not touch an unrelated open window.
-        w.shop_sell = Some(crate::world::ShopSell { vendor: 0xCCDD, items: vec![] });
+        w.shop_sell = Some(crate::world::ShopSell {
+            vendor: 0xCCDD,
+            items: vec![],
+        });
         let mut q = PacketWriter::new();
         q.u8(0x3B).u16(0).u32(0xAABB).u8(0);
         assert!(apply_packet(&mut w, &patch_len(q.into_vec())));
-        assert!(w.shop_sell.is_some(), "unrelated vendor's sell window must survive");
+        assert!(
+            w.shop_sell.is_some(),
+            "unrelated vendor's sell window must survive"
+        );
 
         // The matching vendor DOES close the sell window too (same opcode
         // closes whichever of buy/sell is actually open for that vendor).
@@ -3669,7 +3917,10 @@ mod tests {
         let frame = p.into_vec();
         assert_eq!(frame.len(), 9); // ServUO ContainerDisplayHS : base(0x24, 9)
         assert!(apply_packet(&mut w, &frame));
-        assert_eq!(w.recent_container_opens.last(), Some(&(1, 0x4000_0009, 0x003C)));
+        assert_eq!(
+            w.recent_container_opens.last(),
+            Some(&(1, 0x4000_0009, 0x003C))
+        );
     }
 
     #[test]
@@ -3684,13 +3935,19 @@ mod tests {
         let mut p = PacketWriter::new();
         p.u8(0x24).u32(0x1000_0055).u16(0x0030).u16(0x0000);
         assert!(apply_packet(&mut w, &p.into_vec()));
-        assert_eq!(w.recent_container_opens.last(), Some(&(1, 0x1000_0055, 0x0030)));
+        assert_eq!(
+            w.recent_container_opens.last(),
+            Some(&(1, 0x1000_0055, 0x0030))
+        );
 
         // DisplaySpellbookHS: spellbook item serial, gumpId 0xFFFF (-1).
         let mut q = PacketWriter::new();
         q.u8(0x24).u32(0x4000_0066).u16(0xFFFF).u16(0x007D);
         assert!(apply_packet(&mut w, &q.into_vec()));
-        assert_eq!(w.recent_container_opens.last(), Some(&(2, 0x4000_0066, 0xFFFF)));
+        assert_eq!(
+            w.recent_container_opens.last(),
+            Some(&(2, 0x4000_0066, 0xFFFF))
+        );
     }
 
     #[test]
@@ -3698,7 +3955,10 @@ mod tests {
         let mut w = World::new();
         // 0x88 DisplayPaperdoll: serial, 60-byte title, flags (warmode + canLift).
         let mut p = PacketWriter::new();
-        p.u8(0x88).u32(0xDEAD_BEEF).fixed_ascii("Anima the Adventurer", 60).u8(0x03);
+        p.u8(0x88)
+            .u32(0xDEAD_BEEF)
+            .fixed_ascii("Anima the Adventurer", 60)
+            .u8(0x03);
         let frame = p.into_vec();
         assert_eq!(frame.len(), 66); // ServUO DisplayPaperdoll : base(0x88, 66)
         assert!(apply_packet(&mut w, &frame));
@@ -3712,7 +3972,10 @@ mod tests {
         // A second request for the SAME serial still bumps `seq` (real UO
         // reopens on every double-click, even a repeat one).
         let mut q = PacketWriter::new();
-        q.u8(0x88).u32(0xDEAD_BEEF).fixed_ascii("Anima the Adventurer", 60).u8(0x00);
+        q.u8(0x88)
+            .u32(0xDEAD_BEEF)
+            .fixed_ascii("Anima the Adventurer", 60)
+            .u8(0x00);
         assert!(apply_packet(&mut w, &q.into_vec()));
         let pd2 = w.paperdoll.as_ref().expect("paperdoll set");
         assert_eq!(pd2.seq, 2);
@@ -3734,9 +3997,21 @@ mod tests {
     #[test]
     fn general_info_close_gump_by_type_drops_matching_kind() {
         let mut w = World::new();
-        w.add_gump(Gump { serial: 1, gump_id: 0x2A, ..Default::default() });
-        w.add_gump(Gump { serial: 2, gump_id: 0x2A, ..Default::default() });
-        w.add_gump(Gump { serial: 3, gump_id: 0x5B, ..Default::default() });
+        w.add_gump(Gump {
+            serial: 1,
+            gump_id: 0x2A,
+            ..Default::default()
+        });
+        w.add_gump(Gump {
+            serial: 2,
+            gump_id: 0x2A,
+            ..Default::default()
+        });
+        w.add_gump(Gump {
+            serial: 3,
+            gump_id: 0x5B,
+            ..Default::default()
+        });
         // 0xBF/0x04 CloseGump: typeID 0x2A, buttonID 0 (every real ServUO call
         // site sends 0 — see `general_info`'s doc).
         let mut p = PacketWriter::new();
@@ -3763,7 +4038,10 @@ mod tests {
         let mv = w.map_gumps.get(&0x4000_7777).expect("map view set");
         assert_eq!(mv.open_seq, 1);
         assert_eq!(mv.gump_art, 0x139D);
-        assert_eq!(mv.facet, 0, "legacy 0x90 carries no facet — defaults to Felucca");
+        assert_eq!(
+            mv.facet, 0,
+            "legacy 0x90 carries no facet — defaults to Felucca"
+        );
         assert_eq!((mv.min_x, mv.min_y, mv.max_x, mv.max_y), (0, 0, 400, 400));
         assert_eq!((mv.width, mv.height), (200, 200));
         assert!(mv.pins.is_empty());
@@ -3786,7 +4064,10 @@ mod tests {
 
         let mv = w.map_gumps.get(&0x4000_8888).expect("map view set");
         assert_eq!(mv.facet, 3);
-        assert_eq!((mv.min_x, mv.min_y, mv.max_x, mv.max_y), (520, 0, 2580, 2050));
+        assert_eq!(
+            (mv.min_x, mv.min_y, mv.max_x, mv.max_y),
+            (520, 0, 2580, 2050)
+        );
         assert_eq!((mv.width, mv.height), (400, 400));
     }
 
@@ -3794,7 +4075,15 @@ mod tests {
     fn display_map_resend_bumps_open_seq_and_resets_pins() {
         let mut w = World::new();
         let mut p = PacketWriter::new();
-        p.u8(0x90).u32(0x4000_9999).u16(0x139D).u16(0).u16(0).u16(400).u16(400).u16(200).u16(200);
+        p.u8(0x90)
+            .u32(0x4000_9999)
+            .u16(0x139D)
+            .u16(0)
+            .u16(0)
+            .u16(400)
+            .u16(400)
+            .u16(200)
+            .u16(200);
         assert!(apply_packet(&mut w, &p.into_vec()));
         assert_eq!(w.map_gumps[&0x4000_9999].open_seq, 1);
 
@@ -3807,18 +4096,40 @@ mod tests {
         assert_eq!(w.map_gumps[&0x4000_9999].pins.len(), 1);
 
         let mut q = PacketWriter::new();
-        q.u8(0x90).u32(0x4000_9999).u16(0x139D).u16(0).u16(0).u16(400).u16(400).u16(200).u16(200);
+        q.u8(0x90)
+            .u32(0x4000_9999)
+            .u16(0x139D)
+            .u16(0)
+            .u16(0)
+            .u16(400)
+            .u16(400)
+            .u16(200)
+            .u16(200);
         assert!(apply_packet(&mut w, &q.into_vec()));
         let mv = &w.map_gumps[&0x4000_9999];
-        assert_eq!(mv.open_seq, 2, "a resend must bump open_seq even with identical bounds");
-        assert!(mv.pins.is_empty(), "a resend resets pins — the real wire flow re-adds them over 0x56");
+        assert_eq!(
+            mv.open_seq, 2,
+            "a resend must bump open_seq even with identical bounds"
+        );
+        assert!(
+            mv.pins.is_empty(),
+            "a resend resets pins — the real wire flow re-adds them over 0x56"
+        );
     }
 
     #[test]
     fn map_command_add_pin() {
         let mut w = World::new();
         let mut p = PacketWriter::new();
-        p.u8(0x90).u32(0x4000_AAAA).u16(0x139D).u16(0).u16(0).u16(400).u16(400).u16(200).u16(200);
+        p.u8(0x90)
+            .u32(0x4000_AAAA)
+            .u16(0x139D)
+            .u16(0)
+            .u16(0)
+            .u16(400)
+            .u16(400)
+            .u16(200)
+            .u16(200);
         assert!(apply_packet(&mut w, &p.into_vec()));
 
         // 0x56 MapCommand command=1 (Add): the chest pin lands at index 0.
@@ -3834,7 +4145,15 @@ mod tests {
     fn map_command_clear_drops_every_pin() {
         let mut w = World::new();
         let mut p = PacketWriter::new();
-        p.u8(0x90).u32(0x4000_BBBB).u16(0x139D).u16(0).u16(0).u16(400).u16(400).u16(200).u16(200);
+        p.u8(0x90)
+            .u32(0x4000_BBBB)
+            .u16(0x139D)
+            .u16(0)
+            .u16(0)
+            .u16(400)
+            .u16(400)
+            .u16(200)
+            .u16(200);
         assert!(apply_packet(&mut w, &p.into_vec()));
         for (x, y) in [(10u16, 10u16), (20, 20), (30, 30)] {
             let mut add = PacketWriter::new();
@@ -3854,7 +4173,15 @@ mod tests {
     fn map_command_remove_refuses_index_zero() {
         let mut w = World::new();
         let mut p = PacketWriter::new();
-        p.u8(0x90).u32(0x4000_CCCC).u16(0x139D).u16(0).u16(0).u16(400).u16(400).u16(200).u16(200);
+        p.u8(0x90)
+            .u32(0x4000_CCCC)
+            .u16(0x139D)
+            .u16(0)
+            .u16(0)
+            .u16(400)
+            .u16(400)
+            .u16(200)
+            .u16(200);
         assert!(apply_packet(&mut w, &p.into_vec()));
         for (x, y) in [(10u16, 10u16), (20, 20)] {
             let mut add = PacketWriter::new();
@@ -3867,7 +4194,11 @@ mod tests {
         let mut rm0 = PacketWriter::new();
         rm0.u8(0x56).u32(0x4000_CCCC).u8(4).u8(0).u16(0).u16(0);
         assert!(apply_packet(&mut w, &rm0.into_vec()));
-        assert_eq!(w.map_gumps[&0x4000_CCCC].pins.len(), 2, "index 0 must survive");
+        assert_eq!(
+            w.map_gumps[&0x4000_CCCC].pins.len(),
+            2,
+            "index 0 must survive"
+        );
 
         // command=4 index 1 succeeds.
         let mut rm1 = PacketWriter::new();

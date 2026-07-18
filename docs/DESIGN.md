@@ -8,11 +8,11 @@
 
 Last updated: 2026-07-02 · Status: **Phases 1–3 COMPLETE, including the Phase 3
 "human-playable polish" tail** (iso sprite blitting, walk/attack/typed animations
-incl. UOP + monster body remap, gumps, audio, secure trading, AI contract). 5 crates
-(anima-core / anima-assets / anima-net / anima-wasm / anima-agent) + web/; **170
-tests green** across the workspace (see §5 for the per-crate breakdown, incl. 7
-golden-packet regression tests replaying real `uo_proxy` captures, §7) + 16
-`#[ignore]`d real-data-file tests; clippy clean; wasm32 builds.
+incl. UOP + monster body remap, gumps, audio, secure trading, AI contract). 6 crates
+(anima-core / anima-assets / anima-net / anima-wasm / anima-agent / anima-desktop)
++ web/; workspace tests and quality gates are green (including 7 golden-packet
+regression tests replaying real `uo_proxy` captures, §7); real-data-file tests are
+`#[ignore]`d by default; wasm32 builds.
 - **Phase 1:** headless agent connects to a live ServUO, logs in (create + select),
   builds a World, and navigates to a target tile by A* over real UO map data.
 - **Phase 2:** `anima-core` → **wasm32** (sans-IO pays off); `anima-wasm` wraps it for
@@ -272,11 +272,9 @@ The scene bridge logs in, patrols, and rewrites `web/scene.json` ~2×/s; the pag
 polls it. (Future: swap the JSON bridge for `anima-wasm` in-browser + a
 WebSocket↔TCP relay so the browser runs the core directly — §4.)
 
-**Done:** all 5 crates build, clippy clean,
-`cargo test --workspace` = **170 tests passing** across the workspace (anima-core:
-107 unit + 7 golden-packet regression in `tests/golden.rs`, §7; anima-assets: 28
-unit + 16 `#[ignore]`d real-data-file tests; anima-net: 25 unit; anima-agent: 3
-unit). Validated end-to-end against a live ServUO (see the status block at the top).
+**Done:** all workspace crates build; formatting, clippy, tests, and the wasm32
+build are enforced by CI. Real-data-file tests remain `#[ignore]`d by default.
+Validated end-to-end against a live ServUO (see the status block at the top).
 
 ### Sans-IO contract (how a driver uses the login flow)
 ```
@@ -460,8 +458,8 @@ Distilled from `anima/CLAUDE.md` — verify against ClassicUO/captures while imp
 ```bash
 cd ~/dev/uo/anima-client
 cargo build             # build workspace
-cargo test --workspace  # 190 passing (+18 ignored real-data-file tests)
-cargo clippy --workspace --all-targets   # clean
+cargo test --workspace  # ignored tests require local real-data files
+cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --open        # browse the core API docs
 ```
 

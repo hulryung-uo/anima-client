@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use anima_agent::WanderBrain;
 use anima_assets::MapData;
-use anima_core::{Action, Brain};
 use anima_core::net::LoginConfig;
+use anima_core::{Action, Brain};
 use anima_net::{Endpoint, Session};
 
 fn main() {
@@ -21,7 +21,9 @@ fn main() {
     let pass = a.next().unwrap_or_else(|| "animaagent".into());
     let ticks: u32 = a.next().and_then(|s| s.parse().ok()).unwrap_or(40);
     let home = std::env::var("HOME").unwrap_or_default();
-    let data_dir = a.next().unwrap_or_else(|| format!("{home}/dev/uo/uo-resource"));
+    let data_dir = a
+        .next()
+        .unwrap_or_else(|| format!("{home}/dev/uo/uo-resource"));
     // `MapData` is the pathfinding terrain for `Session::advance_route` (see
     // below) — a brain that never emits `Action::WalkTo` still runs fine
     // without it (`advance_route` is a no-op with no active route); missing
@@ -30,7 +32,11 @@ fn main() {
     let mut map = MapData::open(&data_dir).ok();
     println!(
         "agent: map data {}",
-        if map.is_some() { "loaded" } else { "not loaded (WalkTo actions won't path)" }
+        if map.is_some() {
+            "loaded"
+        } else {
+            "not loaded (WalkTo actions won't path)"
+        }
     );
 
     let cfg = LoginConfig {
@@ -47,7 +53,10 @@ fn main() {
         }
     };
     let p0 = s.world.player_mobile().cloned().unwrap_or_default();
-    println!("agent: in world as {} at ({}, {})", p0.name, p0.pos.x, p0.pos.y);
+    println!(
+        "agent: in world as {} at ({}, {})",
+        p0.name, p0.pos.x, p0.pos.y
+    );
 
     let mut brain = WanderBrain::new();
     // Settle: pump a moment so the initial perception (status, nearby) lands.
@@ -61,12 +70,20 @@ fn main() {
         let act_str: Vec<String> = actions
             .iter()
             .map(|a| match a {
-                Action::Walk { dir, run } => format!("walk(d{dir}{})", if *run { ",run" } else { "" }),
+                Action::Walk { dir, run } => {
+                    format!("walk(d{dir}{})", if *run { ",run" } else { "" })
+                }
                 Action::WalkTo { x, y } => format!("walkto({x},{y})"),
                 Action::Say { text } => format!("say({text:?})"),
                 Action::PartySay { text } => format!("party({text:?})"),
                 Action::PickUp { serial, .. } => format!("pickup(0x{serial:08X})"),
-                Action::Drop { serial, x, y, z, container } => {
+                Action::Drop {
+                    serial,
+                    x,
+                    y,
+                    z,
+                    container,
+                } => {
                     format!("drop(0x{serial:08X}→{x},{y},{z}@0x{container:08X})")
                 }
                 Action::Equip { serial, layer } => format!("equip(0x{serial:08X}@L{layer})"),
@@ -112,7 +129,11 @@ fn main() {
                     format!("tradeaccept(0x{container:08X},{accept})")
                 }
                 Action::TradeCancel { container } => format!("tradecancel(0x{container:08X})"),
-                Action::TradeGold { container, gold, platinum } => {
+                Action::TradeGold {
+                    container,
+                    gold,
+                    platinum,
+                } => {
                     format!("tradegold(0x{container:08X},{gold},{platinum})")
                 }
             })
@@ -123,7 +144,11 @@ fn main() {
             obs.player.pos.y,
             obs.mobiles.len(),
             obs.items.len(),
-            if act_str.is_empty() { "(idle)".into() } else { act_str.join(", ") }
+            if act_str.is_empty() {
+                "(idle)".into()
+            } else {
+                act_str.join(", ")
+            }
         );
 
         for action in &actions {

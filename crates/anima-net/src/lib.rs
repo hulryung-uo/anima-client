@@ -22,11 +22,10 @@ use anima_core::net::outgoing::{
     build_attack, build_book_page_request, build_buy, build_cast_spell, build_double_click,
     build_drop, build_equip, build_gump_response, build_house_design_request, build_opl_request,
     build_party_accept, build_party_decline, build_party_invite, build_party_leave,
-    build_party_message, build_pick_up,
-    build_popup_request, build_popup_select, build_prompt_response, build_say, build_sell,
-    build_single_click, build_skill_lock, build_status_request, build_target_response,
-    build_trade_accept, build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability,
-    build_use_skill, build_war_mode,
+    build_party_message, build_pick_up, build_popup_request, build_popup_select,
+    build_prompt_response, build_say, build_sell, build_single_click, build_skill_lock,
+    build_status_request, build_target_response, build_trade_accept, build_trade_cancel,
+    build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
 };
 use anima_core::net::{
     apply_packet, build_client_version, FramingError, LoginConfig, LoginDirective, LoginError,
@@ -230,7 +229,12 @@ impl Route {
     /// is what actually gives this door awareness; the pathfinding itself
     /// doesn't need to know about doors (planning already treats a closed
     /// one as passable).
-    fn advance<T: Terrain>(&mut self, terrain: &mut T, pos: (u16, u16, i8), facing: u8) -> RouteStep {
+    fn advance<T: Terrain>(
+        &mut self,
+        terrain: &mut T,
+        pos: (u16, u16, i8),
+        facing: u8,
+    ) -> RouteStep {
         let (px, py, pz) = pos;
         if (px as u32, py as u32) == self.goal {
             return RouteStep::Done;
@@ -252,7 +256,10 @@ impl Route {
         // distinct door tiles any candidate route could ever offer up.
         loop {
             let resolved = {
-                let mut avoid = Avoiding { inner: terrain, blocked: &self.blocked };
+                let mut avoid = Avoiding {
+                    inner: terrain,
+                    blocked: &self.blocked,
+                };
                 find_path_near(
                     &mut avoid,
                     (px as u32, py as u32, pz as i32),
@@ -283,10 +290,17 @@ impl Route {
                 let sent_at = prior.map(|a| a.sent_at);
                 // `door_state_changed` is always `false` here — see
                 // `DoorAttempt`'s doc for why `Route` can't tell any better.
-                let action = decide_blocked_step(Some(serial), attempts, sent_at, false, Instant::now());
+                let action =
+                    decide_blocked_step(Some(serial), attempts, sent_at, false, Instant::now());
                 match action {
                     BlockedStepAction::OpenDoor(serial) => {
-                        self.door_attempts.insert(tile, DoorAttempt { count: attempts + 1, sent_at: Instant::now() });
+                        self.door_attempts.insert(
+                            tile,
+                            DoorAttempt {
+                                count: attempts + 1,
+                                sent_at: Instant::now(),
+                            },
+                        );
                         // Consumes this tick's cadence, like a real walk attempt.
                         self.last_step = Instant::now();
                         return RouteStep::OpenDoor(serial);
@@ -362,7 +376,10 @@ pub struct Session {
 impl Session {
     /// Connect, run the full two-phase login handshake, enter the world, and
     /// return a session whose [`World`] is seeded with the login result.
-    pub fn connect_and_login(endpoint: &Endpoint, cfg: LoginConfig) -> Result<Session, DriverError> {
+    pub fn connect_and_login(
+        endpoint: &Endpoint,
+        cfg: LoginConfig,
+    ) -> Result<Session, DriverError> {
         let (result, stream, decoder) = login(endpoint, cfg)?;
         let mut world = World::new();
         world.enter_world(&result);
@@ -430,9 +447,13 @@ impl Session {
             Action::Use { serial } => self.send(&build_double_click(*serial))?,
             Action::Click { serial } => self.send(&build_single_click(*serial))?,
             Action::PickUp { serial, amount } => self.send(&build_pick_up(*serial, *amount))?,
-            Action::Drop { serial, x, y, z, container } => {
-                self.send(&build_drop(*serial, *x, *y, *z, *container))?
-            }
+            Action::Drop {
+                serial,
+                x,
+                y,
+                z,
+                container,
+            } => self.send(&build_drop(*serial, *x, *y, *z, *container))?,
             Action::Equip { serial, layer } => {
                 let mobile = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
                 self.send(&build_equip(*serial, *layer, mobile))?
@@ -453,8 +474,16 @@ impl Session {
                 // world.popup below).
                 self.world.close_shop_sell();
             }
-            Action::GumpResponse { serial, gump_id, button, switches, entries } => {
-                self.send(&build_gump_response(*serial, *gump_id, *button, switches, entries))?;
+            Action::GumpResponse {
+                serial,
+                gump_id,
+                button,
+                switches,
+                entries,
+            } => {
+                self.send(&build_gump_response(
+                    *serial, *gump_id, *button, switches, entries,
+                ))?;
                 // The gump is consumed once we answer it — drop it from the world so
                 // the renderer/brain stop seeing a stale dialog.
                 self.world.close_gump(*serial);
@@ -486,14 +515,22 @@ impl Session {
             Action::PartyInvite => self.send(&build_party_invite())?,
             Action::PartyAccept { leader } => {
                 // leader 0 = "the pending inviter" (the UI may omit the serial).
-                let leader = if *leader != 0 { *leader } else { self.world.party.pending_invite.unwrap_or(0) };
+                let leader = if *leader != 0 {
+                    *leader
+                } else {
+                    self.world.party.pending_invite.unwrap_or(0)
+                };
                 self.send(&build_party_accept(leader))?;
                 // We answered the invite — drop it locally so the prompt clears even
                 // before the server's member-list update lands.
                 self.world.party.pending_invite = None;
             }
             Action::PartyDecline { leader } => {
-                let leader = if *leader != 0 { *leader } else { self.world.party.pending_invite.unwrap_or(0) };
+                let leader = if *leader != 0 {
+                    *leader
+                } else {
+                    self.world.party.pending_invite.unwrap_or(0)
+                };
                 self.send(&build_party_decline(leader))?;
                 self.world.party.pending_invite = None;
             }
@@ -507,7 +544,12 @@ impl Session {
             // may have just closed, or belongs to a session with a different
             // opponent that never existed on our side).
             Action::TradeAccept { container, accept } => {
-                if self.world.trades.iter().any(|t| t.my_container == *container) {
+                if self
+                    .world
+                    .trades
+                    .iter()
+                    .any(|t| t.my_container == *container)
+                {
                     self.send(&build_trade_accept(*container, *accept))?;
                     // Optimistically reflect our own accept state locally (mirrors
                     // `SkillLock`'s optimistic update) — the server also echoes a
@@ -518,7 +560,12 @@ impl Session {
                 }
             }
             Action::TradeCancel { container } => {
-                if self.world.trades.iter().any(|t| t.my_container == *container) {
+                if self
+                    .world
+                    .trades
+                    .iter()
+                    .any(|t| t.my_container == *container)
+                {
                     self.send(&build_trade_cancel(*container))?;
                     // The trade is over the moment we cancel — drop just this
                     // session locally (and purge its leftover container contents,
@@ -529,8 +576,17 @@ impl Session {
                     self.world.close_trade(*container);
                 }
             }
-            Action::TradeGold { container, gold, platinum } => {
-                if self.world.trades.iter().any(|t| t.my_container == *container) {
+            Action::TradeGold {
+                container,
+                gold,
+                platinum,
+            } => {
+                if self
+                    .world
+                    .trades
+                    .iter()
+                    .any(|t| t.my_container == *container)
+                {
                     self.send(&build_trade_gold(*container, *gold, *platinum))?;
                     if let Some(t) = self.world.trade_mut(*container) {
                         t.my_offer_gold = *gold;
@@ -566,7 +622,9 @@ impl Session {
     /// instead of, `MapTerrain`'s own blacklist parameter, which is left
     /// empty here — `Route` owns the one blacklist that matters).
     pub fn advance_route(&mut self, map: &mut MapData) -> Result<(), DriverError> {
-        let Some(mut route) = self.route.take() else { return Ok(()) };
+        let Some(mut route) = self.route.take() else {
+            return Ok(());
+        };
         let Some(p) = self.world.player_mobile() else {
             self.route = Some(route); // not in the world yet — try again next tick
             return Ok(());
@@ -577,7 +635,12 @@ impl Session {
         // arms below need `&mut self` (e.g. `self.walk`/`self.apply_action`).
         let step = {
             let empty = HashSet::new();
-            let mut terrain = MapTerrain { world: &self.world, map, blocked: &empty, multis: None };
+            let mut terrain = MapTerrain {
+                world: &self.world,
+                map,
+                blocked: &empty,
+                multis: None,
+            };
             route.advance(&mut terrain, pos, facing)
         };
         match step {
@@ -597,7 +660,10 @@ impl Session {
                 // already owns the attempt/cooldown bookkeeping, so this is a
                 // fire-and-forget send; the route stays live either way.
                 if std::env::var("ANIMA_DEBUG").is_ok() {
-                    eprintln!("anima-net: route to {:?} opening door {serial:#x}", route.goal);
+                    eprintln!(
+                        "anima-net: route to {:?} opening door {serial:#x}",
+                        route.goal
+                    );
                 }
                 self.apply_action(&Action::Use { serial })?;
                 self.route = Some(route);
@@ -732,7 +798,8 @@ impl Session {
             }
             // 0xBD ClientVersion request — must answer or the server denies movement.
             Some(0xBD) => {
-                self.stream.write_all(&build_client_version(CLIENT_VERSION))?;
+                self.stream
+                    .write_all(&build_client_version(CLIENT_VERSION))?;
             }
             _ => {
                 // A server-pushed jump of the player's tile (>1 step) is a teleport
@@ -742,9 +809,7 @@ impl Session {
                 // predictor (stale sequence + pending steps would deny all movement).
                 let before = self.world.player_mobile().map(|m| m.pos);
                 apply_packet(&mut self.world, frame);
-                if let (Some(b), Some(a)) =
-                    (before, self.world.player_mobile().map(|m| m.pos))
-                {
+                if let (Some(b), Some(a)) = (before, self.world.player_mobile().map(|m| m.pos)) {
                     if b.x.abs_diff(a.x).max(b.y.abs_diff(a.y)) > 1 {
                         self.walker.reset();
                     }
@@ -964,7 +1029,10 @@ mod route_tests {
     fn advance_waits_out_the_cadence_between_steps() {
         let mut terrain = OpenGrid;
         let mut route = Route::new(5, 5);
-        assert!(matches!(route.advance(&mut terrain, (0, 0, 0), 0), RouteStep::Walk(_)));
+        assert!(matches!(
+            route.advance(&mut terrain, (0, 0, 0), 0),
+            RouteStep::Walk(_)
+        ));
         route.step_sent(true);
         assert_eq!(route.steps, 1);
         // The cadence clock was just reset — immediately due again is a Wait,
@@ -978,7 +1046,10 @@ mod route_tests {
         let mut route = Route::new(5, 0);
         // Already facing east (2 — see `direction_delta`), so the proposed
         // step is a real move, not a turn-first.
-        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::Walk(2));
+        assert_eq!(
+            route.advance(&mut terrain, (0, 0, 0), 2),
+            RouteStep::Walk(2)
+        );
         // Only `step_sent(true)` arms the candidate — the send succeeded here.
         route.step_sent(true);
         assert_eq!(route.target, (1, 0));
@@ -987,8 +1058,14 @@ mod route_tests {
         // step: the player is still at (0, 0) instead of having moved to (1, 0).
         route.last_step = Instant::now() - ROUTE_STEP;
         let next = route.advance(&mut terrain, (0, 0, 0), 2);
-        assert!(route.blocked.contains(&(1, 0)), "denied tile should be blacklisted");
-        assert!(matches!(next, RouteStep::Walk(_)), "should reroute, not give up");
+        assert!(
+            route.blocked.contains(&(1, 0)),
+            "denied tile should be blacklisted"
+        );
+        assert!(
+            matches!(next, RouteStep::Walk(_)),
+            "should reroute, not give up"
+        );
     }
 
     #[test]
@@ -999,18 +1076,31 @@ mod route_tests {
         let mut terrain = OpenGrid;
         let mut route = Route::new(5, 0);
         // Already facing east, so the proposed step is a real move.
-        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::Walk(2));
+        assert_eq!(
+            route.advance(&mut terrain, (0, 0, 0), 2),
+            RouteStep::Walk(2)
+        );
         // The send was gated (e.g. `Session::walk` returned `false`) — nothing
         // reached the wire, so nothing should be armed.
         route.step_sent(false);
-        assert_eq!(route.steps, 0, "a gated send must not count toward the runaway guard");
+        assert_eq!(
+            route.steps, 0,
+            "a gated send must not count toward the runaway guard"
+        );
 
         // Force the cadence due again. The player never moved (no packet went
         // out), so this must not be mistaken for a server deny on (1, 0).
         route.last_step = Instant::now() - ROUTE_STEP;
         let next = route.advance(&mut terrain, (0, 0, 0), 2);
-        assert!(route.blocked.is_empty(), "a never-sent step must not blacklist anything");
-        assert_eq!(next, RouteStep::Walk(2), "should simply retry the same tile, not give up");
+        assert!(
+            route.blocked.is_empty(),
+            "a never-sent step must not blacklist anything"
+        );
+        assert_eq!(
+            next,
+            RouteStep::Walk(2),
+            "should simply retry the same tile, not give up"
+        );
     }
 
     #[test]
@@ -1021,12 +1111,19 @@ mod route_tests {
         struct Corridor;
         impl Terrain for Corridor {
             fn walkable_step(&mut self, _x: u32, y: u32, _from_z: i32) -> Option<i32> {
-                if y == 0 { Some(0) } else { None }
+                if y == 0 {
+                    Some(0)
+                } else {
+                    None
+                }
             }
         }
         let mut terrain = Corridor;
         let mut route = Route::new(5, 0);
-        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::Walk(2));
+        assert_eq!(
+            route.advance(&mut terrain, (0, 0, 0), 2),
+            RouteStep::Walk(2)
+        );
         route.step_sent(true);
 
         route.last_step = Instant::now() - ROUTE_STEP;
@@ -1059,10 +1156,18 @@ mod route_tests {
     }
     impl Terrain for DoorCorridor {
         fn walkable_step(&mut self, _x: u32, y: u32, _from_z: i32) -> Option<i32> {
-            if y == 0 { Some(0) } else { None }
+            if y == 0 {
+                Some(0)
+            } else {
+                None
+            }
         }
         fn door_at(&mut self, x: u32, y: u32, _current_z: i32) -> Option<u32> {
-            if (x, y) == self.door_tile && !self.open.get() { Some(self.door_serial) } else { None }
+            if (x, y) == self.door_tile && !self.open.get() {
+                Some(self.door_serial)
+            } else {
+                None
+            }
         }
     }
 
@@ -1073,16 +1178,30 @@ mod route_tests {
         // (no path) immediately, exactly like `advance_gives_up_once_fully_boxed_in`'s
         // sealed corridor. Instead it must recognize the door and negotiate
         // opening it, not give up.
-        let mut terrain = DoorCorridor { door_tile: (1, 0), door_serial: 0xDEAD, open: false.into() };
+        let mut terrain = DoorCorridor {
+            door_tile: (1, 0),
+            door_serial: 0xDEAD,
+            open: false.into(),
+        };
         let mut route = Route::new(5, 0);
-        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::OpenDoor(0xDEAD));
+        assert_eq!(
+            route.advance(&mut terrain, (0, 0, 0), 2),
+            RouteStep::OpenDoor(0xDEAD)
+        );
     }
 
     #[test]
     fn advance_opens_the_door_on_approach_then_walks_through_once_open() {
-        let mut terrain = DoorCorridor { door_tile: (1, 0), door_serial: 0xDEAD, open: false.into() };
+        let mut terrain = DoorCorridor {
+            door_tile: (1, 0),
+            door_serial: 0xDEAD,
+            open: false.into(),
+        };
         let mut route = Route::new(5, 0);
-        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::OpenDoor(0xDEAD));
+        assert_eq!(
+            route.advance(&mut terrain, (0, 0, 0), 2),
+            RouteStep::OpenDoor(0xDEAD)
+        );
         // A door-open attempt is not a walk step — mirrors `play_server`'s
         // `auto_steps`, which likewise only increments on an actual walk send.
         assert_eq!(route.steps, 0);
@@ -1092,7 +1211,10 @@ mod route_tests {
         // must actually walk onto it instead of negotiating forever.
         terrain.open.set(true);
         route.last_step = Instant::now() - ROUTE_STEP;
-        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::Walk(2));
+        assert_eq!(
+            route.advance(&mut terrain, (0, 0, 0), 2),
+            RouteStep::Walk(2)
+        );
     }
 
     #[test]
@@ -1102,9 +1224,16 @@ mod route_tests {
         // the route's own (much shorter) `ROUTE_STEP` cadence is due again, it
         // must not resend yet (ServUO's `Use` toggles a door, so an impatient
         // resend could close what the first `Use` is about to open).
-        let mut terrain = DoorCorridor { door_tile: (1, 0), door_serial: 0xDEAD, open: false.into() };
+        let mut terrain = DoorCorridor {
+            door_tile: (1, 0),
+            door_serial: 0xDEAD,
+            open: false.into(),
+        };
         let mut route = Route::new(5, 0);
-        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::OpenDoor(0xDEAD));
+        assert_eq!(
+            route.advance(&mut terrain, (0, 0, 0), 2),
+            RouteStep::OpenDoor(0xDEAD)
+        );
 
         route.last_step = Instant::now() - ROUTE_STEP; // only the route cadence elapses
         assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::Wait);
@@ -1114,16 +1243,26 @@ mod route_tests {
 
     #[test]
     fn advance_resends_the_door_use_once_the_cooldown_elapses() {
-        let mut terrain = DoorCorridor { door_tile: (1, 0), door_serial: 0xDEAD, open: false.into() };
+        let mut terrain = DoorCorridor {
+            door_tile: (1, 0),
+            door_serial: 0xDEAD,
+            open: false.into(),
+        };
         let mut route = Route::new(5, 0);
-        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::OpenDoor(0xDEAD));
+        assert_eq!(
+            route.advance(&mut terrain, (0, 0, 0), 2),
+            RouteStep::OpenDoor(0xDEAD)
+        );
 
         // Force BOTH the route cadence and the door cooldown to have elapsed.
         route.last_step = Instant::now() - ROUTE_STEP;
         if let Some(a) = route.door_attempts.get_mut(&(1, 0)) {
             a.sent_at = Instant::now() - DOOR_USE_COOLDOWN;
         }
-        assert_eq!(route.advance(&mut terrain, (0, 0, 0), 2), RouteStep::OpenDoor(0xDEAD));
+        assert_eq!(
+            route.advance(&mut terrain, (0, 0, 0), 2),
+            RouteStep::OpenDoor(0xDEAD)
+        );
         assert_eq!(route.door_attempts.get(&(1, 0)).map(|a| a.count), Some(2));
     }
 
@@ -1132,7 +1271,11 @@ mod route_tests {
         // Mirrors `decide_blocked_step_gives_up_on_a_door_past_the_cap`: a door
         // that never opens (a locked door, in real UO terms) still ends in
         // "boxed in" instead of hammering `Use` on it forever.
-        let mut terrain = DoorCorridor { door_tile: (1, 0), door_serial: 0xDEAD, open: false.into() };
+        let mut terrain = DoorCorridor {
+            door_tile: (1, 0),
+            door_serial: 0xDEAD,
+            open: false.into(),
+        };
         let mut route = Route::new(5, 0);
 
         for attempt in 0..MAX_DOOR_OPEN_ATTEMPTS {
@@ -1163,7 +1306,11 @@ mod route_tests {
         struct BlockedGoal;
         impl Terrain for BlockedGoal {
             fn walkable_step(&mut self, x: u32, y: u32, _from_z: i32) -> Option<i32> {
-                if (x, y) == (5, 5) { None } else { Some(0) }
+                if (x, y) == (5, 5) {
+                    None
+                } else {
+                    Some(0)
+                }
             }
         }
         let mut terrain = BlockedGoal;
@@ -1185,9 +1332,18 @@ mod route_tests {
                 other => panic!("unexpected {other:?}"),
             }
         }
-        assert!(walked > 0, "must actually walk toward the blocked goal, not give up at step 0");
-        let cheb = (pos.0 as i32 - 5).unsigned_abs().max((pos.1 as i32 - 5).unsigned_abs());
+        assert!(
+            walked > 0,
+            "must actually walk toward the blocked goal, not give up at step 0"
+        );
+        let cheb = (pos.0 as i32 - 5)
+            .unsigned_abs()
+            .max((pos.1 as i32 - 5).unsigned_abs());
         assert_eq!(cheb, 1, "should stop exactly adjacent to the blocked goal");
-        assert_ne!((pos.0 as u32, pos.1 as u32), (5, 5), "must not walk onto the unstandable goal tile itself");
+        assert_ne!(
+            (pos.0 as u32, pos.1 as u32),
+            (5, 5),
+            "must not walk onto the unstandable goal tile itself"
+        );
     }
 }

@@ -418,7 +418,11 @@ pub fn build_book_page_request(serial: u32, page_count: u16) -> Vec<u8> {
 pub fn build_use_ability(player_serial: u32, ability_id: u8) -> Vec<u8> {
     let mut w = PacketWriter::new();
     w.u8(0xD7).u16(0); // id + length placeholder
-    w.u32(player_serial).u16(0x0019).u32(0).u8(ability_id).u8(0x0A);
+    w.u32(player_serial)
+        .u16(0x0019)
+        .u32(0)
+        .u8(ability_id)
+        .u8(0x0A);
     let mut data = w.into_vec();
     let len = data.len() as u16;
     data[1] = (len >> 8) as u8;
@@ -558,10 +562,7 @@ mod tests {
         // Batch of two serials: header + 2×u32 (BE).
         let b = build_opl_request(&[0x0102_0304, 0x0506_0708]);
         assert_eq!(u16::from_be_bytes([b[1], b[2]]) as usize, b.len());
-        assert_eq!(
-            b,
-            vec![0xD6, 0x00, 0x0B, 1, 2, 3, 4, 5, 6, 7, 8]
-        );
+        assert_eq!(b, vec![0xD6, 0x00, 0x0B, 1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
@@ -596,7 +597,7 @@ mod tests {
         assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
         assert_eq!(&p[3..7], &[0xDE, 0xAD, 0xBE, 0xEF]); // serial (BE)
         assert_eq!(u16::from_be_bytes([p[7], p[8]]), 2); // page count
-        // page 1 / 0xFFFF, page 2 / 0xFFFF
+                                                         // page 1 / 0xFFFF, page 2 / 0xFFFF
         assert_eq!(&p[9..], &[0x00, 0x01, 0xFF, 0xFF, 0x00, 0x02, 0xFF, 0xFF]);
     }
 
@@ -612,9 +613,12 @@ mod tests {
         assert_eq!(u32::from_be_bytes([p[9], p[10], p[11], p[12]]), 0); // zero
         assert_eq!(p[13], 7); // ability id
         assert_eq!(p[14], 0x0A); // trailer
-        // Disarm sends ability 0.
+                                 // Disarm sends ability 0.
         let d = build_use_ability(0x01, 0);
-        assert_eq!(d, vec![0xD7, 0x00, 0x0F, 0, 0, 0, 1, 0x00, 0x19, 0, 0, 0, 0, 0, 0x0A]);
+        assert_eq!(
+            d,
+            vec![0xD7, 0x00, 0x0F, 0, 0, 0, 1, 0x00, 0x19, 0, 0, 0, 0, 0, 0x0A]
+        );
     }
 
     #[test]
@@ -683,10 +687,7 @@ mod tests {
         assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
         assert_eq!(&p[3..7], &[0xAA, 0xBB, 0xCC, 0xDD]); // vendor (BE)
         assert_eq!(u16::from_be_bytes([p[7], p[8]]), 2); // count
-        assert_eq!(
-            &p[9..],
-            &[0x40, 0, 0, 9, 0, 7, 0x40, 0, 0, 0x0A, 0, 1]
-        );
+        assert_eq!(&p[9..], &[0x40, 0, 0, 9, 0, 7, 0x40, 0, 0, 0x0A, 0, 1]);
 
         // Empty list → count 0, 9 bytes total.
         let c = build_sell(0x0102_0304, &[]);
@@ -747,7 +748,23 @@ mod tests {
         assert_eq!(build_pick_up(0x01, 5), vec![0x07, 0, 0, 0, 1, 0, 5]);
         assert_eq!(
             build_drop(0x01, 100, 200, -5, 0xFFFF_FFFF),
-            vec![0x08, 0, 0, 0, 1, 0, 100, 0, 200, (-5i8) as u8, 0, 0xFF, 0xFF, 0xFF, 0xFF]
+            vec![
+                0x08,
+                0,
+                0,
+                0,
+                1,
+                0,
+                100,
+                0,
+                200,
+                (-5i8) as u8,
+                0,
+                0xFF,
+                0xFF,
+                0xFF,
+                0xFF
+            ]
         );
         assert_eq!(
             build_equip(0x0102_0304, 0x15, 0x0A0B_0C0D),
@@ -793,7 +810,7 @@ mod tests {
         assert_eq!(u32::from_be_bytes([p[7], p[8], p[9], p[10]]), 0x2A); // promptId
         assert_eq!(u32::from_be_bytes([p[11], p[12], p[13], p[14]]), 1); // type = reply
         assert_eq!(&p[15..19], b"ENU\0"); // language
-        // "Rex" as UTF-16 LE: R=0x52, e=0x65, x=0x78.
+                                          // "Rex" as UTF-16 LE: R=0x52, e=0x65, x=0x78.
         assert_eq!(&p[19..], &[0x52, 0x00, 0x65, 0x00, 0x78, 0x00]);
 
         // Cancel: type=0, no text bytes at all.

@@ -45,7 +45,11 @@ impl AnimData {
         if off + RECORD > self.data.len() {
             return (0, 0, 0);
         }
-        (self.data[off + 65], self.data[off + 66], self.data[off + 67])
+        (
+            self.data[off + 65],
+            self.data[off + 66],
+            self.data[off + 67],
+        )
     }
 
     /// The per-frame tile-id offsets (the `i8[64]` frameData). Frame `i` shows tile
@@ -71,7 +75,9 @@ impl AnimData {
         }
         let offs = self.frame_offsets(graphic);
         let count = (count as usize).min(64);
-        (0..count).map(|i| graphic.wrapping_add(offs[i] as u16)).collect()
+        (0..count)
+            .map(|i| graphic.wrapping_add(offs[i] as u16))
+            .collect()
     }
 }
 

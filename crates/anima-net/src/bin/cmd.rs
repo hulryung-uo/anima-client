@@ -50,7 +50,11 @@ fn main() {
         "pickup" => post(&host, port, &format!("pickup:{}", rest[0])),
         "target" => post(&host, port, &format!("target:{}", rest[0])),
         "targetxy" => post(&host, port, &format!("targetxy:{}", rest.join(":"))),
-        "war" => post(&host, port, &format!("war:{}", rest.first().map(|s| s.as_str()).unwrap_or("on"))),
+        "war" => post(
+            &host,
+            port,
+            &format!("war:{}", rest.first().map(|s| s.as_str()).unwrap_or("on")),
+        ),
         "raw" => post(&host, port, &rest.join(" ")),
         other => {
             eprintln!("unknown command: {other}");
@@ -108,7 +112,9 @@ fn look(host: &str, port: u16) {
                 "  0x{:08X}  body 0x{:04X} noto {}  @({},{})  {}",
                 m["serial"].as_u64().unwrap_or(0),
                 m["body"].as_u64().unwrap_or(0),
-                m["noto"], m["x"], m["y"],
+                m["noto"],
+                m["x"],
+                m["y"],
                 m["name"].as_str().unwrap_or("")
             );
         }
@@ -120,13 +126,19 @@ fn look(host: &str, port: u16) {
                 "  0x{:08X}  g 0x{:04X}  @({},{})",
                 it["serial"].as_u64().unwrap_or(0),
                 it["g"].as_u64().unwrap_or(0),
-                it["x"], it["y"]
+                it["x"],
+                it["y"]
             );
         }
     }
     if let Some(j) = v["journal"].as_array() {
         for line in j.iter().rev().take(6).rev() {
-            println!("  [{}] {}: {}", line["type"], line["name"].as_str().unwrap_or(""), line["text"].as_str().unwrap_or(""));
+            println!(
+                "  [{}] {}: {}",
+                line["type"],
+                line["name"].as_str().unwrap_or(""),
+                line["text"].as_str().unwrap_or("")
+            );
         }
     }
 }
@@ -153,8 +165,14 @@ fn http(host: &str, port: u16, method: &str, path: &str, body: &str) -> std::io:
     s.read_to_end(&mut buf)?;
     let sep = find(&buf, b"\r\n\r\n").map(|i| i + 4).unwrap_or(0);
     let (head, payload) = buf.split_at(sep);
-    let chunked = String::from_utf8_lossy(head).to_lowercase().contains("transfer-encoding: chunked");
-    let out = if chunked { dechunk(payload) } else { payload.to_vec() };
+    let chunked = String::from_utf8_lossy(head)
+        .to_lowercase()
+        .contains("transfer-encoding: chunked");
+    let out = if chunked {
+        dechunk(payload)
+    } else {
+        payload.to_vec()
+    };
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
@@ -170,7 +188,8 @@ fn dechunk(b: &[u8]) -> Vec<u8> {
             Some(n) => i + n,
             None => break,
         };
-        let size = usize::from_str_radix(String::from_utf8_lossy(&b[i..nl]).trim(), 16).unwrap_or(0);
+        let size =
+            usize::from_str_radix(String::from_utf8_lossy(&b[i..nl]).trim(), 16).unwrap_or(0);
         i = nl + 2;
         if size == 0 || i + size > b.len() {
             if i < b.len() {
@@ -188,7 +207,9 @@ fn dechunk(b: &[u8]) -> Vec<u8> {
 }
 
 fn parse_host(url: &str) -> (String, u16) {
-    let u = url.trim_start_matches("http://").trim_start_matches("https://");
+    let u = url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
     let hp = u.split('/').next().unwrap_or("127.0.0.1:8092");
     match hp.split_once(':') {
         Some((h, p)) => (h.to_string(), p.parse().unwrap_or(8092)),

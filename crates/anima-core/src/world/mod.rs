@@ -9,6 +9,12 @@ use std::collections::{HashMap, HashSet};
 use crate::net::login::LoginResult;
 use crate::types::{Position, Serial};
 
+/// Every player ghost body recognized by ServUO `Body.IsGhost` (human,
+/// elf/gargoyle, and legacy race variants).
+pub const fn is_ghost_body(body: u16) -> bool {
+    matches!(body, 402 | 403 | 607 | 608 | 694 | 695 | 970)
+}
+
 /// A creature/character (NPC or player) in the world.
 #[derive(Debug, Clone, Default)]
 pub struct Mobile {
@@ -37,12 +43,10 @@ pub struct Mobile {
     /// flags byte on every 0x20/0x77/0x78 (not sticky): a later update that
     /// omits the bit clears it back to `false`.
     pub hidden: bool,
-    /// Poisoned status — the mobile-update status-flags 0x04 bit (see
-    /// [`Mobile::hidden`]'s doc for the full bit layout). In UO the health bar
-    /// turns green while this is set, independent of the actual HP fraction —
-    /// it's how you tell a mobile is poisoned at a glance. Re-derived from the
-    /// flags byte on every 0x20/0x77/0x78 (not sticky): a later update that
-    /// omits the bit clears it back to `false` (e.g. Cure Poison).
+    /// Poisoned status from 0x17 MobileHealthbarStatus type 1. In UO the health
+    /// bar turns green while this is set, independent of the actual HP fraction.
+    /// ServUO sends 0x17 after MobileIncoming and whenever poison changes, so a
+    /// cure explicitly clears this back to `false`.
     pub poisoned: bool,
 }
 
@@ -160,7 +164,10 @@ pub struct Weather {
 impl Default for Weather {
     fn default() -> Self {
         // 0xFF = no weather until the server says otherwise.
-        Self { kind: 0xFF, intensity: 0 }
+        Self {
+            kind: 0xFF,
+            intensity: 0,
+        }
     }
 }
 
@@ -577,7 +584,11 @@ pub fn decode_house_planes(
                 // deviation shifts a whole floor by a tile.
                 let (off_x, off_y, mh): (i32, i32, i32) = match plane.plane_z {
                     0 => (min_x as i32, min_y as i32, max_y as i32 - min_y as i32 + 2),
-                    1..=4 => (min_x as i32 + 1, min_y as i32 + 1, max_y as i32 - min_y as i32),
+                    1..=4 => (
+                        min_x as i32 + 1,
+                        min_y as i32 + 1,
+                        max_y as i32 - min_y as i32,
+                    ),
                     _ => (min_x as i32, min_y as i32, max_y as i32 - min_y as i32 + 1),
                 };
                 if mh <= 0 {
@@ -613,6 +624,9 @@ pub struct World {
     pub items: HashMap<u32, Item>,
     /// Chat / system message log (journal), newest last.
     pub journal: Vec<JournalEntry>,
+    /// Absolute index of `journal[0]`. Consumers keep an absolute cursor so
+    /// trimming old lines does not make them replay retained entries.
+    pub(crate) journal_offset: usize,
     /// Server-issued fast-walk prevention keys (FIFO), consumed one per step.
     pub fast_walk: Vec<u32>,
     /// An outstanding target cursor (0x6C), if the server is waiting on one.
@@ -841,6 +855,9 @@ const MAX_RECENT_LIFT_REJECTS: usize = 16;
 const MAX_RECENT_CONTAINER_OPENS: usize = 16;
 /// How many recent swing events [`World::push_swing`] keeps.
 const MAX_RECENT_SWINGS: usize = 16;
+/// Retained chat history for temporarily-paused consumers. The interactive
+/// renderer keeps a smaller presentation ring of its own.
+const MAX_JOURNAL_ENTRIES: usize = 512;
 /// Defensive cap on [`World::corpse_of`]/[`World::corpse_equip`] — both are pruned
 /// on delete (0x1D), so this only guards against a delete we somehow missed
 /// pinning the map's growth for the rest of a long session.
@@ -968,7 +985,10 @@ impl World {
         self.typed_anim_seq += 1;
         self.recent_typed_anims
             .push((self.typed_anim_seq, serial, kind, action, mode));
-        let overflow = self.recent_typed_anims.len().saturating_sub(MAX_RECENT_ANIMS);
+        let overflow = self
+            .recent_typed_anims
+            .len()
+            .saturating_sub(MAX_RECENT_ANIMS);
         if overflow > 0 {
             self.recent_typed_anims.drain(0..overflow);
         }
@@ -1003,8 +1023,12 @@ impl World {
     /// keeps only the most recent [`MAX_RECENT_LIFT_REJECTS`].
     pub fn push_lift_reject(&mut self, reason: u8) {
         self.lift_reject_seq += 1;
-        self.recent_lift_rejects.push((self.lift_reject_seq, reason));
-        let overflow = self.recent_lift_rejects.len().saturating_sub(MAX_RECENT_LIFT_REJECTS);
+        self.recent_lift_rejects
+            .push((self.lift_reject_seq, reason));
+        let overflow = self
+            .recent_lift_rejects
+            .len()
+            .saturating_sub(MAX_RECENT_LIFT_REJECTS);
         if overflow > 0 {
             self.recent_lift_rejects.drain(0..overflow);
         }
@@ -1019,8 +1043,12 @@ impl World {
     /// [`MAX_RECENT_CONTAINER_OPENS`].
     pub fn push_container_open(&mut self, serial: u32, gump_id: u16) {
         self.container_open_seq += 1;
-        self.recent_container_opens.push((self.container_open_seq, serial, gump_id));
-        let overflow = self.recent_container_opens.len().saturating_sub(MAX_RECENT_CONTAINER_OPENS);
+        self.recent_container_opens
+            .push((self.container_open_seq, serial, gump_id));
+        let overflow = self
+            .recent_container_opens
+            .len()
+            .saturating_sub(MAX_RECENT_CONTAINER_OPENS);
         if overflow > 0 {
             self.recent_container_opens.drain(0..overflow);
         }
@@ -1031,7 +1059,8 @@ impl World {
     /// [`MAX_RECENT_SWINGS`].
     pub fn push_swing(&mut self, attacker: u32, defender: u32) {
         self.swing_seq += 1;
-        self.recent_swings.push((self.swing_seq, attacker, defender));
+        self.recent_swings
+            .push((self.swing_seq, attacker, defender));
         let overflow = self.recent_swings.len().saturating_sub(MAX_RECENT_SWINGS);
         if overflow > 0 {
             self.recent_swings.drain(0..overflow);
@@ -1044,7 +1073,13 @@ impl World {
     /// prior state.
     pub fn set_paperdoll(&mut self, serial: u32, title: String, warmode: bool, can_lift: bool) {
         self.paperdoll_seq += 1;
-        self.paperdoll = Some(Paperdoll { seq: self.paperdoll_seq, serial, title, warmode, can_lift });
+        self.paperdoll = Some(Paperdoll {
+            seq: self.paperdoll_seq,
+            serial,
+            title,
+            warmode,
+            can_lift,
+        });
     }
 
     /// Push a client-synthesized "System" journal line — no packet caused this; it's
@@ -1055,7 +1090,7 @@ impl World {
     /// exception to "packet handlers mutate World" — this is UX feedback about a
     /// purely local (client-side) decision, not gameplay state.
     pub fn push_system_note(&mut self, text: impl Into<String>) {
-        self.journal.push(JournalEntry {
+        self.push_journal(JournalEntry {
             serial: 0,
             name: "System".to_string(),
             text: text.into(),
@@ -1065,12 +1100,24 @@ impl World {
         });
     }
 
+    /// Append a journal entry while retaining a bounded history. The offset
+    /// advances with evictions so [`World::observe`] cursors remain absolute.
+    pub fn push_journal(&mut self, entry: JournalEntry) {
+        self.journal.push(entry);
+        let overflow = self.journal.len().saturating_sub(MAX_JOURNAL_ENTRIES);
+        if overflow > 0 {
+            self.journal.drain(0..overflow);
+            self.journal_offset = self.journal_offset.saturating_add(overflow);
+        }
+    }
+
     /// Record a corpse→killed-mobile link (0xAF DisplayDeath). Upserts by
     /// `corpse_serial`; defensively evicts an arbitrary entry (not LRU — this is a
     /// rare safety net, not a hot path) once at [`MAX_CORPSE_LINKS`], since a
     /// missed 0x1D delete would otherwise pin this map's growth forever.
     pub fn set_corpse_of(&mut self, corpse_serial: u32, killed_serial: u32) {
-        if self.corpse_of.len() >= MAX_CORPSE_LINKS && !self.corpse_of.contains_key(&corpse_serial) {
+        if self.corpse_of.len() >= MAX_CORPSE_LINKS && !self.corpse_of.contains_key(&corpse_serial)
+        {
             if let Some(&k) = self.corpse_of.keys().next() {
                 self.corpse_of.remove(&k);
             }
@@ -1168,7 +1215,11 @@ impl World {
     /// A *different* opponent is a genuinely separate concurrent session —
     /// see [`TradeState`]'s doc.
     pub fn open_trade(&mut self, trade: TradeState) {
-        if let Some(existing) = self.trades.iter_mut().find(|t| t.opponent_serial == trade.opponent_serial) {
+        if let Some(existing) = self
+            .trades
+            .iter_mut()
+            .find(|t| t.opponent_serial == trade.opponent_serial)
+        {
             *existing = trade;
         } else {
             self.trades.push(trade);
@@ -1181,7 +1232,9 @@ impl World {
     /// [`TradeState`]'s doc). `None` if no session has that container (the
     /// caller raced the session away — treat as a no-op).
     pub fn trade_mut(&mut self, my_container: u32) -> Option<&mut TradeState> {
-        self.trades.iter_mut().find(|t| t.my_container == my_container)
+        self.trades
+            .iter_mut()
+            .find(|t| t.my_container == my_container)
     }
 
     /// Close a trade session by our own container serial (0x6F action 1, or a
@@ -1194,7 +1247,11 @@ impl World {
     /// keyed by a container serial nothing will ever reference again. No-op
     /// if no session has that container.
     pub fn close_trade(&mut self, my_container: u32) {
-        let Some(pos) = self.trades.iter().position(|t| t.my_container == my_container) else {
+        let Some(pos) = self
+            .trades
+            .iter()
+            .position(|t| t.my_container == my_container)
+        else {
             return;
         };
         let t = self.trades.remove(pos);
@@ -1218,7 +1275,14 @@ impl World {
     /// Upserts by the book's own serial — a re-opened book simply replaces its
     /// previous entry (the server always sends the current full mask, not a diff).
     pub fn set_spellbook_content(&mut self, serial: u32, graphic: u16, offset: u16, content: u64) {
-        self.spellbooks.insert(serial, SpellbookContent { graphic, offset, content });
+        self.spellbooks.insert(
+            serial,
+            SpellbookContent {
+                graphic,
+                offset,
+                content,
+            },
+        );
     }
 
     /// Open or refresh a map item's window (0x90 DisplayMap / 0xF5
@@ -1443,6 +1507,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ghost_body_classification_matches_servuo() {
+        for body in [402, 403, 607, 608, 694, 695, 970] {
+            assert!(is_ghost_body(body), "body {body} must be a ghost");
+        }
+        for body in [0, 400, 401, 605, 606, 666, 667, 970 + 1] {
+            assert!(!is_ghost_body(body), "body {body} must be alive/non-ghost");
+        }
+    }
+
+    #[test]
+    fn journal_is_bounded_without_breaking_observation_cursors() {
+        let mut w = World::new();
+        let mut cursor = 0;
+
+        for i in 0..4 {
+            w.push_system_note(i.to_string());
+        }
+        assert_eq!(w.observe(&mut cursor).new_journal.len(), 4);
+
+        for i in 4..MAX_JOURNAL_ENTRIES + 8 {
+            w.push_system_note(i.to_string());
+        }
+        assert_eq!(w.journal.len(), MAX_JOURNAL_ENTRIES);
+        assert_eq!(w.journal_offset, 8);
+
+        let retained = w.observe(&mut cursor).new_journal;
+        assert_eq!(retained.len(), MAX_JOURNAL_ENTRIES);
+        assert_eq!(retained.first().map(|j| j.text.as_str()), Some("8"));
+        assert_eq!(cursor, MAX_JOURNAL_ENTRIES + 8);
+
+        w.push_system_note("new tail");
+        let tail = w.observe(&mut cursor).new_journal;
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].text, "new tail");
+    }
+
+    #[test]
     fn player_resolves_from_serial() {
         let mut w = World::new();
         assert!(w.player_mobile().is_none());
@@ -1457,7 +1558,11 @@ mod tests {
     #[test]
     fn close_shop_buy_drops_a_stale_buy_window() {
         let mut w = World::new();
-        w.shop_buy = Some(ShopBuy { vendor: 0x1234, container: 0x1, entries: vec![] });
+        w.shop_buy = Some(ShopBuy {
+            vendor: 0x1234,
+            container: 0x1,
+            entries: vec![],
+        });
         w.close_shop_buy();
         assert!(w.shop_buy.is_none());
     }
@@ -1465,9 +1570,21 @@ mod tests {
     #[test]
     fn close_gump_by_type_drops_matching_kind_keeps_others() {
         let mut w = World::new();
-        w.add_gump(Gump { serial: 1, gump_id: 100, ..Default::default() });
-        w.add_gump(Gump { serial: 2, gump_id: 100, ..Default::default() });
-        w.add_gump(Gump { serial: 3, gump_id: 200, ..Default::default() });
+        w.add_gump(Gump {
+            serial: 1,
+            gump_id: 100,
+            ..Default::default()
+        });
+        w.add_gump(Gump {
+            serial: 2,
+            gump_id: 100,
+            ..Default::default()
+        });
+        w.add_gump(Gump {
+            serial: 3,
+            gump_id: 200,
+            ..Default::default()
+        });
         w.close_gump_by_type(100);
         assert_eq!(w.gumps.len(), 1);
         assert_eq!(w.gumps[0].serial, 3);
@@ -1494,7 +1611,10 @@ mod tests {
         // trip could then answer the *previous* SellList, whose serials no
         // longer match anything in the pack (a silent failed sale).
         let mut w = World::new();
-        w.shop_sell = Some(ShopSell { vendor: 0x1234, items: vec![] });
+        w.shop_sell = Some(ShopSell {
+            vendor: 0x1234,
+            items: vec![],
+        });
         w.close_shop_sell();
         assert!(w.shop_sell.is_none());
     }
@@ -1505,7 +1625,10 @@ mod tests {
         w.set_map_view(0x4000_1111, 0x139D, 0, 0, 0, 400, 400, 200, 200);
         let first = w.map_gumps.get(&0x4000_1111).cloned().unwrap();
         assert_eq!(first.open_seq, 1);
-        assert_eq!((first.gump_art, first.width, first.height), (0x139D, 200, 200));
+        assert_eq!(
+            (first.gump_art, first.width, first.height),
+            (0x139D, 200, 200)
+        );
         assert!(first.pins.is_empty());
 
         // A re-decode/re-click resends byte-identical bounds — must still bump
@@ -1540,7 +1663,11 @@ mod tests {
         // Removing index 0 (the chest pin) must be refused, mirroring ServUO
         // `MapItem.RemovePin`'s `index > 0` guard.
         w.apply_map_command(0x4000_3333, 4, 0, 0, 0);
-        assert_eq!(w.map_gumps[&0x4000_3333].pins.len(), 2, "index 0 must survive a remove");
+        assert_eq!(
+            w.map_gumps[&0x4000_3333].pins.len(),
+            2,
+            "index 0 must survive a remove"
+        );
 
         // Removing index 1 is allowed.
         w.apply_map_command(0x4000_3333, 4, 1, 0, 0);
@@ -1561,7 +1688,10 @@ mod tests {
 
         // Insert at an out-of-range index appends (ServUO `InsertPin` behavior).
         w.apply_map_command(0x4000_4444, 2, 99, 30, 30);
-        assert_eq!(w.map_gumps[&0x4000_4444].pins, vec![(5, 5), (10, 10), (30, 30)]);
+        assert_eq!(
+            w.map_gumps[&0x4000_4444].pins,
+            vec![(5, 5), (10, 10), (30, 30)]
+        );
 
         // Move/change index 1 in place.
         w.apply_map_command(0x4000_4444, 3, 1, 11, 12);
@@ -1585,16 +1715,30 @@ mod tests {
     #[test]
     fn map_view_pruned_on_delete_and_facet_purge() {
         let mut w = World::new();
-        w.enter_world(&LoginResult { serial: 0x1, x: 0, y: 0, z: 0, direction: 0, body: 0x190, aos: false });
+        w.enter_world(&LoginResult {
+            serial: 0x1,
+            x: 0,
+            y: 0,
+            z: 0,
+            direction: 0,
+            body: 0x190,
+            aos: false,
+        });
         w.set_map_view(0x4000_5555, 0x139D, 0, 0, 0, 400, 400, 200, 200);
         assert!(w.map_gumps.contains_key(&0x4000_5555));
 
         w.remove(0x4000_5555);
-        assert!(w.map_gumps.is_empty(), "0x1D delete must prune the map view");
+        assert!(
+            w.map_gumps.is_empty(),
+            "0x1D delete must prune the map view"
+        );
 
         w.set_map_view(0x4000_6666, 0x139D, 0, 0, 0, 400, 400, 200, 200);
         w.on_map_change(1); // facet switch — not rooted at the player, so it's purged
-        assert!(w.map_gumps.is_empty(), "a facet switch must purge a map view we're not carrying");
+        assert!(
+            w.map_gumps.is_empty(),
+            "a facet switch must purge a map view we're not carrying"
+        );
     }
 
     #[test]
@@ -1606,7 +1750,10 @@ mod tests {
         w.house_designs.insert(0x4000_7777, HouseDesign::default());
         w.pending_house_design_requests.push(0x4000_7777);
         w.on_map_change(1);
-        assert!(w.house_designs.is_empty(), "no-player facet switch must clear house designs");
+        assert!(
+            w.house_designs.is_empty(),
+            "no-player facet switch must clear house designs"
+        );
         assert!(
             w.pending_house_design_requests.is_empty(),
             "no-player facet switch must clear pending design requests"
@@ -1614,11 +1761,22 @@ mod tests {
 
         // World::remove (0x1D delete).
         let mut w = World::new();
-        w.enter_world(&LoginResult { serial: 0x1, x: 0, y: 0, z: 0, direction: 0, body: 0x190, aos: false });
+        w.enter_world(&LoginResult {
+            serial: 0x1,
+            x: 0,
+            y: 0,
+            z: 0,
+            direction: 0,
+            body: 0x190,
+            aos: false,
+        });
         w.house_designs.insert(0x4000_5555, HouseDesign::default());
         w.pending_house_design_requests.push(0x4000_5555);
         w.remove(0x4000_5555);
-        assert!(w.house_designs.is_empty(), "0x1D delete must prune the house design");
+        assert!(
+            w.house_designs.is_empty(),
+            "0x1D delete must prune the house design"
+        );
         assert!(
             w.pending_house_design_requests.is_empty(),
             "0x1D delete must prune the pending design request"
@@ -1629,7 +1787,10 @@ mod tests {
         w.house_designs.insert(0x4000_6666, HouseDesign::default());
         w.pending_house_design_requests.push(0x4000_6666);
         w.on_map_change(1); // facet switch — not rooted at the player, so purged
-        assert!(w.house_designs.is_empty(), "a facet switch must purge a house design we're not carrying");
+        assert!(
+            w.house_designs.is_empty(),
+            "a facet switch must purge a house design we're not carrying"
+        );
         assert!(
             w.pending_house_design_requests.is_empty(),
             "a facet switch must purge a pending design request we're not carrying"

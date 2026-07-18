@@ -564,7 +564,10 @@ mod tests {
         assert_eq!(build_server_select(0).len(), 3);
         assert_eq!(build_game_seed(0xDEAD_BEEF).len(), 4);
         assert_eq!(build_game_login(0, "user", "pass").len(), 65);
-        assert_eq!(build_play_character("Anima", 0, 0x7F00_0001, 0x3F).len(), 73);
+        assert_eq!(
+            build_play_character("Anima", 0, 0x7F00_0001, 0x3F).len(),
+            73
+        );
         assert_eq!(build_delete_character(0, 0x7F00_0001).len(), 39);
     }
 
@@ -678,7 +681,15 @@ mod tests {
 
         // LoginConfirm 0x1B → Done.
         let mut w = PacketWriter::new();
-        w.u8(0x1B).u32(0x2A).u32(0).u16(400).u16(1000).u16(2000).u16(0).u8(0).zeros(17);
+        w.u8(0x1B)
+            .u32(0x2A)
+            .u32(0)
+            .u16(400)
+            .u16(1000)
+            .u16(2000)
+            .u16(0)
+            .u8(0)
+            .zeros(17);
         let confirm = w.into_vec();
         let d = m.on_packet(&confirm).unwrap();
         assert!(matches!(d[0], LoginDirective::Done(_)));
@@ -733,10 +744,7 @@ mod tests {
         let d = m.on_packet(&char_list).unwrap();
         assert_eq!(
             d,
-            vec![LoginDirective::Send(build_delete_character(
-                0,
-                0x7F00_0001
-            ))]
+            vec![LoginDirective::Send(build_delete_character(0, 0x7F00_0001))]
         );
         assert!(!m.is_done()); // stayed in AwaitCharacterList, waiting for the resend
 
@@ -769,7 +777,8 @@ mod tests {
         // Drive the realistic sequence: the char list makes the machine send its
         // 0x83 delete; ONLY THEN does a DeleteResult mean our delete was rejected.
         // Reason=2 = CharBeingPlayed in ServUO's DeleteResultType.
-        m.on_packet(&build_character_list_frame(0xA9, &["Anima"])).unwrap();
+        m.on_packet(&build_character_list_frame(0xA9, &["Anima"]))
+            .unwrap();
         let err = m.on_packet(&[0x85, 2]).unwrap_err();
         assert_eq!(
             err,

@@ -38,7 +38,11 @@ impl Gumps {
         let mut rgba = vec![0u8; w * h * 4];
         for y in 0..h {
             let row_off = u32le(y * 4) as usize;
-            let next = if y + 1 < h { u32le((y + 1) * 4) as usize } else { total_u32 };
+            let next = if y + 1 < h {
+                u32le((y + 1) * 4) as usize
+            } else {
+                total_u32
+            };
             let pairs = next.saturating_sub(row_off);
             let mut p = row_off * 4;
             let mut x = 0usize;
@@ -53,7 +57,11 @@ impl Gumps {
                     let r = ((value >> 10) & 0x1F) as u8;
                     let g = ((value >> 5) & 0x1F) as u8;
                     let b = (value & 0x1F) as u8;
-                    let (r, g, b) = ((r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2));
+                    let (r, g, b) = (
+                        (r << 3) | (r >> 2),
+                        (g << 3) | (g >> 2),
+                        (b << 3) | (b >> 2),
+                    );
                     for k in 0..run {
                         let px = x + k;
                         if px < w {

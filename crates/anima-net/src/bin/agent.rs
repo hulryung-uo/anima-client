@@ -41,10 +41,16 @@ fn main() {
     let username = args.next().unwrap_or_else(|| "animatest".to_string());
     let password = args.next().unwrap_or_else(|| "animatest".to_string());
     let home = std::env::var("HOME").unwrap_or_default();
-    let data_dir = args.next().unwrap_or_else(|| format!("{home}/dev/uo/uo-resource"));
+    let data_dir = args
+        .next()
+        .unwrap_or_else(|| format!("{home}/dev/uo/uo-resource"));
 
     eprintln!("[anima-agent] connecting to {host}:{port} as {username} ...");
-    let cfg = LoginConfig { username, password, ..Default::default() };
+    let cfg = LoginConfig {
+        username,
+        password,
+        ..Default::default()
+    };
     let mut session = match Session::connect_and_login(&Endpoint::new(host, port), cfg) {
         Ok(s) => s,
         Err(e) => {
@@ -97,13 +103,22 @@ fn main() {
 /// Returns `Ok(Some(reply))` to answer, `Ok(None)` to quit, `Err(msg)` on failure.
 /// `map` is the `WalkTo` pathfinding terrain (`None` if `data_dir` had no game
 /// data — see `main`'s startup log).
-fn handle(session: &mut Session, map: Option<&mut MapData>, line: &str) -> Result<Option<Value>, String> {
+fn handle(
+    session: &mut Session,
+    map: Option<&mut MapData>,
+    line: &str,
+) -> Result<Option<Value>, String> {
     let msg: Value = serde_json::from_str(line).map_err(|e| format!("bad json: {e}"))?;
-    let cmd = msg.get("cmd").and_then(Value::as_str).ok_or("missing 'cmd'")?;
+    let cmd = msg
+        .get("cmd")
+        .and_then(Value::as_str)
+        .ok_or("missing 'cmd'")?;
     match cmd {
         "observe" => {
             let obs = session.observation();
-            Ok(Some(json!({ "ok": true, "obs": observation_to_json(&obs) })))
+            Ok(Some(
+                json!({ "ok": true, "obs": observation_to_json(&obs) }),
+            ))
         }
         "act" => {
             let action = action_from_json(msg.get("action").ok_or("missing 'action'")?)?;

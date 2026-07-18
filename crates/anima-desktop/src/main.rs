@@ -39,12 +39,17 @@ fn default_data_dir() -> PathBuf {
 }
 
 fn config_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_config_dir().ok().map(|d| d.join("config.json"))
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|d| d.join("config.json"))
 }
 
 fn load_persisted_data_dir(app: &AppHandle) -> Option<PathBuf> {
     let text = std::fs::read_to_string(config_path(app)?).ok()?;
-    serde_json::from_str::<DesktopConfig>(&text).ok().map(|c| c.data_dir)
+    serde_json::from_str::<DesktopConfig>(&text)
+        .ok()
+        .map(|c| c.data_dir)
 }
 
 fn persist_data_dir(app: &AppHandle, dir: &Path) {
@@ -52,7 +57,9 @@ fn persist_data_dir(app: &AppHandle, dir: &Path) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(json) = serde_json::to_string_pretty(&DesktopConfig { data_dir: dir.to_path_buf() }) {
+    if let Ok(json) = serde_json::to_string_pretty(&DesktopConfig {
+        data_dir: dir.to_path_buf(),
+    }) {
         let _ = std::fs::write(path, json);
     }
 }
@@ -71,17 +78,25 @@ fn resolve_data_dir(app: &AppHandle) -> PathBuf {
     if looks_like_uo_data(&candidate) {
         return candidate;
     }
-    println!("anima-desktop: no UO client data at {}; asking the user", candidate.display());
+    println!(
+        "anima-desktop: no UO client data at {}; asking the user",
+        candidate.display()
+    );
     let picked = app
         .dialog()
         .file()
-        .set_title("Locate your Ultima Online client files (folder containing anim.mul / tiledata.mul)")
+        .set_title(
+            "Locate your Ultima Online client files (folder containing anim.mul / tiledata.mul)",
+        )
         .blocking_pick_folder()
         .and_then(|f| f.into_path().ok());
     match picked {
         Some(dir) => {
             if !looks_like_uo_data(&dir) {
-                eprintln!("anima-desktop: {} doesn't look like a UO data dir either; using it anyway", dir.display());
+                eprintln!(
+                    "anima-desktop: {} doesn't look like a UO data dir either; using it anyway",
+                    dir.display()
+                );
             }
             persist_data_dir(app, &dir);
             dir
@@ -147,7 +162,10 @@ fn main() {
                     let build = WebviewWindowBuilder::new(
                         &handle_for_window,
                         "main",
-                        WebviewUrl::External(url.parse().expect("http://127.0.0.1:<port>/ is a valid URL")),
+                        WebviewUrl::External(
+                            url.parse()
+                                .expect("http://127.0.0.1:<port>/ is a valid URL"),
+                        ),
                     )
                     .title("Anima")
                     .inner_size(1280.0, 800.0);

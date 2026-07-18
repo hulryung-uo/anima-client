@@ -139,7 +139,11 @@ mod tests {
         o.mobiles.push(MobileView {
             serial: 1,
             name: "PK".into(),
-            pos: Position { x: 103, y: 100, z: 0 },
+            pos: Position {
+                x: 103,
+                y: 100,
+                z: 0,
+            },
             body: 0x190,
             notoriety: NOTO_MURDERER,
             hits: 1,
@@ -171,7 +175,9 @@ mod tests {
             cliloc: 0,
         });
         let acts = b.decide(&o);
-        assert!(acts.iter().any(|a| matches!(a, Action::Say { text } if text.contains("Hastin"))));
+        assert!(acts
+            .iter()
+            .any(|a| matches!(a, Action::Say { text } if text.contains("Hastin"))));
         // Second time: no repeat greeting (journal already consumed; new empty).
         let acts2 = b.decide(&obs_at(100, 100));
         assert!(!acts2.iter().any(|a| matches!(a, Action::Say { .. })));

@@ -105,7 +105,11 @@ impl Cliloc {
 /// kept verbatim, so a template with no placeholders returns unchanged.
 fn substitute(template: &str, args: &str) -> String {
     let arg = args.trim_start_matches('\t');
-    let parts: Vec<&str> = if arg.is_empty() { Vec::new() } else { arg.split('\t').collect() };
+    let parts: Vec<&str> = if arg.is_empty() {
+        Vec::new()
+    } else {
+        arg.split('\t').collect()
+    };
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(open) = rest.find('~') {
@@ -150,13 +154,22 @@ mod tests {
     #[test]
     fn substitutes_numbered_placeholders() {
         // In-order numbered form (the common case).
-        assert_eq!(substitute("~1_NAME~ : ~2_VAL~", "Hastin\t42"), "Hastin : 42");
+        assert_eq!(
+            substitute("~1_NAME~ : ~2_VAL~", "Hastin\t42"),
+            "Hastin : 42"
+        );
         // Out-of-order indices still pick the right arg.
         assert_eq!(substitute("~2_b~/~1_a~", "first\tsecond"), "second/first");
         // Leading tab(s) on the arg string are ignored.
-        assert_eq!(substitute("You see ~1_val~ damage", "\t10"), "You see 10 damage");
+        assert_eq!(
+            substitute("You see ~1_val~ damage", "\t10"),
+            "You see 10 damage"
+        );
         // A template with no placeholders is unchanged.
-        assert_eq!(substitute("You have been damaged!", ""), "You have been damaged!");
+        assert_eq!(
+            substitute("You have been damaged!", ""),
+            "You have been damaged!"
+        );
         // Missing args / unnumbered placeholders are dropped (no raw ~...~ leaks).
         assert_eq!(substitute("[~1_X~]", ""), "[]");
         assert_eq!(substitute("a~b~c", "z"), "ac");
@@ -165,10 +178,12 @@ mod tests {
     #[test]
     fn format_resolves_known_id_only() {
         let c = cliloc_with(1042762, "~1_AMT~ damage to ~2_NAME~");
-        assert_eq!(c.format(1042762, "8\tan orc"), Some("8 damage to an orc".to_string()));
+        assert_eq!(
+            c.format(1042762, "8\tan orc"),
+            Some("8 damage to an orc".to_string())
+        );
         assert_eq!(c.format(999999, "x"), None); // unknown id → caller falls back
     }
-
 
     #[test]
     fn parses_a_synthetic_table() {

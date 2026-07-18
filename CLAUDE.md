@@ -41,5 +41,5 @@ handler-by-handler, validate against captures (strangler migration).
 ## Build / test
 ```bash
 cargo build             # workspace
-cargo test --workspace  # currently 170 passing (+16 #[ignore]d real-data-file tests)
+cargo test --workspace  # ignored tests require local real-data files
 ```

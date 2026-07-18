@@ -111,12 +111,18 @@ fn parse_sound_def(text: &str) -> HashMap<u16, i32> {
             continue;
         }
         // index is the first integer.
-        let Some(index) = line.split_whitespace().next().and_then(|t| t.parse::<u16>().ok()) else {
+        let Some(index) = line
+            .split_whitespace()
+            .next()
+            .and_then(|t| t.parse::<u16>().ok())
+        else {
             continue;
         };
         // group is whatever sits inside the braces.
         let Some(open) = line.find('{') else { continue };
-        let Some(close) = line[open..].find('}').map(|p| open + p) else { continue };
+        let Some(close) = line[open..].find('}').map(|p| open + p) else {
+            continue;
+        };
         let group = &line[open + 1..close];
         let last = group
             .split([' ', ',', '\t'])
@@ -143,7 +149,10 @@ mod tests {
         assert_eq!(&wav[12..16], b"fmt ");
         assert_eq!(&wav[36..40], b"data");
         // sample rate at offset 24 (LE)
-        assert_eq!(u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]), 22050);
+        assert_eq!(
+            u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]),
+            22050
+        );
         // data chunk length matches the PCM length
         assert_eq!(u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]), 4);
         assert_eq!(wav.len(), 44 + 4);

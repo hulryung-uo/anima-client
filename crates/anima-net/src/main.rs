@@ -64,8 +64,17 @@ fn main() {
     println!("\n=== PERCEPTION ===");
     println!(
         "player: {}  hp {}/{}  mana {}/{}  stam {}/{}",
-        if p.name.is_empty() { "<unnamed>" } else { &p.name },
-        p.hits, p.hits_max, p.mana, p.mana_max, p.stam, p.stam_max
+        if p.name.is_empty() {
+            "<unnamed>"
+        } else {
+            &p.name
+        },
+        p.hits,
+        p.hits_max,
+        p.mana,
+        p.mana_max,
+        p.stam,
+        p.stam_max
     );
     println!(
         "stats:  str {} dex {} int {}  gold {}  armor {}  weight {}",
@@ -87,7 +96,10 @@ fn main() {
     // --- capstone: pathfind over real map data and navigate on the server ---
     let start = session.world.player_mobile().cloned().unwrap_or_default();
     println!("\n=== NAVIGATION (perception → A* → movement) ===");
-    let data_dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap_or_default());
+    let data_dir = format!(
+        "{}/dev/uo/uo-resource",
+        std::env::var("HOME").unwrap_or_default()
+    );
     match anima_assets::MapData::open(&data_dir) {
         Ok(mut map) => {
             // Target: 10 tiles north-west of spawn (pathfinder routes around walls).

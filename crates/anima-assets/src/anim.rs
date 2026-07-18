@@ -183,10 +183,17 @@ impl Anim {
         let dir = resource_dir.as_ref();
         // File 0 (anim.mul) is mandatory; anim2..anim5 are optional expansion files.
         let open_file = |i: usize| -> Option<AnimFile> {
-            let suffix = if i == 0 { String::new() } else { (i + 1).to_string() };
+            let suffix = if i == 0 {
+                String::new()
+            } else {
+                (i + 1).to_string()
+            };
             let idx = std::fs::read(dir.join(format!("anim{suffix}.idx"))).ok()?;
             let mul = File::open(dir.join(format!("anim{suffix}.mul"))).ok()?;
-            Some(AnimFile { idx, mul: Mutex::new(mul) })
+            Some(AnimFile {
+                idx,
+                mul: Mutex::new(mul),
+            })
         };
         if open_file(0).is_none() {
             // Force the same error surface as before when anim.mul/idx are missing.
@@ -474,7 +481,12 @@ impl Anim {
     /// `bin(replaced[replaced[G]])` — `bin(replaced[G])` is absent for every
     /// one of them, zero counter-examples.
     fn uop_action(&self, body: u16, group: u8) -> Option<u8> {
-        let replace = |g: u8| self.uop_replace.get(&(body, g)).copied().unwrap_or(g as i32);
+        let replace = |g: u8| {
+            self.uop_replace
+                .get(&(body, g))
+                .copied()
+                .unwrap_or(g as i32)
+        };
         let stage1 = replace(group);
         // Re-apply only if `stage1` is itself a valid table SLOT (0..MAX_ACTIONS)
         // — the only range `uop_replace`'s keys ever occupy (mirrors
@@ -485,7 +497,9 @@ impl Anim {
             .filter(|&g| (g as usize) < MAX_ACTIONS)
             .map(replace)
             .unwrap_or(stage1);
-        (0..MAX_ACTIONS as i32).contains(&action).then_some(action as u8)
+        (0..MAX_ACTIONS as i32)
+            .contains(&action)
+            .then_some(action as u8)
     }
 
     /// Decompressed `.bin` payload for (body, group) — ALL 5 directions' worth
@@ -504,7 +518,12 @@ impl Anim {
         }
         let path = format!("build/animationlegacyframe/{body:06}/{action:02}.bin");
         let hash = uop_hash(&path);
-        let buf = Arc::new(self.uop_files.iter().flatten().find_map(|f| f.by_hash(hash))?);
+        let buf = Arc::new(
+            self.uop_files
+                .iter()
+                .flatten()
+                .find_map(|f| f.by_hash(hash))?,
+        );
         if let Ok(mut cache) = self.uop_cache.lock() {
             if cache.len() >= UOP_CACHE_CAP {
                 cache.clear(); // simplest bounded policy — see field doc comment
@@ -602,7 +621,13 @@ impl Anim {
     /// adjusted for the mirror (`width - cx`). `None` if absent/undecodable — for
     /// a UOP-flagged body this also covers a legitimately empty gap-filled frame
     /// (see [`parse_uop_bin`]): nothing to draw this tick, same as any other `None`.
-    pub fn frame(&self, body: u16, group: u8, dir8: u8, frame_idx: usize) -> Option<(Image, i16, i16)> {
+    pub fn frame(
+        &self,
+        body: u16,
+        group: u8,
+        dir8: u8,
+        frame_idx: usize,
+    ) -> Option<(Image, i16, i16)> {
         let (dir, mirror) = map_dir(dir8);
 
         if self.is_uop(body) {
@@ -728,9 +753,19 @@ fn parse_uop_bin(buf: &[u8], equipment: bool) -> Option<UopBin> {
     for &(start, frame_id, pixel_offset) in &raw {
         while frame_id - last_frame_id > 1 {
             last_frame_id += 1;
-            slots.push(UopFrameSlot { start: 0, pixel_offset: 0, frame_id: last_frame_id, empty: true });
+            slots.push(UopFrameSlot {
+                start: 0,
+                pixel_offset: 0,
+                frame_id: last_frame_id,
+                empty: true,
+            });
         }
-        slots.push(UopFrameSlot { start, pixel_offset, frame_id, empty: false });
+        slots.push(UopFrameSlot {
+            start,
+            pixel_offset,
+            frame_id,
+            empty: false,
+        });
         last_frame_id = frame_id;
     }
 
@@ -740,7 +775,10 @@ fn parse_uop_bin(buf: &[u8], equipment: bool) -> Option<UopBin> {
     if real_frame_count == 0 {
         return None;
     }
-    Some(UopBin { slots, real_frame_count })
+    Some(UopBin {
+        slots,
+        real_frame_count,
+    })
 }
 
 /// Decode one legacy-format animation sprite: `i16 centerX, centerY, width,
@@ -752,7 +790,12 @@ fn parse_uop_bin(buf: &[u8], equipment: bool) -> Option<UopBin> {
 /// `alpha_check`: when true (the UOP path only), a palette color that resolves
 /// to raw `0` is a transparent hole rather than opaque black (ClassicUO
 /// `ReadSpriteData(..., alphaCheck: true)` — only for UOP frames).
-fn decode_sprite_frame(buf: &[u8], p: usize, palette: &[u16; 256], alpha_check: bool) -> Option<(Image, i16, i16)> {
+fn decode_sprite_frame(
+    buf: &[u8],
+    p: usize,
+    palette: &[u16; 256],
+    alpha_check: bool,
+) -> Option<(Image, i16, i16)> {
     if p + 8 > buf.len() {
         return None;
     }
@@ -818,7 +861,15 @@ fn decode_sprite_frame(buf: &[u8], p: usize, palette: &[u16; 256], alpha_check: 
         }
     }
 
-    Some((Image { width: w as u32, height: h as u32, rgba }, center_x, center_y))
+    Some((
+        Image {
+            width: w as u32,
+            height: h as u32,
+            rgba,
+        },
+        center_x,
+        center_y,
+    ))
 }
 
 /// Apply direction-mirroring to a decoded frame: flip the image horizontally
@@ -845,11 +896,15 @@ fn parse_body_def(text: &str) -> HashMap<u16, (u16, u16)> {
             continue;
         }
         // Split around the `{ … }` group list.
-        let (Some(open), Some(close)) = (line.find('{'), line.find('}')) else { continue };
+        let (Some(open), Some(close)) = (line.find('{'), line.find('}')) else {
+            continue;
+        };
         if close < open {
             continue;
         }
-        let Some(index) = parse_def_int(line[..open].trim()) else { continue };
+        let Some(index) = parse_def_int(line[..open].trim()) else {
+            continue;
+        };
         let group: Vec<i64> = line[open + 1..close]
             .split(',')
             .filter_map(|t| parse_def_int(t.trim()))
@@ -857,13 +912,16 @@ fn parse_body_def(text: &str) -> HashMap<u16, (u16, u16)> {
         if group.is_empty() {
             continue;
         }
-        let Some(hue) = parse_def_int(line[close + 1..].trim()) else { continue };
+        let Some(hue) = parse_def_int(line[close + 1..].trim()) else {
+            continue;
+        };
         let check = if group.len() >= 3 { group[2] } else { group[0] };
         if !(0..=0xFFFF).contains(&check) || !(0..=0xFFFF).contains(&index) {
             continue;
         }
         // First entry for an index wins (ClassicUO keeps the already-present graphic).
-        map.entry(index as u16).or_insert((check as u16, hue.clamp(0, 0xFFFF) as u16));
+        map.entry(index as u16)
+            .or_insert((check as u16, hue.clamp(0, 0xFFFF) as u16));
     }
     map
 }
@@ -881,7 +939,9 @@ fn parse_body_conv(text: &str) -> HashMap<u16, (u8, u16)> {
             continue;
         }
         let mut toks = line.split_whitespace();
-        let Some(index) = toks.next().and_then(parse_def_int) else { continue };
+        let Some(index) = toks.next().and_then(parse_def_int) else {
+            continue;
+        };
         if !(0..=0xFFFF).contains(&index) {
             continue;
         }
@@ -892,7 +952,9 @@ fn parse_body_conv(text: &str) -> HashMap<u16, (u8, u16)> {
             if col > 4 {
                 break;
             }
-            let Some(graphic) = parse_def_int(tok) else { continue };
+            let Some(graphic) = parse_def_int(tok) else {
+                continue;
+            };
             if (0..=0xFFFF).contains(&graphic) {
                 map.insert(index as u16, (col as u8, graphic as u16));
             }
@@ -935,8 +997,13 @@ fn parse_equip_conv(text: &str) -> HashMap<(u16, u16), EquipConv> {
         } else {
             gump
         };
-        let Some(hue) = toks.next().and_then(parse_def_int) else { continue };
-        if !(0..=0xFFFF).contains(&body) || !(0..=0xFFFF).contains(&graphic) || !(0..=0xFFFF).contains(&new_graphic) {
+        let Some(hue) = toks.next().and_then(parse_def_int) else {
+            continue;
+        };
+        if !(0..=0xFFFF).contains(&body)
+            || !(0..=0xFFFF).contains(&graphic)
+            || !(0..=0xFFFF).contains(&new_graphic)
+        {
             continue;
         }
         map.insert(
@@ -1002,7 +1069,9 @@ fn parse_mob_types(text: &str) -> HashMap<u16, MobTypeEntry> {
             continue;
         }
         let mut toks = line.split_whitespace();
-        let Some(id) = toks.next().and_then(|t| t.parse::<u16>().ok()) else { continue };
+        let Some(id) = toks.next().and_then(|t| t.parse::<u16>().ok()) else {
+            continue;
+        };
         let Some(ty) = toks.next() else { continue };
         let equipment = ty.eq_ignore_ascii_case("equipment");
         let kind = match ty.to_ascii_lowercase().as_str() {
@@ -1019,7 +1088,15 @@ fn parse_mob_types(text: &str) -> HashMap<u16, MobTypeEntry> {
             .and_then(|t| i64::from_str_radix(t, 16).ok())
             .unwrap_or(0);
         let uop = flags & 0x1_0000 != 0; // AnimationFlags.UseUopAnimation
-        map.insert(id, MobTypeEntry { kind, flags, uop, equipment });
+        map.insert(
+            id,
+            MobTypeEntry {
+                kind,
+                flags,
+                uop,
+                equipment,
+            },
+        );
     }
     map
 }
@@ -1170,7 +1247,9 @@ mod tests {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let anim = Anim::open(&dir).expect("open anim");
         // Human male (0x190 = 400), standing, facing south (dir 4), frame 0.
-        let (img, _cx, _cy) = anim.frame(400, PEOPLE_STAND, 4, 0).expect("human stand frame");
+        let (img, _cx, _cy) = anim
+            .frame(400, PEOPLE_STAND, 4, 0)
+            .expect("human stand frame");
         println!("human stand frame: {}x{}", img.width, img.height);
         assert!(img.width > 0 && img.height > 0);
         assert!(!img.is_empty(), "frame should have opaque pixels");
@@ -1199,7 +1278,12 @@ bad line without braces
     /// Build a `MobTypeEntry` for tests that only care about `kind` (flags 0,
     /// not UOP-flagged, not literally `equipment`).
     fn kind_entry(kind: u8) -> MobTypeEntry {
-        MobTypeEntry { kind, flags: 0, uop: false, equipment: false }
+        MobTypeEntry {
+            kind,
+            flags: 0,
+            uop: false,
+            equipment: false,
+        }
     }
 
     /// Build an `Anim` with no backing files (`entry`/`frame` calls would fail),
@@ -1208,7 +1292,10 @@ bad line without braces
     /// `mobtypes` takes fully-built entries (not just a bare kind) so tests can
     /// also exercise flag-dependent behavior ([`Anim::offset_kind`]/
     /// [`Anim::death_group`]'s flag reinterpretation).
-    fn test_anim(corpsedef: HashMap<u16, (u16, u16)>, mobtypes: HashMap<u16, MobTypeEntry>) -> Anim {
+    fn test_anim(
+        corpsedef: HashMap<u16, (u16, u16)>,
+        mobtypes: HashMap<u16, MobTypeEntry>,
+    ) -> Anim {
         Anim {
             files: Vec::new(),
             bodydef: HashMap::new(),
@@ -1260,7 +1347,15 @@ bad line without braces
         // mob_types_offset_selection_matches_classicuo_table for the same body
         // affecting the idx offset too.
         let mut mobtypes = HashMap::new();
-        mobtypes.insert(6, MobTypeEntry { kind: 1, flags: 0x28, uop: false, equipment: false });
+        mobtypes.insert(
+            6,
+            MobTypeEntry {
+                kind: 1,
+                flags: 0x28,
+                uop: false,
+                equipment: false,
+            },
+        );
         let anim = test_anim(HashMap::new(), mobtypes);
         assert_eq!(anim.death_group(6), MONSTER_DIE1);
 
@@ -1269,7 +1364,15 @@ bad line without braces
         // pure kind, and GetDeathAction's ByLowGroup check is a no-op when the
         // type is already Animal).
         let mut mobtypes = HashMap::new();
-        mobtypes.insert(7, MobTypeEntry { kind: 1, flags: 0x40, uop: false, equipment: false });
+        mobtypes.insert(
+            7,
+            MobTypeEntry {
+                kind: 1,
+                flags: 0x40,
+                uop: false,
+                equipment: false,
+            },
+        );
         let anim = test_anim(HashMap::new(), mobtypes);
         assert_eq!(anim.death_group(7), ANIMAL_DIE1);
     }
@@ -1313,10 +1416,38 @@ bad
 bad line
 ";
         let map = parse_equip_conv(def);
-        assert_eq!(map.get(&(401, 1249)), Some(&EquipConv { graphic: 1250, gump: 61250, hue: 0 }));
-        assert_eq!(map.get(&(401, 538)), Some(&EquipConv { graphic: 986, gump: 538, hue: 0 }));
-        assert_eq!(map.get(&(606, 968)), Some(&EquipConv { graphic: 977, gump: 977, hue: 0 }));
-        assert_eq!(map.get(&(605, 1)), Some(&EquipConv { graphic: 2, gump: 2, hue: 7 }));
+        assert_eq!(
+            map.get(&(401, 1249)),
+            Some(&EquipConv {
+                graphic: 1250,
+                gump: 61250,
+                hue: 0
+            })
+        );
+        assert_eq!(
+            map.get(&(401, 538)),
+            Some(&EquipConv {
+                graphic: 986,
+                gump: 538,
+                hue: 0
+            })
+        );
+        assert_eq!(
+            map.get(&(606, 968)),
+            Some(&EquipConv {
+                graphic: 977,
+                gump: 977,
+                hue: 0
+            })
+        );
+        assert_eq!(
+            map.get(&(605, 1)),
+            Some(&EquipConv {
+                graphic: 2,
+                gump: 2,
+                hue: 7
+            })
+        );
         // Dropped entirely — never inserted under any key.
         assert_eq!(map.get(&(700, 9)), None);
         assert_eq!(map.len(), 4);
@@ -1328,8 +1459,22 @@ bad line
         let mut anim = test_anim(HashMap::new(), HashMap::new());
         anim.equipconv = parse_equip_conv(def);
         // Same item AnimID (1249), different wearer body → different conversion.
-        assert_eq!(anim.equip_conv(401, 1249), Some(EquipConv { graphic: 1250, gump: 61250, hue: 0 }));
-        assert_eq!(anim.equip_conv(606, 1249), Some(EquipConv { graphic: 1252, gump: 61252, hue: 0 }));
+        assert_eq!(
+            anim.equip_conv(401, 1249),
+            Some(EquipConv {
+                graphic: 1250,
+                gump: 61250,
+                hue: 0
+            })
+        );
+        assert_eq!(
+            anim.equip_conv(606, 1249),
+            Some(EquipConv {
+                graphic: 1252,
+                gump: 61252,
+                hue: 0
+            })
+        );
         // Unmapped (body, item) pair → None.
         assert_eq!(anim.equip_conv(400, 1249), None);
     }
@@ -1339,7 +1484,10 @@ bad line
     fn equip_conv_real_data_sanity() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let anim = Anim::open(&dir).expect("open anim");
-        assert!(!anim.equipconv.is_empty(), "Equipconv.def should have loaded entries");
+        assert!(
+            !anim.equipconv.is_empty(),
+            "Equipconv.def should have loaded entries"
+        );
         // Every stored gump is a valid u16 (parse-time range checks held) and every
         // entry is reachable through the public lookup under its own keys.
         for (&(body, graphic), ec) in &anim.equipconv {
@@ -1406,7 +1554,7 @@ not a data line
         assert_eq!(kind(50), Some(0)); // still monster — offset flags don't touch kind anymore
         assert_eq!(kind(60), Some(0)); // still monster — offset flags don't touch kind anymore
         assert_eq!(kind(70), Some(0)); // sea_monster → high/monster
-        // Flags are retained verbatim (for offset_kind/death_group to consult later).
+                                       // Flags are retained verbatim (for offset_kind/death_group to consult later).
         assert_eq!(map.get(&50).unwrap().flags, 0x440);
         assert_eq!(map.get(&60).unwrap().flags, 0x48);
         // Only body 400's TYPE column is literally `equipment`... except none of
@@ -1438,8 +1586,16 @@ not a data line
         // body 6: ANIMAL + LowGroupExtended(0x20), no 0x400/0x40 set → HIGH
         // section (0), but still animal group NUMBERS (anim_type=1) and dies
         // as a monster (see death_group_picks_primary_group_by_kind).
-        assert_eq!(anim.offset_kind(6, 6, 0), 0, "0x20 animal with no further override → high section");
-        assert_eq!(anim.anim_type(6), 1, "pure kind stays animal for group-number semantics");
+        assert_eq!(
+            anim.offset_kind(6, 6, 0),
+            0,
+            "0x20 animal with no further override → high section"
+        );
+        assert_eq!(
+            anim.anim_type(6),
+            1,
+            "pure kind stays animal for group-number semantics"
+        );
         assert_eq!(anim.death_group(6), MONSTER_DIE1);
 
         // body 50: MONSTER + ByPeopleGroup(0x400) → people section (2); pure
@@ -1492,7 +1648,10 @@ not a data line
     fn body_def_remap_adds_real_coverage() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let anim = Anim::open(&dir).expect("open anim");
-        assert!(!anim.bodydef.is_empty(), "Body.def should have loaded entries");
+        assert!(
+            !anim.bodydef.is_empty(),
+            "Body.def should have loaded entries"
+        );
         // For every remap, the *target* body's stand frame should resolve, and count
         // how many exotic bodies gain a sprite they lacked at their original id.
         let mut gained = 0;
@@ -1500,14 +1659,27 @@ not a data line
             if orig == target {
                 continue;
             }
-            let orig_ok = anim.frame_count(orig, anim.stand_group(orig), 4).unwrap_or(0) > 0;
-            let target_ok = anim.frame_count(target, anim.stand_group(target), 4).unwrap_or(0) > 0;
+            let orig_ok = anim
+                .frame_count(orig, anim.stand_group(orig), 4)
+                .unwrap_or(0)
+                > 0;
+            let target_ok = anim
+                .frame_count(target, anim.stand_group(target), 4)
+                .unwrap_or(0)
+                > 0;
             if !orig_ok && target_ok {
                 gained += 1;
             }
         }
-        println!("Body.def: {} entries, {} bodies gained a sprite via remap", anim.bodydef.len(), gained);
-        assert!(gained > 0, "remap should resolve sprites that the raw body id could not");
+        println!(
+            "Body.def: {} entries, {} bodies gained a sprite via remap",
+            anim.bodydef.len(),
+            gained
+        );
+        assert!(
+            gained > 0,
+            "remap should resolve sprites that the raw body id could not"
+        );
     }
 
     #[test]
@@ -1515,7 +1687,10 @@ not a data line
     fn corpse_def_remap_and_death_group_resolve_real_frames() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let anim = Anim::open(&dir).expect("open anim");
-        assert!(!anim.corpsedef.is_empty(), "Corpse.def should have loaded entries");
+        assert!(
+            !anim.corpsedef.is_empty(),
+            "Corpse.def should have loaded entries"
+        );
         // For every remap, the death-pose frame of the *target* body should resolve
         // (facing south, dir 4) — the same sprite the renderer will draw for a
         // corpse of that creature.
@@ -1526,8 +1701,15 @@ not a data line
                 resolved += 1;
             }
         }
-        println!("Corpse.def: {} entries, {} death poses resolved", anim.corpsedef.len(), resolved);
-        assert!(resolved > 0, "death_group should resolve real death-pose frames via Corpse.def");
+        println!(
+            "Corpse.def: {} entries, {} death poses resolved",
+            anim.corpsedef.len(),
+            resolved
+        );
+        assert!(
+            resolved > 0,
+            "death_group should resolve real death-pose frames via Corpse.def"
+        );
     }
 
     #[test]
@@ -1535,7 +1717,10 @@ not a data line
     fn mob_types_overrides_range_heuristic() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let anim = Anim::open(&dir).expect("open anim");
-        assert!(!anim.mobtypes.is_empty(), "mobtypes.txt should have loaded entries");
+        assert!(
+            !anim.mobtypes.is_empty(),
+            "mobtypes.txt should have loaded entries"
+        );
         let mut overridden = 0;
         for (&body, e) in &anim.mobtypes {
             let range = if body < 200 {
@@ -1549,8 +1734,14 @@ not a data line
                 overridden += 1;
             }
         }
-        println!("mobtypes: {} entries, {overridden} override the range heuristic", anim.mobtypes.len());
-        assert!(overridden > 0, "mobtypes should correct some bodies the range heuristic gets wrong");
+        println!(
+            "mobtypes: {} entries, {overridden} override the range heuristic",
+            anim.mobtypes.len()
+        );
+        assert!(
+            overridden > 0,
+            "mobtypes should correct some bodies the range heuristic gets wrong"
+        );
     }
 
     #[test]
@@ -1568,12 +1759,22 @@ not a data line
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let anim = Anim::open(&dir).expect("open anim");
 
-        let e6 = anim.mobtypes.get(&6).expect("body 6 should be in mobtypes.txt");
+        let e6 = anim
+            .mobtypes
+            .get(&6)
+            .expect("body 6 should be in mobtypes.txt");
         assert_eq!(e6.kind, 1, "body 6 is TYPE ANIMAL");
-        assert_ne!(e6.flags & 0x20, 0, "body 6 should have CalculateOffsetLowGroupExtended set");
+        assert_ne!(
+            e6.flags & 0x20,
+            0,
+            "body 6 should have CalculateOffsetLowGroupExtended set"
+        );
 
         let group = anim.stand_group(6);
-        assert_eq!(group, ANIMAL_STAND, "group-number semantics stay animal (walk=0/run=1/stand=2)");
+        assert_eq!(
+            group, ANIMAL_STAND,
+            "group-number semantics stay animal (walk=0/run=1/stand=2)"
+        );
         let (img, _cx, _cy) = anim
             .frame(6, group, 4, 0)
             .expect("body 6 stand frame should now decode via the high section");
@@ -1581,14 +1782,26 @@ not a data line
         // A bird sprite is small. The old bug (reading the low-section base,
         // landing on body 85's monster block) decoded a serpent-sized frame —
         // this bound catches a regression back to that wrong section.
-        assert!(img.width < 60 && img.height < 60, "bird sprite should be small, got {}x{}", img.width, img.height);
+        assert!(
+            img.width < 60 && img.height < 60,
+            "bird sprite should be small, got {}x{}",
+            img.width,
+            img.height
+        );
 
         // A plain animal (mobtypes-covered, no 0x20) still resolves via the LOW
         // section, unaffected by this fix.
         let plain = 95u16; // ANIMAL, flags 0 (no CalculateOffsetLowGroupExtended)
-        let e_plain = anim.mobtypes.get(&plain).expect("plain animal body should be in mobtypes.txt");
+        let e_plain = anim
+            .mobtypes
+            .get(&plain)
+            .expect("plain animal body should be in mobtypes.txt");
         assert_eq!(e_plain.kind, 1);
-        assert_eq!(e_plain.flags & 0x20, 0, "must NOT have the extended flag, to exercise the low-section path");
+        assert_eq!(
+            e_plain.flags & 0x20,
+            0,
+            "must NOT have the extended flag, to exercise the low-section path"
+        );
         let plain_group = anim.stand_group(plain);
         assert!(
             anim.frame_count(plain, plain_group, 4).unwrap_or(0) > 0,
@@ -1596,7 +1809,10 @@ not a data line
         );
 
         // Human (body 400) unaffected by any of this.
-        assert!(anim.frame(400, PEOPLE_STAND, 4, 0).is_some(), "human body 400 stand frame should still resolve");
+        assert!(
+            anim.frame(400, PEOPLE_STAND, 4, 0).is_some(),
+            "human body 400 stand frame should still resolve"
+        );
     }
 
     #[test]
@@ -1604,27 +1820,48 @@ not a data line
     fn body_conv_resolves_expansion_sprites() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let anim = Anim::open(&dir).expect("open anim");
-        assert!(!anim.bodyconv.is_empty(), "Bodyconv.def should have loaded entries");
+        assert!(
+            !anim.bodyconv.is_empty(),
+            "Bodyconv.def should have loaded entries"
+        );
         let installed = anim.files.iter().skip(1).filter(|f| f.is_some()).count();
-        println!("bodyconv: {} entries, {} expansion files (anim2..anim5) installed", anim.bodyconv.len(), installed);
+        println!(
+            "bodyconv: {} entries, {} expansion files (anim2..anim5) installed",
+            anim.bodyconv.len(),
+            installed
+        );
         // Count bodies whose stand frame resolves ONLY through a bodyconv redirect
         // into an expansion file (the raw id has no entry in the base anim.mul).
         let mut via_conv = 0;
         for (&body, &(fi, _)) in &anim.bodyconv {
-            if fi == 0 || anim.files.get(fi as usize).and_then(Option::as_ref).is_none() {
+            if fi == 0
+                || anim
+                    .files
+                    .get(fi as usize)
+                    .and_then(Option::as_ref)
+                    .is_none()
+            {
                 continue;
             }
             let (rfi, _, _) = match anim.entry(body, anim.stand_group(body), 4) {
                 Some(e) => e,
                 None => continue,
             };
-            if rfi != 0 && anim.frame_count(body, anim.stand_group(body), 4).unwrap_or(0) > 0 {
+            if rfi != 0
+                && anim
+                    .frame_count(body, anim.stand_group(body), 4)
+                    .unwrap_or(0)
+                    > 0
+            {
                 via_conv += 1;
             }
         }
         println!("bodyconv: {via_conv} bodies render from an expansion file");
         if installed > 0 {
-            assert!(via_conv > 0, "expansion redirects should resolve real sprites");
+            assert!(
+                via_conv > 0,
+                "expansion redirects should resolve real sprites"
+            );
         }
     }
 
@@ -1642,8 +1879,10 @@ not a data line
         let rec_starts = [40usize, 56, 72];
         buf.resize(88, 0); // reserve the 3×16-byte record table
 
-        let put_u16 = |b: &mut [u8], o: usize, v: u16| b[o..o + 2].copy_from_slice(&v.to_le_bytes());
-        let put_u32 = |b: &mut [u8], o: usize, v: u32| b[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        let put_u16 =
+            |b: &mut [u8], o: usize, v: u16| b[o..o + 2].copy_from_slice(&v.to_le_bytes());
+        let put_u32 =
+            |b: &mut [u8], o: usize, v: u32| b[o..o + 4].copy_from_slice(&v.to_le_bytes());
         put_u16(&mut buf, rec_starts[0] + 2, 1); // frameId=1 → dir0/idx0 (real)
         put_u16(&mut buf, rec_starts[1] + 2, 4); // frameId=4 → dir1/idx1 (real)
         put_u16(&mut buf, rec_starts[2] + 2, 10); // frameId=10 → forces maxFrameCount=10
@@ -1712,7 +1951,8 @@ not a data line
         for (i, c) in pal0.iter_mut().enumerate() {
             *c = u16le(&buf, p0 + i * 2);
         }
-        let (img0, cx0, cy0) = decode_sprite_frame(&buf, p0 + 512, &pal0, true).expect("decode dir0/idx0");
+        let (img0, cx0, cy0) =
+            decode_sprite_frame(&buf, p0 + 512, &pal0, true).expect("decode dir0/idx0");
         assert_eq!((img0.width, img0.height), (2, 2));
         assert_eq!((cx0, cy0), (0, -2));
         assert_eq!(&img0.rgba[0..4], &[255, 255, 255, 255]);
@@ -1731,7 +1971,8 @@ not a data line
         for (i, c) in pal1.iter_mut().enumerate() {
             *c = u16le(&buf, p1 + i * 2);
         }
-        let (img1, cx1, cy1) = decode_sprite_frame(&buf, p1 + 512, &pal1, true).expect("decode dir1/idx1");
+        let (img1, cx1, cy1) =
+            decode_sprite_frame(&buf, p1 + 512, &pal1, true).expect("decode dir1/idx1");
         assert_eq!((img1.width, img1.height), (1, 1));
         assert_eq!((cx1, cy1), (0, -1));
         assert_eq!(&img1.rgba[0..4], &[0, 255, 0, 255]);
@@ -1878,7 +2119,11 @@ not a data line
 
         let map = parse_anim_sequence(&reader);
         assert_eq!(map.get(&(777, 5)), Some(&20));
-        assert_eq!(map.get(&(777, 3)), None, "earlier entry's group must NOT survive a later whole-table replace");
+        assert_eq!(
+            map.get(&(777, 3)),
+            None,
+            "earlier entry's group must NOT survive a later whole-table replace"
+        );
     }
 
     #[test]
@@ -1887,9 +2132,16 @@ not a data line
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let anim = Anim::open(&dir).expect("open anim");
 
-        let uop_bodies: Vec<u16> =
-            anim.mobtypes.iter().filter(|(_, e)| e.uop).map(|(&body, _)| body).collect();
-        println!("mobtypes: {} bodies flagged UseUopAnimation", uop_bodies.len());
+        let uop_bodies: Vec<u16> = anim
+            .mobtypes
+            .iter()
+            .filter(|(_, e)| e.uop)
+            .map(|(&body, _)| body)
+            .collect();
+        println!(
+            "mobtypes: {} bodies flagged UseUopAnimation",
+            uop_bodies.len()
+        );
         assert!(uop_bodies.len() > 100);
 
         let mut resolved = 0;
@@ -1903,18 +2155,27 @@ not a data line
                 }
             }
         }
-        println!("{resolved} of {} UOP-flagged bodies resolve a stand-group frame via the UOP path", uop_bodies.len());
+        println!(
+            "{resolved} of {} UOP-flagged bodies resolve a stand-group frame via the UOP path",
+            uop_bodies.len()
+        );
         assert!(resolved > 100);
 
         let (sample_body, img) = sample.expect("at least one UOP body should decode a frame");
-        println!("sample UOP body {sample_body}: {}x{}", img.width, img.height);
+        println!(
+            "sample UOP body {sample_body}: {}x{}",
+            img.width, img.height
+        );
         assert!(img.width > 0 && img.width < 1024);
         assert!(img.height > 0 && img.height < 1024);
 
         let human_is_uop = anim.mobtypes.get(&400).is_some_and(|e| e.uop);
         let human_resolves = anim.frame(400, anim.stand_group(400), 4, 0).is_some();
         println!("body 400 (human): UOP-flagged={human_is_uop}, resolves a stand frame either way={human_resolves}");
-        assert!(human_resolves, "human body should resolve a stand frame via either the UOP or legacy path");
+        assert!(
+            human_resolves,
+            "human body should resolve a stand frame via either the UOP or legacy path"
+        );
 
         // FIX 1 regression check: body 1401 (Turanchula_Mount) is one of the 9
         // real bodies whose `AnimationSequence.uop` replace chain only
@@ -1922,25 +2183,47 @@ not a data line
         // `uop_action` applying the table once left every one of its groups
         // (including walk=0 and its own stand_group) with no `.bin` match at
         // all. Both must now resolve via the UOP path.
-        assert!(anim.mobtypes.get(&1401).is_some_and(|e| e.uop), "body 1401 should be UOP-flagged");
+        assert!(
+            anim.mobtypes.get(&1401).is_some_and(|e| e.uop),
+            "body 1401 should be UOP-flagged"
+        );
         let walk = anim.frame(1401, PEOPLE_WALK, 4, 0);
-        assert!(walk.is_some(), "body 1401 walk (group 0) should resolve via the double-replace UOP path");
+        assert!(
+            walk.is_some(),
+            "body 1401 walk (group 0) should resolve via the double-replace UOP path"
+        );
         let stand = anim.frame(1401, anim.stand_group(1401), 4, 0);
-        assert!(stand.is_some(), "body 1401 stand_group should resolve via the double-replace UOP path");
+        assert!(
+            stand.is_some(),
+            "body 1401 stand_group should resolve via the double-replace UOP path"
+        );
 
         // FIX 2 regression check: body 826 (Stygian Dragon) group 19 has
         // frames well past the old 512px legacy cap (up to 523x407 on this
         // direction) — every frame must now decode instead of silently
         // going missing mid-animation.
-        assert!(anim.mobtypes.get(&826).is_some_and(|e| e.uop), "body 826 should be UOP-flagged");
-        let count = anim.frame_count(826, 19, 4).expect("body 826 group 19 dir 4 should have a frame count");
+        assert!(
+            anim.mobtypes.get(&826).is_some_and(|e| e.uop),
+            "body 826 should be UOP-flagged"
+        );
+        let count = anim
+            .frame_count(826, 19, 4)
+            .expect("body 826 group 19 dir 4 should have a frame count");
         assert!(count > 0);
         for idx in 0..count {
-            let (img, _cx, _cy) = anim
-                .frame(826, 19, 4, idx)
-                .unwrap_or_else(|| panic!("body 826 group 19 dir 4 frame {idx}/{count} should decode"));
-            assert!(img.width > 0 && img.width <= 4096, "sane width for frame {idx}: {}", img.width);
-            assert!(img.height > 0 && img.height <= 4096, "sane height for frame {idx}: {}", img.height);
+            let (img, _cx, _cy) = anim.frame(826, 19, 4, idx).unwrap_or_else(|| {
+                panic!("body 826 group 19 dir 4 frame {idx}/{count} should decode")
+            });
+            assert!(
+                img.width > 0 && img.width <= 4096,
+                "sane width for frame {idx}: {}",
+                img.width
+            );
+            assert!(
+                img.height > 0 && img.height <= 4096,
+                "sane height for frame {idx}: {}",
+                img.height
+            );
         }
     }
 }
