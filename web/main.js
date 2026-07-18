@@ -1366,11 +1366,12 @@ async function poll() {
   if (diag.poll > 150) console.warn(`[diag] slow poll ${diag.poll.toFixed(0)}ms`);
 }
 
-// The player is dead while their body is a ghost id (402/403). Desaturate the whole
-// scene (CSS class on #map) and show a "You are dead" banner; both clear on res
-// (the body reverts to a living id). Resurrection arrives via the existing gump system.
+// `player.dead` is authoritative (derived by the scene bridge from ServUO's complete
+// ghost-body set). The body fallback keeps this renderer compatible with an older
+// scene producer. Both clear on resurrection when the body reverts to a living id.
 function updateDeathUI(s) {
-  const dead = !!(s && s.player && isGhostBody(s.player.body));
+  const p = s && s.player;
+  const dead = !!(p && (typeof p.dead === "boolean" ? p.dead : isGhostBody(p.body)));
   const map = document.getElementById("map");
   if (map) map.classList.toggle("dead", dead);
   const banner = document.getElementById("deadbanner");
@@ -2117,9 +2118,16 @@ const _LO_3 = [20, 5, 4, 3, 24, 13, 8, 9, 14, 15, 19, 7, 23, 17, 22, 12, 10, 11,
 const LAYER_ORDER_DIR = [_LO_0, _LO_DEF, _LO_DEF, _LO_3, _LO_DEF, _LO_DEF, _LO_DEF, _LO_DEF];
 const layerRank = (l, dir) => LAYER_ORDER_DIR[dir & 7].indexOf(l | 0); // -1 = not drawn
 
-// Ghost body ids: a dead human renders as a translucent ghost (402=male, 403=female).
-const GHOST_BODIES = new Set([402, 403]);
-const isGhostBody = (b) => GHOST_BODIES.has(b | 0);
+// Every ServUO `Body.IsGhost` id and the living people body used to animate it.
+// 970 is the legacy male death-shroud body (`H_Male_Robe_Deathshroud`).
+const GHOST_ANIMATION_BODIES = new Map([
+  [402, 400], [403, 401], // human male/female
+  [607, 605], [608, 606], // elf male/female
+  [694, 666], [695, 667], // gargoyle male/female
+  [970, 400],             // legacy male death shroud
+]);
+const isGhostBody = (b) => GHOST_ANIMATION_BODIES.has(b | 0);
+const ghostAnimationBody = (b) => GHOST_ANIMATION_BODIES.get(b | 0) ?? (b | 0);
 
 // Is a worn layer hidden by something over it? Faithful port of ClassicUO
 // MobileView.IsCovered: a robe (and a few special items) hides the inner clothes
@@ -2233,11 +2241,11 @@ function drawMobs() {
     const ent = isSelf ? scene.player : mobById.get(id);
     const mounted = !!(ent && ent.mounted);
     const mountAnim = (ent && (ent.mountAnim | 0)) || 0;
-    // A dead human is a ghost (body 402/403). Those ghost-body ids carry no animation
-    // frames in the muls, so animate the ghost with the LIVING human body (402→400,
-    // 403→401) rendered translucent, equipment hidden (UO shows ghosts bare).
-    const ghost = isGhostBody(st.body);
-    const bodyAnim = ghost ? (st.body === 403 ? 401 : 400) : (st.body | 0);
+    // Ghost bodies use their race/sex-equivalent living people animation, rendered
+    // translucent with equipment hidden. Self uses the bridge's authoritative dead
+    // bit; nearby mobiles fall back to the same complete body mapping.
+    const ghost = ent && typeof ent.dead === "boolean" ? ent.dead : isGhostBody(st.body);
+    const bodyAnim = ghost ? ghostAnimationBody(st.body) : (st.body | 0);
     // Hidden (mobile-update status-flags 0x80: Hiding/stealth skill, or a GM
     // `[set Hidden true`). Seeing it at all means the server allows us to
     // perceive this mobile (self, or an ally in Detect Hidden range) — UO
@@ -2435,7 +2443,7 @@ function drawMobs() {
         // we're hidden even though we can see ourselves. Sprites are pooled/persistent,
         // so alpha must be reset to 1 every frame for a body that is neither (else a
         // former ghost/hidden mobile stays faint after it dies again/unhides).
-        sp.alpha = isGhostBody(st.body) ? 0.45 : (hidden ? 0.5 : 1);
+        sp.alpha = ghost ? 0.45 : (hidden ? 0.5 : 1);
         const z = zi + e.rank / 256;
         if (sp.zIndex !== z) sp.zIndex = z;
         seen.add(key);

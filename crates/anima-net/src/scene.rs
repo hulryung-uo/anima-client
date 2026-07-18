@@ -2432,7 +2432,8 @@ pub fn build_scene(
     let (p_body, p_hue) = remap(p.body, p.hue);
     let mut player = json!({
         "serial": p.serial,
-        "x": p.pos.x, "y": p.pos.y, "z": p.pos.z, "dir": p.direction, "body": p_body, "at": atype(p_body), "name": p.name,
+        "x": p.pos.x, "y": p.pos.y, "z": p.pos.z, "dir": p.direction,
+        "body": p_body, "dead": player_is_ghost(&s.world), "at": atype(p_body), "name": p.name,
         "noto": p.notoriety,  // self notoriety (innocent/criminal/murderer…) → name-overhead colour
         "hue": p_hue,
         "mounted": mounted, "mountAnim": player_mount_anim,

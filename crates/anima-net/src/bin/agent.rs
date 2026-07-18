@@ -17,7 +17,8 @@
 //!   → `{"cmd":"pump","ms":400}`      ← `{"ok":true,"applied":N}`
 //!   → `{"cmd":"quit"}`               ← `{"ok":true,"bye":true}` then exit
 //! On any error: `{"ok":false,"error":"..."}` (the loop keeps running).
-//! On startup, emits one line: `{"event":"ready","player":{...}}`.
+//! On startup, emits one line:
+//! `{"event":"ready","schema_version":N,"player":{...}}`.
 //!
 //! `act`'s `WalkTo` only queues the route (see [`anima_net::Session::apply_action`]);
 //! `pump` is what actually drives it, one step per call at its own cadence —
@@ -30,7 +31,7 @@ use std::time::Duration;
 use anima_assets::MapData;
 use anima_core::agent::Action;
 use anima_core::net::LoginConfig;
-use anima_net::json::{action_from_json, observation_to_json};
+use anima_net::json::{action_from_json, observation_to_json, SCHEMA_VERSION};
 use anima_net::{Endpoint, Session};
 use serde_json::{json, Value};
 
@@ -77,7 +78,7 @@ fn main() {
     let _ = session.observe(Duration::from_millis(500));
 
     let player = observation_to_json(&session.observation());
-    emit(&json!({ "event": "ready", "player": player["player"] }));
+    emit(&ready_event(&player["player"]));
     eprintln!("[anima-agent] ready — speaking NDJSON on stdout");
 
     let stdin = std::io::stdin();
@@ -98,6 +99,14 @@ fn main() {
             Err(e) => emit(&json!({ "ok": false, "error": e })),
         }
     }
+}
+
+fn ready_event(player: &Value) -> Value {
+    json!({
+        "event": "ready",
+        "schema_version": SCHEMA_VERSION,
+        "player": player,
+    })
 }
 
 /// Returns `Ok(Some(reply))` to answer, `Ok(None)` to quit, `Err(msg)` on failure.
@@ -154,4 +163,19 @@ fn emit(v: &Value) {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{v}");
     let _ = out.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_event_advertises_contract_schema_version() {
+        let player = json!({ "serial": 0x1234, "dead": false });
+        let ready = ready_event(&player);
+
+        assert_eq!(ready["event"], "ready");
+        assert_eq!(ready["schema_version"], SCHEMA_VERSION);
+        assert_eq!(ready["player"], player);
+    }
 }
