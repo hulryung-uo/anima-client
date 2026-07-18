@@ -8,9 +8,9 @@
 
 Last updated: 2026-07-02 · Status: **Phases 1–3 COMPLETE, including the Phase 3
 "human-playable polish" tail** (iso sprite blitting, walk/attack/typed animations
-incl. UOP + monster body remap, gumps, audio, secure trading, AI contract). 6 crates
-(anima-core / anima-assets / anima-net / anima-wasm / anima-agent / anima-desktop)
-+ web/; workspace tests and quality gates are green (including 7 golden-packet
+incl. UOP + monster body remap, gumps, audio, secure trading, AI contract). 7 crates
+(anima-core / anima-assets / anima-contract-json / anima-net / anima-wasm /
+anima-agent / anima-desktop) + web/; workspace tests and quality gates are green (including 7 golden-packet
 regression tests replaying real `uo_proxy` captures, §7); real-data-file tests are
 `#[ignore]`d by default; wasm32 builds.
 - **Phase 1:** headless agent connects to a live ServUO, logs in (create + select),
@@ -165,7 +165,8 @@ decision + the reasoning so a future session understands the constraints.
 - **Brain** — decision-making (AI or human input) lives *above* the core, never inside it.
 
 ### The Observation/Action contract (the Interface↔Brain boundary, D2)
-Not yet codified in code; design it before wiring an AI. Shape:
+Codified in `anima-core::agent`; its versioned JSON representation lives in
+`anima-contract-json` and is shared by the native NDJSON bridge and WASM. Shape:
 - **Observation** (core → brain): player state (pos/hp/mana/stam/skills), nearby mobiles & items, journal deltas, war/hidden flags, targeting/gump prompts pending.
 - **Action** (brain → core): move(dir, run), use/double-click(serial), attack(serial), cast(spell), say(text), target(serial|xyz), pickup/drop/equip, gump-response.
 Keep it a stable schema so scripted/RL/LLM brains and the native/WASM backends all plug into the same thing.
@@ -231,10 +232,11 @@ anima-client/
     │       ├── radarcol.rs    # radarcol.mul: world-map colors
     │       ├── sound.rs       # soundLegacyMUL.uop: sound effects → WAV
     │       └── texmap.rs      # texidx/texmaps.mul: sloped-land seamless textures
+    ├── anima-contract-json/   # shared versioned Observation/Action JSON adapter
     ├── anima-net/             # native TCP driver: Session (login, pump, walk, navigate, actions)
     │   └── src/
     │       ├── lib.rs         # Session + Route/advance_route (non-blocking WalkTo state machine)
-    │       ├── json.rs        # Observation/Action ⇄ JSON (the Python `anima2` brain's IPC contract)
+    │       ├── json.rs        # compatibility re-export of anima-contract-json
     │       ├── scene.rs       # build_scene: World + assets → the web renderer's JSON
     │       ├── main.rs        # `anima-login` bin (login-only smoke test)
     │       └── bin/

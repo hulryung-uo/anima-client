@@ -60,6 +60,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "anima-contract-json"
+version = "0.0.0"
+dependencies = [
+ "anima-core",
+ "serde_json",
+]
+
+[[package]]
 name = "anima-core"
 version = "0.0.0"
 dependencies = [
@@ -83,6 +91,7 @@ name = "anima-net"
 version = "0.0.0"
 dependencies = [
  "anima-assets",
+ "anima-contract-json",
  "anima-core",
  "include_dir",
  "serde_json",
@@ -93,8 +102,8 @@ dependencies = [
 name = "anima-wasm"
 version = "0.0.0"
 dependencies = [
+ "anima-contract-json",
  "anima-core",
- "serde_json",
  "wasm-bindgen",
 ]
 

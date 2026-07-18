@@ -8,6 +8,7 @@
 //!
 //! Build: `wasm-pack build crates/anima-wasm --target web`.
 
+use anima_contract_json::{observation_to_json, SCHEMA_VERSION};
 use anima_core::net::{
     apply_packet, build_client_version, LoginConfig, LoginDirective, LoginMachine, StreamDecoder,
     Walker,
@@ -31,6 +32,11 @@ pub struct WasmClient {
 
 #[wasm_bindgen]
 impl WasmClient {
+    /// JSON schema version returned by [`WasmClient::observation_json`].
+    pub fn schema_version() -> u32 {
+        SCHEMA_VERSION
+    }
+
     /// Start a login. Returns the initial bytes to send on the (login-server)
     /// socket. `version` is e.g. "7.0.102.3".
     #[wasm_bindgen(constructor)]
@@ -131,50 +137,22 @@ impl WasmClient {
         }
     }
 
-    /// Current perception as JSON (player, nearby mobiles/items, new journal).
+    /// Current perception using the shared, versioned Observation JSON schema.
     pub fn observation_json(&mut self) -> String {
         let obs = self.world.observe(&mut self.journal_cursor);
-        let mobiles: Vec<_> = obs
-            .mobiles
-            .iter()
-            .map(|m| {
-                serde_json::json!({
-                    "serial": m.serial, "name": m.name, "x": m.pos.x, "y": m.pos.y, "z": m.pos.z,
-                    "body": m.body, "noto": m.notoriety, "hits": m.hits, "hitsMax": m.hits_max,
-                    "dist": m.distance,
-                })
-            })
-            .collect();
-        let items: Vec<_> = obs
-            .items
-            .iter()
-            .map(|it| {
-                serde_json::json!({
-                    "serial": it.serial, "graphic": it.graphic, "amount": it.amount,
-                    "x": it.pos.x, "y": it.pos.y, "z": it.pos.z, "dist": it.distance,
-                })
-            })
-            .collect();
-        let journal: Vec<_> = obs
-            .new_journal
-            .iter()
-            .map(|j| serde_json::json!({ "name": j.name, "text": j.text, "type": j.msg_type }))
-            .collect();
-        serde_json::json!({
-            "player": {
-                "serial": obs.player.serial, "name": obs.player.name,
-                "x": obs.player.pos.x, "y": obs.player.pos.y, "z": obs.player.pos.z,
-                "dir": obs.player.direction,
-                "hits": obs.player.hits, "hitsMax": obs.player.hits_max,
-                "mana": obs.player.mana, "manaMax": obs.player.mana_max,
-                "stam": obs.player.stam, "stamMax": obs.player.stam_max,
-                "str": obs.player.strength, "dex": obs.player.dexterity, "int": obs.player.intelligence,
-                "gold": obs.player.gold,
-            },
-            "mobiles": mobiles,
-            "items": items,
-            "journal": journal,
-        })
-        .to_string()
+        observation_to_json(&obs).to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observation_uses_the_shared_contract_schema() {
+        let mut client = WasmClient::new("user".into(), "pass".into());
+        let expected = observation_to_json(&anima_core::Observation::default()).to_string();
+        assert_eq!(client.observation_json(), expected);
+        assert_eq!(WasmClient::schema_version(), SCHEMA_VERSION);
     }
 }

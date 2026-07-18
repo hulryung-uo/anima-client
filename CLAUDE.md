@@ -17,8 +17,8 @@ renderers/agents/desktop sit on top. Companion to `../anima` (Python AI player).
 `WanderBrain` plays autonomously live; the human-playable `play` server (`cargo run
 -p anima-net --bin play -- 127.0.0.1 2594 <u> <p>`, open `:8090`) renders real
 terrain + full iso sprites, walk/attack/typed mobile animation (legacy + UOP,
-Body/Bodyconv/Corpse/Equipconv.def remap), gumps, audio, and secure trading. 5
-crates (core/assets/net/wasm/agent) + `web/` + `crates/anima-desktop` (Tauri).
+Body/Bodyconv/Corpse/Equipconv.def remap), gumps, audio, and secure trading. 7
+crates (core/assets/contract-json/net/wasm/agent/desktop) + `web/`.
 **Remaining:** richer/RL/LLM brains, browser WASM+relay.
 (Tauri shell, `multi.mul` houses/boats, sitting, treasure maps, custom housing
 (0xD8 viewing), and delete-character (0x83) are done.) See DESIGN.md §6.

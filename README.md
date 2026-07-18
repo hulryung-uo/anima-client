@@ -55,6 +55,7 @@ anima-client/
 │   │                          #   for the protocol-mandated 0xDD zlib)
 │   │   └── src/{lib,types,agent,gump_layout}.rs · net/ · world/ · path/ · tests/golden.rs
 │   ├── anima-assets/          # .mul/.uop readers: map/tiledata/anim/art/gump/hues/sound/…
+│   ├── anima-contract-json/   # shared versioned Observation/Action JSON adapter
 │   ├── anima-net/             # native TCP driver (Session) + `anima-login`/`play`/`scene`/`anima-agent`/`cmd` bins
 │   ├── anima-wasm/            # wasm-bindgen wrapper: WasmClient (feed bytes → Observation JSON)
 │   ├── anima-agent/           # in-process autonomous brains (Brain trait, WanderBrain)
@@ -76,7 +77,8 @@ gates are kept green in CI.
 
 Crates: `anima-core` (protocol/world/path/contract — sans-IO, near-zero-dep: one
 exception (miniz_oxide, for the protocol-mandated 0xDD zlib), WASM-ready),
-`anima-assets` (.mul/.uop + art/anim/gump/sound readers), `anima-net` (TCP driver +
+`anima-assets` (.mul/.uop + art/anim/gump/sound readers), `anima-contract-json`
+(shared native/WASM contract adapter), `anima-net` (TCP driver +
 `anima-login`/`play`/`scene`/`anima-agent`(NDJSON bridge)/`cmd` bins),
 `anima-wasm` (browser bindings), `anima-agent` (in-process autonomous brains),
 `anima-desktop` (Tauri shell); plus `web/` (PixiJS). Full detail + decision history:

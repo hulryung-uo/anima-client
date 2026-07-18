@@ -1,0 +1,11 @@
+[package]
+name = "anima-contract-json"
+version = "0.0.0"
+edition = "2021"
+description = "Versioned JSON adapter for anima-core's Observation/Action contract."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anima-core = { path = "../anima-core" }
+serde_json = "1"
+
