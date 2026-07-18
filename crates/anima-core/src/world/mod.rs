@@ -161,6 +161,21 @@ pub struct Weather {
     pub intensity: u8,
 }
 
+/// A server waypoint (0xE5 DisplayWaypoint), keyed by its referenced entity
+/// serial. ServUO uses type 1 for the player's corpse and type 6 for a
+/// resurrection healer. Other types remain raw so future brains/renderers can
+/// consume them without changing the packet layer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Waypoint {
+    pub serial: u32,
+    pub pos: Position,
+    pub map: u8,
+    pub kind: u16,
+    pub ignore_object: bool,
+    pub cliloc: u32,
+    pub name: String,
+}
+
 impl Default for Weather {
     fn default() -> Self {
         // 0xFF = no weather until the server says otherwise.
@@ -698,6 +713,10 @@ pub struct World {
     /// An on-screen quest arrow (0xBA) pointing at tile `(x, y)`, or `None` when
     /// hidden. The renderer draws an arrow toward this tile.
     pub quest_arrow: Option<(u16, u16)>,
+    /// Server waypoints (0xE5), removed by 0xE6 or facet change. A kind-1
+    /// corpse marker is also pruned when that corpse entity is deleted; distant
+    /// healer markers survive ordinary mobile interest-range deletes.
+    pub waypoints: HashMap<u32, Waypoint>,
     /// Recent graphical-effect events (0x70/0xC0/0xC7), newest last, capped to the
     /// most recent few. The renderer spawns a visual for each `seq` it hasn't seen
     /// yet (like sounds/damage). See [`Effect`].
@@ -862,6 +881,9 @@ const MAX_JOURNAL_ENTRIES: usize = 512;
 /// on delete (0x1D), so this only guards against a delete we somehow missed
 /// pinning the map's growth for the rest of a long session.
 const MAX_CORPSE_LINKS: usize = 256;
+/// Defensive cap for server waypoints. ServUO sends every healer on the facet
+/// when a player dies, but a malformed shard must not grow this forever.
+const MAX_WAYPOINTS: usize = 2_048;
 
 impl World {
     pub fn new() -> Self {
@@ -1137,6 +1159,23 @@ impl World {
         self.corpse_equip.insert(corpse, entries);
     }
 
+    /// Add or refresh one 0xE5 waypoint. The serial is the authoritative upsert
+    /// key; 0xE6 removes it explicitly.
+    pub fn set_waypoint(&mut self, waypoint: Waypoint) {
+        // ServUO intends one own-corpse marker. Its current send timing can
+        // expose an older corpse, so retaining several makes stale selection
+        // even worse; keep only the most recently received kind-1 marker.
+        if waypoint.kind == 1 {
+            self.waypoints.retain(|_, existing| existing.kind != 1);
+        }
+        if self.waypoints.len() >= MAX_WAYPOINTS && !self.waypoints.contains_key(&waypoint.serial) {
+            if let Some(&serial) = self.waypoints.keys().next() {
+                self.waypoints.remove(&serial);
+            }
+        }
+        self.waypoints.insert(waypoint.serial, waypoint);
+    }
+
     /// The light level the renderer should use: the brighter (lower) of the
     /// overall level and the player's personal light, when a personal light is
     /// active. Lower = brighter, so `min` picks the brighter of the two.
@@ -1405,6 +1444,17 @@ impl World {
         self.spellbooks.remove(&serial);
         self.corpse_of.remove(&serial);
         self.corpse_equip.remove(&serial);
+        // Far-away healer markers deliberately outlive the normal mobile
+        // interest range: a 0x1D merely means the healer left local view and
+        // ServUO will not re-send its 0xE5. A corpse delete, however, makes its
+        // location hint definitively stale. Other kinds wait for explicit E6.
+        if self
+            .waypoints
+            .get(&serial)
+            .is_some_and(|waypoint| waypoint.kind == 1)
+        {
+            self.waypoints.remove(&serial);
+        }
         self.map_gumps.remove(&serial);
         self.house_designs.remove(&serial);
         self.pending_house_design_requests.retain(|s| *s != serial);
@@ -1464,6 +1514,7 @@ impl World {
             self.items.clear();
             self.corpse_of.clear();
             self.corpse_equip.clear();
+            self.waypoints.clear();
             self.opl.clear();
             self.opl_revision.clear();
             self.spellbooks.clear();
@@ -1490,6 +1541,10 @@ impl World {
         let alive = |serial: &u32| *serial == player || keep_items.contains(serial);
         self.corpse_of.retain(|corpse, _| alive(corpse));
         self.corpse_equip.retain(|corpse, _| alive(corpse));
+        // Waypoint serials may reference an entity far outside the normal
+        // interest range, so they cannot use `alive`; every old-facet marker
+        // is stale and the server sends the new facet's set independently.
+        self.waypoints.clear();
         self.opl.retain(|serial, _| alive(serial));
         self.opl_revision.retain(|serial, _| alive(serial));
         self.spellbooks.retain(|serial, _| alive(serial));
@@ -1553,6 +1608,70 @@ mod tests {
         w.player = Some(me);
 
         assert_eq!(w.player_mobile().unwrap().name, "Anima");
+    }
+
+    fn waypoint(serial: u32, kind: u16, x: u16, map: u8) -> Waypoint {
+        Waypoint {
+            serial,
+            pos: Position { x, y: 200, z: 0 },
+            map,
+            kind,
+            ignore_object: false,
+            cliloc: 1_060_000 + serial,
+            name: format!("waypoint-{serial}"),
+        }
+    }
+
+    #[test]
+    fn entity_delete_preserves_healer_waypoint_but_prunes_corpse_waypoint() {
+        let mut w = World::new();
+        w.set_waypoint(waypoint(0x10, 6, 110, 0));
+        w.set_waypoint(waypoint(0x20, 1, 120, 0));
+
+        // A healer leaving the local mobile interest range is not evidence
+        // that its facet-wide waypoint is stale. Only 0xE6/facet change may
+        // remove that marker.
+        w.remove(0x10);
+        assert!(w.waypoints.contains_key(&0x10));
+
+        // A deleted corpse can no longer be a useful location hint.
+        w.remove(0x20);
+        assert!(!w.waypoints.contains_key(&0x20));
+    }
+
+    #[test]
+    fn new_corpse_waypoint_replaces_only_the_previous_corpse_marker() {
+        let mut w = World::new();
+        w.set_waypoint(waypoint(0x10, 6, 110, 0));
+        w.set_waypoint(waypoint(0x20, 1, 120, 0));
+        w.set_waypoint(waypoint(0x30, 1, 130, 0));
+
+        assert_eq!(w.waypoints.len(), 2);
+        assert!(w.waypoints.contains_key(&0x10), "healer must survive");
+        assert!(!w.waypoints.contains_key(&0x20), "old corpse must be gone");
+        assert!(w.waypoints.contains_key(&0x30), "new corpse must be kept");
+    }
+
+    #[test]
+    fn facet_change_clears_waypoints_with_and_without_a_player() {
+        let mut no_player = World::new();
+        no_player.set_waypoint(waypoint(0x10, 6, 110, 0));
+        no_player.on_map_change(1);
+        assert!(no_player.waypoints.is_empty());
+
+        let mut in_world = World::new();
+        in_world.enter_world(&LoginResult {
+            serial: 0x1,
+            x: 100,
+            y: 100,
+            z: 0,
+            direction: 0,
+            body: 0x190,
+            aos: false,
+        });
+        in_world.set_waypoint(waypoint(0x20, 6, 120, 0));
+        in_world.on_map_change(1);
+        assert!(in_world.waypoints.is_empty());
     }
 
     #[test]

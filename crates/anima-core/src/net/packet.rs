@@ -6,6 +6,8 @@ use core::fmt;
 pub enum PacketError {
     /// Tried to read past the end of the buffer.
     UnexpectedEof { needed: usize, remaining: usize },
+    /// The packet had enough bytes but violated its required wire shape.
+    InvalidData(&'static str),
 }
 
 impl fmt::Display for PacketError {
@@ -15,6 +17,7 @@ impl fmt::Display for PacketError {
                 f,
                 "unexpected end of packet: needed {needed} byte(s), {remaining} remaining"
             ),
+            PacketError::InvalidData(message) => write!(f, "invalid packet data: {message}"),
         }
     }
 }

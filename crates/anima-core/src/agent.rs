@@ -101,6 +101,20 @@ pub struct ItemView {
     pub is_multi: bool,
 }
 
+/// A server waypoint (0xE5), with distance derived from the current player
+/// position. ServUO kind 1 marks a corpse and kind 6 a resurrection healer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaypointView {
+    pub serial: u32,
+    pub pos: Position,
+    pub map: u8,
+    pub kind: u16,
+    pub ignore_object: bool,
+    pub cliloc: u32,
+    pub name: String,
+    pub distance: u32,
+}
+
 /// A perception snapshot for the brain. Nearby lists are sorted by distance.
 #[derive(Debug, Clone, Default)]
 pub struct Observation {
@@ -150,6 +164,9 @@ pub struct Observation {
     /// An on-screen quest arrow (0xBA) pointing at world tile `(x, y)`, or
     /// `None` when hidden.
     pub quest_arrow: Option<(u16, u16)>,
+    /// Server waypoints (0xE5), sorted by distance then serial. 0xE6 removes
+    /// entries from subsequent observations.
+    pub waypoints: Vec<WaypointView>,
     /// Current weather (0x65). See [`Weather`].
     pub weather: Weather,
     /// Current season (0xBC): 0=Spring, 1=Summer, 2=Fall, 3=Winter, 4=Desolation.
@@ -458,6 +475,22 @@ impl World {
             .collect();
         items.sort_by_key(|it| it.distance);
 
+        let mut waypoints: Vec<WaypointView> = self
+            .waypoints
+            .values()
+            .map(|waypoint| WaypointView {
+                serial: waypoint.serial,
+                pos: waypoint.pos,
+                map: waypoint.map,
+                kind: waypoint.kind,
+                ignore_object: waypoint.ignore_object,
+                cliloc: waypoint.cliloc,
+                name: waypoint.name.clone(),
+                distance: chebyshev(player.pos, waypoint.pos),
+            })
+            .collect();
+        waypoints.sort_by_key(|waypoint| (waypoint.distance, waypoint.serial));
+
         let journal_end = self.journal_offset.saturating_add(self.journal.len());
         let start = journal_cursor
             .saturating_sub(self.journal_offset)
@@ -534,6 +567,7 @@ impl World {
             book: self.book.clone(),
             party: self.party.clone(),
             quest_arrow: self.quest_arrow,
+            waypoints,
             weather: self.weather,
             season: self.season,
             light: self.effective_light(),
@@ -610,5 +644,47 @@ mod tests {
         // A second observe with the advanced cursor sees no repeat lines.
         let obs2 = w.observe(&mut cursor);
         assert!(obs2.new_journal.is_empty());
+    }
+
+    #[test]
+    fn observe_sorts_waypoints_by_distance_then_serial() {
+        use crate::world::Waypoint;
+
+        let mut w = World::new();
+        w.enter_world(&LoginResult {
+            serial: 0x311,
+            x: 100,
+            y: 100,
+            z: 0,
+            direction: 0,
+            body: 0x190,
+            aos: false,
+        });
+        for (serial, x, name) in [
+            (0x30, 105, "same-distance-higher-serial"),
+            (0x10, 102, "nearest"),
+            (0x20, 105, "same-distance-lower-serial"),
+        ] {
+            w.set_waypoint(Waypoint {
+                serial,
+                pos: Position { x, y: 100, z: -5 },
+                map: 0,
+                kind: 6,
+                ignore_object: false,
+                cliloc: 1_060_000 + serial,
+                name: name.into(),
+            });
+        }
+
+        let obs = w.observe(&mut 0);
+        assert_eq!(
+            obs.waypoints
+                .iter()
+                .map(|waypoint| (waypoint.serial, waypoint.distance))
+                .collect::<Vec<_>>(),
+            vec![(0x10, 2), (0x20, 5), (0x30, 5)]
+        );
+        assert_eq!(obs.waypoints[0].name, "nearest");
+        assert_eq!(obs.waypoints[0].pos.z, -5);
     }
 }

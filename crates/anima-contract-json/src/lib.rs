@@ -6,13 +6,13 @@
 //! The shapes are also mirrored by `anima2/anima2/contract.py` — keep that
 //! consumer in lockstep.
 //!
-//! ## Schema (v7 — snake_case, versioned)
+//! ## Schema (v8 — snake_case, versioned)
 //!
 //! [`observation_to_json`] emits one object with these top-level keys, one per
 //! [`Observation`] field: `player`, `mobiles`, `items`, `new_journal`,
 //! `pending_target`, `skills`, `gumps`, `prompt`, `trades`, `buffs`,
-//! `shop_buy`, `shop_sell`, `popup`, `book`, `party`, `quest_arrow`, `weather`,
-//! `season`, `light`, `war`, `last_attack`, `combatant`, `corpse_of`,
+//! `shop_buy`, `shop_sell`, `popup`, `book`, `party`, `quest_arrow`, `waypoints`,
+//! `weather`, `season`, `light`, `war`, `last_attack`, `combatant`, `corpse_of`,
 //! `corpse_equip`, `map_index`, `aos`, `opl`, `recent_damage`, `spellbooks`,
 //! `map_gumps`. A
 //! gump's `elements` are the structured [`anima_core::gump_layout::GumpElement`]s
@@ -43,7 +43,7 @@
 //! coarse scaled percentage); dedupe on `seq` across polls like the
 //! renderer's scene bridge does.
 //!
-//! Bump the "v7" marker above and [`SCHEMA_VERSION`] (and note the change here)
+//! Bump the schema marker above and [`SCHEMA_VERSION`] (and note the change here)
 //! whenever a key is renamed or removed — the Python side keys off these names verbatim. (v3:
 //! added `opl`, `recent_damage`. v4: added `spellbooks`. v5: added `items[].
 //! is_multi` — a placed boat/house leaks into `items` as an ordinary-looking
@@ -55,16 +55,17 @@
 //! 0x56 MapCommand), so a brain can locate a decoded treasure map's pins
 //! without a human reading the parchment. v7: added `player.body`,
 //! `player.poisoned`, and `player.dead` so survival brains receive status that
-//! the core world already tracks.)
+//! the core world already tracks. v8: added `waypoints`, the server's 0xE5
+//! corpse/resurrection/quest markers with 0xE6 removal semantics.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 use anima_core::agent::{
-    Action, GumpView, ItemView, MobileView, Observation, PlayerView, SkillView,
+    Action, GumpView, ItemView, MobileView, Observation, PlayerView, SkillView, WaypointView,
 };
 use anima_core::gump_layout::{GumpElement, HtmlText};
 use anima_core::types::Position;
@@ -284,6 +285,19 @@ fn weather_json(w: &Weather) -> Value {
     json!({ "kind": w.kind, "intensity": w.intensity })
 }
 
+fn waypoint_json(w: &WaypointView) -> Value {
+    json!({
+        "serial": w.serial,
+        "pos": pos_json(&w.pos),
+        "map": w.map,
+        "kind": w.kind,
+        "ignore_object": w.ignore_object,
+        "cliloc": w.cliloc,
+        "name": w.name,
+        "distance": w.distance,
+    })
+}
+
 /// A raw OPL property line: `{"cliloc": id, "args": "tab\tseparated"}` — left
 /// unresolved (no Cliloc table in this bridge; see the module doc).
 fn opl_line_json((cliloc, args): &(u32, String)) -> Value {
@@ -338,6 +352,7 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "book": obs.book.as_ref().map(book_json),
         "party": party_json(&obs.party),
         "quest_arrow": obs.quest_arrow.map(|(x, y)| json!({ "x": x, "y": y })),
+        "waypoints": obs.waypoints.iter().map(waypoint_json).collect::<Vec<_>>(),
         "weather": weather_json(&obs.weather),
         "season": obs.season,
         "light": obs.light,
@@ -792,6 +807,42 @@ mod tests {
     }
 
     #[test]
+    fn schema_v8_serializes_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 8);
+        let obs = Observation {
+            waypoints: vec![WaypointView {
+                serial: 0x1234_5678,
+                pos: Position {
+                    x: 2588,
+                    y: 406,
+                    z: -7,
+                },
+                map: 2,
+                kind: 6,
+                ignore_object: true,
+                cliloc: 1_060_023,
+                name: "Wandering Healer".into(),
+                distance: 17,
+            }],
+            ..Observation::default()
+        };
+
+        assert_eq!(
+            observation_to_json(&obs)["waypoints"],
+            json!([{
+                "serial": 0x1234_5678,
+                "pos": {"x": 2588, "y": 406, "z": -7},
+                "map": 2,
+                "kind": 6,
+                "ignore_object": true,
+                "cliloc": 1_060_023,
+                "name": "Wandering Healer",
+                "distance": 17,
+            }])
+        );
+    }
+
+    #[test]
     fn observation_json_has_expected_keys() {
         let obs = Observation::default();
         let v = observation_to_json(&obs);
@@ -812,6 +863,7 @@ mod tests {
             "book",
             "party",
             "quest_arrow",
+            "waypoints",
             "weather",
             "season",
             "light",

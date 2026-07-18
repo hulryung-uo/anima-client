@@ -8,10 +8,10 @@
 //! ignored (returns `false`). Movement confirm/deny (0x21/0x22) are owned by
 //! [`crate::net::movement`].
 
-use super::packet::{PacketReader, Result as PResult};
+use super::packet::{PacketError, PacketReader, Result as PResult};
 use crate::world::{
     Effect, Gump, HouseDesign, HousePlane, JournalEntry, PopupEntry, PopupMenu, PromptState, Skill,
-    TargetCursor, TradeState, World,
+    TargetCursor, TradeState, Waypoint, World,
 };
 
 /// Decode one framed game packet (id byte included) into `world`.
@@ -87,6 +87,8 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x56 => map_command(world, frame)?,
         0x99 => multi_target_cursor(world, frame)?,
         0xD8 => custom_house(world, frame)?,
+        0xE5 => display_waypoint(world, frame)?,
+        0xE6 => remove_waypoint(world, frame)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -779,6 +781,61 @@ fn season(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     world.season = r.u8()?;
     let _play_music = r.u8()?;
+    Ok(())
+}
+
+/// 0xE5 DisplayWaypoint — ServUO `Scripts/Misc/Waypoints.cs`:
+/// `[id][len:u16][serial:u32][x:u16][y:u16][z:i8][map:u8][type:u16]
+/// [ignoreObject:u16][cliloc:u32][name:utf16-le NUL][terminator:i16]`.
+/// Type 1 is a corpse and type 6 a resurrection healer; all kinds stay raw in
+/// the world model. A repeated serial refreshes the existing waypoint.
+fn display_waypoint(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[3..]); // id + variable-length header
+    let serial = r.u32()?;
+    let x = r.u16()?;
+    let y = r.u16()?;
+    let z = r.i8()?;
+    let map = r.u8()?;
+    let kind = r.u16()?;
+    let ignore_object = r.u16()? != 0;
+    let cliloc = r.u32()?;
+    let tail = r.rest();
+    if tail.len() < 4 {
+        return Err(PacketError::UnexpectedEof {
+            needed: 4,
+            remaining: tail.len(),
+        });
+    }
+    if tail.len() % 2 != 0 {
+        return Err(PacketError::InvalidData("odd-length waypoint UTF-16 tail"));
+    }
+    let (name_with_nul, trailing) = tail.split_at(tail.len() - 2);
+    if trailing != [0, 0] {
+        return Err(PacketError::InvalidData("non-zero waypoint trailing short"));
+    }
+    let (name_bytes, name_nul) = name_with_nul.split_at(name_with_nul.len() - 2);
+    if name_nul != [0, 0] {
+        return Err(PacketError::InvalidData("unterminated waypoint name"));
+    }
+    // Mobile names are short. Cap the informational field so an adversarial
+    // shard cannot retain 2,048 near-u16-sized strings in the World.
+    let name = decode_unicode(&name_bytes[..name_bytes.len().min(512)], false);
+    world.set_waypoint(Waypoint {
+        serial,
+        pos: crate::types::Position { x, y, z },
+        map,
+        kind,
+        ignore_object,
+        cliloc,
+        name,
+    });
+    Ok(())
+}
+
+/// 0xE6 RemoveWaypoint — `[id][serial:u32]`.
+fn remove_waypoint(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    world.waypoints.remove(&r.u32()?);
     Ok(())
 }
 
@@ -2033,7 +2090,7 @@ fn cliloc_affix(world: &mut World, frame: &[u8]) -> PResult<()> {
 
 /// Decode a UTF-16 string (LE or BE), stopping at the first NUL.
 fn decode_unicode(bytes: &[u8], big_endian: bool) -> String {
-    let mut out = String::new();
+    let mut units = Vec::with_capacity(bytes.len() / 2);
     for pair in bytes.chunks_exact(2) {
         let c = if big_endian {
             u16::from_be_bytes([pair[0], pair[1]])
@@ -2043,9 +2100,9 @@ fn decode_unicode(bytes: &[u8], big_endian: bool) -> String {
         if c == 0 {
             break;
         }
-        out.push(char::from_u32(c as u32).unwrap_or('\u{FFFD}'));
+        units.push(c);
     }
-    out
+    String::from_utf16_lossy(&units)
 }
 
 fn push_journal(
@@ -4215,5 +4272,140 @@ mod tests {
         p.u8(0x56).u32(0xDEAD_0000).u8(1).u8(0).u16(1).u16(1);
         assert!(apply_packet(&mut w, &p.into_vec()));
         assert!(w.map_gumps.is_empty());
+    }
+
+    fn waypoint_frame(
+        serial: u32,
+        x: u16,
+        y: u16,
+        z: i8,
+        map: u8,
+        kind: u16,
+        ignore_object: bool,
+        cliloc: u32,
+        name: &str,
+    ) -> Vec<u8> {
+        let mut p = PacketWriter::new();
+        p.u8(0xE5)
+            .u16(0)
+            .u32(serial)
+            .u16(x)
+            .u16(y)
+            .u8(z as u8)
+            .u8(map)
+            .u16(kind)
+            .u16(u16::from(ignore_object))
+            .u32(cliloc);
+        let mut frame = p.into_vec();
+        for unit in name.encode_utf16() {
+            frame.extend_from_slice(&unit.to_le_bytes());
+        }
+        frame.extend_from_slice(&[0, 0]); // LittleUniNull terminator
+        frame.extend_from_slice(&[0, 0]); // ServUO trailing short
+        let len = frame.len() as u16;
+        frame[1..3].copy_from_slice(&len.to_be_bytes());
+        frame
+    }
+
+    #[test]
+    fn display_waypoint_parses_servuo_shape_and_utf16le_name() {
+        let mut w = World::new();
+        let frame = waypoint_frame(
+            0x1234_5678,
+            2551,
+            420,
+            -17,
+            1,
+            6,
+            true,
+            1_062_613,
+            "Éowyn the healer",
+        );
+
+        assert!(apply_packet(&mut w, &frame));
+        let waypoint = &w.waypoints[&0x1234_5678];
+        assert_eq!(
+            waypoint.pos,
+            crate::types::Position {
+                x: 2551,
+                y: 420,
+                z: -17
+            }
+        );
+        assert_eq!(waypoint.map, 1);
+        assert_eq!(waypoint.kind, 6);
+        assert!(waypoint.ignore_object);
+        assert_eq!(waypoint.cliloc, 1_062_613);
+        assert_eq!(waypoint.name, "Éowyn the healer");
+    }
+
+    #[test]
+    fn waypoint_same_serial_upserts_and_e6_removes_exactly_one() {
+        let mut w = World::new();
+        assert!(apply_packet(
+            &mut w,
+            &waypoint_frame(10, 100, 100, 0, 0, 1, false, 1_046_414, "corpse")
+        ));
+        assert!(apply_packet(
+            &mut w,
+            &waypoint_frame(20, 200, 200, 5, 0, 6, false, 1_062_613, "healer")
+        ));
+        assert!(apply_packet(
+            &mut w,
+            &waypoint_frame(20, 201, 202, 6, 0, 6, false, 1_062_613, "moved")
+        ));
+        assert_eq!(w.waypoints.len(), 2);
+        assert_eq!(w.waypoints[&20].pos.x, 201);
+        assert_eq!(w.waypoints[&20].name, "moved");
+
+        let mut remove = PacketWriter::new();
+        remove.u8(0xE6).u32(20);
+        assert!(apply_packet(&mut w, &remove.into_vec()));
+        assert!(w.waypoints.contains_key(&10));
+        assert!(!w.waypoints.contains_key(&20));
+
+        let mut unknown = PacketWriter::new();
+        unknown.u8(0xE6).u32(999);
+        assert!(apply_packet(&mut w, &unknown.into_vec()));
+        assert_eq!(w.waypoints.len(), 1);
+    }
+
+    #[test]
+    fn truncated_waypoint_is_ignored_without_partial_state() {
+        let mut w = World::new();
+        assert!(apply_packet(&mut w, &[0xE5, 0, 6, 0, 1, 2]));
+        assert!(w.waypoints.is_empty());
+
+        let valid = waypoint_frame(10, 100, 100, 0, 0, 6, false, 1_062_613, "healer");
+        let mut malformed = Vec::new();
+
+        let mut missing_trailing = valid[..valid.len() - 2].to_vec();
+        let len = missing_trailing.len() as u16;
+        missing_trailing[1..3].copy_from_slice(&len.to_be_bytes());
+        malformed.push(missing_trailing);
+
+        let mut odd_tail = valid[..valid.len() - 1].to_vec();
+        let len = odd_tail.len() as u16;
+        odd_tail[1..3].copy_from_slice(&len.to_be_bytes());
+        malformed.push(odd_tail);
+
+        let mut nonzero_trailing = valid;
+        *nonzero_trailing.last_mut().unwrap() = 1;
+        malformed.push(nonzero_trailing);
+
+        for frame in malformed {
+            assert!(apply_packet(&mut w, &frame));
+            assert!(w.waypoints.is_empty());
+        }
+    }
+
+    #[test]
+    fn waypoint_name_decodes_non_bmp_utf16() {
+        let mut w = World::new();
+        assert!(apply_packet(
+            &mut w,
+            &waypoint_frame(10, 100, 100, 0, 0, 6, false, 1_062_613, "Healer 🐉")
+        ));
+        assert_eq!(w.waypoints[&10].name, "Healer 🐉");
     }
 }
