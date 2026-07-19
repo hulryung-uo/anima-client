@@ -478,6 +478,9 @@ pub enum LoginError {
     /// Explicit new-character creation was requested, but every advertised
     /// character slot is already occupied.
     CharacterSlotsFull,
+    /// An exact existing-character slot was requested, but that slot is empty
+    /// (or outside the slots advertised by the shard).
+    CharacterSlotEmpty(u8),
     /// The requested appearance violates client-known creation constraints.
     InvalidCharacterAppearance(&'static str),
     /// Server rejected our `0x83` DeleteCharacter with DeleteResult `0x85`.
@@ -514,6 +517,9 @@ pub struct LoginConfig {
     pub server_index: u16,
     /// Preferred character slot; falls back to the first named slot.
     pub character_slot: u8,
+    /// Require `character_slot` to contain an existing character instead of
+    /// falling back to another slot or auto-creating one.
+    pub require_character_slot: bool,
     pub client_ip: u32,
     /// When the account has no character, create one from this appearance.
     pub create_if_missing: bool,
@@ -538,6 +544,7 @@ impl Default for LoginConfig {
             version: (7, 0, 102, 3),
             server_index: 0,
             character_slot: 0,
+            require_character_slot: false,
             client_ip: 0x7F00_0001, // 127.0.0.1
             create_if_missing: true,
             create_new: false,
@@ -654,11 +661,15 @@ impl LoginMachine {
             State::AwaitCharacterList => {
                 if id == 0xA9 || id == 0x86 {
                     let parsed = parse_character_list_with_capacity(frame)?;
-                    let chosen = parsed
+                    let preferred = parsed
                         .slots
                         .iter()
-                        .find(|s| s.index == self.cfg.character_slot)
-                        .or_else(|| parsed.slots.first());
+                        .find(|s| s.index == self.cfg.character_slot);
+                    let chosen = if self.cfg.require_character_slot {
+                        preferred
+                    } else {
+                        preferred.or_else(|| parsed.slots.first())
+                    };
                     let first_empty_slot = (0..parsed.slot_count)
                         .find(|index| !parsed.slots.iter().any(|slot| slot.index == *index))
                         // Some older shards advertise zero entries for a fresh
@@ -698,6 +709,9 @@ impl LoginMachine {
                                 self.cfg.client_ip,
                                 ALL_FACET_CLIENT_FLAGS,
                             ))])
+                        }
+                        None if self.cfg.require_character_slot => {
+                            Err(LoginError::CharacterSlotEmpty(self.cfg.character_slot))
                         }
                         None if self.cfg.create_if_missing => {
                             self.cfg
@@ -1042,6 +1056,38 @@ mod tests {
         let mut m = machine_at_character_list(cfg);
         let list = build_character_list_frame(0xA9, &["A", "B", "C", "D", "E"]);
         assert_eq!(m.on_packet(&list), Err(LoginError::CharacterSlotsFull));
+    }
+
+    #[test]
+    fn exact_character_selection_plays_the_requested_slot() {
+        let cfg = LoginConfig {
+            character_slot: 2,
+            require_character_slot: true,
+            ..Default::default()
+        };
+        let mut m = machine_at_character_list(cfg);
+        let list = build_character_list_frame(0xA9, &["First", "", "Third", "", ""]);
+        assert_eq!(
+            m.on_packet(&list).unwrap(),
+            vec![LoginDirective::Send(build_play_character(
+                "Third",
+                2,
+                0x7F00_0001,
+                ALL_FACET_CLIENT_FLAGS,
+            ))]
+        );
+    }
+
+    #[test]
+    fn exact_character_selection_rejects_an_empty_slot_without_fallback() {
+        let cfg = LoginConfig {
+            character_slot: 1,
+            require_character_slot: true,
+            ..Default::default()
+        };
+        let mut m = machine_at_character_list(cfg);
+        let list = build_character_list_frame(0xA9, &["First", "", "Third", "", ""]);
+        assert_eq!(m.on_packet(&list), Err(LoginError::CharacterSlotEmpty(1)));
     }
 
     #[test]

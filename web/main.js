@@ -1237,9 +1237,11 @@ function wireLogin() {
   const go = document.getElementById("lg-go");
   const createToggle = document.getElementById("lg-create");
   const createPanel = document.getElementById("lg-create-panel");
+  const slotSelect = document.getElementById("lg-slot");
   const statInputs = ["lg-str", "lg-dex", "lg-int"].map(id => document.getElementById(id));
   const updateCreation = () => {
     createPanel.classList.toggle("on", createToggle.checked);
+    slotSelect.disabled = createToggle.checked;
     const total = statInputs.reduce((sum, input) => sum + (Number(input.value) || 0), 0);
     const totalEl = document.getElementById("lg-stat-total");
     totalEl.textContent = `Total: ${total} / 90`;
@@ -1286,7 +1288,11 @@ function wireLogin() {
       const response = await fetch("login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ host, port, username, password, create }),
+        body: JSON.stringify({
+          host, port, username, password,
+          character_slot: create ? null : Number(slotSelect.value),
+          create,
+        }),
       });
       if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
     } catch (error) {

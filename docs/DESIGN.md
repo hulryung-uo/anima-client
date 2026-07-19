@@ -263,7 +263,8 @@ cd ~/dev/uo/anima-client
 cargo run -p anima-net --bin play -- 127.0.0.1 2594 <user> <pass>
 # open http://127.0.0.1:8090/ — or omit all args to auto-login with the defaults
 # above, or set ANIMA_LOGIN=1 for an in-browser login page instead. That page
-# can also create a customized character in the account's first empty slot.
+# can select an exact existing slot or create a customized character in the
+# account's first empty slot.
 ```
 
 ### Running the Phase 2 AI-patrol scene bridge (older demo path, still works)

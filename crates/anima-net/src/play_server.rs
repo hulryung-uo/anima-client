@@ -197,6 +197,9 @@ struct LoginAttempt {
     port: u16,
     username: String,
     password: String,
+    /// Exact existing slot to play. `None` preserves the historical
+    /// preferred-slot-with-fallback behavior used by legacy scripts.
+    character_slot: Option<u8>,
     /// `Some` means explicitly create a new character, even if other slots
     /// are occupied. `None` keeps the existing select-or-create-if-empty flow.
     create: Option<CharacterAppearance>,
@@ -233,6 +236,7 @@ fn parse_login_attempt(body: &str) -> Result<LoginAttempt, &'static str> {
             port,
             username,
             password,
+            character_slot: None,
             create: None,
         });
     }
@@ -254,6 +258,15 @@ fn parse_login_attempt(body: &str) -> Result<LoginAttempt, &'static str> {
         .and_then(|field| field.as_u64())
         .and_then(|port| u16::try_from(port).ok())
         .ok_or("port must be between 0 and 65535")?;
+    let character_slot = match value.get("character_slot") {
+        Some(field) if !field.is_null() => Some(
+            field
+                .as_u64()
+                .and_then(|slot| u8::try_from(slot).ok())
+                .ok_or("character slot must be a non-negative integer")?,
+        ),
+        _ => None,
+    };
 
     let create = value.get("create").filter(|field| !field.is_null());
     let create = if let Some(create) = create {
@@ -298,6 +311,7 @@ fn parse_login_attempt(body: &str) -> Result<LoginAttempt, &'static str> {
         port,
         username,
         password: text("password").to_string(),
+        character_slot,
         create,
     })
 }
@@ -530,12 +544,15 @@ impl PlayServer {
                 port,
                 username,
                 password,
+                character_slot,
                 create,
             } = attempt;
             let mut c = LoginConfig {
                 username,
                 password,
                 create_new: create.is_some(),
+                character_slot: character_slot.unwrap_or(0),
+                require_character_slot: create.is_none() && character_slot.is_some(),
                 ..Default::default()
             };
             if let Some(appearance) = create {
@@ -555,6 +572,7 @@ impl PlayServer {
                 port: cfg.port,
                 username: cfg.user.clone(),
                 password: cfg.pass.clone(),
+                character_slot: None,
                 create: None,
             }) {
                 Ok(s) => s,
@@ -2442,6 +2460,7 @@ mod login_request_tests {
         assert_eq!(attempt.port, 2594);
         assert_eq!(attempt.username, "account");
         assert_eq!(attempt.password, "pass:with:colons");
+        assert_eq!(attempt.character_slot, None);
         assert!(attempt.create.is_none());
     }
 
@@ -2450,13 +2469,14 @@ mod login_request_tests {
         let attempt = parse_login_attempt(
             r#"{
                 "host":"127.0.0.1","port":2594,
-                "username":"account","password":"secret",
+                "username":"account","password":"secret","character_slot":4,
                 "create":{"name":"New Hero","female":true,"profession":"mage",
                     "strength":20,"dexterity":20,"intelligence":50,"city_index":3}
             }"#,
         )
         .unwrap();
         let appearance = attempt.create.unwrap();
+        assert_eq!(attempt.character_slot, Some(4));
         assert_eq!(appearance.name, "New Hero");
         assert!(appearance.female);
         assert_eq!(
@@ -2469,6 +2489,17 @@ mod login_request_tests {
         );
         assert_eq!(appearance.skills, starting_skills("mage").unwrap());
         assert_eq!(appearance.city_index, 3);
+    }
+
+    #[test]
+    fn json_login_body_selects_an_exact_existing_slot() {
+        let attempt = parse_login_attempt(
+            r#"{"host":"127.0.0.1","port":2594,"username":"account","password":"secret",
+                "character_slot":2,"create":null}"#,
+        )
+        .unwrap();
+        assert_eq!(attempt.character_slot, Some(2));
+        assert!(attempt.create.is_none());
     }
 
     #[test]
