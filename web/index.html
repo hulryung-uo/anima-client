@@ -630,7 +630,7 @@
         <label>Password <input id="lg-pass" type="password" autocomplete="current-password"></label>
         <label class="login-create-toggle"><input id="lg-create" type="checkbox"> Create a new character</label>
         <div id="lg-create-panel">
-          <label>Character name <input id="lg-char-name" maxlength="30" spellcheck="false" autocomplete="off"></label>
+          <label>Character name <input id="lg-char-name" maxlength="16" pattern="[A-Za-z][A-Za-z .'-]*" spellcheck="false" autocomplete="off"></label>
           <label>Gender
             <select id="lg-gender"><option value="male">Male</option><option value="female">Female</option></select>
           </label>

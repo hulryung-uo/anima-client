@@ -152,12 +152,7 @@ impl CharacterAppearance {
     /// `0xF8` request without a useful client-side explanation.
     pub fn validate(&self) -> Result<(), &'static str> {
         let name = self.name.trim();
-        if name.is_empty() {
-            return Err("character name is required");
-        }
-        if name.len() > 30 || !name.bytes().all(|b| b.is_ascii_graphic() || b == b' ') {
-            return Err("character name must be at most 30 printable ASCII bytes");
-        }
+        validate_character_name(name)?;
         if !(10..=60).contains(&self.strength)
             || !(10..=60).contains(&self.dexterity)
             || !(10..=60).contains(&self.intelligence)
@@ -180,11 +175,125 @@ impl CharacterAppearance {
                 used[id as usize] = true;
             }
         }
-        if skill_total == 0 || skill_total > 120 {
-            return Err("starting skill values must total between 1 and 120");
+        if !matches!(skill_total, 100 | 120) {
+            return Err("starting skill values must total exactly 100 or 120");
         }
         Ok(())
     }
+}
+
+/// Mirror ServUO `NameVerification.Validate(name, 2, 16, true, false, true,
+/// 1, SpaceDashPeriodQuote)` as used by `CharacterCreation.SetName`. Without
+/// this, ServUO silently accepts the creation request but replaces an invalid
+/// name with `Generic Player`, which looks like a successful client request.
+fn validate_character_name(name: &str) -> Result<(), &'static str> {
+    const START_DISALLOWED: &[&str] = &["seer", "counselor", "gm", "admin", "lady", "lord"];
+    const DISALLOWED_WORDS: &[&str] = &[
+        "jigaboo",
+        "chigaboo",
+        "wop",
+        "kyke",
+        "kike",
+        "tit",
+        "spic",
+        "prick",
+        "piss",
+        "lezbo",
+        "lesbo",
+        "felatio",
+        "dyke",
+        "dildo",
+        "chinc",
+        "chink",
+        "cunnilingus",
+        "cum",
+        "cocksucker",
+        "cock",
+        "clitoris",
+        "clit",
+        "ass",
+        "hitler",
+        "penis",
+        "nigga",
+        "nigger",
+        "klit",
+        "kunt",
+        "jiz",
+        "jism",
+        "jerkoff",
+        "jackoff",
+        "goddamn",
+        "fag",
+        "blowjob",
+        "bitch",
+        "asshole",
+        "dick",
+        "pussy",
+        "snatch",
+        "cunt",
+        "twat",
+        "shit",
+        "fuck",
+        "tailor",
+        "smith",
+        "scholar",
+        "rogue",
+        "novice",
+        "neophyte",
+        "merchant",
+        "medium",
+        "master",
+        "mage",
+        "lb",
+        "journeyman",
+        "grandmaster",
+        "fisherman",
+        "expert",
+        "chef",
+        "carpenter",
+        "british",
+        "blackthorne",
+        "blackthorn",
+        "beggar",
+        "archer",
+        "apprentice",
+        "adept",
+        "gamemaster",
+        "frozen",
+        "squelched",
+        "invulnerable",
+        "osi",
+        "origin",
+    ];
+
+    if !(2..=16).contains(&name.len()) {
+        return Err("character name must be between 2 and 16 ASCII characters");
+    }
+    let is_separator = |byte| matches!(byte, b' ' | b'-' | b'.' | b'\'');
+    let mut previous_was_separator = false;
+    for (index, byte) in name.bytes().enumerate() {
+        if byte.is_ascii_alphabetic() {
+            previous_was_separator = false;
+        } else if is_separator(byte) && index > 0 && !previous_was_separator {
+            previous_was_separator = true;
+        } else {
+            return Err(
+                "character name may contain ASCII letters and non-consecutive spaces, dashes, periods, or apostrophes",
+            );
+        }
+    }
+
+    let lower = name.to_ascii_lowercase();
+    if START_DISALLOWED
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+        || lower
+            .split([' ', '-', '.', '\''])
+            .any(|word| DISALLOWED_WORDS.contains(&word))
+    {
+        return Err("character name contains a ServUO-reserved word or prefix");
+    }
+    Ok(())
 }
 
 /// Human race id in the gender+race byte. The modern (CV ≥ 7.0.0.0) encoding is
@@ -947,5 +1056,22 @@ mod tests {
             appearance.validate(),
             Err("strength, dexterity, and intelligence must each be 10-60 and total 90")
         );
+    }
+
+    #[test]
+    fn character_name_validation_matches_servuo_creation_rules() {
+        for valid in ["Iron Warden", "O'Neil", "Anne-Marie", "A.B"] {
+            assert_eq!(validate_character_name(valid), Ok(()), "{valid}");
+        }
+        for invalid in [
+            "A",
+            "This Name Is Too Long",
+            "Forge Master",
+            "GM Helper",
+            "Hero42",
+            "Two  Spaces",
+        ] {
+            assert!(validate_character_name(invalid).is_err(), "{invalid}");
+        }
     }
 }

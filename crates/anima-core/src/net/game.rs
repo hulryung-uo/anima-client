@@ -806,7 +806,7 @@ fn display_waypoint(world: &mut World, frame: &[u8]) -> PResult<()> {
             remaining: tail.len(),
         });
     }
-    if tail.len() % 2 != 0 {
+    if !tail.len().is_multiple_of(2) {
         return Err(PacketError::InvalidData("odd-length waypoint UTF-16 tail"));
     }
     let (name_with_nul, trailing) = tail.split_at(tail.len() - 2);
@@ -4274,6 +4274,7 @@ mod tests {
         assert!(w.map_gumps.is_empty());
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn waypoint_frame(
         serial: u32,
         x: u16,

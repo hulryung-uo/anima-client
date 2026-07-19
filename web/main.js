@@ -1262,6 +1262,10 @@ function wireLogin() {
       const name = (document.getElementById("lg-char-name").value || "").trim();
       const [strength, dexterity, intelligence] = statInputs.map(input => Number(input.value));
       if (!name) { msg.textContent = "Enter a character name."; return; }
+      if (!/^[A-Za-z][A-Za-z .'-]{1,15}$/.test(name) || /[ .'-]{2}/.test(name)) {
+        msg.textContent = "Use 2–16 letters with single spaces, dashes, periods, or apostrophes.";
+        return;
+      }
       if ([strength, dexterity, intelligence].some(value => value < 10 || value > 60)
           || strength + dexterity + intelligence !== 90) {
         msg.textContent = "STR, DEX, and INT must each be 10–60 and total 90.";
