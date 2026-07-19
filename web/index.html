@@ -629,14 +629,14 @@
         <label>Port <input id="lg-port" value="2594" spellcheck="false" autocomplete="off"></label>
         <label>Account <input id="lg-user" spellcheck="false" autocomplete="username"></label>
         <label>Password <input id="lg-pass" type="password" autocomplete="current-password"></label>
-        <label>Existing character
+        <label id="lg-slot-row">Existing character
           <select id="lg-slot">
             <option value="0">Slot 1</option><option value="1">Slot 2</option>
             <option value="2">Slot 3</option><option value="3">Slot 4</option>
             <option value="4">Slot 5</option>
           </select>
         </label>
-        <label class="login-create-toggle"><input id="lg-create" type="checkbox"> Create a new character</label>
+        <label id="lg-create-toggle" class="login-create-toggle"><input id="lg-create" type="checkbox"> Create a new character</label>
         <div id="lg-create-panel">
           <label>Character name <input id="lg-char-name" maxlength="16" pattern="[A-Za-z][A-Za-z .'-]*" spellcheck="false" autocomplete="off"></label>
           <label>Gender

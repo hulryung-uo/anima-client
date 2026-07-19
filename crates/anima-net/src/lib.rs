@@ -28,8 +28,8 @@ use anima_core::net::outgoing::{
     build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
 };
 use anima_core::net::{
-    apply_packet, build_client_version, FramingError, LoginConfig, LoginDirective, LoginError,
-    LoginMachine, LoginResult, StreamDecoder, Walker,
+    apply_packet, build_client_version, CharacterChoice, CharacterList, FramingError, LoginConfig,
+    LoginDirective, LoginError, LoginMachine, LoginResult, StreamDecoder, Walker,
 };
 use anima_core::path::{find_path, find_path_near, Terrain, DEFAULT_MAX_EXPANSIONS};
 use anima_core::world::World;
@@ -66,6 +66,9 @@ pub enum DriverError {
     Login(LoginError),
     /// Server closed the connection before login finished.
     ConnectionClosed,
+    /// The login machine asked for an interactive character choice, but this
+    /// driver call did not provide a chooser.
+    CharacterChoiceRequired,
 }
 
 impl std::fmt::Display for DriverError {
@@ -75,6 +78,7 @@ impl std::fmt::Display for DriverError {
             DriverError::Framing(e) => write!(f, "framing error: {e:?}"),
             DriverError::Login(e) => write!(f, "login error: {e:?}"),
             DriverError::ConnectionClosed => write!(f, "connection closed by server"),
+            DriverError::CharacterChoiceRequired => write!(f, "character choice required"),
         }
     }
 }
@@ -380,7 +384,29 @@ impl Session {
         endpoint: &Endpoint,
         cfg: LoginConfig,
     ) -> Result<Session, DriverError> {
-        let (result, stream, decoder) = login(endpoint, cfg)?;
+        Self::connect_and_login_inner(endpoint, cfg, None)
+    }
+
+    /// Connect and pause after account authentication so a caller can display
+    /// the real server-provided character list before choosing or creating.
+    pub fn connect_and_login_with_character_chooser<F>(
+        endpoint: &Endpoint,
+        mut cfg: LoginConfig,
+        mut chooser: F,
+    ) -> Result<Session, DriverError>
+    where
+        F: FnMut(CharacterList) -> Result<CharacterChoice, DriverError>,
+    {
+        cfg.defer_character_choice = true;
+        Self::connect_and_login_inner(endpoint, cfg, Some(&mut chooser))
+    }
+
+    fn connect_and_login_inner(
+        endpoint: &Endpoint,
+        cfg: LoginConfig,
+        chooser: Option<&mut dyn FnMut(CharacterList) -> Result<CharacterChoice, DriverError>>,
+    ) -> Result<Session, DriverError> {
+        let (result, stream, decoder) = login(endpoint, cfg, chooser)?;
         let mut world = World::new();
         world.enter_world(&result);
         stream.set_read_timeout(Some(PUMP_READ_TIMEOUT)).ok();
@@ -903,6 +929,7 @@ impl Session {
 fn login(
     endpoint: &Endpoint,
     cfg: LoginConfig,
+    mut chooser: Option<&mut dyn FnMut(CharacterList) -> Result<CharacterChoice, DriverError>>,
 ) -> Result<(LoginResult, TcpStream, StreamDecoder), DriverError> {
     let (mut machine, initial) = LoginMachine::start(cfg);
 
@@ -926,6 +953,26 @@ fn login(
                         stream = connect(endpoint)?;
                         decoder.switch_to_game();
                         stream.write_all(&then)?;
+                    }
+                    LoginDirective::ChooseCharacter(list) => {
+                        let choice = chooser
+                            .as_deref_mut()
+                            .ok_or(DriverError::CharacterChoiceRequired)?(
+                            list
+                        )?;
+                        for followup in machine
+                            .choose_character(choice)
+                            .map_err(DriverError::Login)?
+                        {
+                            match followup {
+                                LoginDirective::Send(bytes) => stream.write_all(&bytes)?,
+                                _ => {
+                                    return Err(DriverError::Login(
+                                        LoginError::CharacterChoiceNotExpected,
+                                    ));
+                                }
+                            }
+                        }
                     }
                     LoginDirective::Done(result) => return Ok((result, stream, decoder)),
                 }

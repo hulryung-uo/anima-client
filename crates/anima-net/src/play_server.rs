@@ -1,7 +1,8 @@
 //! Library form of the `play` bin: a human-controlled UO client served over
 //! HTTP. Holds one live [`Session`], serves the web renderer + `/scene.json`,
 //! and accepts `POST /input` commands (walk/say/use/attack/pickup/war) which
-//! it executes on the live session.
+//! it executes on the live session. Browser login pauses at the server-provided
+//! character list and resumes through `POST /character`.
 //!
 //! Split in two so a caller can learn the bound HTTP port before blocking:
 //! [`bind`] loads assets, starts the HTTP server (workers included) and
@@ -26,7 +27,7 @@ use anima_assets::{
     Anim, AnimData, Art, Cliloc, Gumps, Hues, MapData, Multis, RadarCol, Sounds, Texmaps, TileData,
     ZReason,
 };
-use anima_core::net::{CharacterAppearance, LoginConfig};
+use anima_core::net::{CharacterAppearance, CharacterChoice, LoginConfig};
 use anima_core::path::{find_path, find_path_near};
 use anima_core::Action;
 use include_dir::{include_dir, Dir};
@@ -38,7 +39,7 @@ use crate::scene::{
     explain_tile_walkable, render_worldmap, BlockedStepAction, DoorUseAttempt, MapTerrain,
     StepDeny, WORLDMAP_STEP,
 };
-use crate::{Endpoint, Session};
+use crate::{DriverError, Endpoint, Session};
 
 /// Bundled copy of `web/` (renderer + PixiJS vendor lib), embedded at compile
 /// time so this crate can serve the client with no `web/` directory on disk —
@@ -153,8 +154,9 @@ pub struct PlayConfig {
     pub web_dir: Option<PathBuf>,
     /// UO client data directory (`.mul`/`.uop` files).
     pub data_dir: PathBuf,
-    /// Serve the browser login page (server/account form) and wait for a
-    /// `POST /login` instead of auto-logging in with `host`/`port`/`user`/`pass`.
+    /// Serve the browser login page and wait for `POST /login`, then expose the
+    /// server-provided character list and wait for `POST /character`, instead
+    /// of auto-logging in with `host`/`port`/`user`/`pass`.
     pub login_page: bool,
     /// Address to bind the HTTP server to. Should be `"127.0.0.1"` (loopback
     /// only) for any caller that doesn't have a specific reason to allow LAN
@@ -184,6 +186,7 @@ pub struct PlayServer {
     scene: Arc<Mutex<String>>,
     rx: mpsc::Receiver<Option<Action>>,
     login_rx: mpsc::Receiver<LoginAttempt>,
+    character_rx: mpsc::Receiver<CharacterChoice>,
     sse_hub: SseHub,
     /// Current session facet (`World::map_index`), kept in step with the game
     /// loop so the `/regions.json` HTTP thread can filter guard-zone rects to
@@ -200,6 +203,9 @@ struct LoginAttempt {
     /// Exact existing slot to play. `None` preserves the historical
     /// preferred-slot-with-fallback behavior used by legacy scripts.
     character_slot: Option<u8>,
+    /// Pause after account authentication and expose the server's character
+    /// list through `scene.json` before entering the world.
+    interactive: bool,
     /// `Some` means explicitly create a new character, even if other slots
     /// are occupied. `None` keeps the existing select-or-create-if-empty flow.
     create: Option<CharacterAppearance>,
@@ -237,6 +243,7 @@ fn parse_login_attempt(body: &str) -> Result<LoginAttempt, &'static str> {
             username,
             password,
             character_slot: None,
+            interactive: false,
             create: None,
         });
     }
@@ -267,41 +274,14 @@ fn parse_login_attempt(body: &str) -> Result<LoginAttempt, &'static str> {
         ),
         _ => None,
     };
+    let interactive = value
+        .get("interactive")
+        .and_then(|field| field.as_bool())
+        .unwrap_or(false);
 
     let create = value.get("create").filter(|field| !field.is_null());
     let create = if let Some(create) = create {
-        let create_text = |key| {
-            create
-                .get(key)
-                .and_then(|field| field.as_str())
-                .unwrap_or("")
-        };
-        let create_u8 = |key| {
-            create
-                .get(key)
-                .and_then(|field| field.as_u64())
-                .and_then(|number| u8::try_from(number).ok())
-        };
-        let mut appearance = CharacterAppearance {
-            name: create_text("name").trim().to_string(),
-            female: create
-                .get("female")
-                .and_then(|field| field.as_bool())
-                .unwrap_or(false),
-            strength: create_u8("strength").ok_or("invalid strength")?,
-            dexterity: create_u8("dexterity").ok_or("invalid dexterity")?,
-            intelligence: create_u8("intelligence").ok_or("invalid intelligence")?,
-            city_index: create
-                .get("city_index")
-                .and_then(|field| field.as_u64())
-                .and_then(|number| u16::try_from(number).ok())
-                .ok_or("invalid starting city")?,
-            ..Default::default()
-        };
-        appearance.skills =
-            starting_skills(create_text("profession")).ok_or("unknown starting profession")?;
-        appearance.validate()?;
-        Some(appearance)
+        Some(parse_character_appearance(create)?)
     } else {
         None
     };
@@ -312,8 +292,59 @@ fn parse_login_attempt(body: &str) -> Result<LoginAttempt, &'static str> {
         username,
         password: text("password").to_string(),
         character_slot,
+        interactive,
         create,
     })
+}
+
+fn parse_character_appearance(
+    create: &serde_json::Value,
+) -> Result<CharacterAppearance, &'static str> {
+    let text = |key| {
+        create
+            .get(key)
+            .and_then(|field| field.as_str())
+            .unwrap_or("")
+    };
+    let number = |key| {
+        create
+            .get(key)
+            .and_then(|field| field.as_u64())
+            .and_then(|number| u8::try_from(number).ok())
+    };
+    let mut appearance = CharacterAppearance {
+        name: text("name").trim().to_string(),
+        female: create
+            .get("female")
+            .and_then(|field| field.as_bool())
+            .unwrap_or(false),
+        strength: number("strength").ok_or("invalid strength")?,
+        dexterity: number("dexterity").ok_or("invalid dexterity")?,
+        intelligence: number("intelligence").ok_or("invalid intelligence")?,
+        city_index: create
+            .get("city_index")
+            .and_then(|field| field.as_u64())
+            .and_then(|number| u16::try_from(number).ok())
+            .ok_or("invalid starting city")?,
+        ..Default::default()
+    };
+    appearance.skills = starting_skills(text("profession")).ok_or("unknown starting profession")?;
+    appearance.validate()?;
+    Ok(appearance)
+}
+
+fn parse_character_choice(body: &str) -> Result<CharacterChoice, &'static str> {
+    let value: serde_json::Value =
+        serde_json::from_str(body.trim()).map_err(|_| "invalid character-choice JSON")?;
+    if let Some(create) = value.get("create").filter(|field| !field.is_null()) {
+        return Ok(CharacterChoice::Create(parse_character_appearance(create)?));
+    }
+    let slot = value
+        .get("slot")
+        .and_then(|field| field.as_u64())
+        .and_then(|slot| u8::try_from(slot).ok())
+        .ok_or("character slot must be a non-negative integer")?;
+    Ok(CharacterChoice::Play(slot))
 }
 
 /// Load assets, bind the HTTP server (workers included), and return a
@@ -442,6 +473,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     let facet: Arc<AtomicU8> = Arc::new(AtomicU8::new(0));
     // Login credentials submitted by the web login page (host, port, user, pass).
     let (login_tx, login_rx) = mpsc::channel::<LoginAttempt>();
+    let (character_tx, character_rx) = mpsc::channel::<CharacterChoice>();
 
     // The HTTP server comes up FIRST so the login page is reachable before we've
     // connected to any game server. Bound to loopback by default — this process
@@ -468,6 +500,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
             scene: scene.clone(),
             tx,
             login: login_tx,
+            character: character_tx,
             art: art.clone(),
             anim: anim.clone(),
             gumps,
@@ -497,6 +530,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
         scene,
         rx,
         login_rx,
+        character_rx,
         sse_hub,
         facet,
     })
@@ -524,6 +558,7 @@ impl PlayServer {
             scene,
             rx,
             login_rx,
+            character_rx,
             sse_hub,
             facet,
         } = self;
@@ -545,6 +580,7 @@ impl PlayServer {
                 username,
                 password,
                 character_slot,
+                interactive,
                 create,
             } = attempt;
             let mut c = LoginConfig {
@@ -560,7 +596,32 @@ impl PlayServer {
             } else {
                 c.appearance.city_index = city_index;
             }
-            Session::connect_and_login(&Endpoint::new(host, port), c)
+            let endpoint = Endpoint::new(host, port);
+            if interactive {
+                Session::connect_and_login_with_character_chooser(&endpoint, c, |list| {
+                    let slots: Vec<serde_json::Value> = list
+                        .slots
+                        .iter()
+                        .map(|slot| serde_json::json!({"index": slot.index, "name": slot.name}))
+                        .collect();
+                    *scene.lock().unwrap() = serde_json::json!({
+                        "auth": "characters",
+                        "slots": slots,
+                        "capacity": list.slot_count.max(1),
+                    })
+                    .to_string();
+                    println!(
+                        "play: character list ready ({} occupied / {} slots)",
+                        list.slots.len(),
+                        list.slot_count
+                    );
+                    character_rx
+                        .recv()
+                        .map_err(|error| DriverError::Io(io::Error::other(error)))
+                })
+            } else {
+                Session::connect_and_login(&endpoint, c)
+            }
         };
         let mut session = if !cfg.login_page {
             println!(
@@ -573,6 +634,7 @@ impl PlayServer {
                 username: cfg.user.clone(),
                 password: cfg.pass.clone(),
                 character_slot: None,
+                interactive: false,
                 create: None,
             }) {
                 Ok(s) => s,
@@ -1281,6 +1343,7 @@ struct SpawnHttp {
     scene: Arc<Mutex<String>>,
     tx: mpsc::Sender<Option<Action>>,
     login: mpsc::Sender<LoginAttempt>,
+    character: mpsc::Sender<CharacterChoice>,
     art: Option<Arc<Mutex<Art>>>,
     anim: Option<Arc<Anim>>,
     gumps: Option<Arc<Gumps>>,
@@ -1303,6 +1366,7 @@ fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         scene,
         tx,
         login,
+        character,
         art,
         anim,
         gumps,
@@ -1329,6 +1393,7 @@ fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         let scene = scene.clone();
         let tx = tx.clone();
         let login = login.clone();
+        let character = character.clone();
         let art = art.clone();
         let anim = anim.clone();
         let gumps = gumps.clone();
@@ -1354,6 +1419,7 @@ fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
                     scene: &scene,
                     tx: &tx,
                     login: &login,
+                    character: &character,
                     art: &art,
                     anim: &anim,
                     gumps: &gumps,
@@ -1384,6 +1450,7 @@ struct Ctx<'a> {
     scene: &'a Arc<Mutex<String>>,
     tx: &'a mpsc::Sender<Option<Action>>,
     login: &'a mpsc::Sender<LoginAttempt>,
+    character: &'a mpsc::Sender<CharacterChoice>,
     art: &'a Option<Arc<Mutex<Art>>>,
     anim: &'a Option<Arc<Anim>>,
     gumps: &'a Option<Arc<Gumps>>,
@@ -1411,6 +1478,7 @@ fn handle_request(ctx: Ctx) {
         scene,
         tx,
         login,
+        character,
         art,
         anim,
         gumps,
@@ -1436,7 +1504,7 @@ fn handle_request(ctx: Ctx) {
     let is_post = *req.method() == Method::Post;
 
     // CSRF guard: every state-changing route here is a POST (`/input`, `/login`,
-    // `/log`), and with the `play` bin's well-known port a malicious page loaded
+    // `/character`, `/log`), and with the `play` bin's well-known port a malicious page loaded
     // in any tab could otherwise drive the session with no preflight (simple
     // requests aren't subject to CORS). A browser always sends `Origin` on a
     // cross-origin request and can't be told not to, so reject when it disagrees
@@ -1490,6 +1558,47 @@ fn handle_request(ctx: Ctx) {
             Ok(attempt) => {
                 let _ = login.send(attempt);
                 let _ = req.respond(Response::from_string("ok"));
+            }
+            Err(message) => {
+                let _ = req.respond(Response::from_string(message).with_status_code(400));
+            }
+        }
+    } else if is_post && url == "/character" {
+        let body = match read_request_body(&mut req) {
+            Ok(body) => body,
+            Err((status, message)) => {
+                let _ = req.respond(Response::from_string(message).with_status_code(status));
+                return;
+            }
+        };
+        match parse_character_choice(&body) {
+            Ok(choice) => {
+                let mut current_scene = scene.lock().unwrap();
+                let awaiting_choice = serde_json::from_str::<serde_json::Value>(&current_scene)
+                    .ok()
+                    .and_then(|value| value.get("auth")?.as_str().map(str::to_owned))
+                    .is_some_and(|auth| auth == "characters");
+                if !awaiting_choice {
+                    drop(current_scene);
+                    let _ = req.respond(
+                        Response::from_string("character choice is not expected")
+                            .with_status_code(409),
+                    );
+                    return;
+                }
+                *current_scene = r#"{"auth":"connecting","msg":"Entering world…"}"#.into();
+                drop(current_scene);
+                match character.send(choice) {
+                    Ok(()) => {
+                        let _ = req.respond(Response::from_string("ok"));
+                    }
+                    Err(_) => {
+                        let _ = req.respond(
+                            Response::from_string("character chooser is unavailable")
+                                .with_status_code(409),
+                        );
+                    }
+                }
             }
             Err(message) => {
                 let _ = req.respond(Response::from_string(message).with_status_code(400));
@@ -2451,7 +2560,8 @@ mod resource_limit_tests {
 
 #[cfg(test)]
 mod login_request_tests {
-    use super::{parse_login_attempt, starting_skills};
+    use super::{parse_character_choice, parse_login_attempt, starting_skills};
+    use anima_core::net::CharacterChoice;
 
     #[test]
     fn legacy_login_body_remains_supported() {
@@ -2461,6 +2571,7 @@ mod login_request_tests {
         assert_eq!(attempt.username, "account");
         assert_eq!(attempt.password, "pass:with:colons");
         assert_eq!(attempt.character_slot, None);
+        assert!(!attempt.interactive);
         assert!(attempt.create.is_none());
     }
 
@@ -2469,7 +2580,7 @@ mod login_request_tests {
         let attempt = parse_login_attempt(
             r#"{
                 "host":"127.0.0.1","port":2594,
-                "username":"account","password":"secret","character_slot":4,
+                "username":"account","password":"secret","character_slot":4,"interactive":true,
                 "create":{"name":"New Hero","female":true,"profession":"mage",
                     "strength":20,"dexterity":20,"intelligence":50,"city_index":3}
             }"#,
@@ -2477,6 +2588,7 @@ mod login_request_tests {
         .unwrap();
         let appearance = attempt.create.unwrap();
         assert_eq!(attempt.character_slot, Some(4));
+        assert!(attempt.interactive);
         assert_eq!(appearance.name, "New Hero");
         assert!(appearance.female);
         assert_eq!(
@@ -2500,6 +2612,24 @@ mod login_request_tests {
         .unwrap();
         assert_eq!(attempt.character_slot, Some(2));
         assert!(attempt.create.is_none());
+    }
+
+    #[test]
+    fn character_choice_parser_accepts_play_and_create() {
+        assert_eq!(
+            parse_character_choice(r#"{"slot":3}"#),
+            Ok(CharacterChoice::Play(3))
+        );
+        let choice = parse_character_choice(
+            r#"{"create":{"name":"New Hero","female":false,"profession":"warrior",
+                "strength":60,"dexterity":20,"intelligence":10,"city_index":0}}"#,
+        )
+        .unwrap();
+        let CharacterChoice::Create(appearance) = choice else {
+            panic!("expected create choice");
+        };
+        assert_eq!(appearance.name, "New Hero");
+        assert_eq!(appearance.skills, starting_skills("warrior").unwrap());
     }
 
     #[test]

@@ -84,6 +84,9 @@ impl WasmClient {
                             self.outbox.extend(then);
                             self.logged_in = true;
                         }
+                        // The JS/WASM constructor currently uses automatic slot
+                        // selection, so this directive is reserved for native UI.
+                        LoginDirective::ChooseCharacter(_) => {}
                         LoginDirective::Done(r) => {
                             self.world.enter_world(&r);
                             self.login = None;

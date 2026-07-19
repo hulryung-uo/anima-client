@@ -1229,19 +1229,24 @@ function drawQuestArrow(ctx, x, y, ang, now) {
   ctx.restore();
 }
 
-// ---- login page (shown when the play-server is in ANIMA_LOGIN mode and not yet
-// in world; scene carries {auth:"login"|"connecting"|"error", msg}) ----
+// ---- two-stage login page: credentials → server-provided character list ----
 let loginWired = false;
+let characterStage = false;
+let characterListKey = "";
 function wireLogin() {
   if (loginWired) return; loginWired = true;
   const go = document.getElementById("lg-go");
   const createToggle = document.getElementById("lg-create");
   const createPanel = document.getElementById("lg-create-panel");
+  const createToggleRow = document.getElementById("lg-create-toggle");
+  const slotRow = document.getElementById("lg-slot-row");
   const slotSelect = document.getElementById("lg-slot");
+  const credentials = ["lg-host", "lg-port", "lg-user", "lg-pass"].map(id => document.getElementById(id));
   const statInputs = ["lg-str", "lg-dex", "lg-int"].map(id => document.getElementById(id));
   const updateCreation = () => {
     createPanel.classList.toggle("on", createToggle.checked);
-    slotSelect.disabled = createToggle.checked;
+    slotSelect.disabled = !characterStage || createToggle.checked || slotSelect.options.length === 0;
+    if (characterStage) go.textContent = createToggle.checked ? "Create" : "Play";
     const total = statInputs.reduce((sum, input) => sum + (Number(input.value) || 0), 0);
     const totalEl = document.getElementById("lg-stat-total");
     totalEl.textContent = `Total: ${total} / 90`;
@@ -1250,6 +1255,8 @@ function wireLogin() {
   createToggle.addEventListener("change", updateCreation);
   for (const input of statInputs) input.addEventListener("input", updateCreation);
   updateCreation();
+  slotRow.style.display = "none";
+  createToggleRow.style.display = "none";
 
   const submit = async () => {
     const host = (document.getElementById("lg-host").value || "127.0.0.1").trim();
@@ -1260,7 +1267,7 @@ function wireLogin() {
     if (!username) { msg.textContent = "Enter an account name."; return; }
 
     let create = null;
-    if (createToggle.checked) {
+    if (characterStage && createToggle.checked) {
       const name = (document.getElementById("lg-char-name").value || "").trim();
       const [strength, dexterity, intelligence] = statInputs.map(input => Number(input.value));
       if (!name) { msg.textContent = "Enter a character name."; return; }
@@ -1282,17 +1289,19 @@ function wireLogin() {
       };
     }
 
-    msg.textContent = create ? "Creating character…" : "Connecting…";
+    msg.textContent = characterStage
+      ? (create ? "Creating character…" : "Entering world…")
+      : "Connecting…";
     go.disabled = true;
     try {
-      const response = await fetch("login", {
+      const endpoint = characterStage ? "character" : "login";
+      const body = characterStage
+        ? (create ? { create } : { slot: Number(slotSelect.value) })
+        : { host, port, username, password, interactive: true, character_slot: null, create: null };
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          host, port, username, password,
-          character_slot: create ? null : Number(slotSelect.value),
-          create,
-        }),
+        body: JSON.stringify(body),
       });
       if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
     } catch (error) {
@@ -1303,6 +1312,35 @@ function wireLogin() {
   go.addEventListener("click", submit);
   for (const input of document.querySelectorAll("#login input, #login select"))
     input.addEventListener("keydown", (e) => { if (e.code === "Enter") submit(); });
+
+  window.updateCharacterLoginStage = (active, slots = [], capacity = 0) => {
+    characterStage = active;
+    for (const input of credentials) input.disabled = active;
+    slotRow.style.display = active ? "flex" : "none";
+    createToggleRow.style.display = active ? "flex" : "none";
+    if (!active) {
+      characterListKey = "";
+      createToggle.checked = false;
+      go.textContent = "Connect";
+      updateCreation();
+      return;
+    }
+    const key = JSON.stringify([slots, capacity]);
+    if (key !== characterListKey) {
+      characterListKey = key;
+      slotSelect.replaceChildren(...slots.map(slot => {
+        const option = document.createElement("option");
+        option.value = String(slot.index);
+        option.textContent = `Slot ${slot.index + 1} — ${slot.name}`;
+        return option;
+      }));
+      const full = slots.length >= capacity;
+      createToggle.disabled = full;
+      createToggle.checked = slots.length === 0 && !full;
+    }
+    go.textContent = createToggle.checked ? "Create" : "Play";
+    updateCreation();
+  };
 }
 // True when a key event is going to a text field (login form, etc.), so the global
 // game-input handler must not consume it (otherwise letters like a/w/s/d/m/b/t —
@@ -1312,15 +1350,27 @@ function isTypingTarget(el) {
   const t = el.tagName;
   return t === "INPUT" || t === "TEXTAREA" || t === "SELECT" || el.isContentEditable;
 }
-function showLogin(auth, msg) {
+function showLogin(auth, msg, slots, capacity) {
   wireLogin();
   const el = document.getElementById("login");
   if (el) el.classList.add("on");
   const m = document.getElementById("lg-msg");
   const go = document.getElementById("lg-go");
-  if (auth === "connecting") { if (m) m.textContent = "Connecting…"; if (go) go.disabled = true; }
-  else if (auth === "error") { if (m) m.textContent = "Login failed: " + (msg || "unknown error"); if (go) go.disabled = false; }
-  else { if (go) go.disabled = false; }
+  if (auth === "characters") {
+    window.updateCharacterLoginStage(true, slots || [], capacity || 0);
+    if (m) m.textContent = "Choose a character or create one in an empty slot.";
+    if (go) go.disabled = false;
+  } else if (auth === "connecting") {
+    if (m) m.textContent = msg || "Connecting…";
+    if (go) go.disabled = true;
+  } else if (auth === "error") {
+    window.updateCharacterLoginStage(false);
+    if (m) m.textContent = "Login failed: " + (msg || "unknown error");
+    if (go) go.disabled = false;
+  } else {
+    window.updateCharacterLoginStage(false);
+    if (go) go.disabled = false;
+  }
 }
 function hideLogin() {
   const el = document.getElementById("login");
@@ -1371,7 +1421,7 @@ async function poll() {
     if (!r.ok) throw new Error(r.status);
     scene = await r.json();
     // Not in world yet (login-page mode): show the login form instead of rendering.
-    if (scene && scene.auth) { showLogin(scene.auth, scene.msg); return; }
+    if (scene && scene.auth) { showLogin(scene.auth, scene.msg, scene.slots, scene.capacity); return; }
     hideLogin();
     if (!seqPrimed) { primeSeqRings(scene); seqPrimed = true; }
     updateAnimStates(scene);

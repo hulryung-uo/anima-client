@@ -33,8 +33,9 @@ sound stream on its own thread so it can't starve the worker pool), and accepts
 -- 127.0.0.1 2594 <u> <p>` then open `http://127.0.0.1:8090/` (all args are optional
 — omitted ones fall back to the baked-in defaults `127.0.0.1:2594`
 `animaplay`/`animaplay` and auto-login proceeds immediately; set `ANIMA_LOGIN=1` to
-instead serve a browser login page that collects server/account before
-connecting).
+instead serve a browser login page that collects server/account, authenticates,
+then shows the server-provided character names before the user chooses an
+existing character or creates a new one on the same connection).
 
 **Isometric renderer:** the web client draws **real UO tile sprites in iso
 projection** — `anima-assets::art` decodes land (44×44 diamond) + static (RLE) art
@@ -262,9 +263,10 @@ cd ~/dev/uo/servuo && MONO_GAC_PREFIX=/opt/homebrew nohup mono ServUO.exe -nocon
 cd ~/dev/uo/anima-client
 cargo run -p anima-net --bin play -- 127.0.0.1 2594 <user> <pass>
 # open http://127.0.0.1:8090/ — or omit all args to auto-login with the defaults
-# above, or set ANIMA_LOGIN=1 for an in-browser login page instead. That page
-# can select an exact existing slot or create a customized character in the
-# account's first empty slot.
+# above, or set ANIMA_LOGIN=1 for an in-browser login page instead. After
+# authentication, that page displays the server-provided character names and
+# can enter an existing slot or create a customized character in the first
+# empty slot.
 ```
 
 ### Running the Phase 2 AI-patrol scene bridge (older demo path, still works)

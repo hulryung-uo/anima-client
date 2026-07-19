@@ -11,10 +11,11 @@
 //! returns. This keeps it WASM/native-agnostic and unit-testable without IO.
 //!
 //! Spec source: `anima/anima/client/{packets,connection}.py`. Character
-//! creation (`LoginConfig::create_if_missing` / `LoginConfig::create_new`) and one-shot deletion
-//! (`LoginConfig::delete_existing`, mirroring the Python client's
-//! delete-then-recreate login flow) are both implemented; the happy path
-//! otherwise assumes an existing character.
+//! creation (`LoginConfig::create_if_missing` / `LoginConfig::create_new`),
+//! deferred server-list selection (`LoginConfig::defer_character_choice`), and
+//! one-shot deletion (`LoginConfig::delete_existing`, mirroring the Python
+//! client's delete-then-recreate login flow) are implemented; the default happy
+//! path otherwise assumes an existing character.
 
 use super::packet::{PacketReader, PacketWriter};
 
@@ -400,12 +401,14 @@ pub fn parse_character_list(frame: &[u8]) -> Result<Vec<CharSlot>, LoginError> {
     Ok(parse_character_list_with_capacity(frame)?.slots)
 }
 
-struct ParsedCharacterList {
-    slots: Vec<CharSlot>,
-    slot_count: u8,
+/// Character slots advertised by the game server after account authentication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharacterList {
+    pub slots: Vec<CharSlot>,
+    pub slot_count: u8,
 }
 
-fn parse_character_list_with_capacity(frame: &[u8]) -> Result<ParsedCharacterList, LoginError> {
+fn parse_character_list_with_capacity(frame: &[u8]) -> Result<CharacterList, LoginError> {
     let id = frame[0];
     let mut r = PacketReader::new(&frame[3..]); // skip id + u16 length
     let count = r.u8().map_err(|_| LoginError::Truncated(id))?;
@@ -417,7 +420,7 @@ fn parse_character_list_with_capacity(frame: &[u8]) -> Result<ParsedCharacterLis
             slots.push(CharSlot { index: i, name });
         }
     }
-    Ok(ParsedCharacterList {
+    Ok(CharacterList {
         slots,
         slot_count: count,
     })
@@ -462,8 +465,18 @@ pub enum LoginDirective {
     /// server, switch the incoming framer to **game mode (Huffman)**, then write
     /// `then`. Everything received after this is Huffman-compressed.
     ReconnectToGameServer { then: Vec<u8> },
+    /// Account authentication succeeded. The driver must obtain a user choice
+    /// and feed it back through [`LoginMachine::choose_character`].
+    ChooseCharacter(CharacterList),
     /// Login finished — we're in the world.
     Done(LoginResult),
+}
+
+/// A decision made after inspecting the server-provided character list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CharacterChoice {
+    Play(u8),
+    Create(CharacterAppearance),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -483,6 +496,8 @@ pub enum LoginError {
     CharacterSlotEmpty(u8),
     /// The requested appearance violates client-known creation constraints.
     InvalidCharacterAppearance(&'static str),
+    /// A character choice was supplied while the machine was not waiting for one.
+    CharacterChoiceNotExpected,
     /// Server rejected our `0x83` DeleteCharacter with DeleteResult `0x85`.
     /// `reason` is the raw `DeleteResultType` byte; `text` is a human-readable
     /// gloss for logs/UI.
@@ -520,6 +535,9 @@ pub struct LoginConfig {
     /// Require `character_slot` to contain an existing character instead of
     /// falling back to another slot or auto-creating one.
     pub require_character_slot: bool,
+    /// Stop after receiving the character list and ask the driver to choose.
+    /// Native browser login uses this; CLI and agents keep automatic selection.
+    pub defer_character_choice: bool,
     pub client_ip: u32,
     /// When the account has no character, create one from this appearance.
     pub create_if_missing: bool,
@@ -545,6 +563,7 @@ impl Default for LoginConfig {
             server_index: 0,
             character_slot: 0,
             require_character_slot: false,
+            defer_character_choice: false,
             client_ip: 0x7F00_0001, // 127.0.0.1
             create_if_missing: true,
             create_new: false,
@@ -559,6 +578,7 @@ enum State {
     AwaitServerList,
     AwaitRedirect,
     AwaitCharacterList,
+    AwaitCharacterChoice,
     AwaitLoginConfirm,
     Done,
 }
@@ -569,6 +589,7 @@ impl State {
             State::AwaitServerList => "AwaitServerList",
             State::AwaitRedirect => "AwaitRedirect",
             State::AwaitCharacterList => "AwaitCharacterList",
+            State::AwaitCharacterChoice => "AwaitCharacterChoice",
             State::AwaitLoginConfirm => "AwaitLoginConfirm",
             State::Done => "Done",
         }
@@ -587,6 +608,7 @@ pub struct LoginMachine {
     /// so a subsequent (refreshed) character list is selected/created normally
     /// instead of looping the delete forever.
     delete_sent: bool,
+    pending_characters: Option<CharacterList>,
 }
 
 impl LoginMachine {
@@ -601,12 +623,55 @@ impl LoginMachine {
             auth_key: 0,
             aos: false,
             delete_sent: false,
+            pending_characters: None,
         };
         (m, initial)
     }
 
     pub fn is_done(&self) -> bool {
         self.state == State::Done
+    }
+
+    /// Resume a deferred login after the driver displayed [`CharacterList`].
+    pub fn choose_character(
+        &mut self,
+        choice: CharacterChoice,
+    ) -> Result<Vec<LoginDirective>, LoginError> {
+        if self.state != State::AwaitCharacterChoice {
+            return Err(LoginError::CharacterChoiceNotExpected);
+        }
+        let list = self
+            .pending_characters
+            .take()
+            .ok_or(LoginError::CharacterChoiceNotExpected)?;
+        match choice {
+            CharacterChoice::Play(index) => {
+                let slot = list
+                    .slots
+                    .iter()
+                    .find(|slot| slot.index == index)
+                    .ok_or(LoginError::CharacterSlotEmpty(index))?;
+                self.state = State::AwaitLoginConfirm;
+                Ok(vec![LoginDirective::Send(build_play_character(
+                    &slot.name,
+                    u32::from(slot.index),
+                    self.cfg.client_ip,
+                    ALL_FACET_CLIENT_FLAGS,
+                ))])
+            }
+            CharacterChoice::Create(appearance) => {
+                appearance
+                    .validate()
+                    .map_err(LoginError::InvalidCharacterAppearance)?;
+                let slot = first_empty_slot(&list).ok_or(LoginError::CharacterSlotsFull)?;
+                self.state = State::AwaitLoginConfirm;
+                Ok(vec![LoginDirective::Send(build_create_character(
+                    &appearance,
+                    u16::from(slot),
+                    ALL_FACET_CLIENT_FLAGS,
+                ))])
+            }
+        }
     }
 
     /// Feed one fully-framed packet (id byte included). Returns the directives
@@ -661,6 +726,11 @@ impl LoginMachine {
             State::AwaitCharacterList => {
                 if id == 0xA9 || id == 0x86 {
                     let parsed = parse_character_list_with_capacity(frame)?;
+                    if self.cfg.defer_character_choice {
+                        self.state = State::AwaitCharacterChoice;
+                        self.pending_characters = Some(parsed.clone());
+                        return Ok(vec![LoginDirective::ChooseCharacter(parsed)]);
+                    }
                     let preferred = parsed
                         .slots
                         .iter()
@@ -670,11 +740,7 @@ impl LoginMachine {
                     } else {
                         preferred.or_else(|| parsed.slots.first())
                     };
-                    let first_empty_slot = (0..parsed.slot_count)
-                        .find(|index| !parsed.slots.iter().any(|slot| slot.index == *index))
-                        // Some older shards advertise zero entries for a fresh
-                        // account instead of a fixed bank of empty slots.
-                        .or((parsed.slot_count == 0).then_some(0));
+                    let first_empty_slot = first_empty_slot(&parsed);
                     match chosen {
                         _ if self.cfg.create_new => {
                             self.cfg
@@ -742,6 +808,7 @@ impl LoginMachine {
                     Ok(vec![]) // e.g. 0xB9 SupportedFeatures, 0xBD version req, etc.
                 }
             }
+            State::AwaitCharacterChoice => Ok(vec![]),
             State::AwaitLoginConfirm => {
                 if id == 0x1B {
                     let mut result = parse_login_confirm(frame)?;
@@ -758,6 +825,14 @@ impl LoginMachine {
             }),
         }
     }
+}
+
+fn first_empty_slot(list: &CharacterList) -> Option<u8> {
+    (0..list.slot_count)
+        .find(|index| !list.slots.iter().any(|slot| slot.index == *index))
+        // Some older shards advertise zero entries for a fresh account instead
+        // of a fixed bank of empty slots.
+        .or((list.slot_count == 0).then_some(0))
 }
 
 #[cfg(test)]
@@ -1101,6 +1176,74 @@ mod tests {
         assert_eq!(
             appearance.validate(),
             Err("strength, dexterity, and intelligence must each be 10-60 and total 90")
+        );
+    }
+
+    #[test]
+    fn deferred_character_list_waits_for_and_plays_the_user_choice() {
+        let cfg = LoginConfig {
+            defer_character_choice: true,
+            ..Default::default()
+        };
+        let mut m = machine_at_character_list(cfg);
+        let list = build_character_list_frame(0xA9, &["First", "", "Third", "", ""]);
+        assert_eq!(
+            m.on_packet(&list).unwrap(),
+            vec![LoginDirective::ChooseCharacter(CharacterList {
+                slots: vec![
+                    CharSlot {
+                        index: 0,
+                        name: "First".into(),
+                    },
+                    CharSlot {
+                        index: 2,
+                        name: "Third".into(),
+                    },
+                ],
+                slot_count: 5,
+            })]
+        );
+        assert_eq!(
+            m.choose_character(CharacterChoice::Play(2)).unwrap(),
+            vec![LoginDirective::Send(build_play_character(
+                "Third",
+                2,
+                0x7F00_0001,
+                ALL_FACET_CLIENT_FLAGS,
+            ))]
+        );
+    }
+
+    #[test]
+    fn deferred_character_list_creates_in_the_first_empty_slot() {
+        let cfg = LoginConfig {
+            defer_character_choice: true,
+            ..Default::default()
+        };
+        let mut m = machine_at_character_list(cfg);
+        let list = build_character_list_frame(0xA9, &["First", "", "Third", "", ""]);
+        m.on_packet(&list).unwrap();
+        let appearance = CharacterAppearance {
+            name: "New Hero".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            m.choose_character(CharacterChoice::Create(appearance.clone()))
+                .unwrap(),
+            vec![LoginDirective::Send(build_create_character(
+                &appearance,
+                1,
+                ALL_FACET_CLIENT_FLAGS,
+            ))]
+        );
+    }
+
+    #[test]
+    fn character_choice_is_rejected_outside_the_deferred_state() {
+        let (mut m, _) = LoginMachine::start(LoginConfig::default());
+        assert_eq!(
+            m.choose_character(CharacterChoice::Play(0)),
+            Err(LoginError::CharacterChoiceNotExpected)
         );
     }
 
