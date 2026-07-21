@@ -1236,6 +1236,7 @@ let characterListKey = "";
 function wireLogin() {
   if (loginWired) return; loginWired = true;
   const go = document.getElementById("lg-go");
+  const backButton = document.getElementById("lg-back");
   const deleteButton = document.getElementById("lg-delete");
   const createToggle = document.getElementById("lg-create");
   const createPanel = document.getElementById("lg-create-panel");
@@ -1248,6 +1249,8 @@ function wireLogin() {
     createPanel.classList.toggle("on", createToggle.checked);
     slotSelect.disabled = !characterStage || createToggle.checked || slotSelect.options.length === 0;
     const canDelete = characterStage && !createToggle.checked && slotSelect.options.length > 0;
+    backButton.style.display = characterStage ? "block" : "none";
+    backButton.disabled = !characterStage;
     deleteButton.style.display = canDelete ? "block" : "none";
     deleteButton.disabled = !canDelete;
     if (characterStage) go.textContent = createToggle.checked ? "Create" : "Play";
@@ -1297,6 +1300,7 @@ function wireLogin() {
       ? (create ? "Creating character…" : "Entering world…")
       : "Connecting…";
     go.disabled = true;
+    backButton.disabled = true;
     try {
       const endpoint = characterStage ? "character" : "login";
       const body = characterStage
@@ -1311,9 +1315,31 @@ function wireLogin() {
     } catch (error) {
       msg.textContent = "Login request failed: " + error.message;
       go.disabled = false;
+      backButton.disabled = false;
     }
   };
   go.addEventListener("click", submit);
+  backButton.addEventListener("click", async () => {
+    if (!characterStage) return;
+    const msg = document.getElementById("lg-msg");
+    msg.textContent = "Returning to account login…";
+    go.disabled = true;
+    backButton.disabled = true;
+    deleteButton.disabled = true;
+    try {
+      const response = await fetch("character", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cancel: true }),
+      });
+      if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    } catch (error) {
+      msg.textContent = "Cancel request failed: " + error.message;
+      go.disabled = false;
+      backButton.disabled = false;
+      deleteButton.disabled = false;
+    }
+  });
   deleteButton.addEventListener("click", async () => {
     const option = slotSelect.selectedOptions[0];
     if (!characterStage || !option) return;
@@ -1322,6 +1348,7 @@ function wireLogin() {
     const msg = document.getElementById("lg-msg");
     msg.textContent = `Deleting ${name}…`;
     go.disabled = true;
+    backButton.disabled = true;
     deleteButton.disabled = true;
     try {
       const response = await fetch("character", {
@@ -1333,6 +1360,7 @@ function wireLogin() {
     } catch (error) {
       msg.textContent = "Delete request failed: " + error.message;
       go.disabled = false;
+      backButton.disabled = false;
       deleteButton.disabled = false;
     }
   });

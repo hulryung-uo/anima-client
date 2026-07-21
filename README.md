@@ -115,6 +115,7 @@ gender, profession, stats, and starting city. New characters use the account's
 first empty slot without deleting an existing character; creation is disabled
 when the server reports that every slot is occupied. Existing characters can be
 deleted from the same list after an explicit irreversible-action confirmation;
-the refreshed server list is displayed before any subsequent choice.
+the refreshed server list is displayed before any subsequent choice. **Back**
+cancels the pending game-server connection and restores the account form.
 
 WASM module: `cargo install wasm-pack && wasm-pack build crates/anima-wasm --target web`.

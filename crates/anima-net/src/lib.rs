@@ -69,6 +69,8 @@ pub enum DriverError {
     /// The login machine asked for an interactive character choice, but this
     /// driver call did not provide a chooser.
     CharacterChoiceRequired,
+    /// The interactive chooser intentionally abandoned this game-server login.
+    CharacterChoiceCancelled,
 }
 
 impl std::fmt::Display for DriverError {
@@ -79,6 +81,7 @@ impl std::fmt::Display for DriverError {
             DriverError::Login(e) => write!(f, "login error: {e:?}"),
             DriverError::ConnectionClosed => write!(f, "connection closed by server"),
             DriverError::CharacterChoiceRequired => write!(f, "character choice required"),
+            DriverError::CharacterChoiceCancelled => write!(f, "character choice cancelled"),
         }
     }
 }

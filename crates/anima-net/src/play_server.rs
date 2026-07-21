@@ -186,7 +186,7 @@ pub struct PlayServer {
     scene: Arc<Mutex<String>>,
     rx: mpsc::Receiver<Option<Action>>,
     login_rx: mpsc::Receiver<LoginAttempt>,
-    character_rx: mpsc::Receiver<CharacterChoice>,
+    character_rx: mpsc::Receiver<CharacterDecision>,
     sse_hub: SseHub,
     /// Current session facet (`World::map_index`), kept in step with the game
     /// loop so the `/regions.json` HTTP thread can filter guard-zone rects to
@@ -209,6 +209,12 @@ struct LoginAttempt {
     /// `Some` means explicitly create a new character, even if other slots
     /// are occupied. `None` keeps the existing select-or-create-if-empty flow.
     create: Option<CharacterAppearance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CharacterDecision {
+    Choose(CharacterChoice),
+    Cancel,
 }
 
 fn starting_skills(profession: &str) -> Option<[(u8, u8); 4]> {
@@ -333,7 +339,7 @@ fn parse_character_appearance(
     Ok(appearance)
 }
 
-fn parse_character_choice(body: &str) -> Result<CharacterChoice, &'static str> {
+fn parse_character_choice(body: &str) -> Result<CharacterDecision, &'static str> {
     let value: serde_json::Value =
         serde_json::from_str(body.trim()).map_err(|_| "invalid character-choice JSON")?;
     let create = value.get("create").filter(|field| !field.is_null());
@@ -345,13 +351,22 @@ fn parse_character_choice(body: &str) -> Result<CharacterChoice, &'static str> {
         .get("delete_slot")
         .and_then(|field| field.as_u64())
         .and_then(|slot| u8::try_from(slot).ok());
-    match (create, play_slot, delete_slot) {
-        (Some(appearance), None, None) => Ok(CharacterChoice::Create(parse_character_appearance(
-            appearance,
-        )?)),
-        (None, Some(slot), None) => Ok(CharacterChoice::Play(slot)),
-        (None, None, Some(slot)) => Ok(CharacterChoice::Delete(slot)),
-        _ => Err("choose exactly one of create, slot, or delete_slot"),
+    let cancel = value
+        .get("cancel")
+        .and_then(|field| field.as_bool())
+        .unwrap_or(false);
+    match (create, play_slot, delete_slot, cancel) {
+        (Some(appearance), None, None, false) => Ok(CharacterDecision::Choose(
+            CharacterChoice::Create(parse_character_appearance(appearance)?),
+        )),
+        (None, Some(slot), None, false) => {
+            Ok(CharacterDecision::Choose(CharacterChoice::Play(slot)))
+        }
+        (None, None, Some(slot), false) => {
+            Ok(CharacterDecision::Choose(CharacterChoice::Delete(slot)))
+        }
+        (None, None, None, true) => Ok(CharacterDecision::Cancel),
+        _ => Err("choose exactly one of create, slot, delete_slot, or cancel"),
     }
 }
 
@@ -481,7 +496,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     let facet: Arc<AtomicU8> = Arc::new(AtomicU8::new(0));
     // Login credentials submitted by the web login page (host, port, user, pass).
     let (login_tx, login_rx) = mpsc::channel::<LoginAttempt>();
-    let (character_tx, character_rx) = mpsc::channel::<CharacterChoice>();
+    let (character_tx, character_rx) = mpsc::channel::<CharacterDecision>();
 
     // The HTTP server comes up FIRST so the login page is reachable before we've
     // connected to any game server. Bound to loopback by default — this process
@@ -623,9 +638,13 @@ impl PlayServer {
                         list.slots.len(),
                         list.slot_count
                     );
-                    character_rx
+                    match character_rx
                         .recv()
-                        .map_err(|error| DriverError::Io(io::Error::other(error)))
+                        .map_err(|error| DriverError::Io(io::Error::other(error)))?
+                    {
+                        CharacterDecision::Choose(choice) => Ok(choice),
+                        CharacterDecision::Cancel => Err(DriverError::CharacterChoiceCancelled),
+                    }
                 })
             } else {
                 Session::connect_and_login(&endpoint, c)
@@ -670,6 +689,10 @@ impl PlayServer {
                 println!("play: connecting to {lh}:{lp} as {lu} ...");
                 match connect(attempt) {
                     Ok(s) => break s,
+                    Err(DriverError::CharacterChoiceCancelled) => {
+                        println!("play: character selection cancelled");
+                        *scene.lock().unwrap() = r#"{"auth":"login"}"#.into();
+                    }
                     Err(e) => {
                         eprintln!("login failed: {e}");
                         let msg = format!("{e}").replace(['"', '\\', '\n'], " ");
@@ -1351,7 +1374,7 @@ struct SpawnHttp {
     scene: Arc<Mutex<String>>,
     tx: mpsc::Sender<Option<Action>>,
     login: mpsc::Sender<LoginAttempt>,
-    character: mpsc::Sender<CharacterChoice>,
+    character: mpsc::Sender<CharacterDecision>,
     art: Option<Arc<Mutex<Art>>>,
     anim: Option<Arc<Anim>>,
     gumps: Option<Arc<Gumps>>,
@@ -1458,7 +1481,7 @@ struct Ctx<'a> {
     scene: &'a Arc<Mutex<String>>,
     tx: &'a mpsc::Sender<Option<Action>>,
     login: &'a mpsc::Sender<LoginAttempt>,
-    character: &'a mpsc::Sender<CharacterChoice>,
+    character: &'a mpsc::Sender<CharacterDecision>,
     art: &'a Option<Arc<Mutex<Art>>>,
     anim: &'a Option<Arc<Anim>>,
     gumps: &'a Option<Arc<Gumps>>,
@@ -1580,11 +1603,12 @@ fn handle_request(ctx: Ctx) {
             }
         };
         match parse_character_choice(&body) {
-            Ok(choice) => {
-                let progress = match &choice {
-                    CharacterChoice::Play(_) => "Entering world…",
-                    CharacterChoice::Create(_) => "Creating character…",
-                    CharacterChoice::Delete(_) => "Deleting character…",
+            Ok(decision) => {
+                let progress = match &decision {
+                    CharacterDecision::Choose(CharacterChoice::Play(_)) => "Entering world…",
+                    CharacterDecision::Choose(CharacterChoice::Create(_)) => "Creating character…",
+                    CharacterDecision::Choose(CharacterChoice::Delete(_)) => "Deleting character…",
+                    CharacterDecision::Cancel => "Returning to account login…",
                 };
                 let mut current_scene = scene.lock().unwrap();
                 let awaiting_choice = serde_json::from_str::<serde_json::Value>(&current_scene)
@@ -1605,7 +1629,7 @@ fn handle_request(ctx: Ctx) {
                 })
                 .to_string();
                 drop(current_scene);
-                match character.send(choice) {
+                match character.send(decision) {
                     Ok(()) => {
                         let _ = req.respond(Response::from_string("ok"));
                     }
@@ -2577,7 +2601,7 @@ mod resource_limit_tests {
 
 #[cfg(test)]
 mod login_request_tests {
-    use super::{parse_character_choice, parse_login_attempt, starting_skills};
+    use super::{parse_character_choice, parse_login_attempt, starting_skills, CharacterDecision};
     use anima_core::net::CharacterChoice;
 
     #[test]
@@ -2632,26 +2656,31 @@ mod login_request_tests {
     }
 
     #[test]
-    fn character_choice_parser_accepts_play_create_and_delete() {
+    fn character_choice_parser_accepts_play_create_delete_and_cancel() {
         assert_eq!(
             parse_character_choice(r#"{"slot":3}"#),
-            Ok(CharacterChoice::Play(3))
+            Ok(CharacterDecision::Choose(CharacterChoice::Play(3)))
         );
         let choice = parse_character_choice(
             r#"{"create":{"name":"New Hero","female":false,"profession":"warrior",
                 "strength":60,"dexterity":20,"intelligence":10,"city_index":0}}"#,
         )
         .unwrap();
-        let CharacterChoice::Create(appearance) = choice else {
+        let CharacterDecision::Choose(CharacterChoice::Create(appearance)) = choice else {
             panic!("expected create choice");
         };
         assert_eq!(appearance.name, "New Hero");
         assert_eq!(appearance.skills, starting_skills("warrior").unwrap());
         assert_eq!(
             parse_character_choice(r#"{"delete_slot":2}"#),
-            Ok(CharacterChoice::Delete(2))
+            Ok(CharacterDecision::Choose(CharacterChoice::Delete(2)))
+        );
+        assert_eq!(
+            parse_character_choice(r#"{"cancel":true}"#),
+            Ok(CharacterDecision::Cancel)
         );
         assert!(parse_character_choice(r#"{"slot":1,"delete_slot":1}"#).is_err());
+        assert!(parse_character_choice(r#"{"slot":1,"cancel":true}"#).is_err());
     }
 
     #[test]
