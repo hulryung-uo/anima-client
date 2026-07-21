@@ -144,6 +144,33 @@ impl WasmClient {
         }
     }
 
+    /// Answer a legacy 0x7C item/question menu. Returns false when the menu no
+    /// longer exists or `index` is out of range; zero is the cancel response.
+    pub fn legacy_menu_select(&mut self, serial: u32, index: u16) -> bool {
+        let response = self.world.legacy_menu(serial).and_then(|menu| {
+            if index == 0 {
+                Some((menu.menu_id, 0, 0))
+            } else {
+                menu.entries.get(index as usize - 1).map(|entry| {
+                    let (graphic, hue) = match menu.kind {
+                        anima_core::world::LegacyMenuKind::Items => (entry.graphic, entry.hue),
+                        anima_core::world::LegacyMenuKind::Question => (0, 0),
+                    };
+                    (menu.menu_id, graphic, hue)
+                })
+            }
+        });
+        let Some((menu_id, graphic, hue)) = response else {
+            return false;
+        };
+        self.outbox
+            .extend(anima_core::net::outgoing::build_legacy_menu_response(
+                serial, menu_id, index, graphic, hue,
+            ));
+        self.world.close_legacy_menu(serial);
+        true
+    }
+
     /// Current perception using the shared, versioned Observation JSON schema.
     pub fn observation_json(&mut self) -> String {
         let obs = self.world.observe(&mut self.journal_cursor);
@@ -191,5 +218,36 @@ mod tests {
             (1, 1200, 800, 17)
         );
         assert!(client.take_outbox().is_empty());
+    }
+
+    #[test]
+    fn legacy_menu_select_queues_resolved_item_response() {
+        let mut client = WasmClient::new("user".into(), "pass".into());
+        client.login = None;
+        client.outbox.clear();
+        let mut frame = vec![
+            0x7C, 0, 0, // id + patched length
+            0x01, 0x02, 0x03, 0x04, // serial
+            0x00, 0x07, // menu id
+            0x06, b'C', b'h', b'o', b'o', b's', b'e', // question
+            0x01, // one entry
+            0x0F, 0x5E, 0x04, 0x81, // graphic + hue
+            0x05, b'S', b'w', b'o', b'r', b'd',
+        ];
+        let len = frame.len() as u16;
+        frame[1..3].copy_from_slice(&len.to_be_bytes());
+        client.handle(&frame);
+        assert!(client.legacy_menu_select(0x0102_0304, 1));
+        assert_eq!(
+            client.take_outbox(),
+            anima_core::net::outgoing::build_legacy_menu_response(
+                0x0102_0304,
+                7,
+                1,
+                0x0F5E,
+                0x0481
+            )
+        );
+        assert!(client.world.legacy_menus.is_empty());
     }
 }

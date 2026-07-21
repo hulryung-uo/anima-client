@@ -112,6 +112,9 @@ fn main() {
                 Action::PopupSelect { serial, index } => {
                     format!("popupsel(0x{serial:08X} i={index})")
                 }
+                Action::LegacyMenuSelect { serial, index } => {
+                    format!("menusel(0x{serial:08X} i={index})")
+                }
                 Action::BookRequest { serial, pages } => {
                     format!("bookreq(0x{serial:08X}×{pages})")
                 }

@@ -6,12 +6,12 @@
 //! The shapes are also mirrored by `anima2/anima2/contract.py` — keep that
 //! consumer in lockstep.
 //!
-//! ## Schema (v8 — snake_case, versioned)
+//! ## Schema (v9 — snake_case, versioned)
 //!
 //! [`observation_to_json`] emits one object with these top-level keys, one per
 //! [`Observation`] field: `player`, `mobiles`, `items`, `new_journal`,
 //! `pending_target`, `skills`, `gumps`, `prompt`, `trades`, `buffs`,
-//! `shop_buy`, `shop_sell`, `popup`, `book`, `party`, `quest_arrow`, `waypoints`,
+//! `shop_buy`, `shop_sell`, `popup`, `legacy_menus`, `book`, `party`, `quest_arrow`, `waypoints`,
 //! `weather`, `season`, `light`, `war`, `last_attack`, `combatant`, `corpse_of`,
 //! `corpse_equip`, `map_index`, `aos`, `opl`, `recent_damage`, `spellbooks`,
 //! `map_gumps`. A
@@ -56,13 +56,14 @@
 //! without a human reading the parchment. v7: added `player.body`,
 //! `player.poisoned`, and `player.dead` so survival brains receive status that
 //! the core world already tracks. v8: added `waypoints`, the server's 0xE5
-//! corpse/resurrection/quest markers with 0xE6 removal semantics.)
+//! corpse/resurrection/quest markers with 0xE6 removal semantics. v9: added
+//! `legacy_menus`, the server's concurrent 0x7C item/question menus.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 use anima_core::agent::{
     Action, GumpView, ItemView, MobileView, Observation, PlayerView, SkillView, WaypointView,
@@ -70,8 +71,9 @@ use anima_core::agent::{
 use anima_core::gump_layout::{GumpElement, HtmlText};
 use anima_core::types::Position;
 use anima_core::world::{
-    Book, Buff, JournalEntry, MapView, Party, PopupEntry, PopupMenu, PromptState, ShopBuy,
-    ShopSell, ShopSellItem, SpellbookContent, TargetCursor, TradeState, Weather,
+    Book, Buff, JournalEntry, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, MapView, Party,
+    PopupEntry, PopupMenu, PromptState, ShopBuy, ShopSell, ShopSellItem, SpellbookContent,
+    TargetCursor, TradeState, Weather,
 };
 use serde_json::{json, Value};
 
@@ -270,6 +272,31 @@ fn popup_json(p: &PopupMenu) -> Value {
     })
 }
 
+fn legacy_menu_entry_json(index: usize, entry: &LegacyMenuEntry) -> Value {
+    json!({
+        "index": index + 1,
+        "graphic": entry.graphic,
+        "hue": entry.hue,
+        "text": entry.text,
+    })
+}
+
+fn legacy_menu_json(menu: &LegacyMenu) -> Value {
+    let kind = match menu.kind {
+        LegacyMenuKind::Items => "items",
+        LegacyMenuKind::Question => "question",
+    };
+    json!({
+        "serial": menu.serial,
+        "menu_id": menu.menu_id,
+        "question": menu.question,
+        "kind": kind,
+        "entries": menu.entries.iter().enumerate()
+            .map(|(index, entry)| legacy_menu_entry_json(index, entry))
+            .collect::<Vec<_>>(),
+    })
+}
+
 fn book_json(b: &Book) -> Value {
     json!({
         "serial": b.serial, "title": b.title, "author": b.author,
@@ -349,6 +376,7 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "shop_buy": obs.shop_buy.as_ref().map(shop_buy_json),
         "shop_sell": obs.shop_sell.as_ref().map(shop_sell_json),
         "popup": obs.popup.as_ref().map(popup_json),
+        "legacy_menus": obs.legacy_menus.iter().map(legacy_menu_json).collect::<Vec<_>>(),
         "book": obs.book.as_ref().map(book_json),
         "party": party_json(&obs.party),
         "quest_arrow": obs.quest_arrow.map(|(x, y)| json!({ "x": x, "y": y })),
@@ -537,6 +565,10 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
             serial: req_u32("serial")?,
             index: v.get("index").and_then(Value::as_u64).unwrap_or(0) as u16,
         }),
+        "LegacyMenuSelect" => Ok(Action::LegacyMenuSelect {
+            serial: req_u32("serial")?,
+            index: req_u16("index")?,
+        }),
         "GumpResponse" => Ok(Action::GumpResponse {
             serial: req_u32("serial")?,
             gump_id: req_u32("gump_id")?,
@@ -715,6 +747,13 @@ mod tests {
                 },
             ),
             (
+                json!({"type": "LegacyMenuSelect", "serial": 9, "index": 2}),
+                Action::LegacyMenuSelect {
+                    serial: 9,
+                    index: 2,
+                },
+            ),
+            (
                 json!({"type": "GumpResponse", "serial": 1, "gump_id": 2, "button": 3,
                        "switches": [1, 2], "entries": [[4, "hi"]]}),
                 Action::GumpResponse {
@@ -807,8 +846,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v8_serializes_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 8);
+    fn schema_v9_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 9);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,
@@ -843,6 +882,34 @@ mod tests {
     }
 
     #[test]
+    fn schema_v9_serializes_legacy_menus_with_one_based_entries() {
+        let obs = Observation {
+            legacy_menus: vec![LegacyMenu {
+                serial: 0x0102_0304,
+                menu_id: 7,
+                question: "Choose".into(),
+                kind: LegacyMenuKind::Items,
+                entries: vec![LegacyMenuEntry {
+                    graphic: 0x0F5E,
+                    hue: 0x0481,
+                    text: "Sword".into(),
+                }],
+            }],
+            ..Observation::default()
+        };
+        assert_eq!(
+            observation_to_json(&obs)["legacy_menus"],
+            json!([{
+                "serial": 0x0102_0304u32,
+                "menu_id": 7,
+                "question": "Choose",
+                "kind": "items",
+                "entries": [{ "index": 1, "graphic": 0x0F5E, "hue": 0x0481, "text": "Sword" }],
+            }])
+        );
+    }
+
+    #[test]
     fn observation_json_has_expected_keys() {
         let obs = Observation::default();
         let v = observation_to_json(&obs);
@@ -860,6 +927,7 @@ mod tests {
             "shop_buy",
             "shop_sell",
             "popup",
+            "legacy_menus",
             "book",
             "party",
             "quest_arrow",
@@ -891,6 +959,7 @@ mod tests {
         assert!(v["book"].is_null());
         assert!(v["popup"].is_null());
         assert!(v["prompt"].is_null());
+        assert_eq!(v["legacy_menus"], json!([]));
     }
 
     /// Schema v5: `items[].is_multi` — a placed boat/house shows up in

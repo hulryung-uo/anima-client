@@ -20,19 +20,20 @@ use anima_assets::MapData;
 use anima_core::agent::{Action, Observation};
 use anima_core::net::outgoing::{
     build_attack, build_book_page_request, build_buy, build_cast_spell, build_double_click,
-    build_drop, build_equip, build_gump_response, build_house_design_request, build_opl_request,
-    build_party_accept, build_party_decline, build_party_invite, build_party_leave,
-    build_party_message, build_pick_up, build_popup_request, build_popup_select,
-    build_prompt_response, build_say, build_sell, build_single_click, build_skill_lock,
-    build_status_request, build_target_response, build_trade_accept, build_trade_cancel,
-    build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
+    build_drop, build_equip, build_gump_response, build_house_design_request,
+    build_legacy_menu_response, build_opl_request, build_party_accept, build_party_decline,
+    build_party_invite, build_party_leave, build_party_message, build_pick_up, build_popup_request,
+    build_popup_select, build_prompt_response, build_say, build_sell, build_single_click,
+    build_skill_lock, build_status_request, build_target_response, build_trade_accept,
+    build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability, build_use_skill,
+    build_war_mode,
 };
 use anima_core::net::{
     apply_packet, build_client_version, CharacterChoice, CharacterList, FramingError, LoginConfig,
     LoginDirective, LoginError, LoginMachine, LoginResult, StreamDecoder, Walker,
 };
 use anima_core::path::{find_path, find_path_near, Terrain, DEFAULT_MAX_EXPANSIONS};
-use anima_core::world::World;
+use anima_core::world::{LegacyMenuKind, World};
 
 // `DOOR_USE_COOLDOWN`/`MAX_DOOR_OPEN_ATTEMPTS` are only referenced by
 // `route_tests` below (production code only needs `decide_blocked_step` to
@@ -551,6 +552,30 @@ impl Session {
                 // The menu is consumed once we pick — clear it locally so the
                 // renderer/brain stop seeing a stale popup.
                 self.world.popup = None;
+            }
+            Action::LegacyMenuSelect { serial, index } => {
+                // Resolve all opaque response fields from the current menu. A stale
+                // action or out-of-range nonzero index is a no-op rather than a
+                // forged/cancel response to the wrong server-side menu.
+                let response = self.world.legacy_menu(*serial).and_then(|menu| {
+                    if *index == 0 {
+                        Some((menu.menu_id, 0, 0))
+                    } else {
+                        menu.entries.get(*index as usize - 1).map(|entry| {
+                            let (graphic, hue) = match menu.kind {
+                                LegacyMenuKind::Items => (entry.graphic, entry.hue),
+                                LegacyMenuKind::Question => (0, 0),
+                            };
+                            (menu.menu_id, graphic, hue)
+                        })
+                    }
+                });
+                if let Some((menu_id, graphic, hue)) = response {
+                    self.send(&build_legacy_menu_response(
+                        *serial, menu_id, *index, graphic, hue,
+                    ))?;
+                    self.world.close_legacy_menu(*serial);
+                }
             }
             Action::BookRequest { serial, pages } => {
                 self.send(&build_book_page_request(*serial, *pages))?;

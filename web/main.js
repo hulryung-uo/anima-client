@@ -1522,6 +1522,7 @@ async function poll() {
     refreshContainers();  // keep open container windows live (items move/disappear)
     refreshShop(scene);   // vendor buy/sell window (auto-opens on scene.shop)
     refreshGumps(scene);  // server-sent generic gumps/dialogs (0xB0/0xDD)
+    refreshLegacyMenus(scene); // legacy icon/question menus (0x7C)
     refreshPopup(scene);  // right-click context menu (0xBF/0x14)
     refreshBook(scene);   // open book reader (0x93/0xD4 + 0x66)
     refreshPrompt(scene); // server text-prompt dialog (0xC2 UnicodePrompt)
@@ -5389,6 +5390,120 @@ function refreshGumps(scene) {
     if (!seen.has(serial)) { gumpWins.get(serial).el.remove(); gumpWins.delete(serial); }
   }
 }
+
+// ── Legacy item/question menus (0x7C → 0x7D) ──────────────────────────────
+// Several may be open at once. Each window is keyed by the server menu serial;
+// answering removes it locally immediately and suppresses the same snapshot
+// until the server consumes the response (avoids one-poll flicker/reopening).
+const legacyMenuWins = new Map(); // serial -> { el, sig, selected }
+const legacyMenuDismissed = new Map(); // serial -> signature just answered/canceled
+let legacyMenuCascade = 0;
+
+function legacyMenuSignature(menu) {
+  return JSON.stringify([menu.menuId | 0, menu.question || "", menu.kind || "question", menu.entries || []]);
+}
+
+function answerLegacyMenu(serial, index) {
+  const win = legacyMenuWins.get(serial);
+  if (!win) return;
+  legacyMenuDismissed.set(serial, win.sig);
+  win.el.remove();
+  legacyMenuWins.delete(serial);
+  sendInput("menusel:" + serial + ":" + index);
+}
+
+function buildLegacyMenuWindow(menu, sig) {
+  const serial = menu.serial >>> 0;
+  const entries = menu.entries || [];
+  const itemMenu = menu.kind === "items";
+  const el = document.createElement("div");
+  el.className = "gump-win legacy-menu-win";
+  const off = (legacyMenuCascade++ % 8) * 22;
+  el.style.left = (220 + off) + "px";
+  el.style.top = (110 + off) + "px";
+  el.innerHTML = '<div class="gump-title"><span>Menu</span><span class="gump-close">✕</span></div>'
+    + '<div class="gump-body legacy-menu-body"><div class="legacy-menu-question"></div>'
+    + '<div class="legacy-menu-entries"></div><div class="legacy-menu-actions">'
+    + '<button class="dlg-btn legacy-menu-continue">Continue</button>'
+    + '<button class="dlg-btn legacy-menu-cancel">Cancel</button></div></div>';
+  el.querySelector(".legacy-menu-question").textContent = menu.question || "Choose an option";
+  const list = el.querySelector(".legacy-menu-entries");
+  if (itemMenu) list.classList.add("legacy-item-grid");
+
+  const state = { el, sig, selected: entries.length ? (entries[0].index | 0) : 0 };
+  for (const entry of entries) {
+    const index = entry.index | 0;
+    const label = document.createElement("label");
+    label.className = itemMenu ? "legacy-item-choice" : "legacy-question-choice";
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = "legacy-menu-" + serial;
+    radio.value = String(index);
+    radio.checked = index === state.selected;
+    radio.addEventListener("change", () => { state.selected = index; });
+    label.appendChild(radio);
+    if (itemMenu) {
+      const img = document.createElement("img");
+      img.src = "art/static/" + (entry.graphic | 0) + ".png" + ((entry.hue | 0) ? ("?hue=" + (entry.hue | 0)) : "");
+      img.alt = "";
+      img.draggable = false;
+      img.addEventListener("error", () => { img.style.visibility = "hidden"; });
+      label.appendChild(img);
+      label.addEventListener("dblclick", (event) => {
+        event.preventDefault();
+        answerLegacyMenu(serial, index);
+      });
+    }
+    const text = document.createElement("span");
+    text.textContent = entry.text || ("Option " + index);
+    label.appendChild(text);
+    list.appendChild(label);
+  }
+
+  const proceed = el.querySelector(".legacy-menu-continue");
+  proceed.disabled = state.selected === 0;
+  proceed.addEventListener("click", () => {
+    if (state.selected) answerLegacyMenu(serial, state.selected);
+  });
+  el.querySelector(".legacy-menu-cancel").addEventListener("click", () => answerLegacyMenu(serial, 0));
+  el.querySelector(".gump-close").addEventListener("click", () => answerLegacyMenu(serial, 0));
+  el.addEventListener("keydown", (event) => {
+    if (event.code === "Escape") {
+      event.preventDefault(); event.stopPropagation(); answerLegacyMenu(serial, 0);
+    } else if (event.code === "Enter" || event.code === "NumpadEnter") {
+      event.preventDefault(); event.stopPropagation();
+      if (state.selected) answerLegacyMenu(serial, state.selected);
+    }
+  });
+  document.body.appendChild(el);
+  makeDraggable(el, el.querySelector(".gump-title"));
+  legacyMenuWins.set(serial, state);
+}
+
+function refreshLegacyMenus(scene) {
+  const list = (scene && scene.legacyMenus) || [];
+  const seen = new Set();
+  for (const menu of list) {
+    const serial = menu.serial >>> 0;
+    const sig = legacyMenuSignature(menu);
+    seen.add(serial);
+    if (legacyMenuDismissed.get(serial) === sig) continue;
+    if (legacyMenuDismissed.has(serial)) legacyMenuDismissed.delete(serial); // changed menu, same serial
+    const existing = legacyMenuWins.get(serial);
+    if (existing && existing.sig === sig) continue;
+    if (existing) { existing.el.remove(); legacyMenuWins.delete(serial); }
+    buildLegacyMenuWindow(menu, sig);
+  }
+  for (const serial of [...legacyMenuWins.keys()]) {
+    if (!seen.has(serial)) {
+      legacyMenuWins.get(serial).el.remove();
+      legacyMenuWins.delete(serial);
+    }
+  }
+  for (const serial of [...legacyMenuDismissed.keys()]) {
+    if (!seen.has(serial)) legacyMenuDismissed.delete(serial);
+  }
+}
 // ── Right-click context (popup) menu (0xBF/0x14) ───────────────────────────
 // scene.popup = { serial, entries:[{ index, text }] } | null. We show a small
 // menu div at the last cursor position; a row click sends popupsel and hides it;
@@ -6914,6 +7029,12 @@ function setupInput() {
     if (e.code === "Escape" && spellbookOn) { e.preventDefault(); closeSpellbook(); return; }
     if (e.code === "Escape" && skillsOn) { e.preventDefault(); closeSkills(); return; }
     if (e.code === "Escape" && shopWin) { e.preventDefault(); shopDismissed = true; closeShop(); return; }
+    if (e.code === "Escape" && legacyMenuWins.size) {
+      e.preventDefault();
+      const serial = [...legacyMenuWins.keys()].pop();
+      answerLegacyMenu(serial, 0);
+      return;
+    }
     if (e.code === "Escape" && popupEl) { e.preventDefault(); hidePopup(true); return; }
     if (e.code === "Escape" && bookWin) { e.preventDefault(); closeBook(); return; }
     // Esc cancels targeting: tell the SERVER to drop the cursor (so the spell/skill

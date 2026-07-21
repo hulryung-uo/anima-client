@@ -576,6 +576,26 @@
         border: 1px solid #2a2f37; border-radius: 4px; padding: 5px 7px; font-size: 12px; }
       .prompt-actions { display: flex; gap: 6px; }
       .prompt-actions .dlg-btn { flex: 1; text-align: center; }
+      /* ---- legacy server item/question menu (0x7C) ---- */
+      .legacy-menu-win { width: min(380px, calc(100vw - 24px)); z-index: 44; }
+      .legacy-menu-body { display: flex; flex-direction: column; gap: 9px; }
+      .legacy-menu-question { color: #f0d58b; font-size: 13px; line-height: 1.35;
+        overflow-wrap: anywhere; }
+      .legacy-menu-entries { display: flex; flex-direction: column; gap: 4px;
+        max-height: 50vh; overflow-y: auto; }
+      .legacy-question-choice, .legacy-item-choice { display: flex; align-items: center;
+        gap: 7px; padding: 5px 7px; border: 1px solid transparent; border-radius: 5px;
+        cursor: pointer; user-select: none; }
+      .legacy-question-choice:hover, .legacy-item-choice:hover {
+        background: rgba(138, 180, 248, .10); border-color: rgba(138, 180, 248, .18); }
+      .legacy-item-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); }
+      .legacy-item-choice { min-height: 64px; flex-direction: column; text-align: center; }
+      .legacy-item-choice input { align-self: flex-start; }
+      .legacy-item-choice img { width: 48px; height: 48px; object-fit: contain;
+        image-rendering: pixelated; }
+      .legacy-item-choice span { width: 100%; overflow: hidden; text-overflow: ellipsis; }
+      .legacy-menu-actions { display: flex; gap: 6px; }
+      .legacy-menu-actions .dlg-btn { flex: 1; text-align: center; }
       /* ---- vendor shop window (buy / sell) ---- */
       #shop-win { top: 70px; left: 300px; width: 340px; }
       .shop-body { max-height: 60vh; overflow-y: auto; padding: 8px; }

@@ -302,6 +302,36 @@ pub struct PopupMenu {
     pub entries: Vec<PopupEntry>,
 }
 
+/// The two wire-compatible forms of a legacy server menu (0x7C). ServUO writes
+/// a zero menu header for both forms; ClassicUO distinguishes them by peeking at
+/// the first entry's graphic (non-zero = item/icon menu, zero = question menu).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LegacyMenuKind {
+    Items,
+    #[default]
+    Question,
+}
+
+/// One selectable entry in a legacy server menu (0x7C). Question-menu entries
+/// carry zero `graphic`/`hue`; item menus echo both values in the 0x7D response.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LegacyMenuEntry {
+    pub graphic: u16,
+    pub hue: u16,
+    pub text: String,
+}
+
+/// A legacy item-list or gray question menu (0x7C). Unlike a context popup,
+/// servers may keep several of these open concurrently, keyed by `serial`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LegacyMenu {
+    pub serial: u32,
+    pub menu_id: u16,
+    pub question: String,
+    pub kind: LegacyMenuKind,
+    pub entries: Vec<LegacyMenuEntry>,
+}
+
 /// A book opened by the player (from 0x93 OpenBook / 0xD4 OpenBookNew). The header
 /// packet sets `serial`/`title`/`author`/`writable`/`page_count` and sizes `pages`
 /// to `page_count` empty pages; the page content arrives separately in 0x66
@@ -746,6 +776,8 @@ pub struct World {
     pub gumps: Vec<Gump>,
     /// The current context (popup) menu (0xBF/0x14), if one is open. See [`PopupMenu`].
     pub popup: Option<PopupMenu>,
+    /// Open legacy item/question menus (0x7C), keyed by serial. See [`LegacyMenu`].
+    pub legacy_menus: Vec<LegacyMenu>,
     /// The currently open book (0x93/0xD4 header + 0x66 page content), or `None`.
     /// See [`Book`].
     pub book: Option<Book>,
@@ -945,6 +977,9 @@ const MAX_CORPSE_LINKS: usize = 256;
 /// Defensive cap for server waypoints. ServUO sends every healer on the facet
 /// when a player dies, but a malformed shard must not grow this forever.
 const MAX_WAYPOINTS: usize = 2_048;
+/// Defensive cap for concurrently-open legacy menus. Normal shards keep only a
+/// handful, but a malformed stream must not grow the list for the whole session.
+const MAX_LEGACY_MENUS: usize = 16;
 
 impl World {
     pub fn new() -> Self {
@@ -1379,6 +1414,33 @@ impl World {
     /// Drop a gump by serial (the player answered/closed it). No-op if absent.
     pub fn close_gump(&mut self, serial: u32) {
         self.gumps.retain(|g| g.serial != serial);
+    }
+
+    /// Add or replace a legacy menu (0x7C), preserving other concurrently-open
+    /// menus. When the defensive cap is reached, discard the oldest menu.
+    pub fn open_legacy_menu(&mut self, menu: LegacyMenu) {
+        if let Some(existing) = self
+            .legacy_menus
+            .iter_mut()
+            .find(|existing| existing.serial == menu.serial)
+        {
+            *existing = menu;
+            return;
+        }
+        if self.legacy_menus.len() >= MAX_LEGACY_MENUS {
+            self.legacy_menus.remove(0);
+        }
+        self.legacy_menus.push(menu);
+    }
+
+    /// Return an open legacy menu by serial.
+    pub fn legacy_menu(&self, serial: u32) -> Option<&LegacyMenu> {
+        self.legacy_menus.iter().find(|menu| menu.serial == serial)
+    }
+
+    /// Drop a legacy menu after answering/canceling it. No-op if already gone.
+    pub fn close_legacy_menu(&mut self, serial: u32) {
+        self.legacy_menus.retain(|menu| menu.serial != serial);
     }
 
     /// Close every open gump of a given KIND (0xBF/0x04 CloseGump). ServUO

@@ -10,8 +10,9 @@
 
 use super::packet::{PacketError, PacketReader, Result as PResult};
 use crate::world::{
-    Effect, Gump, HouseDesign, HousePlane, JournalEntry, PopupEntry, PopupMenu, PromptState, Skill,
-    TargetCursor, TradeState, Waypoint, World,
+    Effect, Gump, HouseDesign, HousePlane, JournalEntry, LegacyMenu, LegacyMenuEntry,
+    LegacyMenuKind, PopupEntry, PopupMenu, PromptState, Skill, TargetCursor, TradeState, Waypoint,
+    World,
 };
 
 /// Decode one framed game packet (id byte included) into `world`.
@@ -62,6 +63,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x65 => weather(world, frame)?,
         0xBC => season(world, frame)?,
         0x74 => open_buy_window(world, frame)?,
+        0x7C => open_legacy_menu(world, frame)?,
         0x9E => sell_list(world, frame)?,
         0xDF => buff(world, frame)?,
         0xB0 => display_gump(world, frame)?,
@@ -969,6 +971,48 @@ fn open_buy_window(world: &mut World, frame: &[u8]) -> PResult<()> {
     world.shop_buy = Some(crate::world::ShopBuy {
         vendor,
         container,
+        entries,
+    });
+    Ok(())
+}
+
+/// 0x7C OpenMenu — the pre-gump item/icon list and gray question menu.
+///
+/// Wire layout: `[id][len:u16][serial:u32][menu_id:u16][question_len:u8]
+/// [question ASCII][count:u8]`, then `count` entries of
+/// `[graphic:u16][hue:u16][text_len:u8][text ASCII]`. ServUO writes both
+/// question-menu entry words as zero. Like ClassicUO, we classify the menu by
+/// the first entry's graphic because real ServUO packets use a zero header id
+/// for both menu types. The entire packet is decoded before replacing state, so
+/// a truncated resend cannot destroy an already-open valid menu.
+fn open_legacy_menu(world: &mut World, frame: &[u8]) -> PResult<()> {
+    if frame.len() < 4 {
+        return Ok(());
+    }
+    let mut r = PacketReader::new(&frame[3..]);
+    let serial = r.u32()?;
+    let menu_id = r.u16()?;
+    let question_len = r.u8()? as usize;
+    let question = ascii_string(r.bytes(question_len)?);
+    let count = r.u8()? as usize;
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let graphic = r.u16()?;
+        let hue = r.u16()?;
+        let text_len = r.u8()? as usize;
+        let text = ascii_string(r.bytes(text_len)?);
+        entries.push(LegacyMenuEntry { graphic, hue, text });
+    }
+    let kind = if entries.first().is_some_and(|entry| entry.graphic != 0) {
+        LegacyMenuKind::Items
+    } else {
+        LegacyMenuKind::Question
+    };
+    world.open_legacy_menu(LegacyMenu {
+        serial,
+        menu_id,
+        question,
+        kind,
         entries,
     });
     Ok(())
@@ -3419,6 +3463,82 @@ mod tests {
         apply_packet(&mut w, &p.into_vec());
         assert_eq!(w.buffs[0].name, "#2457"); // 0x0999 = 2457, no table entry
         assert_eq!(w.buffs[0].dur, 0); // dur 0 = permanent / no timer
+    }
+
+    fn legacy_menu_packet(
+        serial: u32,
+        menu_id: u16,
+        question: &str,
+        entries: &[(u16, u16, &str)],
+    ) -> Vec<u8> {
+        let mut p = PacketWriter::new();
+        p.u8(0x7C)
+            .u16(0)
+            .u32(serial)
+            .u16(menu_id)
+            .u8(question.len() as u8)
+            .bytes(question.as_bytes())
+            .u8(entries.len() as u8);
+        for &(graphic, hue, text) in entries {
+            p.u16(graphic)
+                .u16(hue)
+                .u8(text.len() as u8)
+                .bytes(text.as_bytes());
+        }
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1..3].copy_from_slice(&len.to_be_bytes());
+        frame
+    }
+
+    #[test]
+    fn legacy_item_menu_parses_and_same_serial_replaces_atomically() {
+        let serial = 0x0102_0304;
+        let first = legacy_menu_packet(
+            serial,
+            7,
+            "Choose an item",
+            &[(0x0F5E, 0x0481, "Sword"), (0x0EED, 0, "Gold")],
+        );
+        let mut w = World::new();
+        assert!(apply_packet(&mut w, &first));
+        let menu = w.legacy_menu(serial).unwrap();
+        assert_eq!(menu.menu_id, 7);
+        assert_eq!(menu.question, "Choose an item");
+        assert_eq!(menu.kind, LegacyMenuKind::Items);
+        assert_eq!(menu.entries.len(), 2);
+        assert_eq!(menu.entries[0].graphic, 0x0F5E);
+        assert_eq!(menu.entries[0].hue, 0x0481);
+        assert_eq!(menu.entries[0].text, "Sword");
+
+        // A malformed resend is handled but cannot partially replace the menu.
+        let mut truncated = legacy_menu_packet(serial, 9, "Broken", &[(1, 2, "replacement")]);
+        truncated.pop();
+        assert!(apply_packet(&mut w, &truncated));
+        assert_eq!(w.legacy_menu(serial).unwrap().menu_id, 7);
+
+        let replacement = legacy_menu_packet(serial, 9, "Again", &[(0x2006, 3, "Corpse")]);
+        assert!(apply_packet(&mut w, &replacement));
+        assert_eq!(w.legacy_menus.len(), 1);
+        assert_eq!(w.legacy_menu(serial).unwrap().menu_id, 9);
+    }
+
+    #[test]
+    fn legacy_question_menus_use_zero_item_fields_and_can_coexist() {
+        let mut w = World::new();
+        let first = legacy_menu_packet(
+            10,
+            0,
+            "Where do you wish to go?",
+            &[(0, 0, "Britain"), (0, 0, "Minoc")],
+        );
+        let second = legacy_menu_packet(20, 3, "Continue?", &[(0, 0, "Yes")]);
+        assert!(apply_packet(&mut w, &first));
+        assert!(apply_packet(&mut w, &second));
+        assert_eq!(w.legacy_menus.len(), 2);
+        assert_eq!(w.legacy_menu(10).unwrap().kind, LegacyMenuKind::Question);
+        assert_eq!(w.legacy_menu(10).unwrap().entries[1].text, "Minoc");
+        assert_eq!(w.legacy_menu(20).unwrap().question, "Continue?");
     }
 
     #[test]

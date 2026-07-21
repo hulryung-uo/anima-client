@@ -389,6 +389,27 @@ pub fn build_popup_select(serial: u32, index: u16) -> Vec<u8> {
     data
 }
 
+/// MenuResponse `0x7D` (13 bytes) — answer a legacy 0x7C item/question menu.
+/// `index` is one-based; zero cancels. Item menus echo the selected entry's
+/// graphic/hue, while question menus and cancel responses use zeros.
+/// `[0x7D][serial:u32][menu_id:u16][index:u16][graphic:u16][hue:u16]`.
+pub fn build_legacy_menu_response(
+    serial: u32,
+    menu_id: u16,
+    index: u16,
+    graphic: u16,
+    hue: u16,
+) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x7D)
+        .u32(serial)
+        .u16(menu_id)
+        .u16(index)
+        .u16(graphic)
+        .u16(hue);
+    w.into_vec()
+}
+
 /// BookPageRequest `0x66` (variable): ask the server to send every page of the
 /// open book `serial`. `[0x66][len:u16][serial:u32][pageCount:u16=N]` then, for
 /// each page `1..=N`, `[pageNum:u16][lineCount:u16=0xFFFF]` — the `0xFFFF` line
@@ -636,6 +657,17 @@ mod tests {
             vec![0xBF, 0x00, 0x0B, 0x00, 0x15, 0x01, 0x02, 0x03, 0x04, 0x00, 0x03]
         );
         assert_eq!(u16::from_be_bytes([sel[1], sel[2]]) as usize, sel.len());
+    }
+
+    #[test]
+    fn legacy_menu_response_has_fixed_item_and_cancel_shapes() {
+        assert_eq!(
+            build_legacy_menu_response(0x0102_0304, 0x0506, 2, 0x0F5E, 0x0481),
+            vec![0x7D, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x00, 0x02, 0x0F, 0x5E, 0x04, 0x81,]
+        );
+        let cancel = build_legacy_menu_response(0x1122_3344, 7, 0, 0, 0);
+        assert_eq!(cancel.len(), 13);
+        assert_eq!(&cancel[7..], &[0, 0, 0, 0, 0, 0]);
     }
 
     #[test]

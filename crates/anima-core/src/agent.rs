@@ -12,8 +12,8 @@
 use crate::gump_layout::GumpElement;
 use crate::types::Position;
 use crate::world::{
-    is_ghost_body, Book, Buff, JournalEntry, MapView, Party, PopupMenu, PromptState, ShopBuy,
-    ShopSell, SpellbookContent, TargetCursor, TradeState, Weather, World,
+    is_ghost_body, Book, Buff, JournalEntry, LegacyMenu, MapView, Party, PopupMenu, PromptState,
+    ShopBuy, ShopSell, SpellbookContent, TargetCursor, TradeState, Weather, World,
 };
 
 /// A skill value, in human units (50.0 == GM-half). Derived from [`crate::world::Skill`].
@@ -154,6 +154,9 @@ pub struct Observation {
     /// The open context (right-click popup) menu (0xBF/0x14), if any. See
     /// [`PopupMenu`]. Answer with [`Action::PopupSelect`].
     pub popup: Option<PopupMenu>,
+    /// Open legacy item/question menus (0x7C), sorted by serial. Answer with
+    /// [`Action::LegacyMenuSelect`] using index 0 to cancel or a 1-based choice.
+    pub legacy_menus: Vec<LegacyMenu>,
     /// The currently open book (0x93/0xD4 + 0x66), if any. See [`Book`].
     /// Request more pages with [`Action::BookRequest`].
     pub book: Option<Book>,
@@ -348,6 +351,10 @@ pub enum Action {
     PopupRequest { serial: u32 },
     /// Choose entry `index` from the open context menu for `serial` (0xBF/0x15).
     PopupSelect { serial: u32, index: u16 },
+    /// Answer a legacy item/question menu (0x7C) with packet 0x7D. `index` is
+    /// 1-based; zero cancels. The driver derives the menu id and item graphic/hue
+    /// from the current menu, preventing callers from forging stale entry data.
+    LegacyMenuSelect { serial: u32, index: u16 },
     /// Request the content of all `pages` of the open book `serial` (outgoing 0x66).
     /// The server replies with 0x66 BookData, filling `World::book`.
     BookRequest { serial: u32, pages: u16 },
@@ -550,6 +557,9 @@ impl World {
             .collect();
         map_gumps.sort_by_key(|&(s, _)| s);
 
+        let mut legacy_menus = self.legacy_menus.clone();
+        legacy_menus.sort_by_key(|menu| menu.serial);
+
         Observation {
             player,
             mobiles,
@@ -564,6 +574,7 @@ impl World {
             shop_buy: self.shop_buy.clone(),
             shop_sell: self.shop_sell.clone(),
             popup: self.popup.clone(),
+            legacy_menus,
             book: self.book.clone(),
             party: self.party.clone(),
             quest_arrow: self.quest_arrow,

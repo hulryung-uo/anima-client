@@ -2319,7 +2319,8 @@ fn content_type(path: &str) -> &'static str {
 /// ground) · `equip:<serial>[:<layer>]` (layer 0 = derive from tiledata) ·
 /// `war:<0|1>` · `cast:<spellId>` · `target:<serial>` · `targetxy:<x>:<y>:<z>:<graphic>` ·
 /// `gump:<serial>:<gumpId>:<button>[:sw=1,2][:e=<id>=<text>,…]` (gump reply; text
-/// entries can't contain `:`, `,`, or `=`) · `prompt:<text>` / `promptcancel`
+/// entries can't contain `:`, `,`, or `=`) · `menusel:<serial>:<index>` (legacy
+/// 0x7C menu; index 0 cancels) · `prompt:<text>` / `promptcancel`
 /// (answer/cancel a pending server text prompt, 0xC2 UnicodePrompt) ·
 /// `tradeaccept:<mycont>:<0|1>` / `tradecancel:<mycont>` /
 /// `tradegold:<mycont>:<gold>:<platinum>` (answer the secure-trade session
@@ -2483,6 +2484,13 @@ fn parse_command(body: &str) -> Option<Action> {
             let serial = parse_serial(p.next()?)?;
             let index = p.next()?.parse().ok()?;
             Some(Action::PopupSelect { serial, index })
+        }
+        // menusel:<serial>:<index> — answer/cancel a legacy 0x7C menu (0x7D).
+        "menusel" => {
+            let mut p = arg.split(':');
+            let serial = parse_serial(p.next()?)?;
+            let index = p.next()?.parse().ok()?;
+            Some(Action::LegacyMenuSelect { serial, index })
         }
         // bookreq:<serial>:<count> — request all pages of the open book (0x66).
         "bookreq" => {
