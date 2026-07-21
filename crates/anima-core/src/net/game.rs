@@ -77,6 +77,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x27 => lift_reject(world, frame)?,
         0x28 => end_dragging_item(world, frame)?,
         0x29 => drop_item_accepted(world)?,
+        0x2C => death_status(world, frame)?,
         0x2D => mobile_attributes(world, frame)?,
         0x89 => corpse_equip(world, frame)?,
         0xC2 => unicode_prompt(world, frame)?,
@@ -122,14 +123,21 @@ fn mobile_update(world: &mut World, frame: &[u8]) -> PResult<()> {
     let direction = r.u8()? & 0x07;
     let z = r.i8()?;
 
-    let m = world.mobile_mut(serial);
-    m.body = body;
-    m.hue = hue;
-    m.pos.x = x;
-    m.pos.y = y;
-    m.pos.z = z;
-    m.direction = direction;
-    m.hidden = flags & FLAG_HIDDEN != 0;
+    let is_self = world.is_player(serial);
+    let old_body = world.mobiles.get(&serial).map(|m| m.body).unwrap_or(body);
+    {
+        let m = world.mobile_mut(serial);
+        m.body = body;
+        m.hue = hue;
+        m.pos.x = x;
+        m.pos.y = y;
+        m.pos.z = z;
+        m.direction = direction;
+        m.hidden = flags & FLAG_HIDDEN != 0;
+    }
+    if is_self {
+        world.on_player_body_changed(old_body, body);
+    }
     Ok(())
 }
 
@@ -482,6 +490,7 @@ fn mobile_incoming(world: &mut World, frame: &[u8]) -> PResult<()> {
     // For self, the Walker owns position/facing — only refresh body/hue, never
     // pos/dir (see mobile_moving). Still parse the worn-item list below.
     let is_self = world.is_player(serial);
+    let old_body = world.mobiles.get(&serial).map(|m| m.body).unwrap_or(body);
     {
         let m = world.mobile_mut(serial);
         m.body = body;
@@ -502,6 +511,9 @@ fn mobile_incoming(world: &mut World, frame: &[u8]) -> PResult<()> {
             m.pos.z = z;
             m.direction = direction;
         }
+    }
+    if is_self {
+        world.on_player_body_changed(old_body, body);
     }
 
     // Worn items follow as fixed records: serial(u32) graphic(u16) layer(u8) hue(u16).
@@ -1424,6 +1436,16 @@ fn end_dragging_item(world: &mut World, frame: &[u8]) -> PResult<()> {
 /// the server's held-item cursor release acknowledgement.
 fn drop_item_accepted(world: &mut World) -> PResult<()> {
     world.push_drag_completion(0x29, None);
+    Ok(())
+}
+
+/// 0x2C DeathStatus — `[id][action:u8]` (2 bytes). ServUO writes 0 at the
+/// beginning and 2 at the end of one player-death sequence. ClassicUO applies
+/// its screen/audio/weather/peace-mode effects for both (`action != 1`) and
+/// derives actual dead/alive state separately from the player's body graphic.
+fn death_status(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    world.on_death_screen(r.u8()?);
     Ok(())
 }
 
@@ -3646,6 +3668,73 @@ mod tests {
         assert_eq!(w.recent_drag_completions.len(), 16);
         assert_eq!(w.recent_drag_completions.first().unwrap().seq, 7);
         assert_eq!(w.recent_drag_completions.last().unwrap().seq, 22);
+    }
+
+    #[test]
+    fn death_status_applies_classicuo_effects_without_guessing_alive_state() {
+        let mut w = World::new();
+        w.player = Some(crate::types::Serial(0x1001));
+        w.mobile_mut(0x1001).body = 0x0190;
+        w.season = 3;
+        w.current_music = Some(12);
+        w.weather = crate::world::Weather {
+            kind: 2,
+            intensity: 30,
+        };
+
+        assert!(apply_packet(&mut w, &[0x2C, 0]));
+        assert_eq!(w.weather, crate::world::Weather::default());
+        assert_eq!(w.current_music, Some(42));
+        assert_eq!(w.pre_death_season, Some(3));
+        assert_eq!(w.pre_death_music, Some(Some(12)));
+        assert_eq!(w.death_screen.unwrap().action, 0);
+        assert_eq!(w.pending_war_mode_requests, vec![false]);
+        // Action 2 is the end of ServUO's same death sequence, not resurrection.
+        assert!(apply_packet(&mut w, &[0x2C, 2]));
+        assert_eq!(w.death_screen.unwrap().seq, 2);
+        assert_eq!(w.pre_death_music, Some(Some(12)));
+        assert_eq!(w.pending_war_mode_requests, vec![false, false]);
+
+        // ClassicUO's sole excluded action has no side effects.
+        assert!(apply_packet(&mut w, &[0x2C, 1]));
+        assert_eq!(w.death_screen.unwrap().seq, 2);
+        assert_eq!(w.pending_war_mode_requests, vec![false, false]);
+    }
+
+    #[test]
+    fn player_body_transition_sets_and_restores_death_environment() {
+        let mut w = World::new();
+        w.player = Some(crate::types::Serial(0x1001));
+        w.mobile_mut(0x1001).body = 0x0190;
+        w.season = 2;
+        w.current_music = None;
+
+        let update = |body: u16| {
+            let mut p = PacketWriter::new();
+            p.u8(0x20)
+                .u32(0x1001)
+                .u16(body)
+                .u8(0)
+                .u16(0)
+                .u8(0)
+                .u16(100)
+                .u16(200)
+                .u16(0)
+                .u8(3)
+                .u8(0);
+            p.into_vec()
+        };
+
+        assert!(apply_packet(&mut w, &update(0x0192)));
+        assert_eq!(w.season, 4);
+        assert_eq!(w.current_music, Some(42));
+        assert_eq!(w.pre_death_music, Some(None));
+
+        assert!(apply_packet(&mut w, &update(0x0190)));
+        assert_eq!(w.season, 2);
+        assert_eq!(w.current_music, None);
+        assert_eq!(w.pre_death_season, None);
+        assert_eq!(w.pre_death_music, None);
     }
 
     #[test]

@@ -797,6 +797,12 @@ impl Session {
         for serial in self.world.take_house_design_requests() {
             self.send(&build_house_design_request(serial))?;
         }
+        // 0x2C DeathStatus asks a ClassicUO-compatible client to request peace
+        // mode. Preserve duplicate action-0/action-2 requests from ServUO; the
+        // server treats the ordinary 0x72 packets idempotently.
+        for on in self.world.take_war_mode_requests() {
+            self.send(&build_war_mode(on))?;
+        }
         Ok(applied)
     }
 

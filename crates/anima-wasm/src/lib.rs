@@ -126,6 +126,10 @@ impl WasmClient {
                     serial,
                 ));
         }
+        for on in self.world.take_war_mode_requests() {
+            self.outbox
+                .extend(anima_core::net::outgoing::build_war_mode(on));
+        }
     }
 
     /// Take queued bytes to send to the server (clears the queue).
@@ -157,5 +161,20 @@ mod tests {
         let expected = observation_to_json(&anima_core::Observation::default()).to_string();
         assert_eq!(client.observation_json(), expected);
         assert_eq!(WasmClient::schema_version(), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn death_status_queues_the_classicuo_peace_mode_reply() {
+        let mut client = WasmClient::new("user".into(), "pass".into());
+        client.login = None;
+        client.outbox.clear();
+
+        client.handle(&[0x2C, 0]);
+        assert_eq!(
+            client.take_outbox(),
+            anima_core::net::outgoing::build_war_mode(false)
+        );
+        assert_eq!(client.world.current_music, Some(42));
+        assert!(client.world.pending_war_mode_requests.is_empty());
     }
 }

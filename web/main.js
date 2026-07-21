@@ -161,6 +161,11 @@ let lastLiftRejectSeq = 0;     // highest lift-reject event seq we've already ha
 // ---- item-drag completion events (0x28 EndDraggingItem / 0x29 accepted) ----
 let lastDragCompletionSeq = 0; // highest drag-completion event seq we've handled
 
+// ---- death-screen events (0x2C; actual dead state remains body-derived) ----
+let lastDeathScreenSeq = 0;
+let deathBannerUntil = 0;
+let deathBannerTimer = null;
+
 // ---- server-initiated container opens (0x24 DrawContainer) ----
 let lastContainerOpenSeq = 0;  // highest container-open event seq we've already handled
 
@@ -1465,6 +1470,7 @@ function primeSeqRings(s) {
   lastEffectSeq = Math.max(lastEffectSeq, maxSeq(s.effects));
   lastLiftRejectSeq = Math.max(lastLiftRejectSeq, maxSeq(s.liftRejects));
   lastDragCompletionSeq = Math.max(lastDragCompletionSeq, maxSeq(s.dragCompletions));
+  if (s.deathScreen) lastDeathScreenSeq = Math.max(lastDeathScreenSeq, s.deathScreen.seq | 0);
   lastContainerOpenSeq = Math.max(lastContainerOpenSeq, maxSeq(s.containerOpens));
   lastSwingSeq = Math.max(lastSwingSeq, maxSeq(s.swings));
   lastSoundSeq = Math.max(lastSoundSeq, maxSeq(s.sounds));
@@ -1495,6 +1501,7 @@ async function poll() {
     ingestEffects(scene); // spawn new graphical effects (0x70/0xC0/0xC7)
     ingestLiftRejects(scene); // clear the held item + show a message (0x27 LiftRej)
     ingestDragCompletions(scene); // reconcile held-item cursor acknowledgements (0x28/0x29)
+    ingestDeathScreen(scene); // start ClassicUO's short death banner timer (0x2C)
     ingestContainerOpens(scene); // open a window for each server-initiated container open (0x24)
     ingestSwings(scene); // briefly face the attacker toward the defender (0x2F Swing)
     ingestPaperdoll(scene); // open/refresh a paperdoll the server told us to show (0x88)
@@ -1531,16 +1538,33 @@ async function poll() {
   if (diag.poll > 150) console.warn(`[diag] slow poll ${diag.poll.toFixed(0)}ms`);
 }
 
-// `player.dead` is authoritative (derived by the scene bridge from ServUO's complete
-// ghost-body set). The body fallback keeps this renderer compatible with an older
-// scene producer. Both clear on resurrection when the body reverts to a living id.
+// 0x2C is a one-shot screen effect, while `player.dead` is authoritative state
+// derived from ServUO's complete ghost-body set. ClassicUO keeps the grayscale
+// effect for the whole ghost lifetime but shows “You are dead” for only 1.5s.
+function ingestDeathScreen(s) {
+  const ev = s && s.deathScreen;
+  if (!ev) return;
+  const seq = ev.seq | 0;
+  if (seq <= lastDeathScreenSeq) return;
+  lastDeathScreenSeq = seq;
+  deathBannerUntil = performance.now() + 1500;
+  if (deathBannerTimer != null) clearTimeout(deathBannerTimer);
+  deathBannerTimer = setTimeout(() => {
+    deathBannerTimer = null;
+    deathBannerUntil = 0;
+    updateDeathUI(scene);
+  }, 1500);
+}
+
+// The body fallback keeps this renderer compatible with an older scene producer.
+// Both clear on resurrection when the body reverts to a living id.
 function updateDeathUI(s) {
   const p = s && s.player;
   const dead = !!(p && (typeof p.dead === "boolean" ? p.dead : isGhostBody(p.body)));
   const map = document.getElementById("map");
   if (map) map.classList.toggle("dead", dead);
   const banner = document.getElementById("deadbanner");
-  if (banner) banner.style.display = dead ? "block" : "none";
+  if (banner) banner.style.display = dead && performance.now() < deathBannerUntil ? "block" : "none";
 }
 
 function updateAnimStates(s) {

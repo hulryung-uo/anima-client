@@ -1612,6 +1612,16 @@ fn drag_completions_json(world: &World) -> Value {
     )
 }
 
+/// Latest 0x2C death-screen trigger, separate from `player.dead` (which remains
+/// body-derived). The browser uses `seq` to run ClassicUO's 1.5-second banner
+/// once; action 2 therefore cannot be misread as a resurrection flag.
+fn death_screen_json(world: &World) -> Value {
+    match world.death_screen {
+        Some(event) => json!({ "seq": event.seq, "action": event.action }),
+        None => Value::Null,
+    }
+}
+
 /// Build the `containerOpens` array: [`World::recent_container_opens`] filtered
 /// down to events that are actually a container window. `World` keeps that ring
 /// as raw, unfiltered 0x24 data (every `gump_id` ServUO ever sent); deciding
@@ -2633,6 +2643,8 @@ pub fn build_scene(
     // before clearing its cursor, protecting a newer lift from a delayed ack.
     let drag_completions =
         serde_json::to_string(&drag_completions_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    let death_screen =
+        serde_json::to_string(&death_screen_json(&s.world)).unwrap_or_else(|_| "null".into());
     // Recent server-initiated container opens (0x24 DrawContainer): a window we
     // did NOT ourselves double-click for (banker "bank" speech, GM `[bank`, a
     // snoop, …). The client opens a window for each `seq` newer than the last it
@@ -2668,7 +2680,7 @@ pub fn build_scene(
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
          \"popup\":{popup},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
-         \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"containerOpens\":{container_opens},\"swings\":{swings},\
+         \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
          \"paperdoll\":{paperdoll},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",
         s.confirms, s.denies
@@ -2920,6 +2932,20 @@ mod tests {
                 { "seq": 2, "packet": 0x29, "token": null }
             ])
         );
+    }
+
+    #[test]
+    fn death_screen_json_is_a_seq_gated_event_not_alive_state() {
+        let mut w = World::default();
+        assert_eq!(death_screen_json(&w), Value::Null);
+
+        w.on_death_screen(0);
+        assert_eq!(death_screen_json(&w), json!({ "seq": 1, "action": 0 }));
+        w.on_death_screen(2);
+        assert_eq!(death_screen_json(&w), json!({ "seq": 2, "action": 2 }));
+
+        w.on_death_screen(1);
+        assert_eq!(death_screen_json(&w), json!({ "seq": 2, "action": 2 }));
     }
 
     #[test]

@@ -163,6 +163,16 @@ pub struct DragCompletion {
     pub token: Option<u32>,
 }
 
+/// Latest ClassicUO-style death-screen trigger (0x2C). This is deliberately an
+/// event, not the player's alive/dead state: ServUO sends actions 0 and 2 during
+/// one death sequence, while the authoritative state transition arrives as a
+/// player body change to/from a race-specific ghost body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeathScreenEvent {
+    pub seq: u64,
+    pub action: u8,
+}
+
 /// Current weather state (from 0x65). `kind` reuses the wire type byte:
 /// 0 = rain, 1 = fierce storm, 2 = snow, 3 = storm; 0xFE/0xFF = none/reset.
 /// `intensity` is the particle count (0..70). The renderer only animates the
@@ -700,6 +710,16 @@ pub struct World {
     /// Defaults to 0 (Spring). The renderer may tint the scene to match; we do not
     /// remap tree/foliage graphics (that's a much larger change).
     pub season: u8,
+    /// Latest 0x2C death-screen effect trigger. Renderers use `seq` to show the
+    /// short-lived banner once without confusing action 2 with resurrection.
+    pub death_screen: Option<DeathScreenEvent>,
+    /// Monotonic counter assigning each handled death-screen trigger a unique seq.
+    pub death_screen_seq: u64,
+    /// Season to restore when the player body changes from ghost back to alive.
+    pub pre_death_season: Option<u8>,
+    /// Music to restore on resurrection. The outer option means “snapshot
+    /// captured”; the inner option preserves that no track was playing.
+    pub pre_death_music: Option<Option<u16>>,
     /// The player's active buffs/debuffs (0xDF), keyed by `icon`. See [`Buff`].
     pub buffs: Vec<Buff>,
     /// The current vendor BUY window (0x74), if one is open. See [`ShopBuy`].
@@ -750,6 +770,9 @@ pub struct World {
     /// the server's 0x72 SetWarMode echo (see [`crate::net::game`]); the renderer
     /// reflects it and the war-mode toggle reads it.
     pub war: bool,
+    /// Client war-mode requests caused by server events. Core is sans-I/O, so
+    /// native/WASM drivers drain these and send ordinary 0x72 packets.
+    pub pending_war_mode_requests: Vec<bool>,
     /// The serial last sent in an Attack (0x05) — UO's "last target" for the
     /// auto-attack / attack-last combat loop. `None` until the player attacks.
     pub last_attack: Option<u32>,
@@ -890,6 +913,8 @@ const MAX_RECENT_EFFECTS: usize = 32;
 const MAX_RECENT_LIFT_REJECTS: usize = 16;
 /// How many recent item-drag completion events [`World::push_drag_completion`] keeps.
 const MAX_RECENT_DRAG_COMPLETIONS: usize = 16;
+/// Defensive cap for server-triggered war-mode replies awaiting the driver.
+const MAX_PENDING_WAR_MODE_REQUESTS: usize = 16;
 /// How many recent container-open events [`World::push_container_open`] keeps.
 const MAX_RECENT_CONTAINER_OPENS: usize = 16;
 /// How many recent swing events [`World::push_swing`] keeps.
@@ -1092,6 +1117,79 @@ impl World {
         if overflow > 0 {
             self.recent_drag_completions.drain(0..overflow);
         }
+    }
+
+    /// Apply the side effects of 0x2C DeathStatus exactly as ClassicUO's
+    /// `DeathScreen` handler does for every action except 1: stop weather, play
+    /// death music 42, start a fresh short-lived UI trigger, and ask the server
+    /// to leave war mode. Actual dead/alive state remains body-derived; in
+    /// particular ServUO action 2 is not treated as resurrection.
+    pub fn on_death_screen(&mut self, action: u8) {
+        if action == 1 {
+            return;
+        }
+
+        let already_dead = self
+            .player_mobile()
+            .is_some_and(|mobile| is_ghost_body(mobile.body));
+        if !already_dead {
+            if self.pre_death_season.is_none() {
+                self.pre_death_season = Some(self.season);
+            }
+            if self.pre_death_music.is_none() {
+                self.pre_death_music = Some(self.current_music);
+            }
+        }
+
+        self.weather = Weather::default();
+        self.current_music = Some(42);
+        self.death_screen_seq += 1;
+        self.death_screen = Some(DeathScreenEvent {
+            seq: self.death_screen_seq,
+            action,
+        });
+        self.pending_war_mode_requests.push(false);
+        let overflow = self
+            .pending_war_mode_requests
+            .len()
+            .saturating_sub(MAX_PENDING_WAR_MODE_REQUESTS);
+        if overflow > 0 {
+            self.pending_war_mode_requests.drain(0..overflow);
+        }
+    }
+
+    /// Reconcile the authoritative player body transition with ClassicUO's
+    /// desolation-season/death-music behavior, restoring the prior environment
+    /// when a ghost receives a living body again.
+    pub fn on_player_body_changed(&mut self, old_body: u16, new_body: u16) {
+        let was_dead = is_ghost_body(old_body);
+        let is_dead = is_ghost_body(new_body);
+        if was_dead == is_dead {
+            return;
+        }
+
+        if is_dead {
+            if self.pre_death_season.is_none() {
+                self.pre_death_season = Some(self.season);
+            }
+            if self.pre_death_music.is_none() {
+                self.pre_death_music = Some(self.current_music);
+            }
+            self.season = 4;
+            self.current_music = Some(42);
+        } else {
+            if let Some(season) = self.pre_death_season.take() {
+                self.season = season;
+            }
+            if let Some(music) = self.pre_death_music.take() {
+                self.current_music = music;
+            }
+        }
+    }
+
+    /// Drain server-triggered 0x72 requests for the active transport driver.
+    pub fn take_war_mode_requests(&mut self) -> Vec<bool> {
+        std::mem::take(&mut self.pending_war_mode_requests)
     }
 
     /// Record a 0x24 (DrawContainer/ContainerDisplay) event verbatim: the
