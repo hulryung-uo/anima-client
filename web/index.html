@@ -37,10 +37,13 @@
       .login-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
       .login-stats input { width: 100%; }
       #lg-stat-total { font-size: 10px; color: #8896a5; text-align: right; }
-      #lg-go { margin-top: 6px; padding: 9px; border-radius: 6px; cursor: pointer;
+      #lg-actions { display: flex; gap: 7px; margin-top: 6px; }
+      #lg-actions button { flex: 1; padding: 9px; border-radius: 6px; cursor: pointer;
         border: 1px solid #2a3a4a; background: #1b2530; color: #8ab4f8; font-size: 13px; letter-spacing: .04em; }
-      #lg-go:hover:not(:disabled) { background: rgba(138,180,248,.18); color: #fff; }
-      #lg-go:disabled { opacity: .5; cursor: default; }
+      #lg-actions button:hover:not(:disabled) { background: rgba(138,180,248,.18); color: #fff; }
+      #lg-actions button:disabled { opacity: .5; cursor: default; }
+      #lg-delete { display: none; border-color: #663638 !important; color: #e89a9d !important; }
+      #lg-delete:hover:not(:disabled) { background: rgba(229,72,77,.18) !important; }
       #lg-msg { font-size: 11px; color: #e5a04d; min-height: 14px; text-align: center; }
       /* Game fills the whole viewport; HUD + chat float over it. */
       #map { position: fixed; inset: 0; overflow: hidden; background: #05070a; }
@@ -660,7 +663,10 @@
             <select id="lg-city"><option value="3">Britain</option><option value="0">New Haven</option></select>
           </label>
         </div>
-        <button id="lg-go" type="button">Connect</button>
+        <div id="lg-actions">
+          <button id="lg-go" type="button">Connect</button>
+          <button id="lg-delete" type="button">Delete</button>
+        </div>
         <div id="lg-msg"></div>
       </div>
     </div>

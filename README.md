@@ -113,6 +113,8 @@ character names and slots reported by the server. Choose one of those characters
 to enter the world, or enable **Create a new character** and choose the name,
 gender, profession, stats, and starting city. New characters use the account's
 first empty slot without deleting an existing character; creation is disabled
-when the server reports that every slot is occupied.
+when the server reports that every slot is occupied. Existing characters can be
+deleted from the same list after an explicit irreversible-action confirmation;
+the refreshed server list is displayed before any subsequent choice.
 
 WASM module: `cargo install wasm-pack && wasm-pack build crates/anima-wasm --target web`.

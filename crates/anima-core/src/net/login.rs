@@ -477,6 +477,7 @@ pub enum LoginDirective {
 pub enum CharacterChoice {
     Play(u8),
     Create(CharacterAppearance),
+    Delete(u8),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -669,6 +670,19 @@ impl LoginMachine {
                     &appearance,
                     u16::from(slot),
                     ALL_FACET_CLIENT_FLAGS,
+                ))])
+            }
+            CharacterChoice::Delete(index) => {
+                let slot = list
+                    .slots
+                    .iter()
+                    .find(|slot| slot.index == index)
+                    .ok_or(LoginError::CharacterSlotEmpty(index))?;
+                self.delete_sent = true;
+                self.state = State::AwaitCharacterList;
+                Ok(vec![LoginDirective::Send(build_delete_character(
+                    u32::from(slot.index),
+                    self.cfg.client_ip,
                 ))])
             }
         }
@@ -1235,6 +1249,34 @@ mod tests {
                 1,
                 ALL_FACET_CLIENT_FLAGS,
             ))]
+        );
+    }
+
+    #[test]
+    fn deferred_character_list_deletes_then_displays_the_refreshed_list() {
+        let cfg = LoginConfig {
+            defer_character_choice: true,
+            ..Default::default()
+        };
+        let mut m = machine_at_character_list(cfg);
+        let list = build_character_list_frame(0xA9, &["First", "", "Third", "", ""]);
+        m.on_packet(&list).unwrap();
+        let expected = build_delete_character(2, 0x7F00_0001);
+        assert_eq!(
+            m.choose_character(CharacterChoice::Delete(2)).unwrap(),
+            vec![LoginDirective::Send(expected)]
+        );
+
+        let refreshed = build_character_list_frame(0x86, &["First", "", "", "", ""]);
+        assert_eq!(
+            m.on_packet(&refreshed).unwrap(),
+            vec![LoginDirective::ChooseCharacter(CharacterList {
+                slots: vec![CharSlot {
+                    index: 0,
+                    name: "First".into(),
+                }],
+                slot_count: 5,
+            })]
         );
     }
 

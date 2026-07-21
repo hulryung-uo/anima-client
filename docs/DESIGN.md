@@ -312,8 +312,9 @@ The driver is the only code that knows about sockets — write it once for nativ
 1. ✅ Connection state machine + two-phase login (sans-IO `LoginMachine`).
 2. ✅ Huffman decompressor + game-mode framer (`net/huffman.rs`, `framing.rs`).
 3. ✅ Native TCP driver (`anima-net::Session`) — connects to ServUO end-to-end.
-4. ✅ Character create + select (`build_create_character`, `CharacterAppearance`).
-   (Delete deferred — format documented in `anima`, not needed for the goal.)
+4. ✅ Character create + select + delete (`build_create_character`,
+   `build_delete_character`, `CharacterAppearance`), including the browser's
+   server-provided list and confirmation-gated deletion flow.
 5. ✅ Game packet codec → World mutation (`net/game.rs`): originally 0x20/0x77/0x78/
    0x1A/0x1D/0x11/0xA1-3/0x1C/0xAE/0xBF; now **~50 incoming ids** dispatched (count
    the match arms in `dispatch()`) covering combat/damage/effects, containers,
@@ -333,9 +334,8 @@ The driver is the only code that knows about sockets — write it once for nativ
    full `Observation`/`Action` surface as versioned JSON for the out-of-process
    Python brain (`anima2`), table-tested for every variant.
 
-**Remaining tail (optional, deferred):** delete-character (0x83, format documented
-in `anima`, not needed for the goal); fastwalk is consumed but most shards send 0
-keys; 0x24 DrawContainer (incoming) is unhandled — the renderer instead opens a
+**Remaining tail (optional, deferred):** fastwalk is consumed but most shards send
+0 keys; 0x24 DrawContainer (incoming) is unhandled — the renderer instead opens a
 container window client-side off the item's own container-tiledata flag, which
 covers the same UX without needing the packet.
 
@@ -451,8 +451,9 @@ Distilled from `anima/CLAUDE.md` — verify against ClassicUO/captures while imp
   `0xDC` OPL, `0x93`/`0xD4`/`0x66` books, `0xAF` corpse-of-death, `0xAA` combatant,
   `0x27` lift-reject, `0x89` corpse equip, `0xC2` prompt, `0x6F` secure trade — plus
   `0x21`/`0x22` (confirm/deny walk), owned separately by `net::movement::Walker`,
-  for **52** total. Deliberately still unhandled: `0x83` delete-character, `0x24`
-  DrawContainer (see §6 Phase 1's "remaining tail").
+  for **52** total. Outgoing login-phase `0x83` delete-character is handled
+  separately; incoming `0x24` DrawContainer remains deliberately unhandled (see
+  §6 Phase 1's "remaining tail").
 
 ---
 

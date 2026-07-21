@@ -336,15 +336,23 @@ fn parse_character_appearance(
 fn parse_character_choice(body: &str) -> Result<CharacterChoice, &'static str> {
     let value: serde_json::Value =
         serde_json::from_str(body.trim()).map_err(|_| "invalid character-choice JSON")?;
-    if let Some(create) = value.get("create").filter(|field| !field.is_null()) {
-        return Ok(CharacterChoice::Create(parse_character_appearance(create)?));
-    }
-    let slot = value
+    let create = value.get("create").filter(|field| !field.is_null());
+    let play_slot = value
         .get("slot")
         .and_then(|field| field.as_u64())
-        .and_then(|slot| u8::try_from(slot).ok())
-        .ok_or("character slot must be a non-negative integer")?;
-    Ok(CharacterChoice::Play(slot))
+        .and_then(|slot| u8::try_from(slot).ok());
+    let delete_slot = value
+        .get("delete_slot")
+        .and_then(|field| field.as_u64())
+        .and_then(|slot| u8::try_from(slot).ok());
+    match (create, play_slot, delete_slot) {
+        (Some(appearance), None, None) => Ok(CharacterChoice::Create(parse_character_appearance(
+            appearance,
+        )?)),
+        (None, Some(slot), None) => Ok(CharacterChoice::Play(slot)),
+        (None, None, Some(slot)) => Ok(CharacterChoice::Delete(slot)),
+        _ => Err("choose exactly one of create, slot, or delete_slot"),
+    }
 }
 
 /// Load assets, bind the HTTP server (workers included), and return a
@@ -1573,6 +1581,11 @@ fn handle_request(ctx: Ctx) {
         };
         match parse_character_choice(&body) {
             Ok(choice) => {
+                let progress = match &choice {
+                    CharacterChoice::Play(_) => "Entering world…",
+                    CharacterChoice::Create(_) => "Creating character…",
+                    CharacterChoice::Delete(_) => "Deleting character…",
+                };
                 let mut current_scene = scene.lock().unwrap();
                 let awaiting_choice = serde_json::from_str::<serde_json::Value>(&current_scene)
                     .ok()
@@ -1586,7 +1599,11 @@ fn handle_request(ctx: Ctx) {
                     );
                     return;
                 }
-                *current_scene = r#"{"auth":"connecting","msg":"Entering world…"}"#.into();
+                *current_scene = serde_json::json!({
+                    "auth": "connecting",
+                    "msg": progress,
+                })
+                .to_string();
                 drop(current_scene);
                 match character.send(choice) {
                     Ok(()) => {
@@ -2615,7 +2632,7 @@ mod login_request_tests {
     }
 
     #[test]
-    fn character_choice_parser_accepts_play_and_create() {
+    fn character_choice_parser_accepts_play_create_and_delete() {
         assert_eq!(
             parse_character_choice(r#"{"slot":3}"#),
             Ok(CharacterChoice::Play(3))
@@ -2630,6 +2647,11 @@ mod login_request_tests {
         };
         assert_eq!(appearance.name, "New Hero");
         assert_eq!(appearance.skills, starting_skills("warrior").unwrap());
+        assert_eq!(
+            parse_character_choice(r#"{"delete_slot":2}"#),
+            Ok(CharacterChoice::Delete(2))
+        );
+        assert!(parse_character_choice(r#"{"slot":1,"delete_slot":1}"#).is_err());
     }
 
     #[test]

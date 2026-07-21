@@ -1236,6 +1236,7 @@ let characterListKey = "";
 function wireLogin() {
   if (loginWired) return; loginWired = true;
   const go = document.getElementById("lg-go");
+  const deleteButton = document.getElementById("lg-delete");
   const createToggle = document.getElementById("lg-create");
   const createPanel = document.getElementById("lg-create-panel");
   const createToggleRow = document.getElementById("lg-create-toggle");
@@ -1246,6 +1247,9 @@ function wireLogin() {
   const updateCreation = () => {
     createPanel.classList.toggle("on", createToggle.checked);
     slotSelect.disabled = !characterStage || createToggle.checked || slotSelect.options.length === 0;
+    const canDelete = characterStage && !createToggle.checked && slotSelect.options.length > 0;
+    deleteButton.style.display = canDelete ? "block" : "none";
+    deleteButton.disabled = !canDelete;
     if (characterStage) go.textContent = createToggle.checked ? "Create" : "Play";
     const total = statInputs.reduce((sum, input) => sum + (Number(input.value) || 0), 0);
     const totalEl = document.getElementById("lg-stat-total");
@@ -1310,6 +1314,28 @@ function wireLogin() {
     }
   };
   go.addEventListener("click", submit);
+  deleteButton.addEventListener("click", async () => {
+    const option = slotSelect.selectedOptions[0];
+    if (!characterStage || !option) return;
+    const name = option.dataset.name || option.textContent;
+    if (!window.confirm(`Permanently delete ${name}? This cannot be undone.`)) return;
+    const msg = document.getElementById("lg-msg");
+    msg.textContent = `Deleting ${name}…`;
+    go.disabled = true;
+    deleteButton.disabled = true;
+    try {
+      const response = await fetch("character", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ delete_slot: Number(option.value) }),
+      });
+      if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    } catch (error) {
+      msg.textContent = "Delete request failed: " + error.message;
+      go.disabled = false;
+      deleteButton.disabled = false;
+    }
+  });
   for (const input of document.querySelectorAll("#login input, #login select"))
     input.addEventListener("keydown", (e) => { if (e.code === "Enter") submit(); });
 
@@ -1332,6 +1358,7 @@ function wireLogin() {
         const option = document.createElement("option");
         option.value = String(slot.index);
         option.textContent = `Slot ${slot.index + 1} — ${slot.name}`;
+        option.dataset.name = slot.name;
         return option;
       }));
       const full = slots.length >= capacity;
