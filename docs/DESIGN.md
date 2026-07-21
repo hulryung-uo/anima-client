@@ -214,7 +214,7 @@ anima-client/
     │       │   ├── framing.rs           # frame decoder + game-mode (Huffman) + StreamDecoder
     │       │   ├── huffman.rs           # server→client decompression
     │       │   ├── login.rs             # builders/parsers + LoginMachine (+ char create)
-    │       │   ├── game.rs              # game packet codec → World mutation (~50 incoming ids, §8)
+    │       │   ├── game.rs              # game packet codec → World mutation (63 incoming ids, §8)
     │       │   ├── movement.rs          # walk requests + Walker (seq/confirm/deny) + 0x21/0x22
     │       │   └── outgoing.rs          # client version + action builders
     │       ├── world/mod.rs             # World/Mobile/Item/PlayerStats/journal/gumps/trades/…
@@ -316,8 +316,9 @@ The driver is the only code that knows about sockets — write it once for nativ
    `build_delete_character`, `CharacterAppearance`), including the browser's
    server-provided list and confirmation-gated deletion flow.
 5. ✅ Game packet codec → World mutation (`net/game.rs`): originally 0x20/0x77/0x78/
-   0x1A/0x1D/0x11/0xA1-3/0x1C/0xAE/0xBF; now **~50 incoming ids** dispatched (count
-   the match arms in `dispatch()`) covering combat/damage/effects, containers,
+   0x1A/0x1D/0x11/0xA1-3/0x1C/0xAE/0xBF; now **63 incoming ids** dispatched (count
+   the match arms in `dispatch()`) covering combat/damage/effects, full vitals,
+   containers,
    gumps (incl. packed/compressed 0xDD), targeting, vendors, skills, books,
    party, buffs, quest arrows, weather/season/light, corpses (0xAF/0x89),
    prompts (0xC2), combatant (0xAA), secure trading (0x6F), facet change
@@ -334,10 +335,10 @@ The driver is the only code that knows about sockets — write it once for nativ
    full `Observation`/`Action` surface as versioned JSON for the out-of-process
    Python brain (`anima2`), table-tested for every variant.
 
-**Remaining tail (optional, deferred):** fastwalk is consumed but most shards send
-0 keys; 0x24 DrawContainer (incoming) is unhandled — the renderer instead opens a
-container window client-side off the item's own container-tiledata flag, which
-covers the same UX without needing the packet.
+**Remaining compatibility work:** tracked against ClassicUO's handler registry in
+[`CLASSICUO_GAPS.md`](CLASSICUO_GAPS.md). Fastwalk is consumed but most shards
+send 0 keys. `0x24` DrawContainer is implemented end-to-end, including
+server-initiated bank/container windows and filtering vendor/spellbook overloads.
 
 ### Phase 2 — renderer (web) + WASM. ✅ COMPLETE.
 - ✅ `anima-core` compiles to `wasm32-unknown-unknown`; `anima-wasm` (wasm-bindgen)
@@ -439,7 +440,7 @@ Distilled from `anima/CLAUDE.md` — verify against ClassicUO/captures while imp
 - **Key packet ids** (login phase): `0x1B` EnterWorld, `0x55` LoginComplete.
   (Full incoming-packet handler list: ClassicUO `PacketHandlers.cs`.)
 - **Game-phase incoming coverage (current, verified by counting `net::game::dispatch`'s
-  match arms):** **50** packet ids handled in `net/game.rs` — `0x20` MobileUpdate,
+  match arms):** **63** packet ids handled in `net/game.rs` — `0x20` MobileUpdate,
   `0x77`/`0x78` mobile moving/incoming, `0x2E` EquipItem, `0x1A`/`0xF3` world item
   (legacy/HS), `0x1D` Delete, `0x11` CharacterStatus, `0xA1-3` vitals, `0x1C`/`0xAE`
   Talk/UnicodeTalk, `0xBF` general-info subcommands (facet change, party, …), `0x6C`
@@ -449,11 +450,14 @@ Distilled from `anima/CLAUDE.md` — verify against ClassicUO/captures while imp
   `0x4F`/`0x4E` light, `0x65`/`0xBC` weather/season, `0x74`/`0x9E` vendor buy/sell,
   `0xDF` buff, `0xB0`/`0xDD` gumps (incl. zlib-packed), `0xBA` quest arrow, `0xD6`/
   `0xDC` OPL, `0x93`/`0xD4`/`0x66` books, `0xAF` corpse-of-death, `0xAA` combatant,
-  `0x27` lift-reject, `0x89` corpse equip, `0xC2` prompt, `0x6F` secure trade — plus
+  `0x27` lift-reject, `0x2D` full mobile attributes, `0x89` corpse equip, `0xC2`
+  prompt, `0x6F` secure trade, `0x3B` vendor close, `0x24` container display,
+  `0x88` paperdoll, `0x2F` swing, `0x90`/`0xF5` maps, `0x56` map commands, `0x99`
+  multi target, `0xD8` custom houses, and `0xE5`/`0xE6` waypoints — plus
   `0x21`/`0x22` (confirm/deny walk), owned separately by `net::movement::Walker`,
-  for **52** total. Outgoing login-phase `0x83` delete-character is handled
-  separately; incoming `0x24` DrawContainer remains deliberately unhandled (see
-  §6 Phase 1's "remaining tail").
+  for **65** total. Outgoing login-phase `0x83` delete-character is handled
+  separately. Remaining ClassicUO gaps are maintained in
+  [`CLASSICUO_GAPS.md`](CLASSICUO_GAPS.md).
 
 ---
 

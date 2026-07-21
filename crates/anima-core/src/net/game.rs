@@ -75,6 +75,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0xAF => display_death(world, frame)?,
         0xAA => change_combatant(world, frame)?,
         0x27 => lift_reject(world, frame)?,
+        0x2D => mobile_attributes(world, frame)?,
         0x89 => corpse_equip(world, frame)?,
         0xC2 => unicode_prompt(world, frame)?,
         0x6F => secure_trade(world, frame)?,
@@ -1807,6 +1808,32 @@ fn vital(world: &mut World, frame: &[u8], which: Vital) -> PResult<()> {
     Ok(())
 }
 
+/// 0x2D MobileAttributes — all three vital bars in one fixed packet:
+/// `[id][serial:u32][hitsMax:u16][hits:u16][manaMax:u16][mana:u16]`
+/// `[stamMax:u16][stam:u16]` (17 bytes).
+///
+/// ServUO sends this after entering a map and for a full vital refresh; ClassicUO
+/// applies it to the same fields updated individually by 0xA1/0xA2/0xA3.
+fn mobile_attributes(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let serial = r.u32()?;
+    let hits_max = r.u16()?;
+    let hits = r.u16()?;
+    let mana_max = r.u16()?;
+    let mana = r.u16()?;
+    let stam_max = r.u16()?;
+    let stam = r.u16()?;
+
+    let mobile = world.mobile_mut(serial);
+    mobile.hits_max = hits_max;
+    mobile.hits = hits;
+    mobile.mana_max = mana_max;
+    mobile.mana = mana;
+    mobile.stam_max = stam_max;
+    mobile.stam = stam;
+    Ok(())
+}
+
 /// 0x1C ASCII Talk → journal.
 fn ascii_talk(world: &mut World, frame: &[u8]) -> PResult<()> {
     if frame.len() <= 8 {
@@ -3071,6 +3098,27 @@ mod tests {
         assert!(apply_packet(&mut w, &p.into_vec()));
         let m = &w.mobiles[&0x77];
         assert_eq!((m.hits, m.hits_max), (95, 120));
+    }
+
+    #[test]
+    fn mobile_attributes_updates_all_vitals() {
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0x2D)
+            .u32(0x77)
+            .u16(120)
+            .u16(95)
+            .u16(80)
+            .u16(61)
+            .u16(110)
+            .u16(87);
+        let frame = p.into_vec();
+        assert_eq!(frame.len(), 17);
+        assert!(apply_packet(&mut w, &frame));
+        let m = &w.mobiles[&0x77];
+        assert_eq!((m.hits, m.hits_max), (95, 120));
+        assert_eq!((m.mana, m.mana_max), (61, 80));
+        assert_eq!((m.stam, m.stam_max), (87, 110));
     }
 
     #[test]

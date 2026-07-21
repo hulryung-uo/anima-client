@@ -119,3 +119,5 @@ the refreshed server list is displayed before any subsequent choice. **Back**
 cancels the pending game-server connection and restores the account form.
 
 WASM module: `cargo install wasm-pack && wasm-pack build crates/anima-wasm --target web`.
+ClassicUO compatibility work is tracked in
+[`docs/CLASSICUO_GAPS.md`](docs/CLASSICUO_GAPS.md).
