@@ -158,6 +158,9 @@ let lastEffectSeq = 0;         // highest effect event seq we've already spawned
 // ---- lift-rejection events (0x27 LiftRej) ----
 let lastLiftRejectSeq = 0;     // highest lift-reject event seq we've already handled
 
+// ---- item-drag completion events (0x28 EndDraggingItem / 0x29 accepted) ----
+let lastDragCompletionSeq = 0; // highest drag-completion event seq we've handled
+
 // ---- server-initiated container opens (0x24 DrawContainer) ----
 let lastContainerOpenSeq = 0;  // highest container-open event seq we've already handled
 
@@ -1461,6 +1464,7 @@ function primeSeqRings(s) {
   lastDamageSeq = Math.max(lastDamageSeq, maxSeq(s.damage));
   lastEffectSeq = Math.max(lastEffectSeq, maxSeq(s.effects));
   lastLiftRejectSeq = Math.max(lastLiftRejectSeq, maxSeq(s.liftRejects));
+  lastDragCompletionSeq = Math.max(lastDragCompletionSeq, maxSeq(s.dragCompletions));
   lastContainerOpenSeq = Math.max(lastContainerOpenSeq, maxSeq(s.containerOpens));
   lastSwingSeq = Math.max(lastSwingSeq, maxSeq(s.swings));
   lastSoundSeq = Math.max(lastSoundSeq, maxSeq(s.sounds));
@@ -1490,6 +1494,7 @@ async function poll() {
     ingestDamage(scene); // float new combat damage numbers (0x0B)
     ingestEffects(scene); // spawn new graphical effects (0x70/0xC0/0xC7)
     ingestLiftRejects(scene); // clear the held item + show a message (0x27 LiftRej)
+    ingestDragCompletions(scene); // reconcile held-item cursor acknowledgements (0x28/0x29)
     ingestContainerOpens(scene); // open a window for each server-initiated container open (0x24)
     ingestSwings(scene); // briefly face the attacker toward the defender (0x2F Swing)
     ingestPaperdoll(scene); // open/refresh a paperdoll the server told us to show (0x88)
@@ -3398,6 +3403,34 @@ function ingestLiftRejects(s) {
     if (cursorItem) clearCursorItem();
     const reason = ev.reason | 0;
     addSysMessage(LIFT_REJECT_MSG[reason] || LIFT_REJECT_MSG[LIFT_REJECT_MSG.length - 1]);
+  }
+}
+
+// Reconcile the two legacy server acknowledgements that make ClassicUO release
+// its held-item cursor. Our placement UI is optimistic: it clears the ghost as
+// soon as it sends drop/equip, so pendingPlacements identifies acknowledgements
+// for those already-finished operations. In that case we consume the pending
+// entry without touching a newer item the user may now be holding. With no
+// pending placement, the server is explicitly ending the active drag and we
+// mirror ClassicUO by clearing it.
+function ingestDragCompletions(s) {
+  if (!s || !s.dragCompletions) return;
+  for (const ev of s.dragCompletions) {
+    const seq = ev.seq | 0;
+    if (seq <= lastDragCompletionSeq) continue;
+    lastDragCompletionSeq = seq;
+
+    let pendingIndex = -1;
+    if ((ev.packet | 0) === 0x28 && ev.token != null) {
+      const token = ev.token >>> 0;
+      pendingIndex = pendingPlacements.indexOf(token);
+    }
+    if (pendingIndex < 0 && pendingPlacements.length) pendingIndex = 0;
+    if (pendingIndex >= 0) {
+      pendingPlacements.splice(pendingIndex, 1);
+    } else if (cursorItem) {
+      clearCursorItem();
+    }
   }
 }
 
@@ -5914,6 +5947,11 @@ function esc(s) {
 // item) funnels into it, and every placement reads from it.
 let cursorItem = null;          // { serial, g, amount } | null — the held item, or nothing
 let liftDrag = false;           // true while the very press that lifted the item is still down
+// Serial queue for optimistic drop/equip commands awaiting a possible 0x28/0x29
+// acknowledgement. Current ServUO does not emit these packets, so cap the queue
+// defensively; older/freeshard servers that do emit them consume it in order.
+const pendingPlacements = [];
+const MAX_PENDING_PLACEMENTS = 32;
 let placedAt = 0;               // perf time of the last placement (debounces the trailing mousedown)
 // Pointer-drag arming (canvas sprites can't fire HTML5 dragstart): a left-press on a
 // draggable item arms `groundDrag`; once the press becomes a real drag the item lifts
@@ -5969,6 +6007,11 @@ function clearCursorItem() {
   cursorItem = null; liftDrag = false;
   if (dragGhost) { dragGhost.remove(); dragGhost = null; }
 }
+function sendPlacement(command, serial) {
+  pendingPlacements.push(serial >>> 0);
+  if (pendingPlacements.length > MAX_PENDING_PLACEMENTS) pendingPlacements.shift();
+  sendInput(command);
+}
 // Resolve where a placement click landed and issue the matching drop/equip (the
 // `pickup` already went out at lift, so only one command here). Returns true if the
 // item was placed (caller clears it); false to KEEP holding (clicked an invalid spot).
@@ -5991,7 +6034,7 @@ function placeCursorItem(clientX, clientY) {
     const r = tradeGrid.getBoundingClientRect();
     const gx = Math.max(0, Math.min(150, Math.round(clientX - r.left)));
     const gy = Math.max(0, Math.min(120, Math.round(clientY - r.top)));
-    sendInput("drop:" + serial + ":" + gx + ":" + gy + ":0:" + tgt);
+    sendPlacement("drop:" + serial + ":" + gx + ":" + gy + ":0:" + tgt, serial);
     return true;
   }
   const contWin = el && el.closest && el.closest(".container-win");
@@ -6002,11 +6045,11 @@ function placeCursorItem(clientX, clientY) {
     const r = contWin.getBoundingClientRect();
     const gx = Math.max(0, Math.min(150, Math.round(clientX - r.left)));
     const gy = Math.max(0, Math.min(120, Math.round(clientY - r.top - 20)));
-    sendInput("drop:" + serial + ":" + gx + ":" + gy + ":0:" + tgt);
+    sendPlacement("drop:" + serial + ":" + gx + ":" + gy + ":0:" + tgt, serial);
     return true;
   }
   if (el && el.closest && el.closest("#paperdoll")) {
-    sendInput("equip:" + serial + ":0");   // layer 0 = server derives the wear layer
+    sendPlacement("equip:" + serial + ":0", serial); // layer 0 = server derives wear layer
     return true;
   }
   if (el && el.closest && el.closest("#map")) {
@@ -6019,9 +6062,12 @@ function placeCursorItem(clientX, clientY) {
     // window buildTradeWindow() already builds). Checked before the plain
     // ground drop so standing on/near someone doesn't just drop at their feet.
     const mob = mobileAt(gl.x, gl.y);
-    if (mob != null) { sendInput("drop:" + serial + ":65535:65535:0:" + mob); return true; }
+    if (mob != null) {
+      sendPlacement("drop:" + serial + ":65535:65535:0:" + mob, serial);
+      return true;
+    }
     const t = groundTileAt(gl.x, gl.y);
-    sendInput("drop:" + serial + ":" + t.x + ":" + t.y + ":" + t.z + ":4294967295");
+    sendPlacement("drop:" + serial + ":" + t.x + ":" + t.y + ":" + t.z + ":4294967295", serial);
     return true;
   }
   return false;   // other UI / empty space → keep holding
@@ -6058,10 +6104,10 @@ function returnCursorItem() {
   const serial = cursorItem.serial;
   const bp = backpackSerial();
   if (bp != null) {
-    sendInput("drop:" + serial + ":0:0:0:" + bp);
+    sendPlacement("drop:" + serial + ":0:0:0:" + bp, serial);
   } else {
     const gl = clientToGlobal(lastMenuX, lastMenuY), t = groundTileAt(gl.x, gl.y);
-    sendInput("drop:" + serial + ":" + t.x + ":" + t.y + ":" + t.z + ":4294967295");
+    sendPlacement("drop:" + serial + ":" + t.x + ":" + t.y + ":" + t.z + ":4294967295", serial);
   }
   clearCursorItem();
 }

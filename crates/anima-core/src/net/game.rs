@@ -75,6 +75,8 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0xAF => display_death(world, frame)?,
         0xAA => change_combatant(world, frame)?,
         0x27 => lift_reject(world, frame)?,
+        0x28 => end_dragging_item(world, frame)?,
+        0x29 => drop_item_accepted(world)?,
         0x2D => mobile_attributes(world, frame)?,
         0x89 => corpse_equip(world, frame)?,
         0xC2 => unicode_prompt(world, frame)?,
@@ -1404,6 +1406,24 @@ fn lift_reject(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     let reason = r.u8()?;
     world.push_lift_reject(reason);
+    Ok(())
+}
+
+/// 0x28 EndDraggingItem — `[id][token:u32]` (5 bytes). ClassicUO releases its
+/// held-item cursor and intentionally ignores the payload. We preserve it as an
+/// opaque correlation token because older shards commonly put the item serial
+/// there, allowing the polling renderer to avoid clearing a newer drag when this
+/// acknowledgement arrives late.
+fn end_dragging_item(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    world.push_drag_completion(0x28, Some(r.u32()?));
+    Ok(())
+}
+
+/// 0x29 DropItemAccepted — `[id]` (1 byte). This is the payload-free form of
+/// the server's held-item cursor release acknowledgement.
+fn drop_item_accepted(world: &mut World) -> PResult<()> {
+    world.push_drag_completion(0x29, None);
     Ok(())
 }
 
@@ -3598,6 +3618,34 @@ mod tests {
         assert!(apply_packet(&mut w, &frame));
         assert_eq!(w.recent_lift_rejects.last(), Some(&(1, 3)));
         assert_eq!(w.lift_reject_seq, 1);
+    }
+
+    #[test]
+    fn drag_completion_packets_queue_bounded_events() {
+        let mut w = World::new();
+
+        let mut p = PacketWriter::new();
+        p.u8(0x28).u32(0x4000_1234);
+        let frame = p.into_vec();
+        assert_eq!(frame.len(), 5);
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.recent_drag_completions.len(), 1);
+        assert_eq!(w.recent_drag_completions[0].seq, 1);
+        assert_eq!(w.recent_drag_completions[0].packet, 0x28);
+        assert_eq!(w.recent_drag_completions[0].token, Some(0x4000_1234));
+
+        assert!(apply_packet(&mut w, &[0x29]));
+        assert_eq!(w.recent_drag_completions[1].seq, 2);
+        assert_eq!(w.recent_drag_completions[1].packet, 0x29);
+        assert_eq!(w.recent_drag_completions[1].token, None);
+
+        for _ in 0..20 {
+            assert!(apply_packet(&mut w, &[0x29]));
+        }
+        assert_eq!(w.drag_completion_seq, 22);
+        assert_eq!(w.recent_drag_completions.len(), 16);
+        assert_eq!(w.recent_drag_completions.first().unwrap().seq, 7);
+        assert_eq!(w.recent_drag_completions.last().unwrap().seq, 22);
     }
 
     #[test]

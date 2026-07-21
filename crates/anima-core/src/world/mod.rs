@@ -151,6 +151,18 @@ pub struct Effect {
     pub hue: u16,
 }
 
+/// One server acknowledgement that ends an item-drag operation. ClassicUO
+/// treats both 0x28 EndDraggingItem and 0x29 DropItemAccepted as signals to
+/// release its held-item cursor. The four payload bytes on 0x28 are retained as
+/// an opaque token: older shards commonly use the dragged serial there, while
+/// ClassicUO itself deliberately ignores the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DragCompletion {
+    pub seq: u64,
+    pub packet: u8,
+    pub token: Option<u32>,
+}
+
 /// Current weather state (from 0x65). `kind` reuses the wire type byte:
 /// 0 = rain, 1 = fierce storm, 2 = snow, 3 = storm; 0xFE/0xFF = none/reset.
 /// `intensity` is the particle count (0..70). The renderer only animates the
@@ -774,6 +786,12 @@ pub struct World {
     pub recent_lift_rejects: Vec<(u64, u8)>,
     /// Monotonic counter assigning each lift-rejection event a unique `seq`.
     pub lift_reject_seq: u64,
+    /// Recent item-drag completion acknowledgements (0x28/0x29), newest last.
+    /// The renderer correlates these with its pending placements before clearing
+    /// a held cursor, so a delayed acknowledgement cannot cancel a newer drag.
+    pub recent_drag_completions: Vec<DragCompletion>,
+    /// Monotonic counter assigning each drag-completion event a unique `seq`.
+    pub drag_completion_seq: u64,
     /// An outstanding server text prompt (0xC2 UnicodePrompt), if one is pending.
     /// See [`PromptState`].
     pub prompt: Option<PromptState>,
@@ -870,6 +888,8 @@ const MAX_RECENT_DAMAGE: usize = 16;
 const MAX_RECENT_EFFECTS: usize = 32;
 /// How many recent lift-rejection events [`World::push_lift_reject`] keeps.
 const MAX_RECENT_LIFT_REJECTS: usize = 16;
+/// How many recent item-drag completion events [`World::push_drag_completion`] keeps.
+const MAX_RECENT_DRAG_COMPLETIONS: usize = 16;
 /// How many recent container-open events [`World::push_container_open`] keeps.
 const MAX_RECENT_CONTAINER_OPENS: usize = 16;
 /// How many recent swing events [`World::push_swing`] keeps.
@@ -1053,6 +1073,24 @@ impl World {
             .saturating_sub(MAX_RECENT_LIFT_REJECTS);
         if overflow > 0 {
             self.recent_lift_rejects.drain(0..overflow);
+        }
+    }
+
+    /// Record a 0x28 EndDraggingItem or 0x29 DropItemAccepted event and keep a
+    /// bounded replay ring for renderers that poll the world asynchronously.
+    pub fn push_drag_completion(&mut self, packet: u8, token: Option<u32>) {
+        self.drag_completion_seq += 1;
+        self.recent_drag_completions.push(DragCompletion {
+            seq: self.drag_completion_seq,
+            packet,
+            token,
+        });
+        let overflow = self
+            .recent_drag_completions
+            .len()
+            .saturating_sub(MAX_RECENT_DRAG_COMPLETIONS);
+        if overflow > 0 {
+            self.recent_drag_completions.drain(0..overflow);
         }
     }
 

@@ -1592,6 +1592,26 @@ fn paperdoll_json(world: &World) -> Value {
 const GUMP_ID_VENDOR_BUY: u16 = 0x0030;
 const GUMP_ID_SPELLBOOK: u16 = 0xFFFF;
 
+/// Build the `dragCompletions` event ring consumed by the browser's held-item
+/// cursor. `token` is null for payload-free 0x29 and the raw four-byte 0x28
+/// value otherwise; keeping it raw lets the UI correlate serial-bearing legacy
+/// packets without teaching the protocol layer an unverified interpretation.
+fn drag_completions_json(world: &World) -> Value {
+    Value::Array(
+        world
+            .recent_drag_completions
+            .iter()
+            .map(|event| {
+                json!({
+                    "seq": event.seq,
+                    "packet": event.packet,
+                    "token": event.token,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Build the `containerOpens` array: [`World::recent_container_opens`] filtered
 /// down to events that are actually a container window. `World` keeps that ring
 /// as raw, unfiltered 0x24 data (every `gump_id` ServUO ever sent); deciding
@@ -2608,6 +2628,11 @@ pub fn build_scene(
         .map(|&(seq, reason)| json!({ "seq": seq, "reason": reason }))
         .collect();
     let lift_rejects = serde_json::to_string(&lift_rejects).unwrap_or_else(|_| "[]".into());
+    // Item-drag completion acknowledgements (0x28 EndDraggingItem / 0x29
+    // DropItemAccepted). The browser correlates these with pending placements
+    // before clearing its cursor, protecting a newer lift from a delayed ack.
+    let drag_completions =
+        serde_json::to_string(&drag_completions_json(&s.world)).unwrap_or_else(|_| "[]".into());
     // Recent server-initiated container opens (0x24 DrawContainer): a window we
     // did NOT ourselves double-click for (banker "bank" speech, GM `[bank`, a
     // snoop, …). The client opens a window for each `seq` newer than the last it
@@ -2643,7 +2668,7 @@ pub fn build_scene(
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
          \"popup\":{popup},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
-         \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"containerOpens\":{container_opens},\"swings\":{swings},\
+         \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"containerOpens\":{container_opens},\"swings\":{swings},\
          \"paperdoll\":{paperdoll},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",
         s.confirms, s.denies
@@ -2878,6 +2903,22 @@ mod tests {
             container_opens_json(&w),
             json!([{ "seq": 3, "serial": 0x4000_0077u32 }]),
             "a real container gumpId must still signal an open"
+        );
+    }
+
+    #[test]
+    fn drag_completions_json_preserves_packet_and_optional_token() {
+        let mut w = World::default();
+        assert_eq!(drag_completions_json(&w), json!([]));
+
+        w.push_drag_completion(0x28, Some(0x4000_1234));
+        w.push_drag_completion(0x29, None);
+        assert_eq!(
+            drag_completions_json(&w),
+            json!([
+                { "seq": 1, "packet": 0x28, "token": 0x4000_1234u32 },
+                { "seq": 2, "packet": 0x29, "token": null }
+            ])
         );
     }
 

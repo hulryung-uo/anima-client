@@ -13,7 +13,7 @@ scene/agent exposure, and user-facing behavior (where applicable) are present.
   `src/ClassicUO.Client/Network/PacketHandlers.cs`
 - anima source: `crates/anima-core/src/net/game.rs` plus login and movement
   state machines
-- Current game decoder: 63 packet IDs after adding `0x2D MobileAttributes`;
+- Current game decoder: 65 packet IDs after adding item-drag acknowledgements;
   `0x21`/`0x22` are handled separately by `Walker`
 
 The comparison is mechanical at the packet-ID level, followed by a semantic
@@ -25,6 +25,8 @@ that are acknowledgements/no-ops are not counted as missing game UI features.
 - Login/server/character selection, creation, deletion, cancellation
 - World/mobile/item updates, equipment, containers, paperdolls, status/vitals
 - `0x2D MobileAttributes`: full HP/Mana/Stamina refresh
+- `0x28 EndDraggingItem` / `0x29 DropItemAccepted`: bounded acknowledgement
+  events and delayed-ack-safe held-cursor reconciliation
 - Speech, localized messages, OPL/tooltips, prompts, targeting
 - Movement confirmation/denial, pathfinding, doors, facet changes
 - Combat state, damage/effects, animations, death/corpse links
@@ -39,7 +41,6 @@ the feature. Each row is still open unless a later change moves it above.
 
 | Priority | Packet(s) | ClassicUO behavior | Required anima vertical slice |
 |---|---:|---|---|
-| P0 | `0x28`, `0x29` | End/accept item dragging | Cursor/held-item acknowledgement events and UI cleanup |
 | P0 | `0x2C` | Death status/screen effects | Explicit death transition event, weather/music/war-mode behavior |
 | P0 | `0x38` | Server pathfinding request | Route request into the existing `WalkTo` driver |
 | P0 | `0x7C` | Legacy icon/gray menu | Menu model, reply packet, renderer dialog |
