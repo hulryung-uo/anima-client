@@ -255,6 +255,10 @@ Corners: top=(x,y), right=(x+1,y), bottom=(x+1,y+1), left=(x,y+1).
   first open flanking cardinal → slides along the wall**; a blocked cardinal just fails. The
   resolved direction drives both server pacing and browser prediction (turn-then-move), and a
   fully-blocked step stands (`pred.moving=false`) so running into a wall shows no run animation.
+- [x] **server-requested pathfinding** (`0x38`): preserve each `(x,y,z)` request
+  with a monotonic sequence and restart the existing non-blocking `WalkTo` route
+  in both native `Session` and the web play loop. Server commands use ClassicUO's
+  10,000-node bound without the browser click's 32-tile convenience limit.
 - [x] **walkable_z = ServUO MovementImpl** rule: a standable surface is `Surface && !Impassable`;
   head clearance (`IsOk`) treats anything `Impassable || Surface` as occupying the body span — so
   a **table** (Impassable+Surface) blocks the tile even though it's a surface. `item_blocks` (dynamic

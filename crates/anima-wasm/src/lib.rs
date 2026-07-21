@@ -177,4 +177,19 @@ mod tests {
         assert_eq!(client.world.current_music, Some(42));
         assert!(client.world.pending_war_mode_requests.is_empty());
     }
+
+    #[test]
+    fn server_pathfind_decodes_without_emitting_spurious_wasm_bytes() {
+        let mut client = WasmClient::new("user".into(), "pass".into());
+        client.login = None;
+        client.outbox.clear();
+
+        client.handle(&[0x38, 0x04, 0xB0, 0x03, 0x20, 0x00, 0x11]);
+        let request = client.world.server_pathfind.expect("0x38 request");
+        assert_eq!(
+            (request.seq, request.x, request.y, request.z),
+            (1, 1200, 800, 17)
+        );
+        assert!(client.take_outbox().is_empty());
+    }
 }

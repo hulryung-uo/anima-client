@@ -173,6 +173,17 @@ pub struct DeathScreenEvent {
     pub action: u8,
 }
 
+/// Latest server-requested pathfinding destination (0x38). `z` is kept in the
+/// packet's raw unsigned representation because ClassicUO reads it as `ushort`;
+/// route executors resolve the actual standing Z from map geometry per step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerPathfindRequest {
+    pub seq: u64,
+    pub x: u16,
+    pub y: u16,
+    pub z: u16,
+}
+
 /// Current weather state (from 0x65). `kind` reuses the wire type byte:
 /// 0 = rain, 1 = fierce storm, 2 = snow, 3 = storm; 0xFE/0xFF = none/reset.
 /// `intensity` is the particle count (0..70). The renderer only animates the
@@ -720,6 +731,11 @@ pub struct World {
     /// Music to restore on resurrection. The outer option means “snapshot
     /// captured”; the inner option preserves that no track was playing.
     pub pre_death_music: Option<Option<u16>>,
+    /// Latest 0x38 server-requested WalkTo destination. Consumers gate on `seq`
+    /// so an unchanged destination sent twice still restarts/replaces the route.
+    pub server_pathfind: Option<ServerPathfindRequest>,
+    /// Monotonic counter for [`World::server_pathfind`].
+    pub server_pathfind_seq: u64,
     /// The player's active buffs/debuffs (0xDF), keyed by `icon`. See [`Buff`].
     pub buffs: Vec<Buff>,
     /// The current vendor BUY window (0x74), if one is open. See [`ShopBuy`].
@@ -1185,6 +1201,19 @@ impl World {
                 self.current_music = music;
             }
         }
+    }
+
+    /// Record a server-requested 0x38 WalkTo. This remains an event rather than
+    /// movement state: transport/render drivers own map data, pacing, and route
+    /// cancellation, while core only decodes the protocol intent.
+    pub fn set_server_pathfind(&mut self, x: u16, y: u16, z: u16) {
+        self.server_pathfind_seq += 1;
+        self.server_pathfind = Some(ServerPathfindRequest {
+            seq: self.server_pathfind_seq,
+            x,
+            y,
+            z,
+        });
     }
 
     /// Drain server-triggered 0x72 requests for the active transport driver.

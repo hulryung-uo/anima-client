@@ -75,6 +75,10 @@ const AUTO_WALK_MAX_RANGE: u32 = 32;
 const AUTO_WALK_MAX_EXPANSIONS: usize = 4_000;
 /// Give up after this many issued steps (prevents a runaway route).
 const AUTO_WALK_MAX_STEPS: u32 = 200;
+/// ClassicUO bounds a server-requested 0x38 path at 10,000 explored nodes. It
+/// does not impose the browser click's 32-tile range/200-step convenience cap.
+const SERVER_PATHFIND_MAX_EXPANSIONS: usize = 10_000;
+const SERVER_PATHFIND_MAX_STEPS: u32 = 10_000;
 /// A `WalkTo` whose *exact* clicked tile isn't reachable (a wall decoration,
 /// a tree, a crate someone dropped on it) falls back to the nearest tile
 /// within this many Chebyshev tiles instead of rejecting outright — see
@@ -133,6 +137,92 @@ fn debug_probe_neighbors(
             Err(StepDeny::DynamicItem { graphic, item_z }) => {
                 eprintln!("[pathdbg] dir={dir} ({ux},{uy}): DENY dynamic g=0x{graphic:04X} item_z={item_z}");
             }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalkToStart {
+    Start((u32, u32)),
+    Stop,
+}
+
+/// Validate and resolve a browser- or server-requested WalkTo through the same
+/// pathfinder policy. A blocked exact goal falls back to a nearby reachable
+/// tile, matching ClassicUO's distance-1 relaxation; malformed/far/no-path
+/// requests stop the current route and leave an explanatory system note.
+fn prepare_walkto(
+    world: &mut anima_core::World,
+    map: Option<&mut MapData>,
+    multis: Option<&Multis>,
+    x: u16,
+    y: u16,
+    max_range: Option<u32>,
+    max_expansions: usize,
+) -> WalkToStart {
+    let Some((px, py, pz)) = world
+        .player_mobile()
+        .map(|p| (p.pos.x as u32, p.pos.y as u32, p.pos.z as i32))
+    else {
+        return WalkToStart::Stop;
+    };
+    let Some(map) = map else {
+        return WalkToStart::Stop;
+    };
+
+    let (gx, gy) = (x as u32, y as u32);
+    let dist = px.abs_diff(gx).max(py.abs_diff(gy));
+    if let Some(max_range) = max_range {
+        if dist > max_range {
+            eprintln!("play: walkto ({gx},{gy}) rejected: out-of-range dist={dist}");
+            world.push_system_note(format!(
+                "walkto ({gx},{gy}) rejected: out of range ({dist} tiles, max {max_range})"
+            ));
+            return WalkToStart::Stop;
+        }
+    }
+
+    let empty = std::collections::HashSet::new();
+    let result = {
+        let mut terrain = MapTerrain {
+            world: &*world,
+            map: &mut *map,
+            blocked: &empty,
+            multis,
+        };
+        find_path_near(
+            &mut terrain,
+            (px, py, pz),
+            (gx, gy),
+            WALKTO_GOAL_SLOP,
+            max_expansions,
+        )
+    };
+
+    match result {
+        Some((goal, path)) => {
+            if goal != (gx, gy) {
+                eprintln!("play: walkto ({gx},{gy}) adjusted to nearest reachable tile {goal:?}");
+                world.push_system_note(format!(
+                    "walkto ({gx},{gy}): exact tile blocked, walking to {goal:?} instead"
+                ));
+            }
+            if path.is_empty() {
+                if goal == (gx, gy) {
+                    world.push_system_note(format!("walkto ({gx},{gy}): already there"));
+                }
+                WalkToStart::Stop
+            } else {
+                WalkToStart::Start(goal)
+            }
+        }
+        None => {
+            eprintln!("play: walkto ({gx},{gy}) rejected: no path from ({px},{py},{pz})");
+            world.push_system_note(format!("walkto ({gx},{gy}) rejected: no path found"));
+            if std::env::var("ANIMA_DEBUG").is_ok() {
+                debug_probe_neighbors(&*world, map, multis, &empty, px, py, pz);
+            }
+            WalkToStart::Stop
         }
     }
 }
@@ -743,6 +833,10 @@ impl PlayServer {
         let mut auto_pending_move = false;
         let mut auto_from = (0u16, 0u16);
         let mut auto_target = (0u32, 0u32);
+        let mut auto_max_expansions = AUTO_WALK_MAX_EXPANSIONS;
+        let mut auto_max_steps = AUTO_WALK_MAX_STEPS;
+        // Last core 0x38 event mirrored into this loop's own auto-walk state.
+        let mut server_pathfind_seq = 0u64;
         // Movement (ClassicUO model): the *browser* is the pacer. Its prediction commits
         // one step per UO cadence (ClassicUO `Walker.LastStepRequestTime`) and sends one
         // `walk` per committed step; we just execute each step once. There is no
@@ -797,108 +891,27 @@ impl PlayServer {
                     // rejected up front so it fails fast. A new WalkTo replaces any
                     // active route (and clears the denied-tile blacklist).
                     Some(Action::WalkTo { x, y }) => {
-                        let here = session
-                            .world
-                            .player_mobile()
-                            .map(|p| (p.pos.x as u32, p.pos.y as u32, p.pos.z as i32));
-                        if let (Some((px, py, pz)), Some(m)) = (here, map.as_mut()) {
-                            let (gx, gy) = (x as u32, y as u32);
-                            let dist = px.abs_diff(gx).max(py.abs_diff(gy));
-                            if dist > AUTO_WALK_MAX_RANGE {
-                                // Always print — right now a walkto rejection is 100%
-                                // silent to both the log and the player; this is the fix.
-                                eprintln!(
-                                    "play: walkto ({gx},{gy}) rejected: out-of-range dist={dist}"
-                                );
-                                session.world.push_system_note(format!(
-                                    "walkto ({gx},{gy}) rejected: out of range ({dist} tiles, max {AUTO_WALK_MAX_RANGE})"
-                                ));
-                                auto_goal = None;
-                            } else {
-                                // Verify a route exists before committing (fail fast). If the
-                                // exact clicked tile isn't reachable — a wall decoration, a
-                                // tree, a crate someone dropped on it — fall back to the
-                                // nearest reachable tile within `WALKTO_GOAL_SLOP` of it
-                                // instead of rejecting outright, mirroring ClassicUO's own
-                                // `Pathfinder.WalkTo` (its `distance = 1` relaxation for a
-                                // blocked exact tile — see `find_path_near`'s doc).
-                                let empty = std::collections::HashSet::new();
-                                let mut terrain = MapTerrain {
-                                    world: &session.world,
-                                    map: &mut *m,
-                                    blocked: &empty,
-                                    multis: multis.as_ref(),
-                                };
-                                let resolved = find_path_near(
-                                    &mut terrain,
-                                    (px, py, pz),
-                                    (gx, gy),
-                                    WALKTO_GOAL_SLOP,
-                                    AUTO_WALK_MAX_EXPANSIONS,
-                                );
-                                match resolved {
-                                    Some((goal, path)) => {
-                                        // `goal != (gx, gy)` means `find_path_near` adjusted the
-                                        // click (the exact tile was blocked) — note it regardless
-                                        // of whether any steps are actually needed, so the
-                                        // adjacent-south-of-an-obstacle case (adjusted goal ==
-                                        // where we're already standing) still surfaces *why* we
-                                        // didn't move, not just that we didn't.
-                                        if goal != (gx, gy) {
-                                            eprintln!(
-                                                "play: walkto ({gx},{gy}) adjusted to nearest reachable tile {goal:?}"
-                                            );
-                                            session.world.push_system_note(format!(
-                                                "walkto ({gx},{gy}): exact tile blocked, walking to {goal:?} instead"
-                                            ));
-                                        }
-                                        if path.is_empty() {
-                                            // Already standing at `goal` — either the click landed
-                                            // on our own tile, or (the adjacent-south case) it's
-                                            // the nearest reachable tile and that happens to be
-                                            // where we already are. Either way this is a legitimate
-                                            // "arrived", not FIX 3's false "no path found" reject:
-                                            // an empty path from `find_path_near` no longer implies
-                                            // failure (only `None` does).
-                                            if goal == (gx, gy) {
-                                                session.world.push_system_note(format!(
-                                                    "walkto ({gx},{gy}): already there"
-                                                ));
-                                            }
-                                            auto_goal = None;
-                                        } else {
-                                            auto_goal = Some(goal);
-                                            auto_blocked.clear();
-                                            auto_door_attempts.clear();
-                                            auto_steps = 0;
-                                            auto_pending_move = false;
-                                            last_step = Instant::now()
-                                                - Duration::from_millis(AUTO_WALK_STEP_MS);
-                                        }
-                                    }
-                                    None => {
-                                        eprintln!("play: walkto ({gx},{gy}) rejected: no path from ({px},{py},{pz})");
-                                        session.world.push_system_note(format!(
-                                            "walkto ({gx},{gy}) rejected: no path found"
-                                        ));
-                                        if std::env::var("ANIMA_DEBUG").is_ok() {
-                                            // `empty`, not `auto_blocked`: this probe explains the
-                                            // reachability check that just ran above, which (as a
-                                            // fresh WalkTo, not an in-progress route) used no blacklist.
-                                            debug_probe_neighbors(
-                                                &session.world,
-                                                m,
-                                                multis.as_ref(),
-                                                &empty,
-                                                px,
-                                                py,
-                                                pz,
-                                            );
-                                        }
-                                        auto_goal = None;
-                                    }
-                                }
+                        match prepare_walkto(
+                            &mut session.world,
+                            map.as_mut(),
+                            multis.as_ref(),
+                            x,
+                            y,
+                            Some(AUTO_WALK_MAX_RANGE),
+                            AUTO_WALK_MAX_EXPANSIONS,
+                        ) {
+                            WalkToStart::Start(goal) => {
+                                auto_goal = Some(goal);
+                                auto_blocked.clear();
+                                auto_door_attempts.clear();
+                                auto_steps = 0;
+                                auto_pending_move = false;
+                                auto_max_expansions = AUTO_WALK_MAX_EXPANSIONS;
+                                auto_max_steps = AUTO_WALK_MAX_STEPS;
+                                last_step =
+                                    Instant::now() - Duration::from_millis(AUTO_WALK_STEP_MS);
                             }
+                            WalkToStart::Stop => auto_goal = None,
                         }
                     }
                     // Equip with layer 0 means "figure out the layer for me": look up the
@@ -929,6 +942,52 @@ impl PlayServer {
             if session.observe(Duration::from_millis(20)).is_err() {
                 eprintln!("play: connection closed");
                 break;
+            }
+
+            // A facet change and a server Pathfind request can arrive in the same
+            // pump. Reload first so route validation never consults the map we just
+            // left (the old loop did this only after one auto-walk tick).
+            let want_facet = session.world.map_index;
+            if map.as_ref().map(MapData::facet) != Some(want_facet) {
+                match MapData::open_facet(&cfg.data_dir, want_facet) {
+                    Ok(m) => map = Some(m),
+                    Err(e) => eprintln!(
+                        "play: facet {want_facet} map load failed: {e} (keeping current map)"
+                    ),
+                }
+            }
+
+            // 0x38 Pathfinding is a server-issued WalkTo. Feed it through the
+            // same map/blocked-goal policy as a browser click, but with
+            // ClassicUO's 10,000-node bound and no browser-only 32-tile cap.
+            // A resend to the same tile deliberately restarts it.
+            if let Some(request) = session
+                .world
+                .server_pathfind
+                .filter(|request| request.seq > server_pathfind_seq)
+            {
+                server_pathfind_seq = request.seq;
+                match prepare_walkto(
+                    &mut session.world,
+                    map.as_mut(),
+                    multis.as_ref(),
+                    request.x,
+                    request.y,
+                    None,
+                    SERVER_PATHFIND_MAX_EXPANSIONS,
+                ) {
+                    WalkToStart::Start(goal) => {
+                        auto_goal = Some(goal);
+                        auto_blocked.clear();
+                        auto_door_attempts.clear();
+                        auto_steps = 0;
+                        auto_pending_move = false;
+                        auto_max_expansions = SERVER_PATHFIND_MAX_EXPANSIONS;
+                        auto_max_steps = SERVER_PATHFIND_MAX_STEPS;
+                        last_step = Instant::now() - Duration::from_millis(AUTO_WALK_STEP_MS);
+                    }
+                    WalkToStart::Stop => auto_goal = None,
+                }
             }
 
             // --- Click-to-walk advance: re-path to the goal and issue one step per
@@ -965,7 +1024,7 @@ impl PlayServer {
                                 &mut terrain,
                                 (px as u32, py as u32, pz as i32),
                                 (gx, gy),
-                                AUTO_WALK_MAX_EXPANSIONS,
+                                auto_max_expansions,
                             )
                         });
                         match path {
@@ -999,7 +1058,7 @@ impl PlayServer {
                                             .map(|(_, nx, ny)| (nx as u32, ny as u32))
                                             .unwrap_or((px as u32, py as u32));
                                         auto_steps += 1;
-                                        if auto_steps > AUTO_WALK_MAX_STEPS {
+                                        if auto_steps > auto_max_steps {
                                             auto_goal = None; // runaway guard
                                         }
                                     }
@@ -1099,20 +1158,6 @@ impl PlayServer {
             // guard-zone rects to wherever the player currently is (0xBF/0x08
             // MapChange updates `world.map_index` directly; see its doc).
             facet.store(session.world.map_index, Ordering::Relaxed);
-            // Reload MapData when the server moves us to a different facet, so
-            // land/statics come from the right map files (Malas/Ilshenar/…) instead
-            // of staying on Felucca. Reload only on an actual change; if the new
-            // facet's files won't open, keep the current map rather than going blank.
-            let want_facet = session.world.map_index;
-            if map.as_ref().map(MapData::facet) != Some(want_facet) {
-                match MapData::open_facet(&cfg.data_dir, want_facet) {
-                    Ok(m) => map = Some(m),
-                    Err(e) => eprintln!(
-                        "play: facet {want_facet} map load failed: {e} (keeping current map)"
-                    ),
-                }
-            }
-
             let obs = session.world.observe(&mut cursor);
             for j in &obs.new_journal {
                 journal_seq += 1;

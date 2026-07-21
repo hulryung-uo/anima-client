@@ -13,7 +13,7 @@ scene/agent exposure, and user-facing behavior (where applicable) are present.
   `src/ClassicUO.Client/Network/PacketHandlers.cs`
 - anima source: `crates/anima-core/src/net/game.rs` plus login and movement
   state machines
-- Current game decoder: 66 packet IDs after adding `0x2C DeathStatus`;
+- Current game decoder: 67 packet IDs after adding `0x38 Pathfinding`;
   `0x21`/`0x22` are handled separately by `Walker`
 
 The comparison is mechanical at the packet-ID level, followed by a semantic
@@ -30,6 +30,8 @@ that are acknowledgements/no-ops are not counted as missing game UI features.
 - `0x2C DeathStatus`: ClassicUO-compatible weather reset, death music, timed
   screen banner, peace-mode request, and body-derived death/resurrection
   environment transitions
+- `0x38 Pathfinding`: seq-gated server WalkTo requests executed by both native
+  and web route drivers with ClassicUO-compatible blocked-goal fallback
 - Speech, localized messages, OPL/tooltips, prompts, targeting
 - Movement confirmation/denial, pathfinding, doors, facet changes
 - Combat state, damage/effects, animations, death/corpse links
@@ -44,7 +46,6 @@ the feature. Each row is still open unless a later change moves it above.
 
 | Priority | Packet(s) | ClassicUO behavior | Required anima vertical slice |
 |---|---:|---|---|
-| P0 | `0x38` | Server pathfinding request | Route request into the existing `WalkTo` driver |
 | P0 | `0x7C` | Legacy icon/gray menu | Menu model, reply packet, renderer dialog |
 | P0 | `0x95` | Dye color picker | Dye request model, hue-grid UI, response packet |
 | P0 | `0x9A` | ASCII text prompt | Prompt model/UI and ASCII response/cancel packet |

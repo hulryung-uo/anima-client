@@ -79,6 +79,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x29 => drop_item_accepted(world)?,
         0x2C => death_status(world, frame)?,
         0x2D => mobile_attributes(world, frame)?,
+        0x38 => pathfinding(world, frame)?,
         0x89 => corpse_equip(world, frame)?,
         0xC2 => unicode_prompt(world, frame)?,
         0x6F => secure_trade(world, frame)?,
@@ -1446,6 +1447,19 @@ fn drop_item_accepted(world: &mut World) -> PResult<()> {
 fn death_status(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     world.on_death_screen(r.u8()?);
+    Ok(())
+}
+
+/// 0x38 Pathfinding — `[id][x:u16][y:u16][z:u16]` (7 bytes). ClassicUO passes
+/// this directly to `Player.Pathfinder.WalkTo(x, y, z, 0)`. Core records the
+/// request with a monotonic sequence; native and web route executors consume it
+/// using their existing non-blocking WalkTo machinery.
+fn pathfinding(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let x = r.u16()?;
+    let y = r.u16()?;
+    let z = r.u16()?;
+    world.set_server_pathfind(x, y, z);
     Ok(())
 }
 
@@ -3735,6 +3749,30 @@ mod tests {
         assert_eq!(w.current_music, None);
         assert_eq!(w.pre_death_season, None);
         assert_eq!(w.pre_death_music, None);
+    }
+
+    #[test]
+    fn pathfinding_records_every_server_walkto_request() {
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0x38).u16(0x1234).u16(0x5678).u16((-7i16) as u16);
+        let frame = p.into_vec();
+        assert_eq!(frame.len(), 7);
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(
+            w.server_pathfind,
+            Some(crate::world::ServerPathfindRequest {
+                seq: 1,
+                x: 0x1234,
+                y: 0x5678,
+                z: (-7i16) as u16,
+            })
+        );
+
+        // A byte-identical resend is a fresh command and must replace/restart
+        // any active route, so only its seq changes.
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.server_pathfind.unwrap().seq, 2);
     }
 
     #[test]

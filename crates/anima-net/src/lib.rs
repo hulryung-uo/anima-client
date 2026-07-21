@@ -108,6 +108,9 @@ const ROUTE_STEP: Duration = Duration::from_millis(400);
 /// Give up a route after this many issued steps (runaway guard, mirrors
 /// `play.rs`'s `AUTO_WALK_MAX_STEPS`).
 const ROUTE_MAX_STEPS: u32 = 200;
+/// ClassicUO's 0x38 pathfinder node/path bound; server commands are not subject
+/// to the interactive click route's smaller runaway guard.
+const SERVER_ROUTE_MAX_STEPS: u32 = 10_000;
 /// Like `play_server`'s `WALKTO_GOAL_SLOP`: a route whose *exact* goal tile
 /// turns out unreachable (a wall decoration, a tree, a crate someone dropped
 /// on it) still resolves to the nearest reachable tile within this many
@@ -185,6 +188,7 @@ struct Route {
     /// count — a door `Use` attempt does not (mirrors `play_server`'s
     /// `auto_steps`, which likewise only increments on an actual walk send).
     steps: u32,
+    max_steps: u32,
     last_step: Instant,
     /// Whether the last *armed* (successfully sent) step was a real move (not
     /// a turn) and, if so, where we were and which tile we aimed for — lets
@@ -203,10 +207,19 @@ struct Route {
 
 impl Route {
     fn new(gx: u32, gy: u32) -> Self {
+        Self::with_max_steps(gx, gy, ROUTE_MAX_STEPS)
+    }
+
+    fn from_server(gx: u32, gy: u32) -> Self {
+        Self::with_max_steps(gx, gy, SERVER_ROUTE_MAX_STEPS)
+    }
+
+    fn with_max_steps(gx: u32, gy: u32, max_steps: u32) -> Self {
         Route {
             goal: (gx, gy),
             blocked: HashSet::new(),
             steps: 0,
+            max_steps,
             // Already "due" so the very first `advance` after a `WalkTo` steps
             // immediately instead of waiting a full cadence.
             last_step: Instant::now() - ROUTE_STEP,
@@ -366,6 +379,18 @@ impl Route {
     }
 }
 
+/// Convert the latest core 0x38 event into a fresh native route exactly once.
+/// A repeated destination with a newer seq intentionally replaces the route,
+/// matching ClassicUO's `WalkTo` restart semantics.
+fn next_server_pathfind_route(world: &World, last_seq: &mut u64) -> Option<Route> {
+    let request = world.server_pathfind?;
+    if request.seq <= *last_seq {
+        return None;
+    }
+    *last_seq = request.seq;
+    Some(Route::from_server(request.x as u32, request.y as u32))
+}
+
 /// A live connection to a UO server: the game-phase socket plus the world state
 /// it feeds.
 pub struct Session {
@@ -378,6 +403,8 @@ pub struct Session {
     pub denies: u32,
     /// The active [`Action::WalkTo`] route, if any — see [`Session::advance_route`].
     route: Option<Route>,
+    /// Last 0x38 server pathfinding event converted into `route`.
+    server_pathfind_seq: u64,
 }
 
 impl Session {
@@ -422,6 +449,7 @@ impl Session {
             confirms: 0,
             denies: 0,
             route: None,
+            server_pathfind_seq: 0,
         };
         // ServUO doesn't push our stats/skills unsolicited — request them so the
         // first Observation carries them (ClassicUO does the same on login).
@@ -678,7 +706,7 @@ impl Session {
             RouteStep::Walk(dir) => {
                 let sent = self.walk(dir, false)?;
                 route.step_sent(sent);
-                if route.steps <= ROUTE_MAX_STEPS {
+                if route.steps <= route.max_steps {
                     self.route = Some(route);
                 }
             }
@@ -844,6 +872,11 @@ impl Session {
                 // predictor (stale sequence + pending steps would deny all movement).
                 let before = self.world.player_mobile().map(|m| m.pos);
                 apply_packet(&mut self.world, frame);
+                if let Some(route) =
+                    next_server_pathfind_route(&self.world, &mut self.server_pathfind_seq)
+                {
+                    self.route = Some(route);
+                }
                 if let (Some(b), Some(a)) = (before, self.world.player_mobile().map(|m| m.pos)) {
                     if b.x.abs_diff(a.x).max(b.y.abs_diff(a.y)) > 1 {
                         self.walker.reset();
@@ -1036,6 +1069,25 @@ mod route_tests {
     //! live `Session` (a connected `TcpStream`), which per this crate's testing
     //! rules stays out of unit tests.
     use super::*;
+
+    #[test]
+    fn server_pathfind_event_starts_once_and_resend_replaces_route() {
+        let mut world = World::new();
+        let mut seen = 0;
+
+        world.set_server_pathfind(1200, 800, 17);
+        let route = next_server_pathfind_route(&world, &mut seen).expect("fresh route");
+        assert_eq!(route.goal, (1200, 800));
+        assert_eq!(route.max_steps, SERVER_ROUTE_MAX_STEPS);
+        assert_eq!(seen, 1);
+        assert!(next_server_pathfind_route(&world, &mut seen).is_none());
+
+        world.set_server_pathfind(1200, 800, 17);
+        let replacement =
+            next_server_pathfind_route(&world, &mut seen).expect("resend restarts route");
+        assert_eq!(replacement.goal, (1200, 800));
+        assert_eq!(seen, 2);
+    }
 
     /// An unbounded, always-walkable grid — isolates the route bookkeeping
     /// (cadence/blacklist/arrival) from pathfinding-around-obstacles, which
