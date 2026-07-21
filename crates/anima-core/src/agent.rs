@@ -12,8 +12,8 @@
 use crate::gump_layout::GumpElement;
 use crate::types::Position;
 use crate::world::{
-    is_ghost_body, Book, Buff, JournalEntry, LegacyMenu, MapView, Party, PopupMenu, PromptState,
-    ShopBuy, ShopSell, SpellbookContent, TargetCursor, TradeState, Weather, World,
+    is_ghost_body, Book, Buff, HuePicker, JournalEntry, LegacyMenu, MapView, Party, PopupMenu,
+    PromptState, ShopBuy, ShopSell, SpellbookContent, TargetCursor, TradeState, Weather, World,
 };
 
 /// A skill value, in human units (50.0 == GM-half). Derived from [`crate::world::Skill`].
@@ -157,6 +157,9 @@ pub struct Observation {
     /// Open legacy item/question menus (0x7C), sorted by serial. Answer with
     /// [`Action::LegacyMenuSelect`] using index 0 to cancel or a 1-based choice.
     pub legacy_menus: Vec<LegacyMenu>,
+    /// Open server hue pickers (0x95), sorted by serial. These cannot be
+    /// canceled; answer with [`Action::HuePickerSelect`] and a dyed hue.
+    pub hue_pickers: Vec<HuePicker>,
     /// The currently open book (0x93/0xD4 + 0x66), if any. See [`Book`].
     /// Request more pages with [`Action::BookRequest`].
     pub book: Option<Book>,
@@ -355,6 +358,10 @@ pub enum Action {
     /// 1-based; zero cancels. The driver derives the menu id and item graphic/hue
     /// from the current menu, preventing callers from forging stale entry data.
     LegacyMenuSelect { serial: u32, index: u16 },
+    /// Choose a color in a server hue picker (0x95). The outgoing builder
+    /// mirrors ServUO's normalization to the ordinary dyed range `2..=1001`.
+    /// A stale serial is a no-op; server-owned hue pickers have no cancel reply.
+    HuePickerSelect { serial: u32, hue: u16 },
     /// Request the content of all `pages` of the open book `serial` (outgoing 0x66).
     /// The server replies with 0x66 BookData, filling `World::book`.
     BookRequest { serial: u32, pages: u16 },
@@ -559,6 +566,8 @@ impl World {
 
         let mut legacy_menus = self.legacy_menus.clone();
         legacy_menus.sort_by_key(|menu| menu.serial);
+        let mut hue_pickers = self.hue_pickers.clone();
+        hue_pickers.sort_by_key(|picker| picker.serial);
 
         Observation {
             player,
@@ -575,6 +584,7 @@ impl World {
             shop_sell: self.shop_sell.clone(),
             popup: self.popup.clone(),
             legacy_menus,
+            hue_pickers,
             book: self.book.clone(),
             party: self.party.clone(),
             quest_arrow: self.quest_arrow,

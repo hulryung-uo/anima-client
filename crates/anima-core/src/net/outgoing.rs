@@ -410,6 +410,17 @@ pub fn build_legacy_menu_response(
     w.into_vec()
 }
 
+/// HuePickerResponse `0x95` (9 bytes) — answer a server DisplayHuePicker.
+/// ServUO masks hue flags then applies `Utility.ClipDyedHue`, so mirror that
+/// normalization locally: the ordinary dye palette is exactly `2..=1001`.
+/// `[0x95][picker_serial:u32][reserved:u16=0][hue:u16]`.
+pub fn build_hue_picker_response(serial: u32, hue: u16) -> Vec<u8> {
+    let hue = (hue & 0x3FFF).clamp(2, 1001);
+    let mut w = PacketWriter::new();
+    w.u8(0x95).u32(serial).u16(0).u16(hue);
+    w.into_vec()
+}
+
 /// BookPageRequest `0x66` (variable): ask the server to send every page of the
 /// open book `serial`. `[0x66][len:u16][serial:u32][pageCount:u16=N]` then, for
 /// each page `1..=N`, `[pageNum:u16][lineCount:u16=0xFFFF]` — the `0xFFFF` line
@@ -668,6 +679,16 @@ mod tests {
         let cancel = build_legacy_menu_response(0x1122_3344, 7, 0, 0, 0);
         assert_eq!(cancel.len(), 13);
         assert_eq!(&cancel[7..], &[0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn hue_picker_response_matches_servuo_clipping_and_fixed_shape() {
+        assert_eq!(
+            build_hue_picker_response(0x0102_0304, 0x0386),
+            vec![0x95, 1, 2, 3, 4, 0, 0, 0x03, 0x86]
+        );
+        assert_eq!(&build_hue_picker_response(7, 0)[7..], &[0, 2]);
+        assert_eq!(&build_hue_picker_response(7, 0xFFFF)[7..], &[0x03, 0xE9]);
     }
 
     #[test]

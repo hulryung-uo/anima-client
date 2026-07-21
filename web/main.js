@@ -1523,6 +1523,7 @@ async function poll() {
     refreshShop(scene);   // vendor buy/sell window (auto-opens on scene.shop)
     refreshGumps(scene);  // server-sent generic gumps/dialogs (0xB0/0xDD)
     refreshLegacyMenus(scene); // legacy icon/question menus (0x7C)
+    refreshHuePickers(scene); // server dye color pickers (0x95)
     refreshPopup(scene);  // right-click context menu (0xBF/0x14)
     refreshBook(scene);   // open book reader (0x93/0xD4 + 0x66)
     refreshPrompt(scene); // server text-prompt dialog (0xC2 UnicodePrompt)
@@ -5502,6 +5503,159 @@ function refreshLegacyMenus(scene) {
   }
   for (const serial of [...legacyMenuDismissed.keys()]) {
     if (!seen.has(serial)) legacyMenuDismissed.delete(serial);
+  }
+}
+
+// ── Server dye hue pickers (0x95 request/response) ─────────────────────────
+// ClassicUO presents 1000 ordinary dyed hues as five 20×10 grids. Graduation
+// g contains hues `2 + g + cell*5`, covering exactly ServUO's clipped 2..1001
+// range. A server-owned picker has no cancel packet, so these windows have no X.
+const huePickerWins = new Map();       // serial -> picker window state
+const huePickerDismissed = new Map();  // serial -> signature just answered
+let huePickerCascade = 0;
+let dyedPalettePromise = null;
+
+function loadDyedPalette() {
+  if (!dyedPalettePromise) {
+    dyedPalettePromise = fetch("hues/dyed.json", { cache: "force-cache" })
+      .then((response) => {
+        if (!response.ok) throw new Error("palette HTTP " + response.status);
+        return response.json();
+      })
+      .then((data) => {
+        if ((data.start | 0) !== 2 || !Array.isArray(data.colors) || data.colors.length !== 1000) {
+          throw new Error("invalid dyed palette");
+        }
+        return data.colors;
+      })
+      .catch((error) => {
+        console.warn("dye palette unavailable", error);
+        dyedPalettePromise = null; // allow a later picker to retry
+        return Array(1000).fill("#444");
+      });
+  }
+  return dyedPalettePromise;
+}
+
+function huePickerSignature(picker) {
+  return JSON.stringify([picker.graphic | 0]);
+}
+
+function dyedHue(graduation, cell) {
+  return 2 + (graduation | 0) + (cell | 0) * 5;
+}
+
+function updateHuePickerPreview(state) {
+  state.label.textContent = "Hue " + state.selectedHue;
+  state.preview.src = "art/static/" + state.graphic + ".png?hue=" + state.selectedHue;
+}
+
+function renderHuePickerGrid(state) {
+  state.grid.innerHTML = "";
+  for (let cell = 0; cell < 200; cell++) {
+    const hue = dyedHue(state.graduation, cell);
+    const swatch = document.createElement("button");
+    swatch.type = "button";
+    swatch.className = "hue-picker-swatch" + (hue === state.selectedHue ? " selected" : "");
+    swatch.style.backgroundColor = state.colors[hue - 2] || "#444";
+    swatch.title = "Hue " + hue;
+    swatch.setAttribute("aria-label", "Hue " + hue);
+    swatch.addEventListener("click", () => {
+      state.selectedCell = cell;
+      state.selectedHue = hue;
+      for (const old of state.grid.querySelectorAll(".selected")) old.classList.remove("selected");
+      swatch.classList.add("selected");
+      updateHuePickerPreview(state);
+    });
+    swatch.addEventListener("dblclick", () => answerHuePicker(state.serial, hue));
+    state.grid.appendChild(swatch);
+  }
+}
+
+function answerHuePicker(serial, hue) {
+  const state = huePickerWins.get(serial);
+  if (!state) return;
+  huePickerDismissed.set(serial, state.sig);
+  state.el.remove();
+  huePickerWins.delete(serial);
+  sendInput("huepick:" + serial + ":" + hue);
+}
+
+function buildHuePickerWindow(picker, sig) {
+  const serial = picker.serial >>> 0;
+  const graphic = (picker.graphic | 0) || 0x0FAB;
+  const el = document.createElement("div");
+  el.className = "gump-win hue-picker-win";
+  const off = (huePickerCascade++ % 8) * 22;
+  el.style.left = (250 + off) + "px";
+  el.style.top = (90 + off) + "px";
+  el.innerHTML = '<div class="gump-title"><span>Dye color</span></div>'
+    + '<div class="gump-body hue-picker-body"><div class="hue-picker-toolbar">'
+    + '<div class="hue-picker-preview"><img alt="Dye preview" draggable="false"></div>'
+    + '<div class="hue-picker-controls"><span class="hue-picker-label">Hue 3</span>'
+    + '<label>Graduation <input class="hue-picker-slider" type="range" min="0" max="4" step="1" value="1"></label>'
+    + '</div></div><div class="hue-picker-grid" aria-label="Dye colors"></div>'
+    + '<button class="dlg-btn hue-picker-apply">Apply color</button></div>';
+  document.body.appendChild(el);
+  const state = {
+    el, sig, serial, graphic, graduation: 1, selectedCell: 0, selectedHue: 3, colors: null,
+    grid: el.querySelector(".hue-picker-grid"),
+    preview: el.querySelector(".hue-picker-preview img"),
+    label: el.querySelector(".hue-picker-label"),
+  };
+  huePickerWins.set(serial, state);
+  updateHuePickerPreview(state);
+  state.preview.addEventListener("error", () => { state.preview.style.visibility = "hidden"; });
+  const slider = el.querySelector(".hue-picker-slider");
+  slider.addEventListener("input", () => {
+    state.graduation = slider.value | 0;
+    // ClassicUO keeps the selected grid cell while changing graduation.
+    state.selectedHue = dyedHue(state.graduation, state.selectedCell);
+    if (state.colors) renderHuePickerGrid(state);
+    updateHuePickerPreview(state);
+  });
+  el.querySelector(".hue-picker-apply").addEventListener("click", () => {
+    answerHuePicker(serial, state.selectedHue);
+  });
+  el.addEventListener("keydown", (event) => {
+    if (event.code === "Escape") {
+      // ClassicUO sets CanCloseWithRightClick=false for server-owned pickers.
+      event.preventDefault(); event.stopPropagation();
+    } else if (event.code === "Enter" || event.code === "NumpadEnter") {
+      event.preventDefault(); event.stopPropagation(); answerHuePicker(serial, state.selectedHue);
+    }
+  });
+  makeDraggable(el, el.querySelector(".gump-title"));
+  state.grid.textContent = "Loading colors…";
+  loadDyedPalette().then((colors) => {
+    if (huePickerWins.get(serial) !== state) return;
+    state.colors = colors;
+    renderHuePickerGrid(state);
+  });
+}
+
+function refreshHuePickers(scene) {
+  const list = (scene && scene.huePickers) || [];
+  const seen = new Set();
+  for (const picker of list) {
+    const serial = picker.serial >>> 0;
+    const sig = huePickerSignature(picker);
+    seen.add(serial);
+    if (huePickerDismissed.get(serial) === sig) continue;
+    if (huePickerDismissed.has(serial)) huePickerDismissed.delete(serial);
+    const existing = huePickerWins.get(serial);
+    if (existing && existing.sig === sig) continue;
+    if (existing) { existing.el.remove(); huePickerWins.delete(serial); }
+    buildHuePickerWindow(picker, sig);
+  }
+  for (const serial of [...huePickerWins.keys()]) {
+    if (!seen.has(serial)) {
+      huePickerWins.get(serial).el.remove();
+      huePickerWins.delete(serial);
+    }
+  }
+  for (const serial of [...huePickerDismissed.keys()]) {
+    if (!seen.has(serial)) huePickerDismissed.delete(serial);
   }
 }
 // ── Right-click context (popup) menu (0xBF/0x14) ───────────────────────────

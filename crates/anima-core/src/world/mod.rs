@@ -332,6 +332,15 @@ pub struct LegacyMenu {
     pub entries: Vec<LegacyMenuEntry>,
 }
 
+/// A server-owned legacy hue picker (0x95). `serial` identifies the pending
+/// server callback; `graphic` is the item id supplied for picker identity/
+/// preview. Several pickers can coexist in ServUO's `NetState.HuePickers` list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HuePicker {
+    pub serial: u32,
+    pub graphic: u16,
+}
+
 /// A book opened by the player (from 0x93 OpenBook / 0xD4 OpenBookNew). The header
 /// packet sets `serial`/`title`/`author`/`writable`/`page_count` and sizes `pages`
 /// to `page_count` empty pages; the page content arrives separately in 0x66
@@ -778,6 +787,8 @@ pub struct World {
     pub popup: Option<PopupMenu>,
     /// Open legacy item/question menus (0x7C), keyed by serial. See [`LegacyMenu`].
     pub legacy_menus: Vec<LegacyMenu>,
+    /// Open server hue pickers (0x95), keyed by serial. See [`HuePicker`].
+    pub hue_pickers: Vec<HuePicker>,
     /// The currently open book (0x93/0xD4 header + 0x66 page content), or `None`.
     /// See [`Book`].
     pub book: Option<Book>,
@@ -980,6 +991,9 @@ const MAX_WAYPOINTS: usize = 2_048;
 /// Defensive cap for concurrently-open legacy menus. Normal shards keep only a
 /// handful, but a malformed stream must not grow the list for the whole session.
 const MAX_LEGACY_MENUS: usize = 16;
+/// ServUO's default per-connection `HuePickerCap`; mirror it so the client can
+/// answer every picker a conforming shard is allowed to keep pending.
+const MAX_HUE_PICKERS: usize = 512;
 
 impl World {
     pub fn new() -> Self {
@@ -1441,6 +1455,35 @@ impl World {
     /// Drop a legacy menu after answering/canceling it. No-op if already gone.
     pub fn close_legacy_menu(&mut self, serial: u32) {
         self.legacy_menus.retain(|menu| menu.serial != serial);
+    }
+
+    /// Add or replace a pending 0x95 hue picker. ServUO assigns monotonically
+    /// increasing serials, while upsert also handles a shard retransmission.
+    pub fn open_hue_picker(&mut self, picker: HuePicker) {
+        if let Some(existing) = self
+            .hue_pickers
+            .iter_mut()
+            .find(|existing| existing.serial == picker.serial)
+        {
+            *existing = picker;
+            return;
+        }
+        if self.hue_pickers.len() >= MAX_HUE_PICKERS {
+            self.hue_pickers.remove(0);
+        }
+        self.hue_pickers.push(picker);
+    }
+
+    /// Return a pending hue picker by server callback serial.
+    pub fn hue_picker(&self, serial: u32) -> Option<&HuePicker> {
+        self.hue_pickers
+            .iter()
+            .find(|picker| picker.serial == serial)
+    }
+
+    /// Consume a hue picker after its 0x95 response is sent.
+    pub fn close_hue_picker(&mut self, serial: u32) {
+        self.hue_pickers.retain(|picker| picker.serial != serial);
     }
 
     /// Close every open gump of a given KIND (0xBF/0x04 CloseGump). ServUO

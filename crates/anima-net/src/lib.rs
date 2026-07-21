@@ -21,12 +21,12 @@ use anima_core::agent::{Action, Observation};
 use anima_core::net::outgoing::{
     build_attack, build_book_page_request, build_buy, build_cast_spell, build_double_click,
     build_drop, build_equip, build_gump_response, build_house_design_request,
-    build_legacy_menu_response, build_opl_request, build_party_accept, build_party_decline,
-    build_party_invite, build_party_leave, build_party_message, build_pick_up, build_popup_request,
-    build_popup_select, build_prompt_response, build_say, build_sell, build_single_click,
-    build_skill_lock, build_status_request, build_target_response, build_trade_accept,
-    build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability, build_use_skill,
-    build_war_mode,
+    build_hue_picker_response, build_legacy_menu_response, build_opl_request, build_party_accept,
+    build_party_decline, build_party_invite, build_party_leave, build_party_message, build_pick_up,
+    build_popup_request, build_popup_select, build_prompt_response, build_say, build_sell,
+    build_single_click, build_skill_lock, build_status_request, build_target_response,
+    build_trade_accept, build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability,
+    build_use_skill, build_war_mode,
 };
 use anima_core::net::{
     apply_packet, build_client_version, CharacterChoice, CharacterList, FramingError, LoginConfig,
@@ -575,6 +575,14 @@ impl Session {
                         *serial, menu_id, *index, graphic, hue,
                     ))?;
                     self.world.close_legacy_menu(*serial);
+                }
+            }
+            Action::HuePickerSelect { serial, hue } => {
+                // Picker serials are server callbacks. Never answer a stale picker:
+                // ServUO would ignore it, while keeping our actual live picker open.
+                if self.world.hue_picker(*serial).is_some() {
+                    self.send(&build_hue_picker_response(*serial, *hue))?;
+                    self.world.close_hue_picker(*serial);
                 }
             }
             Action::BookRequest { serial, pages } => {

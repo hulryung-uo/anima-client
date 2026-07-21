@@ -1783,6 +1783,13 @@ fn handle_request(ctx: Ctx) {
         serve_anim(anim, hues, anim_cache, body, group, dir, frame, hue, req);
     } else if let Some(id) = parse_gump_url(&url) {
         serve_gump(gumps, hues, gump_cache, id, hue, req);
+    } else if url == "/hues/dyed.json" {
+        // One compact palette fetch for the 0x95 picker. Loading 200/1000
+        // individual `/hue/<id>.json` swatches would needlessly fan out HTTP.
+        let mut r = Response::from_string(dyed_palette_json(hues.as_deref()));
+        r.add_header(ctype("application/json"));
+        r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=3600"[..]).unwrap());
+        let _ = req.respond(r);
     } else if let Some(hid) = url
         .strip_prefix("/hue/")
         .and_then(|s| s.strip_suffix(".json"))
@@ -1994,6 +2001,20 @@ fn parse_hue_query(raw_url: &str) -> u16 {
         }
     }
     0
+}
+
+/// JSON palette used by the ordinary dye picker. ServUO clips picker responses
+/// to hues 2..=1001; ClassicUO exposes exactly those 1000 colors across five
+/// 200-cell graduations. Ramp 24 is the same representative swatch used by the
+/// existing `/hue/<id>.json` endpoint.
+fn dyed_palette_json(hues: Option<&Hues>) -> String {
+    let colors: Vec<String> = (2u16..=1001)
+        .map(|hue| {
+            let c = hues.map(|h| h.color(hue, 24)).unwrap_or([0, 0, 0, 0]);
+            format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
+        })
+        .collect();
+    serde_json::json!({ "start": 2, "colors": colors }).to_string()
 }
 
 /// Case-insensitively look up a request header's value.
@@ -2320,7 +2341,8 @@ fn content_type(path: &str) -> &'static str {
 /// `war:<0|1>` · `cast:<spellId>` · `target:<serial>` · `targetxy:<x>:<y>:<z>:<graphic>` ·
 /// `gump:<serial>:<gumpId>:<button>[:sw=1,2][:e=<id>=<text>,…]` (gump reply; text
 /// entries can't contain `:`, `,`, or `=`) · `menusel:<serial>:<index>` (legacy
-/// 0x7C menu; index 0 cancels) · `prompt:<text>` / `promptcancel`
+/// 0x7C menu; index 0 cancels) · `huepick:<serial>:<hue>` (0x95 dye picker) ·
+/// `prompt:<text>` / `promptcancel`
 /// (answer/cancel a pending server text prompt, 0xC2 UnicodePrompt) ·
 /// `tradeaccept:<mycont>:<0|1>` / `tradecancel:<mycont>` /
 /// `tradegold:<mycont>:<gold>:<platinum>` (answer the secure-trade session
@@ -2492,6 +2514,13 @@ fn parse_command(body: &str) -> Option<Action> {
             let index = p.next()?.parse().ok()?;
             Some(Action::LegacyMenuSelect { serial, index })
         }
+        // huepick:<serial>:<hue> — choose a dyed hue in a server 0x95 picker.
+        "huepick" => {
+            let mut p = arg.split(':');
+            let serial = parse_serial(p.next()?)?;
+            let hue = p.next()?.parse().ok()?;
+            Some(Action::HuePickerSelect { serial, hue })
+        }
         // bookreq:<serial>:<count> — request all pages of the open book (0x66).
         "bookreq" => {
             let mut p = arg.split(':');
@@ -2599,6 +2628,47 @@ fn parse_saturating_u32(s: &str) -> Option<u32> {
         .parse::<u64>()
         .ok()
         .map(|v| v.min(u32::MAX as u64) as u32)
+}
+
+#[cfg(test)]
+mod hue_palette_tests {
+    use super::*;
+
+    #[test]
+    fn missing_assets_still_emit_complete_dyed_hue_range() {
+        let value: serde_json::Value = serde_json::from_str(&dyed_palette_json(None)).unwrap();
+        assert_eq!(value["start"], 2);
+        let colors = value["colors"].as_array().unwrap();
+        assert_eq!(colors.len(), 1000);
+        assert_eq!(colors.first().unwrap(), "#000000"); // hue 2
+        assert_eq!(colors.last().unwrap(), "#000000"); // hue 1001
+    }
+
+    #[test]
+    fn huepick_command_preserves_picker_serial_and_hue() {
+        assert_eq!(
+            parse_command("huepick:0x01020304:902"),
+            Some(Action::HuePickerSelect {
+                serial: 0x0102_0304,
+                hue: 902,
+            })
+        );
+        assert!(parse_command("huepick:bad:902").is_none());
+    }
+
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource/hues.mul
+    fn real_hues_mul_produces_visible_varied_picker_colors() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let hues = Hues::open(dir).expect("open real hues.mul");
+        let value: serde_json::Value =
+            serde_json::from_str(&dyed_palette_json(Some(&hues))).unwrap();
+        let colors = value["colors"].as_array().unwrap();
+        assert_eq!(colors.len(), 1000);
+        assert!(colors.iter().any(|color| color != "#000000"));
+        let unique: std::collections::HashSet<_> = colors.iter().collect();
+        assert!(unique.len() > 100, "picker palette should have many colors");
+    }
 }
 
 #[cfg(test)]

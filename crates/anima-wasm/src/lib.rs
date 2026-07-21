@@ -171,6 +171,20 @@ impl WasmClient {
         true
     }
 
+    /// Answer a pending server 0x95 hue picker. Returns false for a stale
+    /// callback serial. Hue normalization matches ServUO (`2..=1001`).
+    pub fn hue_picker_select(&mut self, serial: u32, hue: u16) -> bool {
+        if self.world.hue_picker(serial).is_none() {
+            return false;
+        }
+        self.outbox
+            .extend(anima_core::net::outgoing::build_hue_picker_response(
+                serial, hue,
+            ));
+        self.world.close_hue_picker(serial);
+        true
+    }
+
     /// Current perception using the shared, versioned Observation JSON schema.
     pub fn observation_json(&mut self) -> String {
         let obs = self.world.observe(&mut self.journal_cursor);
@@ -249,5 +263,20 @@ mod tests {
             )
         );
         assert!(client.world.legacy_menus.is_empty());
+    }
+
+    #[test]
+    fn hue_picker_select_queues_clipped_response_and_consumes_picker() {
+        let mut client = WasmClient::new("user".into(), "pass".into());
+        client.login = None;
+        client.outbox.clear();
+        client.handle(&[0x95, 0x01, 0x02, 0x03, 0x04, 0, 0, 0x0F, 0xAB]);
+        assert!(client.hue_picker_select(0x0102_0304, u16::MAX));
+        assert_eq!(
+            client.take_outbox(),
+            anima_core::net::outgoing::build_hue_picker_response(0x0102_0304, u16::MAX)
+        );
+        assert!(client.world.hue_pickers.is_empty());
+        assert!(!client.hue_picker_select(0x0102_0304, 10));
     }
 }

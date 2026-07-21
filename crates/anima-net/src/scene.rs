@@ -1369,6 +1369,18 @@ fn legacy_menus_json(world: &World) -> Value {
     )
 }
 
+/// Build pending server 0x95 hue pickers in stable callback-serial order.
+fn hue_pickers_json(world: &World) -> Value {
+    let mut pickers = world.hue_pickers.clone();
+    pickers.sort_by_key(|picker| picker.serial);
+    Value::Array(
+        pickers
+            .into_iter()
+            .map(|picker| json!({ "serial": picker.serial, "graphic": picker.graphic }))
+            .collect(),
+    )
+}
+
 /// Build the `party` object for the scene (0xBF/0x06). `leader` is the party
 /// leader's serial (0 = none), `members` lists each member `{serial, name, hits,
 /// hitsMax}`, and `invite` is the serial of a leader who invited us (0 = none).
@@ -2623,6 +2635,9 @@ pub fn build_scene(
     // Legacy item/question menus (0x7C), potentially several at once.
     let legacy_menus =
         serde_json::to_string(&legacy_menus_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    // Server dye hue pickers (0x95), potentially several callback serials.
+    let hue_pickers =
+        serde_json::to_string(&hue_pickers_json(&s.world)).unwrap_or_else(|_| "[]".into());
     // The open book (0x93/0xD4 + 0x66), or null.
     let book = serde_json::to_string(&book_json(&s.world)).unwrap_or_else(|_| "null".into());
     // Known spellbook contents (0xBF/0x1B), one entry per book we've been told
@@ -2720,7 +2735,7 @@ pub fn build_scene(
          \"statics\":[{statics}],\"mobiles\":{mobiles},\"items\":{items},\"contItems\":{cont_items},\
          \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"tanims\":{tanims},\"damage\":{damage},\"effects\":{effects},\"music\":{music},\
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
-         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
+         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
          \"paperdoll\":{paperdoll},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps},\
@@ -2864,8 +2879,8 @@ mod tests {
     use anima_assets::MultiComponent;
     use anima_core::types::{Position, Serial};
     use anima_core::world::{
-        Book, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, PopupEntry, PopupMenu, PromptState,
-        TradeState,
+        Book, HuePicker, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, PopupEntry, PopupMenu,
+        PromptState, TradeState,
     };
 
     #[test]
@@ -3205,6 +3220,28 @@ mod tests {
         assert_eq!(v[0]["entries"][0]["hue"], 0x0481);
         assert_eq!(v[1]["serial"], 20);
         assert_eq!(v[1]["kind"], "question");
+    }
+
+    #[test]
+    fn hue_pickers_json_is_sorted_and_exact() {
+        let mut w = World::default();
+        w.hue_pickers = vec![
+            HuePicker {
+                serial: 20,
+                graphic: 0x2006,
+            },
+            HuePicker {
+                serial: 10,
+                graphic: 0x0FAB,
+            },
+        ];
+        assert_eq!(
+            hue_pickers_json(&w),
+            json!([
+                { "serial": 10, "graphic": 0x0FAB },
+                { "serial": 20, "graphic": 0x2006 },
+            ])
+        );
     }
 
     #[test]

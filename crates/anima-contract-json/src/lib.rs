@@ -6,12 +6,12 @@
 //! The shapes are also mirrored by `anima2/anima2/contract.py` — keep that
 //! consumer in lockstep.
 //!
-//! ## Schema (v9 — snake_case, versioned)
+//! ## Schema (v10 — snake_case, versioned)
 //!
 //! [`observation_to_json`] emits one object with these top-level keys, one per
 //! [`Observation`] field: `player`, `mobiles`, `items`, `new_journal`,
 //! `pending_target`, `skills`, `gumps`, `prompt`, `trades`, `buffs`,
-//! `shop_buy`, `shop_sell`, `popup`, `legacy_menus`, `book`, `party`, `quest_arrow`, `waypoints`,
+//! `shop_buy`, `shop_sell`, `popup`, `legacy_menus`, `hue_pickers`, `book`, `party`, `quest_arrow`, `waypoints`,
 //! `weather`, `season`, `light`, `war`, `last_attack`, `combatant`, `corpse_of`,
 //! `corpse_equip`, `map_index`, `aos`, `opl`, `recent_damage`, `spellbooks`,
 //! `map_gumps`. A
@@ -57,13 +57,14 @@
 //! `player.poisoned`, and `player.dead` so survival brains receive status that
 //! the core world already tracks. v8: added `waypoints`, the server's 0xE5
 //! corpse/resurrection/quest markers with 0xE6 removal semantics. v9: added
-//! `legacy_menus`, the server's concurrent 0x7C item/question menus.)
+//! `legacy_menus`, the server's concurrent 0x7C item/question menus. v10:
+//! added `hue_pickers`, the server's concurrent 0x95 dye color pickers.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 use anima_core::agent::{
     Action, GumpView, ItemView, MobileView, Observation, PlayerView, SkillView, WaypointView,
@@ -71,8 +72,8 @@ use anima_core::agent::{
 use anima_core::gump_layout::{GumpElement, HtmlText};
 use anima_core::types::Position;
 use anima_core::world::{
-    Book, Buff, JournalEntry, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, MapView, Party,
-    PopupEntry, PopupMenu, PromptState, ShopBuy, ShopSell, ShopSellItem, SpellbookContent,
+    Book, Buff, HuePicker, JournalEntry, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, MapView,
+    Party, PopupEntry, PopupMenu, PromptState, ShopBuy, ShopSell, ShopSellItem, SpellbookContent,
     TargetCursor, TradeState, Weather,
 };
 use serde_json::{json, Value};
@@ -297,6 +298,10 @@ fn legacy_menu_json(menu: &LegacyMenu) -> Value {
     })
 }
 
+fn hue_picker_json(picker: &HuePicker) -> Value {
+    json!({ "serial": picker.serial, "graphic": picker.graphic })
+}
+
 fn book_json(b: &Book) -> Value {
     json!({
         "serial": b.serial, "title": b.title, "author": b.author,
@@ -377,6 +382,7 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "shop_sell": obs.shop_sell.as_ref().map(shop_sell_json),
         "popup": obs.popup.as_ref().map(popup_json),
         "legacy_menus": obs.legacy_menus.iter().map(legacy_menu_json).collect::<Vec<_>>(),
+        "hue_pickers": obs.hue_pickers.iter().map(hue_picker_json).collect::<Vec<_>>(),
         "book": obs.book.as_ref().map(book_json),
         "party": party_json(&obs.party),
         "quest_arrow": obs.quest_arrow.map(|(x, y)| json!({ "x": x, "y": y })),
@@ -569,6 +575,10 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
             serial: req_u32("serial")?,
             index: req_u16("index")?,
         }),
+        "HuePickerSelect" => Ok(Action::HuePickerSelect {
+            serial: req_u32("serial")?,
+            hue: req_u16("hue")?,
+        }),
         "GumpResponse" => Ok(Action::GumpResponse {
             serial: req_u32("serial")?,
             gump_id: req_u32("gump_id")?,
@@ -754,6 +764,13 @@ mod tests {
                 },
             ),
             (
+                json!({"type": "HuePickerSelect", "serial": 10, "hue": 902}),
+                Action::HuePickerSelect {
+                    serial: 10,
+                    hue: 902,
+                },
+            ),
+            (
                 json!({"type": "GumpResponse", "serial": 1, "gump_id": 2, "button": 3,
                        "switches": [1, 2], "entries": [[4, "hi"]]}),
                 Action::GumpResponse {
@@ -846,8 +863,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v9_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 9);
+    fn schema_v10_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 10);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,
@@ -910,6 +927,21 @@ mod tests {
     }
 
     #[test]
+    fn schema_v10_serializes_hue_pickers_exact_shape() {
+        let obs = Observation {
+            hue_pickers: vec![HuePicker {
+                serial: 0x0102_0304,
+                graphic: 0x0FAB,
+            }],
+            ..Observation::default()
+        };
+        assert_eq!(
+            observation_to_json(&obs)["hue_pickers"],
+            json!([{ "serial": 0x0102_0304u32, "graphic": 0x0FAB }])
+        );
+    }
+
+    #[test]
     fn observation_json_has_expected_keys() {
         let obs = Observation::default();
         let v = observation_to_json(&obs);
@@ -928,6 +960,7 @@ mod tests {
             "shop_sell",
             "popup",
             "legacy_menus",
+            "hue_pickers",
             "book",
             "party",
             "quest_arrow",
@@ -960,6 +993,7 @@ mod tests {
         assert!(v["popup"].is_null());
         assert!(v["prompt"].is_null());
         assert_eq!(v["legacy_menus"], json!([]));
+        assert_eq!(v["hue_pickers"], json!([]));
     }
 
     /// Schema v5: `items[].is_multi` — a placed boat/house shows up in

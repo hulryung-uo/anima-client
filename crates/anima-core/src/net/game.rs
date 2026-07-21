@@ -10,7 +10,7 @@
 
 use super::packet::{PacketError, PacketReader, Result as PResult};
 use crate::world::{
-    Effect, Gump, HouseDesign, HousePlane, JournalEntry, LegacyMenu, LegacyMenuEntry,
+    Effect, Gump, HouseDesign, HousePlane, HuePicker, JournalEntry, LegacyMenu, LegacyMenuEntry,
     LegacyMenuKind, PopupEntry, PopupMenu, PromptState, Skill, TargetCursor, TradeState, Waypoint,
     World,
 };
@@ -64,6 +64,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0xBC => season(world, frame)?,
         0x74 => open_buy_window(world, frame)?,
         0x7C => open_legacy_menu(world, frame)?,
+        0x95 => open_hue_picker(world, frame)?,
         0x9E => sell_list(world, frame)?,
         0xDF => buff(world, frame)?,
         0xB0 => display_gump(world, frame)?,
@@ -1015,6 +1016,19 @@ fn open_legacy_menu(world: &mut World, frame: &[u8]) -> PResult<()> {
         kind,
         entries,
     });
+    Ok(())
+}
+
+/// 0x95 DisplayHuePicker — fixed 9-byte server request:
+/// `[id][serial:u32][reserved:u16=0][graphic:u16]`. The same packet id and
+/// width are reused client→server for the selected hue; see
+/// [`crate::net::outgoing::build_hue_picker_response`].
+fn open_hue_picker(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let serial = r.u32()?;
+    r.skip(2)?;
+    let graphic = r.u16()?;
+    world.open_hue_picker(HuePicker { serial, graphic });
     Ok(())
 }
 
@@ -3539,6 +3553,46 @@ mod tests {
         assert_eq!(w.legacy_menu(10).unwrap().kind, LegacyMenuKind::Question);
         assert_eq!(w.legacy_menu(10).unwrap().entries[1].text, "Minoc");
         assert_eq!(w.legacy_menu(20).unwrap().question, "Continue?");
+    }
+
+    #[test]
+    fn hue_picker_parses_fixed_packet_upserts_and_coexists() {
+        let mut w = World::new();
+        assert!(apply_packet(
+            &mut w,
+            &[0x95, 0x01, 0x02, 0x03, 0x04, 0, 0, 0x0F, 0xAB]
+        ));
+        assert_eq!(
+            w.hue_picker(0x0102_0304),
+            Some(&HuePicker {
+                serial: 0x0102_0304,
+                graphic: 0x0FAB,
+            })
+        );
+
+        assert!(apply_packet(
+            &mut w,
+            &[0x95, 0x00, 0x00, 0x00, 0x09, 0, 0, 0x20, 0x06]
+        ));
+        assert_eq!(w.hue_pickers.len(), 2);
+
+        // A retransmit with the same callback serial refreshes in place.
+        assert!(apply_packet(
+            &mut w,
+            &[0x95, 0x01, 0x02, 0x03, 0x04, 0, 0, 0x0E, 0xED]
+        ));
+        assert_eq!(w.hue_pickers.len(), 2);
+        assert_eq!(w.hue_picker(0x0102_0304).unwrap().graphic, 0x0EED);
+    }
+
+    #[test]
+    fn truncated_hue_picker_is_ignored_without_partial_state() {
+        let mut w = World::new();
+        assert!(apply_packet(
+            &mut w,
+            &[0x95, 0x01, 0x02, 0x03, 0x04, 0, 0, 0x0F]
+        ));
+        assert!(w.hue_pickers.is_empty());
     }
 
     #[test]

@@ -115,6 +115,9 @@ fn main() {
                 Action::LegacyMenuSelect { serial, index } => {
                     format!("menusel(0x{serial:08X} i={index})")
                 }
+                Action::HuePickerSelect { serial, hue } => {
+                    format!("huepick(0x{serial:08X} hue={hue})")
+                }
                 Action::BookRequest { serial, pages } => {
                     format!("bookreq(0x{serial:08X}×{pages})")
                 }
