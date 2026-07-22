@@ -1456,6 +1456,40 @@ fn logout_ack_json(world: &World) -> Value {
     }
 }
 
+/// Bounded 0xF6 history used by the browser to interpolate every member of a
+/// boat step from the same source, destination, and server speed.
+fn boat_movements_json(world: &World) -> Value {
+    Value::Array(
+        world
+            .recent_boat_movements
+            .iter()
+            .map(|movement| {
+                let mut entities = Vec::with_capacity(movement.entities.len() + 1);
+                entities.push(json!({
+                    "serial": movement.boat_serial,
+                    "from": { "x": movement.from.x, "y": movement.from.y, "z": movement.from.z },
+                    "to": { "x": movement.to.x, "y": movement.to.y, "z": movement.to.z },
+                }));
+                entities.extend(movement.entities.iter().map(|entity| {
+                    json!({
+                        "serial": entity.serial,
+                        "from": { "x": entity.from.x, "y": entity.from.y, "z": entity.from.z },
+                        "to": { "x": entity.to.x, "y": entity.to.y, "z": entity.to.z },
+                    })
+                }));
+                json!({
+                    "seq": movement.seq,
+                    "boat": movement.boat_serial,
+                    "speed": movement.speed,
+                    "dir": movement.moving_direction,
+                    "facing": movement.facing_direction,
+                    "entities": entities,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Build the `party` object for the scene (0xBF/0x06). `leader` is the party
 /// leader's serial (0 = none), `members` lists each member `{serial, name, hits,
 /// hitsMax}`, and `invite` is the serial of a leader who invited us (0 = none).
@@ -1882,6 +1916,7 @@ fn emit_multi_component(
     y: i64,
     graphic: u16,
     cz: i32,
+    multi_serial: u32,
     statics: &mut String,
     n_statics: &mut usize,
     lights: &mut Vec<Value>,
@@ -1913,8 +1948,8 @@ fn emit_multi_component(
     let anim = anim_suffix(map, animdata, graphic);
     let _ = write!(
         statics,
-        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}}},",
-        x, y, cz, graphic, spz, foliage, anim
+        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{},\"ms\":{}{}{}}},",
+        x, y, cz, graphic, spz, multi_serial, foliage, anim
     );
     *n_statics += 1;
     if lights.len() < light_cap && map.item_is_light(graphic) {
@@ -2559,6 +2594,7 @@ pub fn build_scene(
                                                 y,
                                                 g,
                                                 mz + dz as i32,
+                                                mserial,
                                                 &mut statics,
                                                 &mut n_statics,
                                                 &mut lights,
@@ -2582,6 +2618,7 @@ pub fn build_scene(
                                     y,
                                     c.graphic,
                                     mz + c.dz as i32,
+                                    mserial,
                                     &mut statics,
                                     &mut n_statics,
                                     &mut lights,
@@ -2741,6 +2778,8 @@ pub fn build_scene(
         serde_json::to_string(&character_profiles_json(&s.world)).unwrap_or_else(|_| "[]".into());
     let logout_ack =
         serde_json::to_string(&logout_ack_json(&s.world)).unwrap_or_else(|_| "null".into());
+    let boat_moves =
+        serde_json::to_string(&boat_movements_json(&s.world)).unwrap_or_else(|_| "[]".into());
     // The open book (0x93/0xD4 + 0x66), or null.
     let book = serde_json::to_string(&book_json(&s.world)).unwrap_or_else(|_| "null".into());
     // Known spellbook contents (0xBF/0x1B), one entry per book we've been told
@@ -2842,7 +2881,7 @@ pub fn build_scene(
          \"statics\":[{statics}],\"mobiles\":{mobiles},\"items\":{items},\"contItems\":{cont_items},\
          \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"tanims\":{tanims},\"damage\":{damage},\"effects\":{effects},\"music\":{music},\
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
-         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"logoutAck\":{logout_ack},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
+         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"logoutAck\":{logout_ack},\"boatMoves\":{boat_moves},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
          \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps},\
@@ -3464,6 +3503,51 @@ mod tests {
         assert_eq!(logout_ack_json(&w), json!({ "seq": 1, "allowed": false }));
         w.set_logout_ack(true);
         assert_eq!(logout_ack_json(&w), json!({ "seq": 2, "allowed": true }));
+    }
+
+    #[test]
+    fn boat_movements_json_preserves_rigid_group_and_speed() {
+        let mut w = World::default();
+        w.push_boat_movement(anima_core::world::BoatMovement {
+            seq: 0,
+            boat_serial: 0x4000_1000,
+            speed: 4,
+            moving_direction: 2,
+            facing_direction: 6,
+            from: anima_core::types::Position {
+                x: 10,
+                y: 20,
+                z: -5,
+            },
+            to: anima_core::types::Position {
+                x: 11,
+                y: 20,
+                z: -5,
+            },
+            entities: vec![anima_core::world::BoatMovedEntity {
+                serial: 0x42,
+                from: anima_core::types::Position {
+                    x: 10,
+                    y: 21,
+                    z: -4,
+                },
+                to: anima_core::types::Position {
+                    x: 11,
+                    y: 21,
+                    z: -4,
+                },
+            }],
+        });
+        assert_eq!(
+            boat_movements_json(&w),
+            json!([{
+                "seq": 1, "boat": 0x4000_1000u32, "speed": 4, "dir": 2, "facing": 6,
+                "entities": [
+                    { "serial": 0x4000_1000u32, "from": { "x": 10, "y": 20, "z": -5 }, "to": { "x": 11, "y": 20, "z": -5 } },
+                    { "serial": 0x42, "from": { "x": 10, "y": 21, "z": -4 }, "to": { "x": 11, "y": 21, "z": -4 } },
+                ]
+            }])
+        );
     }
 
     #[test]

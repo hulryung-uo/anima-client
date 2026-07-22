@@ -190,6 +190,9 @@ const suppressedProfileSeqs = new Set(); // closed/saved locally; wait for scene
 // ---- server-authorized logout (0xD1) ----
 let lastLogoutAckSeq = 0;
 let logoutPending = false;
+// ---- High Seas smooth boat movement (0xF6) ----
+let lastBoatMoveSeq = 0;
+const boatGlides = new Map(); // entity serial -> queued rigid movement segments
 // { serial, title, canLift } for whichever target the LAST server signal named —
 // read by refreshPaperdoll() to show the real title line instead of the plain
 // mobile name, when it matches the currently-displayed doll.
@@ -1500,6 +1503,7 @@ function primeSeqRings(s) {
   lastOpenUrlSeq = Math.max(lastOpenUrlSeq, maxSeq(s.openUrls));
   lastTipNoticeSeq = Math.max(lastTipNoticeSeq, maxSeq(s.tips));
   if (s.logoutAck) lastLogoutAckSeq = Math.max(lastLogoutAckSeq, s.logoutAck.seq | 0);
+  lastBoatMoveSeq = Math.max(lastBoatMoveSeq, maxSeq(s.boatMoves));
   // Per-serial, unlike the rings above — see `lastMapOpenSeq`'s doc.
   if (s.maps) for (const m of s.maps) lastMapOpenSeq.set(m.serial >>> 0, m.openSeq | 0);
 }
@@ -1523,6 +1527,7 @@ async function poll() {
     wasInWorld = true;
     hideLogin();
     if (!seqPrimed) { primeSeqRings(scene); seqPrimed = true; }
+    ingestBoatMoves(scene);
     updateAnimStates(scene);
     const ts = performance.now();
     syncWorld(scene); // diffs only — no full rebuild
@@ -1608,6 +1613,78 @@ function updateDeathUI(s) {
   if (banner) banner.style.display = dead && performance.now() < deathBannerUntil ? "block" : "none";
 }
 
+// ClassicUO BoatMovingManager velocity table. A segment starts when its 0xF6
+// reaches this renderer; bursts are queued instead of collapsing intermediate
+// tiles, keeping the hull and every passenger on one rigid timeline.
+function boatMoveDuration(speed) {
+  speed |= 0;
+  if (speed === 2) return 1000;
+  if (speed === 3) return 500;
+  if (speed === 4) return 250;
+  if (speed > 4) return speed * 10;
+  return 500;
+}
+
+function queueBoatGlide(serial, from, to, duration, now) {
+  serial >>>= 0;
+  let queue = boatGlides.get(serial);
+  if (!queue) { queue = []; boatGlides.set(serial, queue); }
+  while (queue.length && now >= queue[0].end) queue.shift();
+  const previous = queue.length ? queue[queue.length - 1] : null;
+  const start = previous ? previous.end : now;
+  const source = previous ? previous.to : from;
+  queue.push({
+    from: { x: Number(source.x), y: Number(source.y), z: Number(source.z || 0) },
+    to: { x: Number(to.x), y: Number(to.y), z: Number(to.z || 0) },
+    start,
+    end: start + duration,
+  });
+  // A background tab can receive a short burst when it wakes. Keep enough
+  // segments to preserve those intermediate tiles instead of jumping ahead.
+  if (queue.length > 32) {
+    const first = queue[0], latest = queue[queue.length - 1];
+    const t = now <= first.start ? 0 : Math.min(1, (now - first.start) / (first.end - first.start));
+    const current = {
+      x: first.from.x + (first.to.x - first.from.x) * t,
+      y: first.from.y + (first.to.y - first.from.y) * t,
+      z: first.from.z + (first.to.z - first.from.z) * t,
+    };
+    queue.splice(0, queue.length, { from: current, to: latest.to, start: now, end: now + duration });
+  }
+}
+
+function boatVisual(serial, fallback, now) {
+  const queue = boatGlides.get(serial >>> 0);
+  if (!queue) return { ...fallback, active: false };
+  while (queue.length && now >= queue[0].end) queue.shift();
+  if (!queue.length) {
+    boatGlides.delete(serial >>> 0);
+    return { ...fallback, active: false };
+  }
+  const segment = queue[0];
+  const t = now <= segment.start ? 0 : Math.min(1, (now - segment.start) / (segment.end - segment.start));
+  return {
+    x: segment.from.x + (segment.to.x - segment.from.x) * t,
+    y: segment.from.y + (segment.to.y - segment.from.y) * t,
+    z: segment.from.z + (segment.to.z - segment.from.z) * t,
+    active: true,
+  };
+}
+
+function ingestBoatMoves(s) {
+  const now = performance.now();
+  for (const movement of (s && s.boatMoves) || []) {
+    const seq = Number(movement.seq) || 0;
+    if (!seq || seq <= lastBoatMoveSeq) continue;
+    lastBoatMoveSeq = seq;
+    const duration = boatMoveDuration(movement.speed);
+    for (const entity of movement.entities || []) {
+      if (!entity.from || !entity.to) continue;
+      queueBoatGlide(entity.serial, entity.from, entity.to, duration, now);
+    }
+  }
+}
+
 function updateAnimStates(s) {
   const now = performance.now();
   const seen = new Set();
@@ -1677,6 +1754,12 @@ function updateAnimStates(s) {
       pred.x = p.x; pred.y = p.y; pred.z = p.z ?? pred.z; pred.dir = p.dir ?? pred.dir;
     } else if (!moveIntent && pred.steps.length === 0 && serverStable) {
       pred.z = p.z ?? pred.z; // keep Z authoritative at rest (forced Z changes)
+    }
+    const boatPos = boatVisual(p.serial, { x: p.x, y: p.y, z: p.z ?? 0 }, now);
+    if (boatPos.active) {
+      pred.steps.length = 0; pred.t0 = 0;
+      pred.x = p.x; pred.y = p.y; pred.z = p.z ?? pred.z; pred.dir = p.dir ?? pred.dir;
+      pred.rx = boatPos.x; pred.ry = boatPos.y; pred.rz = boatPos.z; pred.moving = true;
     }
     if (!anim.has("self")) anim.set("self", { rx: pred.rx, ry: pred.ry, rz: pred.rz, stepDur: 400, fallback: 0xffffff });
     seen.add("self");
@@ -1776,6 +1859,12 @@ function syncWorld(s) {
     sp.anchor.set(0.5, 1.0);
     sp.x = isoX(st.x, st.y); sp.y = isoY(st.x, st.y, st.z) + HALF;
     sp.zIndex = depthZ(st.x, st.y, st.pz ?? st.z, 4);
+    if (st.ms != null) {
+      sp._boatSerial = st.ms >>> 0;
+      sp._boatBaseX = st.x; sp._boatBaseY = st.y; sp._boatBaseZ = st.z;
+      sp._boatBaseSpriteX = sp.x; sp._boatBaseSpriteY = sp.y;
+      sp._boatPzOffset = (st.pz ?? st.z) - st.z; sp._boatDepthBias = 4;
+    }
     // Tile + foliage flag for the transparency pass (circle-of-transparency / foliage fade).
     sp._tx = st.x; sp._ty = st.y; sp._foliage = !!st.f;
     sp._texUrl = texUrl; // so the "still on screen" branch above can keep it LRU-fresh
@@ -1844,6 +1933,10 @@ function syncWorld(s) {
       sp.x = x; sp.y = y + HALF;
     }
     sp.zIndex = depthZ(it.x, it.y, it.pz ?? iz, 5); // bias 5: just above same-tile statics
+    sp._boatSerial = it.serial >>> 0;
+    sp._boatBaseX = it.x; sp._boatBaseY = it.y; sp._boatBaseZ = iz;
+    sp._boatBaseSpriteX = sp.x; sp._boatBaseSpriteY = sp.y;
+    sp._boatPzOffset = (it.pz ?? iz) - iz; sp._boatDepthBias = 5;
     // Tile + foliage flag for the transparency pass (circle-of-transparency / foliage fade).
     sp._tx = it.x; sp._ty = it.y; sp._foliage = !!it.f;
     sp.eventMode = "static"; sp.cursor = "pointer";
@@ -2166,6 +2259,27 @@ function processSteps(now, dt) {
   pred.moving = !settled; // keep the walk cycle while easing the last bit
 }
 
+function applyBoatSpriteGlides(now) {
+  const move = (sp) => {
+    if (sp._boatSerial == null) return;
+    const base = { x: sp._boatBaseX, y: sp._boatBaseY, z: sp._boatBaseZ };
+    const visual = boatVisual(sp._boatSerial, base, now);
+    const dx = isoX(visual.x, visual.y) - isoX(base.x, base.y);
+    const dy = isoY(visual.x, visual.y, visual.z) - isoY(base.x, base.y, base.z);
+    sp.x = sp._boatBaseSpriteX + dx;
+    sp.y = sp._boatBaseSpriteY + dy;
+    sp.zIndex = depthZ(
+      visual.x,
+      visual.y,
+      visual.z + (sp._boatPzOffset || 0),
+      sp._boatDepthBias || 4,
+    );
+    if (visual.active) markDirty();
+  };
+  for (const sp of staticPool.values()) move(sp);
+  for (const entry of itemPool.values()) move(entry.sp);
+}
+
 function renderFrame(dt) {
   if (!scene) return;
   const now = performance.now();
@@ -2179,13 +2293,27 @@ function renderFrame(dt) {
   if (me && pred) {
     enqueueSteps(now);
     processSteps(now, dt);
+    let carriedByBoat = false;
+    if (scene.player) {
+      const boatPos = boatVisual(
+        scene.player.serial,
+        { x: pred.rx, y: pred.ry, z: pred.rz ?? pred.z },
+        now,
+      );
+      if (boatPos.active) {
+        pred.rx = boatPos.x; pred.ry = boatPos.y; pred.rz = boatPos.z; pred.moving = true;
+        carriedByBoat = true;
+        markDirty();
+      }
+    }
     me.rx = pred.rx; me.ry = pred.ry; me.rz = pred.rz; me.z = pred.z; me.dir = pred.dir;
-    me.animMoving = pred.moving;
+    // Boat offsets carry a standing passenger without playing a walk cycle.
+    me.animMoving = carriedByBoat ? false : pred.moving;
     me.stepDur = stepDelay(!!(moveIntent && moveIntent.run), mounted());
     // Leg cadence tied to GROUND COVERED (cyclesPerTile): walking unchanged
     // (80ms/frame); running takes bigger strides so the legs don't whirl. Phase
     // is a 0..1 cycle fraction.
-    me.animPhase = pred.moving
+    me.animPhase = me.animMoving
       ? ((me.animPhase || 0) + cyclesPerTile(!!(moveIntent && moveIntent.run)) * dt / (me.stepDur || 300)) % 1
       : 0;
     if (scene.player) me.body = scene.player.body;
@@ -2194,8 +2322,18 @@ function renderFrame(dt) {
   // velocity, timed to their measured step cadence (×1.12 margin so they're still
   // moving when the next tile arrives). The player ("self") is driven by the queue
   // above, not this glide. Snap on big jumps.
-  for (const st of anim.values()) {
+  for (const [id, st] of anim) {
     if (st === me) continue;
+    const serial = id.startsWith("m") ? Number(id.slice(1)) : 0;
+    const boatPos = serial
+      ? boatVisual(serial, { x: st.tx, y: st.ty, z: st.z | 0 }, now)
+      : { active: false };
+    if (boatPos.active) {
+      st.rx = boatPos.x; st.ry = boatPos.y; st.rz = boatPos.z;
+      st.animMoving = false; st.animPhase = 0;
+      markDirty();
+      continue;
+    }
     // Ease vertical position (z) too, so stairs/ramps glide instead of popping.
     const tz = st.z | 0;
     if (st.rz === undefined) st.rz = tz;
@@ -2218,6 +2356,7 @@ function renderFrame(dt) {
     if (dist <= step) { st.rx = st.tx; st.ry = st.ty; }
     else { st.rx += (dx / dist) * step; st.ry += (dy / dist) * step; }
   }
+  applyBoatSpriteGlides(now);
   // camera follows the eased player so the avatar stays centered (eased z too).
   // Seated: follow the chair TILE (not the sprite's small pixel nudge, see
   // trySit()/chairSeatFor()) so the camera settles exactly like it would after any

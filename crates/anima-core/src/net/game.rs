@@ -10,9 +10,9 @@
 
 use super::packet::{PacketError, PacketReader, Result as PResult};
 use crate::world::{
-    Effect, Gump, HouseDesign, HousePlane, HuePicker, JournalEntry, LegacyMenu, LegacyMenuEntry,
-    LegacyMenuKind, PopupEntry, PopupMenu, PromptKind, PromptState, Skill, TargetCursor, TipKind,
-    TradeState, Waypoint, World,
+    BoatMovedEntity, BoatMovement, Effect, Gump, HouseDesign, HousePlane, HuePicker, JournalEntry,
+    LegacyMenu, LegacyMenuEntry, LegacyMenuKind, PopupEntry, PopupMenu, PromptKind, PromptState,
+    Skill, TargetCursor, TipKind, TradeState, Waypoint, World,
 };
 
 /// Decode one framed game packet (id byte included) into `world`.
@@ -98,6 +98,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x2F => swing(world, frame)?,
         0x90 => display_map(world, frame, false)?,
         0xF5 => display_map(world, frame, true)?,
+        0xF6 => boat_moving(world, frame)?,
         0x56 => map_command(world, frame)?,
         0x99 => multi_target_cursor(world, frame)?,
         0xD8 => custom_house(world, frame)?,
@@ -1790,6 +1791,80 @@ fn logout_ack(world: &mut World, frame: &[u8]) -> PResult<()> {
     Ok(())
 }
 
+/// 0xF6 High Seas smooth boat movement. The variable packet carries the boat's
+/// destination plus every onboard entity's destination. Parse the complete
+/// list before mutating so a truncated packet cannot split the rigid group.
+fn boat_moving(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let body = frame.get(3..).ok_or(PacketError::InvalidData(
+        "0xF6 is missing its variable header",
+    ))?;
+    let mut r = PacketReader::new(body);
+    let boat_serial = r.u32()?;
+    let speed = r.u8()?;
+    let moving_direction = r.u8()? & 0x07;
+    let facing_direction = r.u8()? & 0x07;
+    let boat_to = crate::types::Position {
+        x: r.u16()?,
+        y: r.u16()?,
+        z: r.u16()? as i8,
+    };
+    let count = r.u16()?;
+    if usize::from(count) > r.remaining() / 10 {
+        return Err(PacketError::UnexpectedEof {
+            needed: usize::from(count) * 10,
+            remaining: r.remaining(),
+        });
+    }
+    let mut destinations = Vec::with_capacity(usize::from(count));
+    for _ in 0..count {
+        destinations.push((
+            r.u32()?,
+            crate::types::Position {
+                x: r.u16()?,
+                y: r.u16()?,
+                z: r.u16()? as i8,
+            },
+        ));
+    }
+
+    let Some(boat_from) = world.items.get(&boat_serial).map(|boat| boat.pos) else {
+        return Ok(()); // ClassicUO ignores 0xF6 for an unknown multi.
+    };
+    if let Some(boat) = world.items.get_mut(&boat_serial) {
+        boat.pos = boat_to;
+        boat.direction = facing_direction;
+    }
+
+    let mut entities = Vec::new();
+    for (serial, to) in destinations {
+        let from = if let Some(mobile) = world.mobiles.get_mut(&serial) {
+            let from = mobile.pos;
+            mobile.pos = to;
+            Some(from)
+        } else if let Some(item) = world.items.get_mut(&serial) {
+            let from = item.pos;
+            item.pos = to;
+            Some(from)
+        } else {
+            None
+        };
+        if let Some(from) = from {
+            entities.push(BoatMovedEntity { serial, from, to });
+        }
+    }
+    world.push_boat_movement(BoatMovement {
+        seq: 0,
+        boat_serial,
+        speed,
+        moving_direction,
+        facing_direction,
+        from: boat_from,
+        to: boat_to,
+        entities,
+    });
+    Ok(())
+}
+
 /// 0xC2 UnicodePrompt — the server asks us to answer with typed text (pet rename,
 /// house sign, guild abbreviation, … — ~38 ServUO flows). Fixed 21 bytes as
 /// ServUO sends it: `[id][len:u16][senderSerial:u32][promptId:u32][type:u32=0]
@@ -2603,6 +2678,7 @@ fn unicode_string(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::net::packet::PacketWriter;
+    use crate::types::Position;
 
     fn target_packet(target_type: u8, cursor_id: u32, flag: u8) -> Vec<u8> {
         let mut p = PacketWriter::new();
@@ -4644,6 +4720,107 @@ mod tests {
                 allowed: true,
             })
         );
+    }
+
+    #[test]
+    fn boat_moving_commits_boat_and_known_passengers_as_one_event() {
+        let boat_serial = 0x4000_1000;
+        let player_serial = 0x0000_0042;
+        let item_serial = 0x4000_2000;
+        let mut w = World::new();
+        w.item_mut(boat_serial).pos = Position {
+            x: 100,
+            y: 200,
+            z: -5,
+        };
+        w.item_mut(boat_serial).is_multi = true;
+        w.mobile_mut(player_serial).pos = Position {
+            x: 101,
+            y: 200,
+            z: -4,
+        };
+        w.item_mut(item_serial).pos = Position {
+            x: 99,
+            y: 200,
+            z: -5,
+        };
+
+        let mut p = PacketWriter::new();
+        p.u8(0xF6)
+            .u16(0)
+            .u32(boat_serial)
+            .u8(4)
+            .u8(2)
+            .u8(6)
+            .u16(101)
+            .u16(200)
+            .u16((-5i16) as u16)
+            .u16(3)
+            .u32(player_serial)
+            .u16(102)
+            .u16(200)
+            .u16((-4i16) as u16)
+            .u32(item_serial)
+            .u16(100)
+            .u16(200)
+            .u16((-5i16) as u16)
+            .u32(0x0000_9999)
+            .u16(103)
+            .u16(200)
+            .u16(0);
+        let frame = patch_len(p.into_vec());
+        assert!(apply_packet(&mut w, &frame));
+
+        assert_eq!(
+            w.items[&boat_serial].pos,
+            Position {
+                x: 101,
+                y: 200,
+                z: -5
+            }
+        );
+        assert_eq!(w.items[&boat_serial].direction, 6);
+        assert_eq!(
+            w.mobiles[&player_serial].pos,
+            Position {
+                x: 102,
+                y: 200,
+                z: -4
+            }
+        );
+        assert_eq!(
+            w.items[&item_serial].pos,
+            Position {
+                x: 100,
+                y: 200,
+                z: -5
+            }
+        );
+        let movement = &w.recent_boat_movements[0];
+        assert_eq!(movement.seq, 1);
+        assert_eq!(movement.boat_serial, boat_serial);
+        assert_eq!(movement.speed, 4);
+        assert_eq!(movement.moving_direction, 2);
+        assert_eq!(movement.facing_direction, 6);
+        assert_eq!(
+            movement.entities.len(),
+            2,
+            "unknown passenger stays unknown"
+        );
+    }
+
+    #[test]
+    fn truncated_boat_moving_is_atomic() {
+        let boat_serial = 0x4000_1000;
+        let mut w = World::new();
+        w.item_mut(boat_serial).pos = Position { x: 10, y: 20, z: 0 };
+        let frame = [
+            0xF6, 0, 18, 0x40, 0, 0x10, 0, 4, 2, 2, 0, 11, 0, 20, 0, 0, 0, 1,
+        ];
+        assert!(apply_packet(&mut w, &frame));
+        assert!(apply_packet(&mut w, &[0xF6]));
+        assert_eq!(w.items[&boat_serial].pos, Position { x: 10, y: 20, z: 0 });
+        assert!(w.recent_boat_movements.is_empty());
     }
 
     /// Patch the big-endian length word at `[1..3]` of a variable-framed test packet.

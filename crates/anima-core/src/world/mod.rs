@@ -84,6 +84,29 @@ pub struct Item {
     pub is_multi: bool,
 }
 
+/// One known passenger/item carried by a 0xF6 High Seas boat movement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoatMovedEntity {
+    pub serial: u32,
+    pub from: Position,
+    pub to: Position,
+}
+
+/// One authoritative 0xF6 boat step. Core commits every destination
+/// immediately; renderers use the retained source/destination pair and speed
+/// to interpolate the boat and all known onboard entities as one rigid group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoatMovement {
+    pub seq: u64,
+    pub boat_serial: u32,
+    pub speed: u8,
+    pub moving_direction: u8,
+    pub facing_direction: u8,
+    pub from: Position,
+    pub to: Position,
+    pub entities: Vec<BoatMovedEntity>,
+}
+
 /// Self-only fields that don't live on the player's [`Mobile`].
 #[derive(Debug, Clone, Default)]
 pub struct PlayerStats {
@@ -814,6 +837,10 @@ pub struct World {
     pub player_stats: PlayerStats,
     pub mobiles: HashMap<u32, Mobile>,
     pub items: HashMap<u32, Item>,
+    /// Recent High Seas smooth-boat steps (0xF6), newest last.
+    pub recent_boat_movements: Vec<BoatMovement>,
+    /// Monotonic identity assigned to each accepted 0xF6 step.
+    pub boat_movement_seq: u64,
     /// Chat / system message log (journal), newest last.
     pub journal: Vec<JournalEntry>,
     /// Absolute index of `journal[0]`. Consumers keep an absolute cursor so
@@ -1108,6 +1135,7 @@ const MAX_RECENT_CONTAINER_OPENS: usize = 16;
 const MAX_RECENT_SWINGS: usize = 16;
 /// How many recent validated external-URL requests [`World::push_open_url`] keeps.
 const MAX_RECENT_OPEN_URLS: usize = 16;
+const MAX_RECENT_BOAT_MOVEMENTS: usize = 16;
 /// Defensive cap for concurrently open server tip/notice windows.
 const MAX_TIPS: usize = 16;
 /// Defensive cap for concurrently open server text-entry dialogs.
@@ -1220,6 +1248,20 @@ impl World {
         let it = self.items.entry(serial).or_default();
         it.serial = serial;
         it
+    }
+
+    /// Retain a bounded, monotonic boat-step history for renderer polling.
+    pub fn push_boat_movement(&mut self, mut movement: BoatMovement) {
+        self.boat_movement_seq += 1;
+        movement.seq = self.boat_movement_seq;
+        self.recent_boat_movements.push(movement);
+        let overflow = self
+            .recent_boat_movements
+            .len()
+            .saturating_sub(MAX_RECENT_BOAT_MOVEMENTS);
+        if overflow > 0 {
+            self.recent_boat_movements.drain(0..overflow);
+        }
     }
 
     /// Record a sound-effect event (0x54). Assigns the next monotonic `seq` and

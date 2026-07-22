@@ -13,7 +13,7 @@ scene/agent exposure, and user-facing behavior (where applicable) are present.
   `src/ClassicUO.Client/Network/PacketHandlers.cs`
 - anima source: `crates/anima-core/src/net/game.rs` plus login and movement
   state machines
-- Current game decoder: 75 packet IDs after adding `0xD1 LogoutAck`;
+- Current game decoder: 76 packet IDs after adding `0xF6 BoatMoving`;
   `0x21`/`0x22` are handled separately by `Walker`
 
 The comparison is mechanical at the packet-ID level, followed by a semantic
@@ -61,6 +61,9 @@ that are acknowledgements/no-ops are not counted as missing game UI features.
   flag is absent, versioned brain/native/WASM contracts, Options logout
   confirmation, and clean login-scene recovery after an accepted logout or
   lost game connection
+- `0xF6 BoatMoving`: atomic High Seas boat/passenger/item relocation, bounded
+  monotonic movement events, exact ClassicUO speed intervals, and rigid-group
+  browser interpolation for the hull, onboard entities, and following camera
 - Speech, localized messages, OPL/tooltips, prompts, targeting
 - Movement confirmation/denial, pathfinding, doors, facet changes
 - Combat state, damage/effects, animations, death/corpse links
@@ -75,7 +78,6 @@ the feature. Each row is still open unless a later change moves it above.
 
 | Priority | Packet(s) | ClassicUO behavior | Required anima vertical slice |
 |---|---:|---|---|
-| P0 | `0xF6` | Smooth boat movement | Boat/passenger movement state and renderer interpolation |
 | P1 | `0x15` | Follow response | Follow/autowalk state |
 | P1 | `0x16` | Older health-bar status | Version-compatible poison/yellow health parsing |
 | P1 | `0x23` | Drag animation | World-to-world item movement animation |
