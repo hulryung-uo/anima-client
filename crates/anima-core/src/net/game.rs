@@ -853,7 +853,11 @@ fn damage(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     let serial = r.u32()?;
     let amount = r.u16()?;
-    world.push_damage(serial, amount);
+    // ClassicUO's Damage() drops a 0-damage event (it only floats a number when
+    // damage > 0); mirror it so the brain's damage log stays meaningful.
+    if amount > 0 {
+        world.push_damage(serial, amount);
+    }
     Ok(())
 }
 
@@ -2695,7 +2699,16 @@ fn char_status(world: &mut World, frame: &[u8]) -> PResult<()> {
             // ML: weight cap + race. `weight_max` already existed on
             // `PlayerStats` but was never written until now.
             stats.weight_max = r.u16()?;
-            stats.race = r.u8()?;
+            // ClassicUO normalizes an absent race (0) to Human (1); RaceType has
+            // no valid 0 value (1=Human, 2=Elf, 3=Gargoyle).
+            let race = r.u8()?;
+            stats.race = if race == 0 { 1 } else { race };
+        } else {
+            // Non-ML shards (flag < 5) omit the weight cap on the wire; ClassicUO
+            // derives it from strength (7*(str>>1)+40 for CV_500A+) so it is
+            // never a stale 0. u32 math avoids a debug overflow on a malformed
+            // strength.
+            stats.weight_max = ((strength as u32 >> 1) * 7 + 40) as u16;
         }
         if flag >= 3 {
             // Renaissance: stat cap + follower count.
@@ -3052,7 +3065,11 @@ fn general_info(world: &mut World, frame: &[u8]) -> PResult<()> {
             let _ = r.u8()?;
             let serial = r.u32()?;
             let dmg = r.u8()? as u16;
-            world.push_damage(serial, dmg);
+            // ClassicUO drops a 0-damage event; mirror it so the brain's
+            // damage log never sees phantom 0-amount hits.
+            if dmg > 0 {
+                world.push_damage(serial, dmg);
+            }
         }
         // 0x26 SpeedMode — `[val:u8]` (ClassicUO `CharacterSpeedType`;
         // `ExtendedCommand` case 0x26 resets an out-of-range value to 0/Normal
@@ -6479,8 +6496,10 @@ mod tests {
         assert_eq!(s.stats_cap, 200);
         assert_eq!(s.followers, 1);
         assert_eq!(s.followers_max, 4);
-        // No ML/AOS bytes were on the wire — these must stay at defaults.
-        assert_eq!(s.weight_max, 0);
+        // flag < 5 omits the weight cap on the wire; it is derived from strength
+        // (7*(60>>1)+40 = 250), matching ClassicUO's non-ML fallback.
+        assert_eq!(s.weight_max, 250);
+        // No ML/AOS bytes were on the wire — these stay at defaults.
         assert_eq!(s.race, 0);
         assert_eq!(s.fire_resistance, 0);
         assert_eq!(s.tithing_points, 0);
