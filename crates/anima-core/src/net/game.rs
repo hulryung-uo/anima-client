@@ -124,13 +124,17 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
     Ok(true)
 }
 
-/// Status-flags bit for "hidden" on the mobile-update packets (0x20/0x77/
-/// 0x78). ServUO `Mobile.cs GetPacketFlags`: 0x04 Flying, 0x08
-/// YellowHealth/Blessed, 0x40 WarMode, 0x80 Hidden — we only need the Hidden
-/// bit. NOTE: poison is NOT in this byte on a Stygian-Abyss+ client (which we
-/// report as); it arrives in the separate 0x17 health-bar packet — see
+/// Status-flags bits on the mobile-update packets (0x20/0x77/0x78/0xD2/0xD3).
+/// ServUO `Mobile.cs GetPacketFlags`: 0x01 Frozen/Paralyzed, 0x04 Flying, 0x08
+/// YellowHealth/Blessed, 0x40 WarMode, 0x80 Hidden (ClassicUO
+/// `EntityFlags.cs`). We only decode Paralyzed/WarMode/Hidden — for OTHER
+/// mobiles this byte is the ONLY wire source for war-mode/paralysis. NOTE:
+/// poison is NOT in this byte on a Stygian-Abyss+ client (which we report
+/// as); it arrives in the separate 0x17 health-bar packet — see
 /// [`health_bar_status`].
 const FLAG_HIDDEN: u8 = 0x80;
+const FLAG_WARMODE: u8 = 0x40;
+const FLAG_PARALYZED: u8 = 0x01;
 
 /// 0x20 MobileUpdate — position/appearance reset. This is always about OUR
 /// OWN mobile (ServUO sends it only to the mobile itself), so its flags byte
@@ -160,6 +164,8 @@ fn mobile_update(world: &mut World, frame: &[u8]) -> PResult<()> {
         m.pos.z = z;
         m.direction = direction;
         m.hidden = flags & FLAG_HIDDEN != 0;
+        m.war_mode = flags & FLAG_WARMODE != 0;
+        m.paralyzed = flags & FLAG_PARALYZED != 0;
     }
     if is_self {
         world.on_player_body_changed(old_body, body);
@@ -538,6 +544,8 @@ fn mobile_moving(world: &mut World, frame: &[u8]) -> PResult<()> {
         let m = world.mobile_mut(serial);
         m.notoriety = notoriety;
         m.hidden = flags & FLAG_HIDDEN != 0;
+        m.war_mode = flags & FLAG_WARMODE != 0;
+        m.paralyzed = flags & FLAG_PARALYZED != 0;
         return Ok(());
     }
 
@@ -550,6 +558,8 @@ fn mobile_moving(world: &mut World, frame: &[u8]) -> PResult<()> {
     m.hue = hue;
     m.notoriety = notoriety;
     m.hidden = flags & FLAG_HIDDEN != 0;
+    m.war_mode = flags & FLAG_WARMODE != 0;
+    m.paralyzed = flags & FLAG_PARALYZED != 0;
     Ok(())
 }
 
@@ -585,6 +595,8 @@ fn update_character(world: &mut World, frame: &[u8]) -> PResult<()> {
         m.hue = hue;
         m.notoriety = notoriety;
         m.hidden = flags & FLAG_HIDDEN != 0;
+        m.war_mode = flags & FLAG_WARMODE != 0;
+        m.paralyzed = flags & FLAG_PARALYZED != 0;
         return Ok(());
     }
 
@@ -596,6 +608,8 @@ fn update_character(world: &mut World, frame: &[u8]) -> PResult<()> {
     m.hue = hue;
     m.notoriety = notoriety;
     m.hidden = flags & FLAG_HIDDEN != 0;
+    m.war_mode = flags & FLAG_WARMODE != 0;
+    m.paralyzed = flags & FLAG_PARALYZED != 0;
     Ok(())
 }
 
@@ -646,6 +660,10 @@ fn mobile_incoming(world: &mut World, frame: &[u8]) -> PResult<()> {
         // e.g. re-entering view after a facet change while hidden). Poisoned is
         // the same story: re-derive it for self too.
         m.hidden = flags & FLAG_HIDDEN != 0;
+        // War-mode/paralyzed are visual/status attrs like hidden — refresh for
+        // self too.
+        m.war_mode = flags & FLAG_WARMODE != 0;
+        m.paralyzed = flags & FLAG_PARALYZED != 0;
         // Notoriety is a visual attribute (like body/hue/hidden), not movement state,
         // so capture it for self too — ServUO sends the player their own noto here (and
         // on crime deltas), which is what colours your own single-click name. pos/dir
@@ -711,9 +729,11 @@ fn update_object(world: &mut World, frame: &[u8]) -> PResult<()> {
         let m = world.mobile_mut(serial);
         m.body = body;
         m.hue = hue;
-        // Hidden/notoriety are visual attributes, not movement state — refresh
-        // them for self too (same reasoning as mobile_incoming).
+        // Hidden/war-mode/paralyzed/notoriety are visual attributes, not movement
+        // state — refresh them for self too (same reasoning as mobile_incoming).
         m.hidden = flags & FLAG_HIDDEN != 0;
+        m.war_mode = flags & FLAG_WARMODE != 0;
+        m.paralyzed = flags & FLAG_PARALYZED != 0;
         m.notoriety = notoriety;
         if !is_self {
             m.pos.x = x;
@@ -2906,7 +2926,10 @@ fn chat_message(world: &mut World, frame: &[u8]) -> PResult<()> {
 /// 0xBF GeneralInfo — multiplexed subcommands. We handle the fast-walk key
 /// stack (sub 0x01 sets six keys, sub 0x02 pushes one; each walk consumes one),
 /// close-gump-by-type (sub 0x04), party (sub 0x06), the facet switch (sub
-/// 0x08), the popup menu (sub 0x14), and spellbook content (sub 0x1B).
+/// 0x08), the popup menu (sub 0x14), extended stats (sub 0x19: bonded-pet
+/// death / stat-training locks), spellbook content (sub 0x1B), the custom
+/// house notification (sub 0x1D), New Damage (sub 0x22), and speed mode (sub
+/// 0x26).
 ///
 /// Deliberately NOT wired: sub 0x16 CloseUserInterfaceWindows. ClassicUO does
 /// handle it client-side (`ExtendedCommand` case 0x16: paperdoll/statusbar/
@@ -2954,6 +2977,7 @@ fn general_info(world: &mut World, frame: &[u8]) -> PResult<()> {
         // reload of `MapData` would additionally require.
         0x08 => world.on_map_change(r.u8()?),
         0x14 => parse_popup(world, &mut r)?,
+        0x19 => parse_extended_stats(world, &mut r)?,
         0x1B => parse_spellbook_content(world, &mut r)?,
         // 0x1D CustomHouseNotification — `[serial:u32][revision:u32]`. ServUO
         // resends this on EVERY `SendInfoTo` of the multi (Server/Multis/
@@ -2978,6 +3002,60 @@ fn general_info(world: &mut World, frame: &[u8]) -> PResult<()> {
             let current = world.house_designs.get(&serial).map(|d| d.revision);
             if current != Some(revision) && !world.pending_house_design_requests.contains(&serial) {
                 world.pending_house_design_requests.push(serial);
+            }
+        }
+        // 0x22 New Damage — the AOS-era twin of 0x0B Damage (see [`damage`]'s
+        // doc): some ServUO client/version combos emit this instead of 0x0B.
+        // `[unk:u8][serial:u32][damage:u8]` (ClassicUO `ExtendedCommand` case
+        // 0x22). Mirrors `damage`'s call to `push_damage`, just with a
+        // one-byte (not u16) damage field.
+        0x22 => {
+            let _ = r.u8()?;
+            let serial = r.u32()?;
+            let dmg = r.u8()? as u16;
+            world.push_damage(serial, dmg);
+        }
+        // 0x26 SpeedMode — `[val:u8]` (ClassicUO `CharacterSpeedType`;
+        // `ExtendedCommand` case 0x26 resets an out-of-range value to 0/Normal
+        // rather than reading past it). Values: 0 Normal, 1 FastUnmount, 2
+        // CantRun, 3 FastUnmountAndCantRun — `>= 2` means the server forces us
+        // to walk, which the movement driver can consult later.
+        0x26 => {
+            let val = r.u8()?;
+            world.player_stats.speed_mode = if val > 3 { 0 } else { val };
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// 0xBF/0x19 ExtendedStats — `[version:u8][serial:u32]` then version-specific
+/// (ClassicUO `ExtendedCommand` case 0x19):
+/// - version 0 (bonded-pet death flag): `[isDead:u8]`. **Existing-mobile-only**
+///   — like ClassicUO's `Mobiles.Get(serial) == null` guard, this never spawns
+///   a phantom mobile.
+/// - version 2 (stat-training locks), only meaningful when `serial` is the
+///   player: `[updateGump:u8][state:u8]`. `state` packs three 2-bit locks:
+///   `str_lock = state>>4 & 3`, `dex_lock = state>>2 & 3`, `int_lock = state &
+///   3` (0=Up, 1=Down, 2=Locked).
+/// - other versions (e.g. 5, an animation override): ignored.
+fn parse_extended_stats(world: &mut World, r: &mut PacketReader) -> PResult<()> {
+    let version = r.u8()?;
+    let serial = r.u32()?;
+    match version {
+        0 => {
+            let is_dead = r.u8()? != 0;
+            if let Some(m) = world.mobiles.get_mut(&serial) {
+                m.is_dead = is_dead;
+            }
+        }
+        2 => {
+            let _update_gump = r.u8()?;
+            let state = r.u8()?;
+            if world.is_player(serial) {
+                world.player_stats.str_lock = (state >> 4) & 0x03;
+                world.player_stats.dex_lock = (state >> 2) & 0x03;
+                world.player_stats.int_lock = state & 0x03;
             }
         }
         _ => {}
@@ -4116,6 +4194,28 @@ mod tests {
     }
 
     #[test]
+    fn mobile_incoming_war_mode_and_paralyzed_flags_decode() {
+        // 0x78 MobileIncoming: war-mode (0x40) and paralyzed (0x01) both ride
+        // the same status-flags byte as hidden — for another mobile, this
+        // byte is the only wire source for either.
+        let mut w = World::new();
+        assert!(apply_packet(
+            &mut w,
+            &mobile_incoming_frame(0xF00D, FLAG_WARMODE | FLAG_PARALYZED)
+        ));
+        let m = &w.mobiles[&0xF00D];
+        assert!(m.war_mode);
+        assert!(m.paralyzed);
+        assert!(!m.hidden, "unrelated bit must stay false");
+
+        // A fresh 0x78 that omits both bits clears them back — not sticky.
+        assert!(apply_packet(&mut w, &mobile_incoming_frame(0xF00D, 0x00)));
+        let m = &w.mobiles[&0xF00D];
+        assert!(!m.war_mode);
+        assert!(!m.paralyzed);
+    }
+
+    #[test]
     fn mobile_update_hidden_flag_is_the_self_feedback_path() {
         // 0x20 MobileUpdate is fixed-length, no length prefix: serial, body,
         // graphic_inc, hue, flags, x, y, server_id, dir, z.
@@ -4413,6 +4513,18 @@ mod tests {
         let mut p = PacketWriter::new();
         p.u8(0x0B).u32(0x0000_1234).u16(17);
         assert!(apply_packet(&mut w, &p.into_vec()));
+        assert_eq!(w.recent_damage.last(), Some(&(1, 0x0000_1234, 17)));
+        assert_eq!(w.damage_seq, 1);
+    }
+
+    #[test]
+    fn general_info_new_damage_pushes_damage_event() {
+        // 0xBF/0x22 New Damage — the AOS-era twin of 0x0B: [unk:u8][serial:u32][damage:u8].
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0xBF).u16(0).u16(0x0022);
+        p.u8(0).u32(0x0000_1234).u8(17);
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
         assert_eq!(w.recent_damage.last(), Some(&(1, 0x0000_1234, 17)));
         assert_eq!(w.damage_seq, 1);
     }
@@ -6154,6 +6266,85 @@ mod tests {
         assert!(apply_packet(&mut w, &frame));
         assert_eq!(w.gumps.len(), 1);
         assert_eq!(w.gumps[0].serial, 3);
+    }
+
+    #[test]
+    fn general_info_extended_stats_v0_is_existing_only() {
+        // 0xBF/0x19 ExtendedStats version 0 (bonded-pet death flag):
+        // [version:u8=0][serial:u32][isDead:u8]. Existing-mobile-only — a
+        // serial we don't already know must not spawn a phantom mobile.
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0xBF).u16(0).u16(0x0019).u8(0).u32(0xDEAD).u8(1);
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        assert!(
+            !w.mobiles.contains_key(&0xDEAD),
+            "must not create a phantom mobile"
+        );
+
+        // A pre-created mobile does get its is_dead flag set.
+        w.mobile_mut(0xBEEF);
+        let mut q = PacketWriter::new();
+        q.u8(0xBF).u16(0).u16(0x0019).u8(0).u32(0xBEEF).u8(1);
+        assert!(apply_packet(&mut w, &patch_len(q.into_vec())));
+        assert!(w.mobiles[&0xBEEF].is_dead);
+    }
+
+    #[test]
+    fn general_info_extended_stats_v2_sets_player_stat_locks() {
+        // 0xBF/0x19 ExtendedStats version 2 (stat-training locks), only
+        // meaningful for the player: [version:u8=2][serial:u32][updateGump:u8]
+        // [state:u8]. state packs str/dex/int locks as 2-bit fields
+        // (str<<4 | dex<<2 | int); here Str=Down(1), Dex=Locked(2), Int=Up(0).
+        let mut w = World::new();
+        w.player = Some(crate::types::Serial(0x1001));
+        let state: u8 = (1 << 4) | (2 << 2) | 0;
+        let mut p = PacketWriter::new();
+        p.u8(0xBF)
+            .u16(0)
+            .u16(0x0019)
+            .u8(2)
+            .u32(0x1001)
+            .u8(0)
+            .u8(state);
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        assert_eq!(w.player_stats.str_lock, 1);
+        assert_eq!(w.player_stats.dex_lock, 2);
+        assert_eq!(w.player_stats.int_lock, 0);
+    }
+
+    #[test]
+    fn general_info_extended_stats_v2_ignores_non_player_serial() {
+        let mut w = World::new();
+        w.player = Some(crate::types::Serial(0x1001));
+        let state: u8 = (1 << 4) | (2 << 2) | 3;
+        let mut p = PacketWriter::new();
+        p.u8(0xBF)
+            .u16(0)
+            .u16(0x0019)
+            .u8(2)
+            .u32(0x9999) // not the player
+            .u8(0)
+            .u8(state);
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        assert_eq!(w.player_stats.str_lock, 0, "must stay default");
+        assert_eq!(w.player_stats.dex_lock, 0, "must stay default");
+        assert_eq!(w.player_stats.int_lock, 0, "must stay default");
+    }
+
+    #[test]
+    fn general_info_speed_mode_sets_and_clamps() {
+        // 0xBF/0x26 SpeedMode: [val:u8]. Values > 3 must clamp back to 0.
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0xBF).u16(0).u16(0x0026).u8(2); // CantRun
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        assert_eq!(w.player_stats.speed_mode, 2);
+
+        let mut q = PacketWriter::new();
+        q.u8(0xBF).u16(0).u16(0x0026).u8(0xFF); // out of range
+        assert!(apply_packet(&mut w, &patch_len(q.into_vec())));
+        assert_eq!(w.player_stats.speed_mode, 0);
     }
 
     #[test]

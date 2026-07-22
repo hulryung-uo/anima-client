@@ -57,6 +57,20 @@ pub struct Mobile {
     /// `HealthbarYellow`/invulnerable NPCs). Independent of `poisoned` — a
     /// packet reporting only one type must never clobber the other.
     pub yellow_health: bool,
+    /// War-mode status — the mobile-update status-flags 0x40 bit (ClassicUO
+    /// `EntityFlags.WarMode`). For any OTHER mobile, this flags byte is the
+    /// ONLY wire source for war-mode; re-derived on every 0x20/0x77/0x78/
+    /// 0xD2/0xD3 (not sticky), same as `hidden`.
+    pub war_mode: bool,
+    /// Paralyzed/frozen status — the mobile-update status-flags 0x01 bit
+    /// (ClassicUO `EntityFlags.Frozen`, `Mobile.IsParalyzed`). Re-derived
+    /// on every 0x20/0x77/0x78/0xD2/0xD3 (not sticky), same as `hidden`.
+    pub paralyzed: bool,
+    /// Bonded-pet death flag from 0xBF/0x19 ExtendedStats version 0 (ServUO
+    /// sends this for a bonded pet so it displays "dead" without being
+    /// actually removed from the world). Existing-mobile-only — never spawns
+    /// a phantom.
+    pub is_dead: bool,
 }
 
 /// An item — on the ground, in a container, or equipped.
@@ -127,6 +141,20 @@ pub struct PlayerStats {
     pub armor: i16,
     pub weight: u16,
     pub weight_max: u16,
+    /// Stat-training lock for Strength from 0xBF/0x19 ExtendedStats version 2
+    /// (`state >> 4 & 0x03`). 0 = Up, 1 = Down, 2 = Locked.
+    pub str_lock: u8,
+    /// Stat-training lock for Dexterity (`state >> 2 & 0x03`); same values as
+    /// [`Self::str_lock`].
+    pub dex_lock: u8,
+    /// Stat-training lock for Intelligence (`state & 0x03`); same values as
+    /// [`Self::str_lock`].
+    pub int_lock: u8,
+    /// Forced movement speed from 0xBF/0x26 SpeedMode (ClassicUO
+    /// `CharacterSpeedType`): 0 Normal, 1 FastUnmount, 2 CantRun, 3
+    /// FastUnmountAndCantRun. `>= 2` means the server forces us to walk (no
+    /// running) — the movement driver can consult this later.
+    pub speed_mode: u8,
 }
 
 /// One journal (chat/system) line.
