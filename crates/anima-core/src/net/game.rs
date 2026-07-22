@@ -10,9 +10,9 @@
 
 use super::packet::{PacketError, PacketReader, Result as PResult};
 use crate::world::{
-    BoatMovedEntity, BoatMovement, Effect, Gump, HouseDesign, HousePlane, HuePicker, JournalEntry,
-    LegacyMenu, LegacyMenuEntry, LegacyMenuKind, PopupEntry, PopupMenu, PromptKind, PromptState,
-    Skill, TargetCursor, TipKind, TradeState, Waypoint, World,
+    BoatMovedEntity, BoatMovement, Effect, GameTime, Gump, HouseDesign, HousePlane, HuePicker,
+    JournalEntry, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, PopupEntry, PopupMenu, PromptKind,
+    PromptState, Skill, TargetCursor, TipKind, TradeState, Waypoint, World,
 };
 
 /// Decode one framed game packet (id byte included) into `world`.
@@ -36,7 +36,10 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0xF3 => world_item_hs(world, frame)?,
         0x1D => delete(world, frame)?,
         0x11 => char_status(world, frame)?,
+        0x98 => update_name(world, frame)?,
         0x17 => health_bar_status(world, frame)?,
+        0xDE => update_mobile_status(world, frame)?,
+        0xC4 => semivisible(world, frame)?,
         0xA1 => vital(world, frame, Vital::Hits)?,
         0xA2 => vital(world, frame, Vital::Mana)?,
         0xA3 => vital(world, frame, Vital::Stam)?,
@@ -62,6 +65,8 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x4E => personal_light(world, frame)?,
         0x65 => weather(world, frame)?,
         0xBC => season(world, frame)?,
+        0xC8 => client_view_range(world, frame)?,
+        0x5B => set_time(world, frame)?,
         0x74 => open_buy_window(world, frame)?,
         0x7C => open_legacy_menu(world, frame)?,
         0x95 => open_hue_picker(world, frame)?,
@@ -77,6 +82,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x66 => book_data(world, frame)?,
         0xAF => display_death(world, frame)?,
         0xAA => change_combatant(world, frame)?,
+        0x15 => follow_r(world, frame)?,
         0x27 => lift_reject(world, frame)?,
         0x28 => end_dragging_item(world, frame)?,
         0x29 => drop_item_accepted(world)?,
@@ -174,6 +180,32 @@ fn health_bar_status(world: &mut World, frame: &[u8]) -> PResult<()> {
     if let Some(p) = poisoned {
         world.mobile_mut(serial).poisoned = p;
     }
+    Ok(())
+}
+
+/// 0xDE UpdateMobileStatus — `[id][len:u16][serial:u32][status:u8]` and, only
+/// when `status == 1`, a trailing `[attacker:u32]` (ClassicUO
+/// `UpdateMobileStatus`). ClassicUO's handler applies no state — it just reads
+/// the fields to stay in sync with the stream — so we match that: parse and
+/// discard, no `World` mutation, and no phantom mobile is created.
+fn update_mobile_status(_world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[3..]); // skip id + 2-byte length
+    let _serial = r.u32()?;
+    let status = r.u8()?;
+    if status == 1 {
+        let _attacker = r.u32()?;
+    }
+    Ok(())
+}
+
+/// 0xC4 Semivisible — `[id][serial:u32][flag:u8]` (6 bytes, ClassicUO
+/// `Semivisible`). ClassicUO's handler is an empty no-op; we parse it anyway
+/// so it's recognized (not treated as an unknown packet) rather than
+/// mutating any state.
+fn semivisible(_world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let _serial = r.u32()?;
+    let _flag = r.u8()?;
     Ok(())
 }
 
@@ -811,6 +843,32 @@ fn season(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     world.season = r.u8()?;
     let _play_music = r.u8()?;
+    Ok(())
+}
+
+/// 0xC8 ClientViewRange — `[id][range:u8]` (2 bytes, ClassicUO
+/// `ClientViewRange`). The server's authoritative echo of the client's
+/// requested draw range, in tiles.
+fn client_view_range(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    world.client_view_range = r.u8()?;
+    Ok(())
+}
+
+/// 0x5B SetTime — `[id][hour:u8][minute:u8][second:u8]` (4 bytes). Ported from
+/// `anima/anima/perception/handlers.py` `handle_game_time`; ClassicUO's own
+/// `SetTime` handler is a no-op, but the in-game clock is useful perception
+/// data, so we keep it as [`World::game_time`].
+fn set_time(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let hour = r.u8()?;
+    let minute = r.u8()?;
+    let second = r.u8()?;
+    world.game_time = Some(GameTime {
+        hour,
+        minute,
+        second,
+    });
     Ok(())
 }
 
@@ -1525,6 +1583,18 @@ fn change_combatant(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     let serial = r.u32()?;
     world.combatant = if serial == 0 { None } else { Some(serial) };
+    Ok(())
+}
+
+/// 0x15 FollowR — `[id][follower:u32][followed:u32]` (9 bytes, ServUO
+/// `FollowMessage`; ClassicUO `FollowR` reads and discards both serials). We
+/// keep the followed serial as [`World::follow_target`] — the mobile the
+/// server says to follow — clearing it when that serial is 0.
+fn follow_r(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let _follower = r.u32()?;
+    let followed = r.u32()?;
+    world.follow_target = if followed == 0 { None } else { Some(followed) };
     Ok(())
 }
 
@@ -2255,6 +2325,19 @@ fn char_status(world: &mut World, frame: &[u8]) -> PResult<()> {
         m.stam_max = stam_max;
         m.mana = mana;
         m.mana_max = mana_max;
+    }
+    Ok(())
+}
+
+/// 0x98 UpdateName — `[id][len:u16][serial:u32][name: ASCII, fills to the end
+/// of the frame]` (ClassicUO `UpdateName`). ClassicUO skips an empty name
+/// rather than blanking whatever name it already has, so we do the same.
+fn update_name(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[3..]); // skip id + 2-byte length
+    let serial = r.u32()?;
+    let name = ascii_string(r.rest());
+    if !name.is_empty() {
+        world.mobile_mut(serial).name = name;
     }
     Ok(())
 }
@@ -3575,6 +3658,44 @@ mod tests {
     }
 
     #[test]
+    fn update_mobile_status_recognized_but_applies_no_state() {
+        // 0xDE UpdateMobileStatus: ClassicUO's handler applies no state — we
+        // match that (recognized + parsed, no World mutation, no phantom
+        // mobile created).
+        let mut w = World::new();
+        // status == 0: no trailing attacker serial.
+        let mut p = PacketWriter::new();
+        p.u8(0xDE).u16(0).u32(0x1234).u8(0);
+        let mut v = p.into_vec();
+        let len = v.len() as u16;
+        v[1] = (len >> 8) as u8;
+        v[2] = (len & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &v));
+        assert!(w.mobiles.is_empty(), "must not create a phantom mobile");
+
+        // status == 1: trailing attacker serial present.
+        let mut q = PacketWriter::new();
+        q.u8(0xDE).u16(0).u32(0x1234).u8(1).u32(0x5678);
+        let mut v = q.into_vec();
+        let len = v.len() as u16;
+        v[1] = (len >> 8) as u8;
+        v[2] = (len & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &v));
+        assert!(w.mobiles.is_empty());
+    }
+
+    #[test]
+    fn semivisible_recognized_but_applies_no_state() {
+        // 0xC4 Semivisible: ClassicUO's handler is an empty no-op; we parse it
+        // for recognition only.
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0xC4).u32(0xABCD).u8(1);
+        assert!(apply_packet(&mut w, &p.into_vec()));
+        assert!(w.mobiles.is_empty(), "must not create a phantom mobile");
+    }
+
+    #[test]
     fn hidden_and_poison_are_independent() {
         // Hidden rides the mobile-flags byte (0x80); poison rides the 0x17
         // health-bar packet — setting one must not disturb the other.
@@ -3659,6 +3780,50 @@ mod tests {
         assert_eq!(w.journal.len(), 1);
         assert_eq!(w.journal[0].name, "Hastin");
         assert_eq!(w.journal[0].text, "hello there");
+    }
+
+    #[test]
+    fn update_name_sets_name_when_present() {
+        // 0x98 UpdateName: [id][len:u16][serial:u32][name ASCII to end of frame].
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0x98).u16(0).u32(0x1001).bytes(b"Hastin");
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.mobiles[&0x1001].name, "Hastin");
+    }
+
+    #[test]
+    fn update_name_skips_empty_name() {
+        // ClassicUO's UpdateName skips an empty name rather than blanking
+        // whatever name it already has; an empty name also must not create a
+        // phantom mobile entry.
+        let mut w = World::new();
+        w.mobile_mut(0x1001).name = "Hastin".to_string();
+        let mut p = PacketWriter::new();
+        p.u8(0x98).u16(0).u32(0x1001).bytes(b"\0");
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.mobiles[&0x1001].name, "Hastin", "must not blank the name");
+
+        let mut w2 = World::new();
+        let mut q = PacketWriter::new();
+        q.u8(0x98).u16(0).u32(0x2002).bytes(b"\0");
+        let mut frame2 = q.into_vec();
+        let len2 = frame2.len() as u16;
+        frame2[1] = (len2 >> 8) as u8;
+        frame2[2] = (len2 & 0xFF) as u8;
+        assert!(apply_packet(&mut w2, &frame2));
+        assert!(
+            !w2.mobiles.contains_key(&0x2002),
+            "must not create a phantom mobile"
+        );
     }
 
     #[test]
@@ -3818,6 +3983,33 @@ mod tests {
         p.u8(0xBC).u8(3).u8(1);
         assert!(apply_packet(&mut w, &p.into_vec()));
         assert_eq!(w.season, 3);
+    }
+
+    #[test]
+    fn client_view_range_sets_field() {
+        let mut w = World::new();
+        assert_eq!(w.client_view_range, 18); // UO's stock default
+        let mut p = PacketWriter::new();
+        p.u8(0xC8).u8(24);
+        assert!(apply_packet(&mut w, &p.into_vec()));
+        assert_eq!(w.client_view_range, 24);
+    }
+
+    #[test]
+    fn set_time_sets_game_time() {
+        let mut w = World::new();
+        assert_eq!(w.game_time, None);
+        let mut p = PacketWriter::new();
+        p.u8(0x5B).u8(13).u8(45).u8(9);
+        assert!(apply_packet(&mut w, &p.into_vec()));
+        assert_eq!(
+            w.game_time,
+            Some(GameTime {
+                hour: 13,
+                minute: 45,
+                second: 9,
+            })
+        );
     }
 
     #[test]
@@ -4243,6 +4435,24 @@ mod tests {
         q.u8(0xAA).u32(0);
         assert!(apply_packet(&mut w, &q.into_vec()));
         assert_eq!(w.combatant, None);
+    }
+
+    #[test]
+    fn follow_r_sets_and_clears_target() {
+        let mut w = World::new();
+        // 0x15 FollowR: [id][follower:u32][followed:u32] (9 bytes).
+        let mut p = PacketWriter::new();
+        p.u8(0x15).u32(0x1111).u32(0x2222);
+        let frame = p.into_vec();
+        assert_eq!(frame.len(), 9); // ServUO FollowMessage : base(0x15, 9)
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.follow_target, Some(0x2222));
+
+        // followed serial 0 clears the target.
+        let mut q = PacketWriter::new();
+        q.u8(0x15).u32(0x1111).u32(0);
+        assert!(apply_packet(&mut w, &q.into_vec()));
+        assert_eq!(w.follow_target, None);
     }
 
     #[test]

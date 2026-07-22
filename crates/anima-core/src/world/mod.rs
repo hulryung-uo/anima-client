@@ -217,6 +217,15 @@ pub struct Weather {
     pub intensity: u8,
 }
 
+/// The in-game clock (0x5B SetTime): `[id][hour:u8][minute:u8][second:u8]`.
+/// Ported from `anima/anima/perception/handlers.py` `handle_game_time`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GameTime {
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
 /// A server waypoint (0xE5 DisplayWaypoint), keyed by its referenced entity
 /// serial. ServUO uses type 1 for the player's corpse and type 6 for a
 /// resurrection healer. Other types remain raw so future brains/renderers can
@@ -914,6 +923,14 @@ pub struct World {
     /// Defaults to 0 (Spring). The renderer may tint the scene to match; we do not
     /// remap tree/foliage graphics (that's a much larger change).
     pub season: u8,
+    /// The client view range in tiles (0xC8 ClientViewRange), ServUO
+    /// `NetState.UpdateRange`. `#[derive(Default)]` would give 0, which is not a
+    /// valid range, so [`World::new`] overrides it to [`DEFAULT_CLIENT_VIEW_RANGE`]
+    /// (18, UO's stock range) after construction.
+    pub client_view_range: u8,
+    /// The current in-game clock (0x5B SetTime), if the server has sent one.
+    /// See [`GameTime`].
+    pub game_time: Option<GameTime>,
     /// Latest 0x2C death-screen effect trigger. Renderers use `seq` to show the
     /// short-lived banner once without confusing action 2 with resurrection.
     pub death_screen: Option<DeathScreenEvent>,
@@ -995,6 +1012,11 @@ pub struct World {
     /// can also change combatant on its own (e.g. it retargets who's actually
     /// swinging at us). `None` when combat has ended (wire serial 0).
     pub combatant: Option<u32>,
+    /// The mobile the server last told us to follow (0x15 FollowR), or `None`
+    /// once it sends a followed serial of 0. ServUO's `FollowMessage` carries
+    /// two serials; ClassicUO reads and discards both (no client-side follow
+    /// behavior), so this is data-only — no core logic acts on it yet.
+    pub follow_target: Option<u32>,
     /// Maps a corpse item's serial to the mobile that died to create it (0xAF
     /// DisplayDeath). AI-facing only ("is this the corpse of what I killed") — no
     /// renderer change needed (a corpse already carries its own body/hue/direction).
@@ -1180,10 +1202,16 @@ const MAX_LEGACY_MENUS: usize = 16;
 /// ServUO's default per-connection `HuePickerCap`; mirror it so the client can
 /// answer every picker a conforming shard is allowed to keep pending.
 const MAX_HUE_PICKERS: usize = 512;
+/// UO's stock client view range (tiles), sent as the default before any 0xC8
+/// ClientViewRange packet arrives. See [`World::client_view_range`].
+const DEFAULT_CLIENT_VIEW_RANGE: u8 = 18;
 
 impl World {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            client_view_range: DEFAULT_CLIENT_VIEW_RANGE,
+            ..Self::default()
+        }
     }
 
     /// Our own character, if we've entered the world and it's known.
