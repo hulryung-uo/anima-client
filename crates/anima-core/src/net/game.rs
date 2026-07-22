@@ -200,7 +200,10 @@ fn health_bar_status(world: &mut World, frame: &[u8]) -> PResult<()> {
     };
     if let Some(flag) = poisoned {
         m.poisoned = flag > 0;
-        m.poison_level = flag as i8 - 1;
+        // ServUO sends poison level+1 (0 = cured); compute in a wider type so a
+        // malformed flag >= 0x80 can't underflow-panic (apply_packet swallows
+        // parse errors, not panics). Normal flags are 0..=5.
+        m.poison_level = (flag as i16 - 1) as i8;
     }
     if let Some(y) = yellow {
         m.yellow_health = y;
@@ -2642,14 +2645,20 @@ fn char_status(world: &mut World, frame: &[u8]) -> PResult<()> {
 }
 
 /// 0x98 UpdateName — `[id][len:u16][serial:u32][name: ASCII, fills to the end
-/// of the frame]` (ClassicUO `UpdateName`). ClassicUO skips an empty name
-/// rather than blanking whatever name it already has, so we do the same.
+/// of the frame]` (ClassicUO `UpdateName`). Existing-only: like ClassicUO,
+/// which gates the rename on `world.Get(serial) != null`, we only rename a
+/// mobile we already track — a stray/late 0x98 (or one whose serial is an
+/// item) must never spawn a phantom mobile at (0,0). We additionally skip an
+/// empty name defensively: ClassicUO would blank the entity, but losing a good
+/// name to a stray empty packet is undesirable.
 fn update_name(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[3..]); // skip id + 2-byte length
     let serial = r.u32()?;
     let name = ascii_string(r.rest());
     if !name.is_empty() {
-        world.mobile_mut(serial).name = name;
+        if let Some(m) = world.mobiles.get_mut(&serial) {
+            m.name = name;
+        }
     }
     Ok(())
 }
@@ -4253,7 +4262,9 @@ mod tests {
     #[test]
     fn update_name_sets_name_when_present() {
         // 0x98 UpdateName: [id][len:u16][serial:u32][name ASCII to end of frame].
+        // Existing-only (like ClassicUO): the mobile must already exist.
         let mut w = World::new();
+        w.mobile_mut(0x1001); // pre-create, as a spatial packet (0x78/0x20) would
         let mut p = PacketWriter::new();
         p.u8(0x98).u16(0).u32(0x1001).bytes(b"Hastin");
         let mut frame = p.into_vec();
@@ -4262,6 +4273,36 @@ mod tests {
         frame[2] = (len & 0xFF) as u8;
         assert!(apply_packet(&mut w, &frame));
         assert_eq!(w.mobiles[&0x1001].name, "Hastin");
+    }
+
+    #[test]
+    fn update_name_does_not_spawn_phantom_for_unknown_serial() {
+        // A 0x98 for a serial we don't already track (a stray/late name reply,
+        // or an item serial) must NOT create a phantom mobile at (0,0).
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0x98).u16(0).u32(0xDEAD).bytes(b"Ghost");
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &frame));
+        assert!(!w.mobiles.contains_key(&0xDEAD));
+    }
+
+    #[test]
+    fn health_bar_status_high_poison_flag_does_not_panic() {
+        // A malformed poison flag >= 0x80 must not underflow-panic poison_level.
+        let mut w = World::new();
+        w.mobile_mut(0x0BAD);
+        let mut p = PacketWriter::new();
+        p.u8(0x17).u16(0).u32(0x0BAD).u16(1).u16(1).u8(0xFF);
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &frame));
+        assert!(w.mobiles[&0x0BAD].poisoned);
     }
 
     #[test]
@@ -6826,6 +6867,55 @@ mod tests {
         assert_eq!(w.chat_messages[0].sender, "Alice");
         assert_eq!(w.chat_messages[0].text, "hello world");
         assert_eq!(w.chat_messages[0].seq, 1);
+    }
+
+    #[test]
+    fn chat_destroy_conference_removes_only_the_named_channel() {
+        let mut w = World::new();
+        for ch in ["General", "Trade"] {
+            let mut p = PacketWriter::new();
+            p.u8(0xB2).u16(0);
+            p.u16(0x03E8);
+            p.u32(0);
+            push_utf16be(&mut p, ch);
+            p.u16(0x30); // no password
+            assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        }
+        assert_eq!(w.chat.channels.len(), 2);
+        // Destroy just "General".
+        let mut p = PacketWriter::new();
+        p.u8(0xB2).u16(0);
+        p.u16(0x03E9);
+        p.u32(0);
+        push_utf16be(&mut p, "General");
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        assert_eq!(w.chat.channels.len(), 1);
+        assert_eq!(w.chat.channels[0].name, "Trade");
+    }
+
+    #[test]
+    fn chat_localized_system_message_stored_with_empty_sender() {
+        // A localized cmd (0x0001..=0x0024) carries only a text payload; we have
+        // no Chat.enu template table, so the raw payload is stored with no
+        // sender. An out-of-range cmd is ignored.
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0xB2).u16(0);
+        p.u16(0x0001); // localized system message
+        p.u32(0); // skipped header
+        push_utf16be(&mut p, "the system speaks");
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        assert_eq!(w.chat_messages.len(), 1);
+        assert!(w.chat_messages[0].sender.is_empty());
+        assert_eq!(w.chat_messages[0].text, "the system speaks");
+
+        // Unknown/out-of-range cmd → ignored, no new line.
+        let mut p = PacketWriter::new();
+        p.u8(0xB2).u16(0);
+        p.u16(0x0100);
+        p.u32(0);
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        assert_eq!(w.chat_messages.len(), 1);
     }
 
     #[test]
