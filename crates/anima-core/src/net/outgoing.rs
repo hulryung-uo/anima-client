@@ -776,6 +776,228 @@ pub fn build_trade_gold(my_container: u32, gold: u32, platinum: u32) -> Vec<u8> 
     finish_variable(w.into_vec())
 }
 
+/// NameRequest `0x98` (variable, 7 bytes) — ask the server for `serial`'s name.
+/// The server replies with the same opcode (incoming `0x98` UpdateName).
+/// Ports ClassicUO `Send_NameRequest`: despite the fixed 4-byte body, ClassicUO's
+/// packet-length table marks `0x98` dynamic (`-1`), so it is framed with the
+/// standard `[id][len:u16]` header rather than sent as a bare fixed packet.
+/// Layout: `[0x98][len:u16=0x0007][serial:u32]`.
+pub fn build_name_request(serial: u32) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x98).u16(0); // id + length placeholder
+    w.u32(serial);
+    finish_variable(w.into_vec())
+}
+
+/// RenameRequest `0x75` (fixed, 35 bytes) — rename a pet/hireling `serial`.
+/// Ports ClassicUO `Send_RenameRequest`: the packet-length table lists `0x75`
+/// as a fixed `0x0023` (35) bytes, so — unlike the variable builders in this
+/// file — there is **no** length field; `name` is `WriteASCII(name, 30)`, a
+/// CP1252-encoded, NUL-padded 30-byte field (truncated if longer).
+/// Layout: `[0x75][serial:u32][name: 30 bytes, CP1252, NUL-padded]`.
+pub fn build_rename_request(serial: u32, name: &str) -> Vec<u8> {
+    const NAME_WIDTH: usize = 30;
+    let mut w = PacketWriter::new();
+    w.u8(0x75).u32(serial);
+    let mut written = 0usize;
+    for ch in name.chars() {
+        if written >= NAME_WIDTH {
+            break;
+        }
+        w.u8(unicode_to_cp1252(ch));
+        written += 1;
+    }
+    for _ in written..NAME_WIDTH {
+        w.u8(0);
+    }
+    w.into_vec()
+}
+
+/// BulletinBoardRequestMessage `0x71` (variable), sub-command `0x03` — ask the
+/// bulletin board `board` to send the full body of message `msg` (server
+/// replies with incoming `0x71`). Ports ClassicUO
+/// `Send_BulletinBoardRequestMessage`.
+/// Layout: `[0x71][len:u16=0x000C][0x03][board:u32][msg:u32]`.
+pub fn build_bulletin_request_message(board: u32, msg: u32) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x71).u16(0); // id + length placeholder
+    w.u8(0x03).u32(board).u32(msg);
+    finish_variable(w.into_vec())
+}
+
+/// BulletinBoardRequestMessageSummary `0x71`, sub-command `0x04` — ask for the
+/// summary (author/subject/time, no body) of message `msg` on `board`. Ports
+/// ClassicUO `Send_BulletinBoardRequestMessageSummary`.
+/// Layout: `[0x71][len:u16=0x000C][0x04][board:u32][msg:u32]`.
+pub fn build_bulletin_request_summary(board: u32, msg: u32) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x71).u16(0); // id + length placeholder
+    w.u8(0x04).u32(board).u32(msg);
+    finish_variable(w.into_vec())
+}
+
+/// BulletinBoardPostMessage `0x71`, sub-command `0x05` — post a new message
+/// (or, when `reply_to != 0`, a reply) to bulletin board `board`.
+///
+/// Ports ClassicUO `Send_BulletinBoardPostMessage`, which is called with the
+/// caller's *unsplit* body text and splits it on `\n` itself; here the caller
+/// passes the already-split `lines` directly. Preserves one ClassicUO quirk
+/// verbatim: the subject's length-prefix byte is `subject.Length + 1` — the
+/// .NET **UTF-16 code-unit** count (mirrored here via `encode_utf16().count()`)
+/// — even though the bytes that follow are UTF-8, so a non-ASCII subject's
+/// declared length does not actually match its encoded byte count. Each
+/// line's length-prefix, by contrast, correctly uses its own UTF-8 byte count.
+/// Layout: `[0x71][len:u16][0x05][board:u32][replyTo:u32]
+/// [subjectLen:u8][subject:utf8][0x00][lineCount:u8]
+/// {[lineLen:u8][line:utf8][0x00]}…`.
+pub fn build_bulletin_post_message(
+    board: u32,
+    reply_to: u32,
+    subject: &str,
+    lines: &[&str],
+) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x71).u16(0); // id + length placeholder
+    w.u8(0x05).u32(board).u32(reply_to);
+
+    // Faithful quirk: length-prefixed by UTF-16 unit count, not UTF-8 byte
+    // count (see doc comment above).
+    let subject_units = subject.encode_utf16().count();
+    w.u8((subject_units + 1) as u8);
+    w.bytes(subject.as_bytes()).u8(0);
+
+    w.u8(lines.len() as u8);
+    for line in lines {
+        let encoded = line.as_bytes();
+        w.u8((encoded.len() + 1) as u8);
+        w.bytes(encoded).u8(0);
+    }
+
+    finish_variable(w.into_vec())
+}
+
+/// BulletinBoardRemoveMessage `0x71`, sub-command `0x06` — delete message
+/// `msg` from bulletin board `board` (only the poster/board owner may
+/// succeed; the server silently ignores unauthorized requests). Ports
+/// ClassicUO `Send_BulletinBoardRemoveMessage`.
+/// Layout: `[0x71][len:u16=0x000C][0x06][board:u32][msg:u32]`.
+pub fn build_bulletin_remove_message(board: u32, msg: u32) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x71).u16(0); // id + length placeholder
+    w.u8(0x06).u32(board).u32(msg);
+    finish_variable(w.into_vec())
+}
+
+/// OpenChat `0xB5` (fixed, 64 bytes) — open the chat window, optionally
+/// pre-filling a conversation/channel `name`. Ports ClassicUO `Send_OpenChat`:
+/// the packet-length table lists `0xB5` as a fixed `0x0040` (64) bytes, so
+/// (like `0x75` above) there is no length field. `name` is UTF-16BE, capped
+/// at 30 code units, written with **no** explicit NUL terminator — the fixed
+/// packet is simply zero-padded out to 64 bytes afterward, which reads back
+/// as an implicit terminator.
+/// Layout: `[0xB5][0x00][name:utf16-be, ≤30 units][zero-pad to 64 bytes]`.
+pub fn build_chat_open(name: &str) -> Vec<u8> {
+    const TOTAL_LEN: usize = 64;
+    let mut w = PacketWriter::new();
+    w.u8(0xB5).u8(0x00);
+    for unit in name.encode_utf16().take(30) {
+        w.u16(unit);
+    }
+    let mut data = w.into_vec();
+    data.resize(TOTAL_LEN, 0);
+    data
+}
+
+/// The chat-command language tag ClassicUO writes ahead of every `0xB3`
+/// sub-command: a fixed 4-byte ASCII field, NUL-padded. ClassicUO reads this
+/// from `Settings.GlobalSettings.Language`, which `Main.cs` always sets to
+/// `"ENU"` at startup, so it is effectively a constant.
+const CHAT_LANGUAGE: &[u8; 4] = b"ENU\0";
+
+/// ChatJoinCommand `0xB3` (variable) — join (or create-and-join, if it
+/// doesn't yet exist) chat channel `channel`, with optional `password`. Ports
+/// ClassicUO `Send_ChatJoinCommand`. The channel name is wrapped in literal
+/// `"` (0x0022) quote code units followed by a `0x0020` space, then the
+/// password (if any) follows as its own NUL-terminated UTF-16BE string —
+/// exactly the raw code-unit sequence ClassicUO writes, quirks included.
+/// Layout: `[0xB3][len:u16][lang:4]["ENU"][0x0062][0x0022]
+/// [channel:utf16-be][0x0000][0x0022][0x0020]{[password:utf16-be][0x0000]}?`.
+pub fn build_chat_join(channel: &str, password: &str) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xB3).u16(0); // id + length placeholder
+    w.bytes(CHAT_LANGUAGE);
+    w.u16(0x0062); // sub-command: join channel
+    w.u16(0x0022); // opening quote
+    for unit in channel.encode_utf16() {
+        w.u16(unit);
+    }
+    w.u16(0x0000); // NUL terminator (ClassicUO's WriteUnicodeBE appends this)
+    w.u16(0x0022); // closing quote
+    w.u16(0x0020); // space
+    if !password.is_empty() {
+        for unit in password.encode_utf16() {
+            w.u16(unit);
+        }
+        w.u16(0x0000);
+    }
+    finish_variable(w.into_vec())
+}
+
+/// ChatCreateChannelCommand `0xB3` (variable) — create (and join) a new chat
+/// channel `channel`, with optional `password`. Ports ClassicUO
+/// `Send_ChatCreateChannelCommand`. Unlike join, the channel name here is
+/// unquoted; only the password (if any) is wrapped, in literal `{`/`}`
+/// (0x007B/0x007D) code units.
+/// Layout: `[0xB3][len:u16][lang:4]["ENU"][0x0063][channel:utf16-be][0x0000]
+/// {[0x007B][password:utf16-be][0x0000][0x007D]}?`.
+pub fn build_chat_create_channel(channel: &str, password: &str) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xB3).u16(0); // id + length placeholder
+    w.bytes(CHAT_LANGUAGE);
+    w.u16(0x0063); // sub-command: create channel
+    for unit in channel.encode_utf16() {
+        w.u16(unit);
+    }
+    w.u16(0x0000);
+    if !password.is_empty() {
+        w.u16(0x007B); // '{'
+        for unit in password.encode_utf16() {
+            w.u16(unit);
+        }
+        w.u16(0x0000);
+        w.u16(0x007D); // '}'
+    }
+    finish_variable(w.into_vec())
+}
+
+/// ChatLeaveChannelCommand `0xB3` (variable), sub-command `0x0043` — leave the
+/// current chat channel. Ports ClassicUO `Send_ChatLeaveChannelCommand`; no
+/// payload beyond the language tag and sub-command word.
+/// Layout: `[0xB3][len:u16=0x0009][lang:4]["ENU"][0x0043]`.
+pub fn build_chat_leave() -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xB3).u16(0); // id + length placeholder
+    w.bytes(CHAT_LANGUAGE);
+    w.u16(0x0043); // sub-command: leave channel
+    finish_variable(w.into_vec())
+}
+
+/// ChatMessageCommand `0xB3` (variable), sub-command `0x0061` — send `text`
+/// to the currently-joined chat channel. Ports ClassicUO
+/// `Send_ChatMessageCommand`.
+/// Layout: `[0xB3][len:u16][lang:4]["ENU"][0x0061][text:utf16-be][0x0000]`.
+pub fn build_chat_message(text: &str) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xB3).u16(0); // id + length placeholder
+    w.bytes(CHAT_LANGUAGE);
+    w.u16(0x0061); // sub-command: chat message
+    for unit in text.encode_utf16() {
+        w.u16(unit);
+    }
+    w.u16(0x0000);
+    finish_variable(w.into_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1239,5 +1461,152 @@ mod tests {
         assert_eq!(build_client_view_range(18), vec![0xC8, 18]);
         assert_eq!(build_client_view_range(2), vec![0xC8, 5]); // clamp up to MIN
         assert_eq!(build_client_view_range(99), vec![0xC8, 24]); // clamp down to MAX
+    }
+
+    #[test]
+    fn name_request_layout() {
+        let p = build_name_request(0xDEAD_BEEF);
+        assert_eq!(p, vec![0x98, 0x00, 0x07, 0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+    }
+
+    #[test]
+    fn rename_request_layout() {
+        // Fixed 35 bytes, no length field: [0x75][serial:u32][name: 30B CP1252 NUL-padded].
+        let p = build_rename_request(0x0102_0304, "Rex");
+        assert_eq!(p.len(), 35);
+        assert_eq!(p[0], 0x75);
+        assert_eq!(&p[1..5], &[1, 2, 3, 4]); // serial (BE)
+        assert_eq!(&p[5..8], b"Rex");
+        assert!(p[8..].iter().all(|&b| b == 0));
+
+        // A name longer than the 30-byte field is truncated, not overflowed.
+        let long = build_rename_request(1, &"x".repeat(40));
+        assert_eq!(long.len(), 35);
+        assert!(long[5..35].iter().all(|&b| b == b'x'));
+    }
+
+    #[test]
+    fn bulletin_board_request_shapes() {
+        assert_eq!(
+            build_bulletin_request_message(0xAABB_CCDD, 0x1122_3344),
+            vec![0x71, 0x00, 0x0C, 0x03, 0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44]
+        );
+        assert_eq!(
+            build_bulletin_request_summary(0xAABB_CCDD, 0x1122_3344),
+            vec![0x71, 0x00, 0x0C, 0x04, 0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44]
+        );
+        assert_eq!(
+            build_bulletin_remove_message(0xAABB_CCDD, 0x1122_3344),
+            vec![0x71, 0x00, 0x0C, 0x06, 0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44]
+        );
+    }
+
+    #[test]
+    fn bulletin_post_message_layout() {
+        let p = build_bulletin_post_message(0x0102_0304, 0x0506_0708, "Hi", &["line1", "line2"]);
+        assert_eq!(p[0], 0x71);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(p[3], 0x05); // sub-command: post
+        assert_eq!(&p[4..8], &[1, 2, 3, 4]); // board (BE)
+        assert_eq!(&p[8..12], &[5, 6, 7, 8]); // replyTo (BE)
+        assert_eq!(p[12], 3); // subjectLen = utf16-units("Hi") + 1
+        assert_eq!(&p[13..15], b"Hi");
+        assert_eq!(p[15], 0); // subject NUL
+        assert_eq!(p[16], 2); // lineCount
+        assert_eq!(p[17], 6); // "line1".len() + 1
+        assert_eq!(&p[18..23], b"line1");
+        assert_eq!(p[23], 0);
+        assert_eq!(p[24], 6); // "line2".len() + 1
+        assert_eq!(&p[25..30], b"line2");
+        assert_eq!(p[30], 0);
+        assert_eq!(p.len(), 31);
+
+        // Non-ASCII subject exercises ClassicUO's faithfully-ported quirk: the
+        // length prefix counts UTF-16 units ("é" = 1 unit → prefix 2), but the
+        // bytes that follow are UTF-8 (2 bytes for "é"), so the declared
+        // length does not match the actual encoded byte count. No lines →
+        // lineCount 0 and nothing further.
+        let q = build_bulletin_post_message(1, 0, "é", &[]);
+        assert_eq!(q[12], 2); // 1 UTF-16 unit + 1, not 1 UTF-8-byte-count(2) + 1
+        assert_eq!(&q[13..15], "é".as_bytes());
+        assert_eq!(q[15], 0);
+        assert_eq!(q[16], 0); // lineCount
+        assert_eq!(q.len(), 17);
+    }
+
+    #[test]
+    fn chat_open_layout() {
+        // Fixed 64 bytes, no length field: [0xB5][0x00][name:utf16-be][zero-pad].
+        let p = build_chat_open("Bob");
+        assert_eq!(p.len(), 64);
+        assert_eq!(p[0], 0xB5);
+        assert_eq!(p[1], 0x00);
+        assert_eq!(&p[2..8], &[0x00, b'B', 0x00, b'o', 0x00, b'b']);
+        assert!(p[8..].iter().all(|&b| b == 0));
+
+        let empty = build_chat_open("");
+        assert_eq!(empty.len(), 64);
+        assert!(empty[2..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn chat_join_layout() {
+        let p = build_chat_join("Test", "");
+        assert_eq!(p[0], 0xB3);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(&p[3..7], b"ENU\0"); // language
+        assert_eq!(u16::from_be_bytes([p[7], p[8]]), 0x0062); // sub-command: join
+        assert_eq!(u16::from_be_bytes([p[9], p[10]]), 0x0022); // opening quote
+        assert_eq!(
+            &p[11..19],
+            &[0x00, b'T', 0x00, b'e', 0x00, b's', 0x00, b't']
+        );
+        assert_eq!(u16::from_be_bytes([p[19], p[20]]), 0x0000); // NUL terminator
+        assert_eq!(u16::from_be_bytes([p[21], p[22]]), 0x0022); // closing quote
+        assert_eq!(u16::from_be_bytes([p[23], p[24]]), 0x0020); // space
+        assert_eq!(p.len(), 25); // no password → nothing trails the space
+
+        let with_pw = build_chat_join("Test", "Pw");
+        assert_eq!(with_pw.len(), 25 + 4 + 2); // "Pw" (2 units) + NUL
+        assert_eq!(&with_pw[25..], &[0x00, b'P', 0x00, b'w', 0x00, 0x00]);
+    }
+
+    #[test]
+    fn chat_create_channel_layout() {
+        let p = build_chat_create_channel("Test", "");
+        assert_eq!(p[0], 0xB3);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(&p[3..7], b"ENU\0");
+        assert_eq!(u16::from_be_bytes([p[7], p[8]]), 0x0063); // sub-command: create
+        assert_eq!(&p[9..17], &[0x00, b'T', 0x00, b'e', 0x00, b's', 0x00, b't']);
+        assert_eq!(u16::from_be_bytes([p[17], p[18]]), 0x0000); // NUL terminator
+        assert_eq!(p.len(), 19); // no password → nothing trails the name
+
+        let with_pw = build_chat_create_channel("Test", "Pw");
+        assert_eq!(u16::from_be_bytes([with_pw[19], with_pw[20]]), 0x007B); // '{'
+        assert_eq!(&with_pw[21..27], &[0x00, b'P', 0x00, b'w', 0x00, 0x00]);
+        assert_eq!(u16::from_be_bytes([with_pw[27], with_pw[28]]), 0x007D); // '}'
+        assert_eq!(with_pw.len(), 29);
+    }
+
+    #[test]
+    fn chat_leave_layout() {
+        assert_eq!(
+            build_chat_leave(),
+            vec![0xB3, 0x00, 0x09, b'E', b'N', b'U', 0x00, 0x00, 0x43]
+        );
+    }
+
+    #[test]
+    fn chat_message_layout() {
+        let p = build_chat_message("Hi");
+        assert_eq!(p[0], 0xB3);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(&p[3..7], b"ENU\0");
+        assert_eq!(u16::from_be_bytes([p[7], p[8]]), 0x0061); // sub-command: message
+        assert_eq!(&p[9..13], &[0x00, b'H', 0x00, b'i']);
+        assert_eq!(u16::from_be_bytes([p[13], p[14]]), 0x0000); // NUL terminator
+        assert_eq!(p.len(), 15);
     }
 }
