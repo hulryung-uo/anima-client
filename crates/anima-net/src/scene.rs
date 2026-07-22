@@ -2264,10 +2264,15 @@ pub fn build_scene(
         let prices: Vec<Value> = b
             .entries
             .iter()
-            .map(|(price, name)| {
+            .map(|e| {
                 // ServUO sends cliloc-named stock as the bare numeric cliloc id; resolve
-                // it to the real item name (e.g. 1060834 → "a hatchet").
-                json!({ "price": price, "name": resolve_shop_name(name, cliloc) })
+                // it to the real item name (e.g. 1060834 → "a hatchet"). The item fields
+                // (serial/graphic/amount) are paired in by 0x3C arrival order in
+                // anima-core's `open_buy_window`.
+                json!({
+                    "price": e.price, "name": resolve_shop_name(&e.name, cliloc),
+                    "serial": e.serial, "graphic": e.graphic, "amount": e.amount,
+                })
             })
             .collect();
         json!({ "vendor": b.vendor, "cont": b.container, "prices": prices })

@@ -265,7 +265,29 @@ pub struct Buff {
 pub struct ShopBuy {
     pub vendor: u32,
     pub container: u32,
-    pub entries: Vec<(u32, String)>,
+    pub entries: Vec<ShopBuyEntry>,
+}
+
+/// One line of a vendor's BUY window (from 0x74 OpenBuyWindow). The wire packet
+/// carries only `(price, name)` per line, in "correct" (buy-list) order, while
+/// the matching 0x3C VendorBuyContent sends the same items reversed but with
+/// each item's correct index+1 in its `x` (ServUO `Packets.cs::VendorBuyContent`:
+/// "The client sorts these by their X/Y value"). `open_buy_window`/
+/// `recorrelate_shop_buy` pair each price with the for-sale item whose `x` ranks
+/// i-th and attach its `serial`/`graphic`/`amount`/`hue`, making this symmetric
+/// with [`ShopSellItem`] so the brain can identify an offer by graphic and
+/// address a 0x3B BUY request to a concrete `serial` without reconstructing the
+/// index correspondence itself. The four item fields are 0 when no matching
+/// container item is known yet (e.g. a BUY list that arrived before the
+/// container's 0x3C contents).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShopBuyEntry {
+    pub price: u32,
+    pub name: String,
+    pub serial: u32,
+    pub graphic: u16,
+    pub amount: u16,
+    pub hue: u16,
 }
 
 /// One line of a vendor's SELL list (from 0x9E SellList): an item in our pack the

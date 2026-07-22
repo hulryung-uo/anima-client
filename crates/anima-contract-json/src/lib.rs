@@ -236,7 +236,13 @@ fn shop_buy_json(s: &ShopBuy) -> Value {
     let entries: Vec<Value> = s
         .entries
         .iter()
-        .map(|(price, name)| json!({ "price": price, "name": name }))
+        .map(|e| {
+            json!({
+                "price": e.price, "name": e.name,
+                "serial": e.serial, "graphic": e.graphic,
+                "amount": e.amount, "hue": e.hue,
+            })
+        })
         .collect();
     json!({ "vendor": s.vendor, "container": s.container, "entries": entries })
 }

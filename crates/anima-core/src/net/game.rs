@@ -346,6 +346,9 @@ fn container_content(world: &mut World, frame: &[u8]) -> PResult<()> {
     for rec in fresh {
         put_in_container(world, rec);
     }
+    // A vendor's for-sale container contents often land here *after* its 0x74
+    // BUY list; backfill each price line's concrete item now that they exist.
+    recorrelate_shop_buy(world);
     Ok(())
 }
 
@@ -357,6 +360,7 @@ fn add_to_container(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     let rec = read_container_item(&mut r)?;
     put_in_container(world, rec);
+    recorrelate_shop_buy(world);
     Ok(())
 }
 
@@ -963,7 +967,12 @@ fn open_buy_window(world: &mut World, frame: &[u8]) -> PResult<()> {
         .get(&container)
         .and_then(|it| it.container)
         .unwrap_or(0);
-    let mut entries = Vec::with_capacity(count as usize);
+    // Read the `(price, name)` list in packet order — the wire carries no
+    // serials/graphics. The concrete item behind each price is attached by
+    // `recorrelate_shop_buy` below (and again whenever the container's contents
+    // change), since the 0x74 list and the container's 0x3C contents arrive in
+    // either order.
+    let mut entries: Vec<crate::world::ShopBuyEntry> = Vec::with_capacity(count as usize);
     for _ in 0..count {
         if r.remaining() < 5 {
             break;
@@ -974,14 +983,56 @@ fn open_buy_window(world: &mut World, frame: &[u8]) -> PResult<()> {
             break;
         }
         let name = ascii_string(r.bytes(name_len)?);
-        entries.push((price, name));
+        entries.push(crate::world::ShopBuyEntry {
+            price,
+            name,
+            ..Default::default()
+        });
     }
     world.shop_buy = Some(crate::world::ShopBuy {
         vendor,
         container,
         entries,
     });
+    recorrelate_shop_buy(world);
     Ok(())
+}
+
+/// (Re)attach concrete for-sale items to an open BUY window's price lines.
+///
+/// The 0x74 BUY list prices a vendor's items in "correct" (buy-list) order, but
+/// the matching 0x3C VendorBuyContent sends the *same* items **reversed** —
+/// encoding each item's correct index+1 in its `x` coordinate for the client to
+/// re-sort by (ServUO `Packets.cs::VendorBuyContent`: "OSI sends these in wierd
+/// order… the x74 packet is sent in 'correct' order… The client sorts these by
+/// their X/Y value"). So we pair `entries[i]` with the for-sale item whose `x`
+/// ranks i-th, filling each [`crate::world::ShopBuyEntry`]'s serial/graphic/
+/// amount/hue. Recomputed whenever either packet lands (they arrive in either
+/// order); cheap no-op when no BUY window is open. This makes a BUY offer as
+/// identifiable as a `ShopSellItem` — match by graphic, buy by serial.
+fn recorrelate_shop_buy(world: &mut World) {
+    let container = match world.shop_buy.as_ref() {
+        Some(sb) => sb.container,
+        None => return,
+    };
+    let mut ordered: Vec<(u16, u32, u16, u16, u16)> = world
+        .items
+        .values()
+        .filter(|it| it.container == Some(container))
+        .map(|it| (it.pos.x, it.serial, it.graphic, it.amount, it.hue))
+        .collect();
+    // Sort by the X ServUO overloaded with each item's correct buy-list index+1.
+    ordered.sort_by_key(|&(x, ..)| x);
+    if let Some(sb) = world.shop_buy.as_mut() {
+        for (i, entry) in sb.entries.iter_mut().enumerate() {
+            if let Some(&(_, serial, graphic, amount, hue)) = ordered.get(i) {
+                entry.serial = serial;
+                entry.graphic = graphic;
+                entry.amount = amount;
+                entry.hue = hue;
+            }
+        }
+    }
 }
 
 /// 0x7C OpenMenu — the pre-gump item/icon list and gray question menu.
@@ -3954,7 +4005,23 @@ mod tests {
         let cont = w.item_mut(0x4000_0001);
         cont.container = Some(0xAABB);
 
-        // 0x74: container, count=2, two (price, name) entries.
+        // 0x3C VendorBuyContent sends the for-sale items **reversed** but with
+        // each item's correct buy-list index+1 in its `x` (ServUO overloads x so
+        // the client can re-sort). So send them egg-first (x=2) then loaf (x=1) —
+        // arrival order is the REVERSE of the buy-list order below — and the
+        // recorrelation must still pair price[0] (bread) with the x=1 loaf.
+        let mut c = PacketWriter::new();
+        c.u8(0x3C).u16(0).u16(2);
+        // read_container_item: serial, graphic(u16)+inc(u8), amount, x, y, grid, cont, hue
+        c.u32(0x102).u16(0x09B5).u8(0).u16(7).u16(2).u16(1).u8(0).u32(0x4000_0001).u16(0);
+        c.u32(0x101).u16(0x103B).u8(0).u16(20).u16(1).u16(1).u8(0).u32(0x4000_0001).u16(0);
+        let mut cframe = c.into_vec();
+        let clen = cframe.len() as u16;
+        cframe[1] = (clen >> 8) as u8;
+        cframe[2] = (clen & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &cframe));
+
+        // 0x74: container, count=2, two (price, name) entries in the same order.
         let mut p = PacketWriter::new();
         p.u8(0x74).u16(0); // id, len placeholder
         p.u32(0x4000_0001).u8(2);
@@ -3970,8 +4037,17 @@ mod tests {
         assert_eq!(sb.vendor, 0xAABB);
         assert_eq!(sb.container, 0x4000_0001);
         assert_eq!(sb.entries.len(), 2);
-        assert_eq!(sb.entries[0], (15, "bread".to_string()));
-        assert_eq!(sb.entries[1], (3, "egg".to_string()));
+        // Each price is now paired with its concrete container item by 0x3C order.
+        assert_eq!(sb.entries[0].price, 15);
+        assert_eq!(sb.entries[0].name, "bread");
+        assert_eq!(sb.entries[0].serial, 0x101);
+        assert_eq!(sb.entries[0].graphic, 0x103B);
+        assert_eq!(sb.entries[0].amount, 20);
+        assert_eq!(sb.entries[1].price, 3);
+        assert_eq!(sb.entries[1].name, "egg");
+        assert_eq!(sb.entries[1].serial, 0x102);
+        assert_eq!(sb.entries[1].graphic, 0x09B5);
+        assert_eq!(sb.entries[1].amount, 7);
     }
 
     #[test]
