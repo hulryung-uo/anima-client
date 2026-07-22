@@ -35,6 +35,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x2E => equip_update(world, frame)?,
         0x1A => world_item(world, frame)?,
         0xF3 => world_item_hs(world, frame)?,
+        0xF7 => packet_list(world, frame)?,
         0x1D => delete(world, frame)?,
         0x11 => char_status(world, frame)?,
         0x98 => update_name(world, frame)?,
@@ -362,6 +363,30 @@ fn world_item_hs(world: &mut World, frame: &[u8]) -> PResult<()> {
     it.layer = 0;
     it.direction = direction & 0x07;
     it.is_multi = is_multi;
+    Ok(())
+}
+
+/// 0xF7 PacketList — a batch container: `[id][len:u16][count:u16]` then `count`
+/// sub-packets, each a full packet with NO length prefix. ClassicUO's
+/// `PacketList` dispatches only `0xF3` sub-packets (fixed 26 bytes) and stops on
+/// any other id. ServUO does not batch, but OSI and some shards do; without this
+/// the framing layer consumes the whole 0xF7 frame and its batched item updates
+/// would be silently dropped (never dispatched). We rebuild each 26-byte 0xF3
+/// sub-frame and reuse [`world_item_hs`].
+fn packet_list(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[3..]); // skip id + u16 length
+    let count = r.u16()?;
+    for _ in 0..count {
+        // ClassicUO only batches 0xF3 and breaks on anything else (it cannot
+        // know an unknown id's length to keep walking the shared reader).
+        if r.u8()? != 0xF3 {
+            break;
+        }
+        let mut sub = [0u8; 26];
+        sub[0] = 0xF3;
+        sub[1..].copy_from_slice(r.bytes(25)?);
+        world_item_hs(world, &sub)?;
+    }
     Ok(())
 }
 
@@ -3783,6 +3808,53 @@ mod tests {
             it.graphic, 0x4002,
             "non-multi keeps the full incremented graphic unmasked, like ClassicUO"
         );
+    }
+
+    #[test]
+    fn packet_list_dispatches_batched_0xf3_items() {
+        // 0xF7 PacketList: [id][len:u16][count:u16] then count × 0xF3 sub-packets
+        // (each fixed 26 bytes, no length prefix). Both items must land.
+        fn f3_body(serial: u32, graphic: u16, x: u16, y: u16) -> Vec<u8> {
+            let mut p = PacketWriter::new();
+            p.u16(0x0001).u8(0x00); // unk, data_type=item
+            p.u32(serial).u16(graphic).u8(0); // serial, graphic, inc
+            p.u16(1).u16(1); // amount, amount2
+            p.u16(x).u16(y).u8(0); // x, y, z
+            p.u8(0).u16(0); // direction, hue
+            let mut v = p.into_vec();
+            v.resize(25, 0); // pad to the fixed 25-byte 0xF3 body
+            v
+        }
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0xF7).u16(0); // id + length placeholder
+        p.u16(2); // count
+        p.u8(0xF3).bytes(&f3_body(0x4000_2001, 0x0FB1, 100, 200));
+        p.u8(0xF3).bytes(&f3_body(0x4000_2002, 0x0FB2, 101, 201));
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.items.get(&0x4000_2001).map(|i| i.graphic), Some(0x0FB1));
+        assert_eq!(w.items.get(&0x4000_2002).map(|i| i.graphic), Some(0x0FB2));
+    }
+
+    #[test]
+    fn packet_list_stops_at_non_0xf3_subpacket() {
+        // ClassicUO breaks on the first non-0xF3 sub-id; the batch after it is
+        // dropped rather than mis-parsed.
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0xF7).u16(0);
+        p.u16(2);
+        p.u8(0x11).u32(0xDEAD); // a non-0xF3 sub-id -> stop immediately
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &frame));
+        assert!(w.items.is_empty());
     }
 
     #[test]
