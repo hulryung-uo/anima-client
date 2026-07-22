@@ -223,6 +223,32 @@ impl WasmClient {
         true
     }
 
+    /// Request the previous/next page for an exact open 0xA6 Tip window.
+    /// Returns false for a stale seq or a non-pageable notice.
+    pub fn tip_navigate(&mut self, seq: u64, next: bool) -> bool {
+        let Some(tip) = self
+            .world
+            .tip(seq)
+            .filter(|tip| tip.kind == anima_core::world::TipKind::Tip)
+            .map(|tip| tip.tip)
+        else {
+            return false;
+        };
+        self.outbox
+            .extend(anima_core::net::outgoing::build_tip_request(tip, next));
+        self.world.close_tip(seq);
+        true
+    }
+
+    /// Dismiss one exact Tip/Notice window without a server packet.
+    pub fn tip_close(&mut self, seq: u64) -> bool {
+        if self.world.tip(seq).is_none() {
+            return false;
+        }
+        self.world.close_tip(seq);
+        true
+    }
+
     /// Current perception using the shared, versioned Observation JSON schema.
     pub fn observation_json(&mut self) -> String {
         let obs = self.world.observe(&mut self.journal_cursor);
@@ -336,5 +362,31 @@ mod tests {
         );
         assert!(client.world.prompt.is_none());
         assert!(!client.prompt_cancel());
+    }
+
+    #[test]
+    fn tip_navigation_and_notice_close_use_distinct_semantics() {
+        let mut client = WasmClient::new("user".into(), "pass".into());
+        client.login = None;
+        client.outbox.clear();
+
+        // Pageable tip #0x12345678 with text "Tip".
+        client.handle(&[
+            0xA6, 0, 13, 0, 0x12, 0x34, 0x56, 0x78, 0, 3, b'T', b'i', b'p',
+        ]);
+        assert!(client.tip_navigate(1, true));
+        assert_eq!(
+            client.take_outbox(),
+            anima_core::net::outgoing::build_tip_request(0x1234_5678, true)
+        );
+        assert!(client.world.tips.is_empty());
+        assert!(!client.tip_navigate(1, false));
+
+        // Flag 2 is a close-only notice: navigation is rejected, local close works.
+        client.handle(&[0xA6, 0, 11, 2, 0, 0, 0, 9, 0, 1, b'N']);
+        assert!(!client.tip_navigate(2, true));
+        assert!(client.tip_close(2));
+        assert!(client.take_outbox().is_empty());
+        assert!(!client.tip_close(2));
     }
 }

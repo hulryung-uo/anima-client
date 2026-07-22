@@ -13,8 +13,8 @@ use crate::gump_layout::GumpElement;
 use crate::types::Position;
 use crate::world::{
     is_ghost_body, Book, Buff, HuePicker, JournalEntry, LegacyMenu, MapView, OpenUrlRequest, Party,
-    PopupMenu, PromptState, ShopBuy, ShopSell, SpellbookContent, TargetCursor, TradeState, Weather,
-    World,
+    PopupMenu, PromptState, ShopBuy, ShopSell, SpellbookContent, TargetCursor, TipNotice,
+    TradeState, Weather, World,
 };
 
 /// A skill value, in human units (50.0 == GM-half). Derived from [`crate::world::Skill`].
@@ -165,6 +165,10 @@ pub struct Observation {
     /// informational events only: no navigation happens in the core, and a UI
     /// must obtain explicit user approval before opening one. Dedupe on `seq`.
     pub open_urls: Vec<OpenUrlRequest>,
+    /// Open server 0xA6 Tip/Notice windows in arrival order. Navigate a pageable
+    /// tip with [`Action::TipNavigate`], or dismiss either kind with
+    /// [`Action::TipClose`].
+    pub tips: Vec<TipNotice>,
     /// The currently open book (0x93/0xD4 + 0x66), if any. See [`Book`].
     /// Request more pages with [`Action::BookRequest`].
     pub book: Option<Book>,
@@ -406,6 +410,13 @@ pub enum Action {
     /// needed the response instead of leaving it dangling; a no-op if nothing is
     /// pending.
     PromptCancel,
+    /// Ask the server for the previous/next page of a pageable 0xA6 Tip window.
+    /// `seq` identifies the exact open client window; stale or notice-only
+    /// windows are a no-op. The driver sends fixed 0xA7 then closes that window.
+    TipNavigate { seq: u64, next: bool },
+    /// Dismiss exactly one 0xA6 Tip/Notice window locally without sending a
+    /// packet, matching ClassicUO's close/right-click behavior.
+    TipClose { seq: u64 },
     /// Toggle our side's accept checkbox on a secure trade (0x6F action 2).
     /// `container` selects which session (its `my_container`, from
     /// [`crate::world::World::trades`] — multiple can be open at once with
@@ -592,6 +603,7 @@ impl World {
             legacy_menus,
             hue_pickers,
             open_urls: self.recent_open_urls.clone(),
+            tips: self.tips.clone(),
             book: self.book.clone(),
             party: self.party.clone(),
             quest_arrow: self.quest_arrow,

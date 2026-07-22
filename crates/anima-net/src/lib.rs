@@ -25,15 +25,16 @@ use anima_core::net::outgoing::{
     build_opl_request, build_party_accept, build_party_decline, build_party_invite,
     build_party_leave, build_party_message, build_pick_up, build_popup_request, build_popup_select,
     build_prompt_response, build_say, build_sell, build_single_click, build_skill_lock,
-    build_status_request, build_target_response, build_trade_accept, build_trade_cancel,
-    build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
+    build_status_request, build_target_response, build_tip_request, build_trade_accept,
+    build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability, build_use_skill,
+    build_war_mode,
 };
 use anima_core::net::{
     apply_packet, build_client_version, CharacterChoice, CharacterList, FramingError, LoginConfig,
     LoginDirective, LoginError, LoginMachine, LoginResult, StreamDecoder, Walker,
 };
 use anima_core::path::{find_path, find_path_near, Terrain, DEFAULT_MAX_EXPANSIONS};
-use anima_core::world::{LegacyMenuKind, PromptKind, World};
+use anima_core::world::{LegacyMenuKind, PromptKind, TipKind, World};
 
 // `DOOR_USE_COOLDOWN`/`MAX_DOOR_OPEN_ATTEMPTS` are only referenced by
 // `route_tests` below (production code only needs `decide_blocked_step` to
@@ -630,6 +631,8 @@ impl Session {
             }
             Action::PromptResponse { text } => self.respond_prompt(text, false)?,
             Action::PromptCancel => self.respond_prompt("", true)?,
+            Action::TipNavigate { seq, next } => self.navigate_tip(*seq, *next)?,
+            Action::TipClose { seq } => self.world.close_tip(*seq),
             // No-op if no session has `container` (the brain raced it away — it
             // may have just closed, or belongs to a session with a different
             // opponent that never existed on our side).
@@ -834,6 +837,22 @@ impl Session {
         };
         self.send(&pkt)?;
         self.world.prompt = None;
+        Ok(())
+    }
+
+    /// Navigate one exact pageable Tip window and close it once its 0xA7
+    /// request is sent. Notice windows and stale seqs are intentionally inert.
+    fn navigate_tip(&mut self, seq: u64, next: bool) -> Result<(), DriverError> {
+        let Some(tip) = self
+            .world
+            .tip(seq)
+            .filter(|tip| tip.kind == TipKind::Tip)
+            .map(|tip| tip.tip)
+        else {
+            return Ok(());
+        };
+        self.send(&build_tip_request(tip, next))?;
+        self.world.close_tip(seq);
         Ok(())
     }
 

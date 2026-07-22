@@ -2344,6 +2344,8 @@ fn content_type(path: &str) -> &'static str {
 /// 0x7C menu; index 0 cancels) · `huepick:<serial>:<hue>` (0x95 dye picker) ·
 /// `prompt:<text>` / `promptcancel`
 /// (answer/cancel a pending 0x9A ASCII / 0xC2 Unicode server text prompt) ·
+/// `tipnav:<seq>:<0|1>` / `tipclose:<seq>` (previous/next or dismiss an exact
+/// 0xA6 Tip/Notice window) ·
 /// `tradeaccept:<mycont>:<0|1>` / `tradecancel:<mycont>` /
 /// `tradegold:<mycont>:<gold>:<platinum>` (answer the secure-trade session
 /// keyed by our own container serial `mycont`, 0x6F — multiple concurrent
@@ -2559,6 +2561,18 @@ fn parse_command(body: &str) -> Option<Action> {
         }),
         // promptcancel — cancel a pending server text prompt (Esc).
         "promptcancel" => Some(Action::PromptCancel),
+        // tipnav:<seq>:<0|1> — previous/next on a pageable Tip window.
+        "tipnav" => {
+            let mut p = arg.split(':');
+            Some(Action::TipNavigate {
+                seq: p.next()?.parse().ok()?,
+                next: p.next()? == "1",
+            })
+        }
+        // tipclose:<seq> — dismiss a Tip or Notice locally (no wire response).
+        "tipclose" => Some(Action::TipClose {
+            seq: arg.parse().ok()?,
+        }),
         // tradeaccept:<mycont>:<0|1> — toggle our accept checkbox on the secure
         // trade session keyed by our own container serial (0x6F action 2).
         "tradeaccept" => {
@@ -2654,6 +2668,30 @@ mod hue_palette_tests {
             })
         );
         assert!(parse_command("huepick:bad:902").is_none());
+    }
+
+    #[test]
+    fn tip_commands_preserve_window_seq_and_direction() {
+        assert_eq!(
+            parse_command("tipnav:42:1"),
+            Some(Action::TipNavigate {
+                seq: 42,
+                next: true
+            })
+        );
+        assert_eq!(
+            parse_command("tipnav:42:0"),
+            Some(Action::TipNavigate {
+                seq: 42,
+                next: false,
+            })
+        );
+        assert_eq!(
+            parse_command("tipclose:42"),
+            Some(Action::TipClose { seq: 42 })
+        );
+        assert!(parse_command("tipnav:bad:1").is_none());
+        assert!(parse_command("tipclose:bad").is_none());
     }
 
     #[test]

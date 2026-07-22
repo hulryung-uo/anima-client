@@ -6,12 +6,12 @@
 //! The shapes are also mirrored by `anima2/anima2/contract.py` — keep that
 //! consumer in lockstep.
 //!
-//! ## Schema (v12 — snake_case, versioned)
+//! ## Schema (v13 — snake_case, versioned)
 //!
 //! [`observation_to_json`] emits one object with these top-level keys, one per
 //! [`Observation`] field: `player`, `mobiles`, `items`, `new_journal`,
 //! `pending_target`, `skills`, `gumps`, `prompt`, `trades`, `buffs`,
-//! `shop_buy`, `shop_sell`, `popup`, `legacy_menus`, `hue_pickers`, `open_urls`,
+//! `shop_buy`, `shop_sell`, `popup`, `legacy_menus`, `hue_pickers`, `open_urls`, `tips`,
 //! `book`, `party`, `quest_arrow`, `waypoints`,
 //! `weather`, `season`, `light`, `war`, `last_attack`, `combatant`, `corpse_of`,
 //! `corpse_equip`, `map_index`, `aos`, `opl`, `recent_damage`, `spellbooks`,
@@ -63,13 +63,15 @@
 //! added `prompt.kind` (`"ascii"` or `"unicode"`) so consumers can preserve
 //! the identity of legacy 0x9A prompts separately from 0xC2 prompts. v12:
 //! added `open_urls`, validated 0xA5 HTTP(S) navigation requests carrying a
-//! monotonic `seq`; consumers must still ask the user before opening one.)
+//! monotonic `seq`; consumers must still ask the user before opening one. v13:
+//! added `tips`, concurrent 0xA6 Tip/Notice windows, plus `TipNavigate` and
+//! `TipClose` actions.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 13;
 
 use anima_core::agent::{
     Action, GumpView, ItemView, MobileView, Observation, PlayerView, SkillView, WaypointView,
@@ -79,7 +81,7 @@ use anima_core::types::Position;
 use anima_core::world::{
     Book, Buff, HuePicker, JournalEntry, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, MapView,
     OpenUrlRequest, Party, PopupEntry, PopupMenu, PromptState, ShopBuy, ShopSell, ShopSellItem,
-    SpellbookContent, TargetCursor, TradeState, Weather,
+    SpellbookContent, TargetCursor, TipNotice, TradeState, Weather,
 };
 use serde_json::{json, Value};
 
@@ -315,6 +317,15 @@ fn open_url_json(request: &OpenUrlRequest) -> Value {
     json!({ "seq": request.seq, "url": request.url })
 }
 
+fn tip_json(tip: &TipNotice) -> Value {
+    json!({
+        "seq": tip.seq,
+        "tip": tip.tip,
+        "kind": tip.kind.as_str(),
+        "text": tip.text,
+    })
+}
+
 fn book_json(b: &Book) -> Value {
     json!({
         "serial": b.serial, "title": b.title, "author": b.author,
@@ -397,6 +408,7 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "legacy_menus": obs.legacy_menus.iter().map(legacy_menu_json).collect::<Vec<_>>(),
         "hue_pickers": obs.hue_pickers.iter().map(hue_picker_json).collect::<Vec<_>>(),
         "open_urls": obs.open_urls.iter().map(open_url_json).collect::<Vec<_>>(),
+        "tips": obs.tips.iter().map(tip_json).collect::<Vec<_>>(),
         "book": obs.book.as_ref().map(book_json),
         "party": party_json(&obs.party),
         "quest_arrow": obs.quest_arrow.map(|(x, y)| json!({ "x": x, "y": y })),
@@ -482,6 +494,11 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         .ok_or("action missing 'type'")?;
     let u32f = |k: &str| v.get(k).and_then(Value::as_u64).map(|n| n as u32);
     let req_u32 = |k: &str| u32f(k).ok_or_else(|| format!("action {t} missing u32 '{k}'"));
+    let req_u64 = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("action {t} missing u64 '{k}'"))
+    };
     // A missing/mistyped (wrong key case, float) coordinate must error rather
     // than silently default to 0 — that would walk the player to the map
     // origin on a malformed request instead of surfacing the bad input.
@@ -610,6 +627,13 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         }),
         "PromptResponse" => Ok(Action::PromptResponse { text: text("text") }),
         "PromptCancel" => Ok(Action::PromptCancel),
+        "TipNavigate" => Ok(Action::TipNavigate {
+            seq: req_u64("seq")?,
+            next: v.get("next").and_then(Value::as_bool).unwrap_or(false),
+        }),
+        "TipClose" => Ok(Action::TipClose {
+            seq: req_u64("seq")?,
+        }),
         "TradeAccept" => Ok(Action::TradeAccept {
             container: req_u32("container")?,
             accept: v.get("accept").and_then(Value::as_bool).unwrap_or(true),
@@ -629,7 +653,7 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anima_core::world::PromptKind;
+    use anima_core::world::{PromptKind, TipKind};
 
     /// Table-driven: every [`Action`] variant round-trips through
     /// `{"type": ..} -> action_from_json -> Action`. Add a row here whenever
@@ -804,6 +828,14 @@ mod tests {
             ),
             (json!({"type": "PromptCancel"}), Action::PromptCancel),
             (
+                json!({"type": "TipNavigate", "seq": 9, "next": true}),
+                Action::TipNavigate { seq: 9, next: true },
+            ),
+            (
+                json!({"type": "TipClose", "seq": 10}),
+                Action::TipClose { seq: 10 },
+            ),
+            (
                 json!({"type": "TradeAccept", "container": 55, "accept": true}),
                 Action::TradeAccept {
                     container: 55,
@@ -878,8 +910,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v12_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 12);
+    fn schema_v13_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 13);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,
@@ -942,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v12_serializes_hue_pickers_exact_shape() {
+    fn schema_v13_serializes_hue_pickers_exact_shape() {
         let obs = Observation {
             hue_pickers: vec![HuePicker {
                 serial: 0x0102_0304,
@@ -957,7 +989,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v12_serializes_prompt_kind_exactly() {
+    fn schema_v13_serializes_prompt_kind_exactly() {
         for (kind, expected) in [
             (PromptKind::Ascii, "ascii"),
             (PromptKind::Unicode, "unicode"),
@@ -982,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v12_serializes_validated_open_url_events_exactly() {
+    fn schema_v13_serializes_validated_open_url_events_exactly() {
         let obs = Observation {
             open_urls: vec![
                 OpenUrlRequest {
@@ -1001,6 +1033,34 @@ mod tests {
             json!([
                 { "seq": 7, "url": "https://uo.com/news" },
                 { "seq": 8, "url": "http://localhost:8080/help" },
+            ])
+        );
+    }
+
+    #[test]
+    fn schema_v13_serializes_tip_and_notice_windows_exactly() {
+        let obs = Observation {
+            tips: vec![
+                TipNotice {
+                    seq: 3,
+                    tip: 0x1234_5678,
+                    kind: TipKind::Tip,
+                    text: "First\nSecond €".into(),
+                },
+                TipNotice {
+                    seq: 4,
+                    tip: 9,
+                    kind: TipKind::Notice,
+                    text: "Maintenance".into(),
+                },
+            ],
+            ..Observation::default()
+        };
+        assert_eq!(
+            observation_to_json(&obs)["tips"],
+            json!([
+                { "seq": 3, "tip": 0x1234_5678u32, "kind": "tip", "text": "First\nSecond €" },
+                { "seq": 4, "tip": 9, "kind": "notice", "text": "Maintenance" },
             ])
         );
     }
@@ -1026,6 +1086,7 @@ mod tests {
             "legacy_menus",
             "hue_pickers",
             "open_urls",
+            "tips",
             "book",
             "party",
             "quest_arrow",
@@ -1060,6 +1121,7 @@ mod tests {
         assert_eq!(v["legacy_menus"], json!([]));
         assert_eq!(v["hue_pickers"], json!([]));
         assert_eq!(v["open_urls"], json!([]));
+        assert_eq!(v["tips"], json!([]));
     }
 
     /// Schema v5: `items[].is_multi` — a placed boat/house shows up in

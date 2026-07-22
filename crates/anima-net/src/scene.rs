@@ -1381,6 +1381,25 @@ fn hue_pickers_json(world: &World) -> Value {
     )
 }
 
+/// Open 0xA6 Tip/Notice windows. Arrival order and `seq` are preserved because
+/// repeated packets with the same wire tip id are distinct ClassicUO gumps.
+fn tips_json(world: &World) -> Value {
+    Value::Array(
+        world
+            .tips
+            .iter()
+            .map(|tip| {
+                json!({
+                    "seq": tip.seq,
+                    "tip": tip.tip,
+                    "kind": tip.kind.as_str(),
+                    "text": tip.text,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Build the `party` object for the scene (0xBF/0x06). `leader` is the party
 /// leader's serial (0 = none), `members` lists each member `{serial, name, hits,
 /// hitsMax}`, and `invite` is the serial of a leader who invited us (0 = none).
@@ -2656,6 +2675,8 @@ pub fn build_scene(
     // Server dye hue pickers (0x95), potentially several callback serials.
     let hue_pickers =
         serde_json::to_string(&hue_pickers_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    // Concurrent 0xA6 Tip/Notice windows. Only kind "tip" has prev/next.
+    let tips = serde_json::to_string(&tips_json(&s.world)).unwrap_or_else(|_| "[]".into());
     // The open book (0x93/0xD4 + 0x66), or null.
     let book = serde_json::to_string(&book_json(&s.world)).unwrap_or_else(|_| "null".into());
     // Known spellbook contents (0xBF/0x1B), one entry per book we've been told
@@ -2757,7 +2778,7 @@ pub fn build_scene(
          \"statics\":[{statics}],\"mobiles\":{mobiles},\"items\":{items},\"contItems\":{cont_items},\
          \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"tanims\":{tanims},\"damage\":{damage},\"effects\":{effects},\"music\":{music},\
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
-         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
+         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
          \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps},\
@@ -2902,7 +2923,7 @@ mod tests {
     use anima_core::types::{Position, Serial};
     use anima_core::world::{
         Book, HuePicker, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, PopupEntry, PopupMenu,
-        PromptKind, PromptState, TradeState,
+        PromptKind, PromptState, TipKind, TradeState,
     };
 
     #[test]
@@ -3278,6 +3299,21 @@ mod tests {
             json!([
                 { "serial": 10, "graphic": 0x0FAB },
                 { "serial": 20, "graphic": 0x2006 },
+            ])
+        );
+    }
+
+    #[test]
+    fn tips_json_preserves_concurrent_window_identity_and_kind() {
+        let mut w = World::default();
+        assert_eq!(tips_json(&w), json!([]));
+        w.push_tip(0x1234_5678, TipKind::Tip, "First\nSecond".into());
+        w.push_tip(9, TipKind::Notice, "Maintenance".into());
+        assert_eq!(
+            tips_json(&w),
+            json!([
+                { "seq": 1, "tip": 0x1234_5678u32, "kind": "tip", "text": "First\nSecond" },
+                { "seq": 2, "tip": 9, "kind": "notice", "text": "Maintenance" },
             ])
         );
     }

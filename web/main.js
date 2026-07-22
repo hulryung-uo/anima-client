@@ -178,6 +178,9 @@ let lastPaperdollSeq = 0;      // highest paperdoll-signal seq we've already han
 let lastOpenUrlSeq = 0;
 const openUrlQueue = [];
 let openUrlWin = null;
+// ---- server Tip/Notice windows (0xA6 ScrollMessage) ----
+let lastTipNoticeSeq = 0;
+const tipNoticeWindows = new Map(); // seq -> live DOM window
 // { serial, title, canLift } for whichever target the LAST server signal named —
 // read by refreshPaperdoll() to show the real title line instead of the plain
 // mobile name, when it matches the currently-displayed doll.
@@ -1447,7 +1450,8 @@ function hideLogin() {
 // ---- seq-ring priming (skip a stale backlog replay on page reload) ----
 // Every event "ring" above (character anims 0x6E/0xE2, damage 0x0B, effects
 // 0x70/0xC0/0xC7, lift-rejects 0x27, container-opens 0x24, swings 0x2F,
-// paperdoll 0x88, external URLs 0xA5, sounds 0x54) is keyed by a monotonic `seq` that lives in the
+// paperdoll 0x88, external URLs 0xA5, tips/notices 0xA6, sounds 0x54) is keyed
+// by a monotonic `seq` that lives in the
 // anima-net play server's `World`, NOT on this page: reloading the browser
 // resets every `lastXSeq` variable above to 0, but the live ServUO session
 // (and its already-fired backlog under those seqs) keeps running underneath —
@@ -1480,6 +1484,7 @@ function primeSeqRings(s) {
   lastSoundSeq = Math.max(lastSoundSeq, maxSeq(s.sounds));
   if (s.paperdoll) lastPaperdollSeq = Math.max(lastPaperdollSeq, s.paperdoll.seq | 0);
   lastOpenUrlSeq = Math.max(lastOpenUrlSeq, maxSeq(s.openUrls));
+  lastTipNoticeSeq = Math.max(lastTipNoticeSeq, maxSeq(s.tips));
   // Per-serial, unlike the rings above — see `lastMapOpenSeq`'s doc.
   if (s.maps) for (const m of s.maps) lastMapOpenSeq.set(m.serial >>> 0, m.openSeq | 0);
 }
@@ -1530,6 +1535,7 @@ async function poll() {
     refreshGumps(scene);  // server-sent generic gumps/dialogs (0xB0/0xDD)
     refreshLegacyMenus(scene); // legacy icon/question menus (0x7C)
     refreshHuePickers(scene); // server dye color pickers (0x95)
+    refreshTipNotices(scene); // pageable tips / close-only notices (0xA6)
     refreshPopup(scene);  // right-click context menu (0xBF/0x14)
     refreshBook(scene);   // open book reader (0x93/0xD4 + 0x66)
     refreshPrompt(scene); // server text-prompt dialog (0x9A ASCII / 0xC2 Unicode)
@@ -6545,6 +6551,83 @@ function ingestOpenUrls(s) {
     if (url && openUrlQueue.length < 16) openUrlQueue.push({ seq, url });
   }
   showNextOpenUrlDialog();
+}
+
+// ---- Tip of the Day / Notice windows (0xA6 ScrollMessage) ------------------
+function removeTipNoticeWindow(seq, notifyServer) {
+  const el = tipNoticeWindows.get(seq);
+  if (el) el.remove();
+  tipNoticeWindows.delete(seq);
+  if (notifyServer) sendInput("tipclose:" + seq); // local-only Action; no UO packet
+}
+
+function navigateTipNotice(seq, next) {
+  removeTipNoticeWindow(seq, false);
+  sendInput("tipnav:" + seq + ":" + (next ? "1" : "0"));
+}
+
+function openTipNoticeWindow(tip) {
+  const seq = Number(tip.seq) || 0;
+  if (!seq || tipNoticeWindows.has(seq)) return;
+  const pageable = tip.kind === "tip";
+  const el = document.createElement("div");
+  el.className = "gump-win tip-notice-win " + (pageable ? "pageable" : "notice");
+  el.innerHTML = '<div class="gump-title"><span></span><span class="gump-close">✕</span></div>'
+    + '<div class="gump-body tip-notice-body"><div class="tip-notice-text"></div>'
+    + '<div class="tip-notice-actions"></div></div>';
+  el.querySelector(".gump-title span").textContent = pageable ? "Tip of the Day" : "Notice";
+  el.querySelector(".tip-notice-text").textContent = String(tip.text || "");
+  const actions = el.querySelector(".tip-notice-actions");
+  const button = (label, fn, className) => {
+    const b = document.createElement("button");
+    b.className = "dlg-btn " + className;
+    b.textContent = label;
+    b.addEventListener("click", fn);
+    actions.appendChild(b);
+    return b;
+  };
+  if (pageable) {
+    button("Previous", () => navigateTipNotice(seq, false), "tip-notice-prev");
+    button("Next", () => navigateTipNotice(seq, true), "tip-notice-next");
+  }
+  const close = button("Close", () => removeTipNoticeWindow(seq, true), "tip-notice-close");
+
+  // ClassicUO places pageable tips around (200,100), notices around (20,20).
+  // Cascade concurrent windows slightly so repeated packets remain visible.
+  const cascade = (tipNoticeWindows.size % 6) * 18;
+  el.style.left = (pageable ? 200 + cascade : 20 + cascade) + "px";
+  el.style.top = (pageable ? 100 + cascade : 20 + cascade) + "px";
+  document.body.appendChild(el);
+  tipNoticeWindows.set(seq, el);
+  el.querySelector(".gump-close").addEventListener("click", () => removeTipNoticeWindow(seq, true));
+  el.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    removeTipNoticeWindow(seq, true);
+  });
+  el.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.code === "Escape") { e.preventDefault(); removeTipNoticeWindow(seq, true); }
+  });
+  makeDraggable(el, el.querySelector(".gump-title"));
+  close.focus();
+}
+
+function refreshTipNotices(s) {
+  const active = new Set();
+  for (const tip of (s && s.tips) || []) {
+    const seq = Number(tip.seq) || 0;
+    if (!seq) continue;
+    active.add(seq);
+    if (seq > lastTipNoticeSeq) {
+      lastTipNoticeSeq = seq;
+      openTipNoticeWindow(tip);
+    }
+  }
+  // The server replied to navigation, the local close Action landed, or the
+  // bounded core list expired this window: remove it without another command.
+  for (const seq of [...tipNoticeWindows.keys()]) {
+    if (!active.has(seq)) removeTipNoticeWindow(seq, false);
+  }
 }
 
 // ---- server text-prompt dialog (ClassicUO ASCII/Unicode "enter text") -----

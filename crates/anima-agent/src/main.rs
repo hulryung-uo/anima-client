@@ -131,6 +131,10 @@ fn main() {
                 Action::PartyLeave => "partyleave".into(),
                 Action::PromptResponse { text } => format!("prompt({text:?})"),
                 Action::PromptCancel => "promptcancel".into(),
+                Action::TipNavigate { seq, next } => {
+                    format!("tipnav({seq},{})", if *next { "next" } else { "prev" })
+                }
+                Action::TipClose { seq } => format!("tipclose({seq})"),
                 Action::TradeAccept { container, accept } => {
                     format!("tradeaccept(0x{container:08X},{accept})")
                 }

@@ -483,6 +483,35 @@ pub struct OpenUrlRequest {
     pub url: String,
 }
 
+/// Presentation kind carried by 0xA6 ScrollMessage's flag byte. Flag 0 is a
+/// pageable “Tip of the Day”; flag 1 is a protocol-level no-op in ClassicUO;
+/// every other value is a non-pageable notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TipKind {
+    Tip,
+    Notice,
+}
+
+impl TipKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tip => "tip",
+            Self::Notice => "notice",
+        }
+    }
+}
+
+/// One open server 0xA6 tip/notice window. `seq` is the client-side window
+/// identity: repeated packets with the same wire `tip` still open distinct
+/// ClassicUO gumps. Only [`TipKind::Tip`] supports 0xA7 previous/next requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TipNotice {
+    pub seq: u64,
+    pub tip: u32,
+    pub kind: TipKind,
+    pub text: String,
+}
+
 /// Wire encoding used by a pending server text prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
@@ -921,6 +950,10 @@ pub struct World {
     pub recent_open_urls: Vec<OpenUrlRequest>,
     /// Monotonic counter assigning each open-URL request a unique `seq`.
     pub open_url_seq: u64,
+    /// Open 0xA6 Tip/Notice windows in arrival order. See [`TipNotice`].
+    pub tips: Vec<TipNotice>,
+    /// Monotonic counter assigning each tip/notice window a unique `seq`.
+    pub tip_seq: u64,
     /// Recent 0x24 (DrawContainer/ContainerDisplay(HS)) events: each `(seq,
     /// serial, gump_id)`, newest last, capped like `recent_lift_rejects`. This
     /// is deliberately a **raw, unfiltered data log** — every `gump_id` ServUO
@@ -1018,6 +1051,8 @@ const MAX_RECENT_CONTAINER_OPENS: usize = 16;
 const MAX_RECENT_SWINGS: usize = 16;
 /// How many recent validated external-URL requests [`World::push_open_url`] keeps.
 const MAX_RECENT_OPEN_URLS: usize = 16;
+/// Defensive cap for concurrently open server tip/notice windows.
+const MAX_TIPS: usize = 16;
 /// Retained chat history for temporarily-paused consumers. The interactive
 /// renderer keeps a smaller presentation ring of its own.
 const MAX_JOURNAL_ENTRIES: usize = 512;
@@ -1359,6 +1394,32 @@ impl World {
         if overflow > 0 {
             self.recent_open_urls.drain(0..overflow);
         }
+    }
+
+    /// Open one server Tip/Notice window. A repeated wire `tip` is not an
+    /// upsert: ClassicUO adds a new gump for every 0xA6 packet, so each receives
+    /// a fresh `seq`. The oldest window is dropped if a shard exceeds the cap.
+    pub fn push_tip(&mut self, tip: u32, kind: TipKind, text: String) {
+        self.tip_seq += 1;
+        self.tips.push(TipNotice {
+            seq: self.tip_seq,
+            tip,
+            kind,
+            text,
+        });
+        let overflow = self.tips.len().saturating_sub(MAX_TIPS);
+        if overflow > 0 {
+            self.tips.drain(0..overflow);
+        }
+    }
+
+    pub fn tip(&self, seq: u64) -> Option<&TipNotice> {
+        self.tips.iter().find(|tip| tip.seq == seq)
+    }
+
+    /// Close exactly one client-side tip/notice gump by its monotonic identity.
+    pub fn close_tip(&mut self, seq: u64) {
+        self.tips.retain(|tip| tip.seq != seq);
     }
 
     /// Record a server-initiated paperdoll open/refresh (0x88 DisplayPaperdoll).

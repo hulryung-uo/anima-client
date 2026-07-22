@@ -421,6 +421,15 @@ pub fn build_hue_picker_response(serial: u32, hue: u16) -> Vec<u8> {
     w.into_vec()
 }
 
+/// Request the previous/next page from a pageable 0xA6 TipWindow. ClassicUO
+/// sends fixed packet 0xA7 as `[id][tip:u16][direction:u8]`, truncating the
+/// inbound 32-bit tip id to its low 16 bits; direction 0 = previous, 1 = next.
+pub fn build_tip_request(tip: u32, next: bool) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xA7).u16(tip as u16).u8(next as u8);
+    w.into_vec()
+}
+
 /// BookPageRequest `0x66` (variable): ask the server to send every page of the
 /// open book `serial`. `[0x66][len:u16][serial:u32][pageCount:u16=N]` then, for
 /// each page `1..=N`, `[pageNum:u16][lineCount:u16=0xFFFF]` — the `0xFFFF` line
@@ -758,6 +767,12 @@ mod tests {
         );
         assert_eq!(&build_hue_picker_response(7, 0)[7..], &[0, 2]);
         assert_eq!(&build_hue_picker_response(7, 0xFFFF)[7..], &[0x03, 0xE9]);
+    }
+
+    #[test]
+    fn tip_request_matches_classicuo_fixed_shape_and_id_truncation() {
+        assert_eq!(build_tip_request(0x1234_5678, false), [0xA7, 0x56, 0x78, 0]);
+        assert_eq!(build_tip_request(0x1234_5678, true), [0xA7, 0x56, 0x78, 1]);
     }
 
     #[test]

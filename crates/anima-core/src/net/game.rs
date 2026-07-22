@@ -11,7 +11,7 @@
 use super::packet::{PacketError, PacketReader, Result as PResult};
 use crate::world::{
     Effect, Gump, HouseDesign, HousePlane, HuePicker, JournalEntry, LegacyMenu, LegacyMenuEntry,
-    LegacyMenuKind, PopupEntry, PopupMenu, PromptKind, PromptState, Skill, TargetCursor,
+    LegacyMenuKind, PopupEntry, PopupMenu, PromptKind, PromptState, Skill, TargetCursor, TipKind,
     TradeState, Waypoint, World,
 };
 
@@ -86,6 +86,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x89 => corpse_equip(world, frame)?,
         0x9A => ascii_prompt(world, frame)?,
         0xA5 => open_url(world, frame)?,
+        0xA6 => tip_window(world, frame)?,
         0xC2 => unicode_prompt(world, frame)?,
         0x6F => secure_trade(world, frame)?,
         0x3B => end_vendor(world, frame)?,
@@ -1671,6 +1672,35 @@ fn valid_optional_port(suffix: &str) -> bool {
             .is_some_and(|port| !port.is_empty() && port.parse::<u16>().is_ok())
 }
 
+/// 0xA6 ScrollMessage / TipWindow — variable packet
+/// `[id][len:u16][flag:u8][tip:u32][textLen:u16][text:cp1252*len]`.
+/// ClassicUO ignores flag 1 entirely, renders flag 0 as a pageable “Tip of the
+/// Day” (0xA7 previous/next), and every other flag as a close-only notice. A
+/// truncated body is atomic: it cannot create a partial window.
+fn tip_window(world: &mut World, frame: &[u8]) -> PResult<()> {
+    if frame.len() < 4 {
+        return Ok(());
+    }
+    let flag = frame[3];
+    if flag == 1 {
+        return Ok(());
+    }
+    if frame.len() < 10 {
+        return Ok(());
+    }
+    let mut r = PacketReader::new(&frame[4..]);
+    let tip = r.u32()?;
+    let text_len = r.u16()? as usize;
+    let text = ascii_string(r.bytes(text_len)?).replace('\r', "\n");
+    let kind = if flag == 0 {
+        TipKind::Tip
+    } else {
+        TipKind::Notice
+    };
+    world.push_tip(tip, kind, text);
+    Ok(())
+}
+
 /// 0xC2 UnicodePrompt — the server asks us to answer with typed text (pet rename,
 /// house sign, guild abbreviation, … — ~38 ServUO flows). Fixed 21 bytes as
 /// ServUO sends it: `[id][len:u16][senderSerial:u32][promptId:u32][type:u32=0]
@@ -2429,7 +2459,42 @@ fn push_journal_cliloc(
 
 fn ascii_string(bytes: &[u8]) -> String {
     let end = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
-    bytes[..end].iter().map(|&c| c as char).collect()
+    bytes[..end].iter().map(|&c| cp1252_char(c)).collect()
+}
+
+/// ClassicUO `StringHelper.Cp1252ToUnicode`: server “ASCII” strings use the
+/// Windows-1252 printable extension rather than ISO-8859-1's C1 controls.
+fn cp1252_char(byte: u8) -> char {
+    match byte {
+        128 => '\u{20AC}', // €
+        130 => '\u{201A}', // ‚
+        131 => '\u{0192}', // ƒ
+        132 => '\u{201E}', // „
+        133 => '\u{2026}', // …
+        134 => '\u{2020}', // †
+        135 => '\u{2021}', // ‡
+        136 => '\u{02C6}', // ˆ
+        137 => '\u{2030}', // ‰
+        138 => '\u{0160}', // Š
+        139 => '\u{2039}', // ‹
+        140 => '\u{0152}', // Œ
+        142 => '\u{017D}', // Ž
+        145 => '\u{2018}', // ‘
+        146 => '\u{2019}', // ’
+        147 => '\u{201C}', // “
+        148 => '\u{201D}', // ”
+        149 => '\u{2022}', // •
+        150 => '\u{2013}', // –
+        151 => '\u{2014}', // —
+        152 => '\u{02DC}', // ˜
+        153 => '\u{2122}', // ™
+        154 => '\u{0161}', // š
+        155 => '\u{203A}', // ›
+        156 => '\u{0153}', // œ
+        158 => '\u{017E}', // ž
+        159 => '\u{0178}', // Ÿ
+        _ => byte as char,
+    }
 }
 
 /// Decode a big-endian UTF-16 string, stopping at a NUL char.
@@ -4227,6 +4292,66 @@ mod tests {
         assert_eq!(w.recent_open_urls.len(), 16);
         assert_eq!(w.recent_open_urls.first().map(|e| e.seq), Some(5));
         assert_eq!(w.recent_open_urls.last().map(|e| e.seq), Some(20));
+    }
+
+    fn tip_packet(flag: u8, tip: u32, text: &[u8]) -> Vec<u8> {
+        let mut p = PacketWriter::new();
+        p.u8(0xA6)
+            .u16(0)
+            .u8(flag)
+            .u32(tip)
+            .u16(text.len() as u16)
+            .bytes(text);
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1..3].copy_from_slice(&len.to_be_bytes());
+        frame
+    }
+
+    #[test]
+    fn tip_window_parses_pageable_tip_notice_and_cp1252() {
+        let mut w = World::new();
+        assert!(apply_packet(
+            &mut w,
+            &tip_packet(0, 0x1234_5678, b"First\rSecond \x80")
+        ));
+        assert!(apply_packet(&mut w, &tip_packet(2, 9, b"Maintenance")));
+        assert!(apply_packet(&mut w, &tip_packet(0, 0x1234_5678, b"Repeat")));
+
+        assert_eq!(w.tips.len(), 3);
+        assert_eq!((w.tips[0].seq, w.tips[0].tip), (1, 0x1234_5678));
+        assert_eq!(w.tips[0].kind, TipKind::Tip);
+        assert_eq!(w.tips[0].text, "First\nSecond €");
+        assert_eq!(w.tips[1].kind, TipKind::Notice);
+        assert_eq!(w.tips[1].text, "Maintenance");
+        assert_eq!(w.tips[2].seq, 3, "repeat packet opens a distinct gump");
+
+        w.close_tip(1);
+        assert!(w.tip(1).is_none());
+        assert_eq!(w.tips.len(), 2, "close removes exactly one window");
+    }
+
+    #[test]
+    fn tip_window_ignores_flag_one_and_truncated_text_atomically() {
+        let mut w = World::new();
+        assert!(apply_packet(&mut w, &[0xA6, 0, 4, 1]));
+        assert!(w.tips.is_empty(), "ClassicUO treats flag 1 as a no-op");
+
+        let mut truncated = tip_packet(0, 7, b"abc");
+        truncated[8..10].copy_from_slice(&10u16.to_be_bytes());
+        assert!(apply_packet(&mut w, &truncated));
+        assert!(w.tips.is_empty());
+    }
+
+    #[test]
+    fn tip_window_ring_is_bounded() {
+        let mut w = World::new();
+        for tip in 0..20 {
+            assert!(apply_packet(&mut w, &tip_packet(2, tip, b"notice")));
+        }
+        assert_eq!(w.tips.len(), 16);
+        assert_eq!(w.tips.first().map(|tip| tip.seq), Some(5));
+        assert_eq!(w.tips.last().map(|tip| tip.seq), Some(20));
     }
 
     /// Patch the big-endian length word at `[1..3]` of a variable-framed test packet.
