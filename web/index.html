@@ -566,6 +566,20 @@
         border: 1px solid #2a2f37; border-radius: 4px; padding: 4px 6px; font-size: 12px; }
       .split-actions { display: flex; gap: 6px; }
       .split-actions .dlg-btn { flex: 1; text-align: center; }
+      /* ---- server-requested external page (0xA5 OpenUrl) ---- */
+      .open-url-win { width: min(390px, calc(100vw - 24px)); z-index: 48;
+        left: 50%; top: 38%; transform: translate(-50%, -50%); }
+      .open-url-body { display: flex; flex-direction: column; gap: 8px; }
+      .open-url-warning { color: #d6dae0; font-size: 12px; line-height: 1.4; }
+      .open-url-host { color: #f0d58b; font-size: 13px; font-weight: 600;
+        overflow-wrap: anywhere; }
+      .open-url-value { max-height: 76px; overflow: auto; padding: 6px;
+        border: 1px solid #2a2f37; border-radius: 4px; background: #14171c;
+        color: #aeb7c5; font-size: 10px; line-height: 1.35; overflow-wrap: anywhere; }
+      .open-url-actions { display: flex; gap: 6px; }
+      .open-url-actions .dlg-btn { flex: 1; height: 24px; line-height: 22px;
+        text-align: center; box-sizing: border-box; }
+      .open-url-open { display: block; text-decoration: none; }
       /* ---- server text-prompt dialog (0x9A ASCII / 0xC2 Unicode: pet rename,
          house sign, guild abbreviation, …) — the question itself already showed up as
          a journal line; this is just the response box. Centered (no cursor

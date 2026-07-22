@@ -471,6 +471,18 @@ pub struct Paperdoll {
     pub can_lift: bool,
 }
 
+/// A validated server request to open an external web page (0xA5 OpenUrl).
+/// Only absolute HTTP(S) URLs reach this model; the decoder rejects other
+/// schemes, credentials, malformed authorities, control characters, and
+/// oversized input before calling [`World::push_open_url`]. `seq` makes repeat
+/// requests for the same address distinct and lets renderers ask for explicit
+/// user consent exactly once per packet.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenUrlRequest {
+    pub seq: u64,
+    pub url: String,
+}
+
 /// Wire encoding used by a pending server text prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
@@ -903,6 +915,12 @@ pub struct World {
     pub paperdoll: Option<Paperdoll>,
     /// Monotonic counter assigning each [`World::paperdoll`] update a unique `seq`.
     pub paperdoll_seq: u64,
+    /// Recent validated 0xA5 external-URL requests, oldest first. These are
+    /// requests only: a renderer must still obtain explicit user confirmation
+    /// before navigating. See [`OpenUrlRequest`].
+    pub recent_open_urls: Vec<OpenUrlRequest>,
+    /// Monotonic counter assigning each open-URL request a unique `seq`.
+    pub open_url_seq: u64,
     /// Recent 0x24 (DrawContainer/ContainerDisplay(HS)) events: each `(seq,
     /// serial, gump_id)`, newest last, capped like `recent_lift_rejects`. This
     /// is deliberately a **raw, unfiltered data log** — every `gump_id` ServUO
@@ -998,6 +1016,8 @@ const MAX_PENDING_WAR_MODE_REQUESTS: usize = 16;
 const MAX_RECENT_CONTAINER_OPENS: usize = 16;
 /// How many recent swing events [`World::push_swing`] keeps.
 const MAX_RECENT_SWINGS: usize = 16;
+/// How many recent validated external-URL requests [`World::push_open_url`] keeps.
+const MAX_RECENT_OPEN_URLS: usize = 16;
 /// Retained chat history for temporarily-paused consumers. The interactive
 /// renderer keeps a smaller presentation ring of its own.
 const MAX_JOURNAL_ENTRIES: usize = 512;
@@ -1320,6 +1340,24 @@ impl World {
         let overflow = self.recent_swings.len().saturating_sub(MAX_RECENT_SWINGS);
         if overflow > 0 {
             self.recent_swings.drain(0..overflow);
+        }
+    }
+
+    /// Record one already-validated 0xA5 external URL request. This never opens
+    /// anything by itself; native/WASM renderers consume the bounded event ring
+    /// and must ask the user before navigating.
+    pub fn push_open_url(&mut self, url: String) {
+        self.open_url_seq += 1;
+        self.recent_open_urls.push(OpenUrlRequest {
+            seq: self.open_url_seq,
+            url,
+        });
+        let overflow = self
+            .recent_open_urls
+            .len()
+            .saturating_sub(MAX_RECENT_OPEN_URLS);
+        if overflow > 0 {
+            self.recent_open_urls.drain(0..overflow);
         }
     }
 

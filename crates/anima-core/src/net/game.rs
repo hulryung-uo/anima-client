@@ -85,6 +85,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x38 => pathfinding(world, frame)?,
         0x89 => corpse_equip(world, frame)?,
         0x9A => ascii_prompt(world, frame)?,
+        0xA5 => open_url(world, frame)?,
         0xC2 => unicode_prompt(world, frame)?,
         0x6F => secure_trade(world, frame)?,
         0x3B => end_vendor(world, frame)?,
@@ -1568,6 +1569,106 @@ fn ascii_prompt(world: &mut World, frame: &[u8]) -> PResult<()> {
         kind: PromptKind::Ascii,
     });
     Ok(())
+}
+
+/// 0xA5 OpenUrl — `[id][len:u16][url:ascii-NUL]`. ClassicUO passes any
+/// non-empty string straight to the OS browser. A remote shard is not trusted
+/// enough to launch arbitrary URI handlers, so anima narrows this to a bounded,
+/// absolute HTTP(S) URL with a well-formed authority and records a consent
+/// request instead. The renderer is responsible for asking the user; receiving
+/// this packet never navigates by itself.
+fn open_url(world: &mut World, frame: &[u8]) -> PResult<()> {
+    if frame.len() < 4 {
+        return Ok(());
+    }
+    if let Some(url) = validated_http_url(&frame[3..]) {
+        world.push_open_url(url);
+    }
+    Ok(())
+}
+
+const MAX_OPEN_URL_BYTES: usize = 2_048;
+
+/// Validate the deliberately small URL surface a game shard may ask a browser
+/// to open. This is stricter than a general URL parser by design: HTTP(S) only,
+/// printable ASCII only, no credentials, a DNS/IPv4/bracketed-IPv6 host, and an
+/// optional numeric u16 port. Paths, queries, and fragments remain opaque.
+fn validated_http_url(payload: &[u8]) -> Option<String> {
+    let end = payload
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(payload.len());
+    let bytes = &payload[..end];
+    if bytes.is_empty()
+        || bytes.len() > MAX_OPEN_URL_BYTES
+        || bytes
+            .iter()
+            .any(|&b| !(0x21..=0x7E).contains(&b) || matches!(b, b'\\' | b'"' | b'<' | b'>' | b'`'))
+    {
+        return None;
+    }
+    let url = std::str::from_utf8(bytes).ok()?;
+    let scheme_end = url.find("://")?;
+    let scheme = &url[..scheme_end];
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    let remainder = &url[scheme_end + 3..];
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    if !valid_http_authority(authority) {
+        return None;
+    }
+    Some(url.to_owned())
+}
+
+fn valid_http_authority(authority: &str) -> bool {
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some(close) = bracketed.find(']') else {
+            return false;
+        };
+        let host = &bracketed[..close];
+        let suffix = &bracketed[close + 1..];
+        return host.parse::<std::net::Ipv6Addr>().is_ok() && valid_optional_port(suffix);
+    }
+
+    if authority.matches(':').count() > 1 {
+        return false; // IPv6 must use brackets in an HTTP URL authority.
+    }
+    let (host, port) = authority
+        .split_once(':')
+        .map_or((authority, ""), |(host, port)| (host, port));
+    if host.is_empty() || (!port.is_empty() && port.parse::<u16>().is_err()) {
+        return false;
+    }
+    if authority.ends_with(':') {
+        return false;
+    }
+
+    if host.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        return host.parse::<std::net::Ipv4Addr>().is_ok();
+    }
+    host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
+fn valid_optional_port(suffix: &str) -> bool {
+    suffix.is_empty()
+        || suffix
+            .strip_prefix(':')
+            .is_some_and(|port| !port.is_empty() && port.parse::<u16>().is_ok())
 }
 
 /// 0xC2 UnicodePrompt — the server asks us to answer with typed text (pet rename,
@@ -4061,6 +4162,71 @@ mod tests {
             w.prompt.expect("original prompt retained").kind,
             PromptKind::Ascii
         );
+    }
+
+    fn open_url_packet(url: &[u8]) -> Vec<u8> {
+        let mut p = PacketWriter::new();
+        p.u8(0xA5).u16(0).bytes(url).u8(0);
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1..3].copy_from_slice(&len.to_be_bytes());
+        frame
+    }
+
+    #[test]
+    fn open_url_accepts_only_valid_http_urls_and_preserves_repeat_events() {
+        let mut w = World::new();
+        for url in [
+            "https://uo.com/ultima-store/?item=1#buy",
+            "HTTP://ServUO.craftuo.com:8080/",
+            "https://[2001:db8::1]/news",
+            "https://uo.com/ultima-store/?item=1#buy",
+        ] {
+            assert!(apply_packet(&mut w, &open_url_packet(url.as_bytes())));
+        }
+        assert_eq!(w.recent_open_urls.len(), 4);
+        assert_eq!(w.recent_open_urls[0].seq, 1);
+        assert_eq!(w.recent_open_urls[3].seq, 4);
+        assert_eq!(w.recent_open_urls[1].url, "HTTP://ServUO.craftuo.com:8080/");
+
+        let rejected: &[&[u8]] = &[
+            b"javascript:alert(1)",
+            b"file:///etc/passwd",
+            b"//uo.com/path",
+            b"https://user:pass@uo.com/",
+            b"https:///missing-host",
+            b"https://uo.com:99999/",
+            b"https://bad..host/",
+            b"https://uo.com\\@evil.example/",
+            b"https://uo.com/<script>",
+            b"https://uo.com/space here",
+            b"https://uo.com/\x80",
+            b"",
+        ];
+        for &url in rejected {
+            assert!(apply_packet(&mut w, &open_url_packet(url)));
+        }
+        let mut oversized = b"https://example.com/".to_vec();
+        oversized.resize(MAX_OPEN_URL_BYTES + 1, b'a');
+        assert!(apply_packet(&mut w, &open_url_packet(&oversized)));
+        assert_eq!(w.recent_open_urls.len(), 4, "invalid URLs emit no event");
+
+        assert!(apply_packet(&mut w, &[0xA5, 0, 3]));
+        assert_eq!(w.recent_open_urls.len(), 4, "truncated packet is inert");
+    }
+
+    #[test]
+    fn open_url_event_ring_is_bounded() {
+        let mut w = World::new();
+        for i in 0..20 {
+            assert!(apply_packet(
+                &mut w,
+                &open_url_packet(format!("https://example.com/{i}").as_bytes())
+            ));
+        }
+        assert_eq!(w.recent_open_urls.len(), 16);
+        assert_eq!(w.recent_open_urls.first().map(|e| e.seq), Some(5));
+        assert_eq!(w.recent_open_urls.last().map(|e| e.seq), Some(20));
     }
 
     /// Patch the big-endian length word at `[1..3]` of a variable-framed test packet.

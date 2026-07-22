@@ -12,8 +12,9 @@
 use crate::gump_layout::GumpElement;
 use crate::types::Position;
 use crate::world::{
-    is_ghost_body, Book, Buff, HuePicker, JournalEntry, LegacyMenu, MapView, Party, PopupMenu,
-    PromptState, ShopBuy, ShopSell, SpellbookContent, TargetCursor, TradeState, Weather, World,
+    is_ghost_body, Book, Buff, HuePicker, JournalEntry, LegacyMenu, MapView, OpenUrlRequest, Party,
+    PopupMenu, PromptState, ShopBuy, ShopSell, SpellbookContent, TargetCursor, TradeState, Weather,
+    World,
 };
 
 /// A skill value, in human units (50.0 == GM-half). Derived from [`crate::world::Skill`].
@@ -160,6 +161,10 @@ pub struct Observation {
     /// Open server hue pickers (0x95), sorted by serial. These cannot be
     /// canceled; answer with [`Action::HuePickerSelect`] and a dyed hue.
     pub hue_pickers: Vec<HuePicker>,
+    /// Recent validated 0xA5 HTTP(S) URL requests, oldest first. These are
+    /// informational events only: no navigation happens in the core, and a UI
+    /// must obtain explicit user approval before opening one. Dedupe on `seq`.
+    pub open_urls: Vec<OpenUrlRequest>,
     /// The currently open book (0x93/0xD4 + 0x66), if any. See [`Book`].
     /// Request more pages with [`Action::BookRequest`].
     pub book: Option<Book>,
@@ -586,6 +591,7 @@ impl World {
             popup: self.popup.clone(),
             legacy_menus,
             hue_pickers,
+            open_urls: self.recent_open_urls.clone(),
             book: self.book.clone(),
             party: self.party.clone(),
             quest_arrow: self.quest_arrow,

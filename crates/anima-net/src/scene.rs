@@ -1640,6 +1640,19 @@ fn paperdoll_json(world: &World) -> Value {
     }
 }
 
+/// Validated 0xA5 HTTP(S) navigation requests. This bridge only transports the
+/// request and its monotonic identity; the browser presents a consent dialog
+/// and never navigates merely because an entry appears here.
+fn open_urls_json(world: &World) -> Value {
+    Value::Array(
+        world
+            .recent_open_urls
+            .iter()
+            .map(|request| json!({ "seq": request.seq, "url": request.url }))
+            .collect(),
+    )
+}
+
 /// ServUO 0x24 `gumpId`s that are NOT a container (see
 /// [`anima_core::net::game::draw_container`]'s doc for the ServUO/ClassicUO
 /// cites): `DisplayBuyList`/`DisplayBuyListHS` (vendor "Buy" window) always
@@ -2727,6 +2740,10 @@ pub fn build_scene(
     // `paperdoll_json`'s doc for the `seq` "fresh request" semantics.
     let paperdoll =
         serde_json::to_string(&paperdoll_json(&s.world)).unwrap_or_else(|_| "null".into());
+    // Validated 0xA5 external-page requests. The browser seq-gates these and
+    // requires an explicit click before opening a new tab.
+    let open_urls =
+        serde_json::to_string(&open_urls_json(&s.world)).unwrap_or_else(|_| "[]".into());
     // Current facet/map index (0xBF/0x08 MapChange); see `World::map_index`'s doc
     // for what a real per-facet `MapData` reload would additionally require.
     let facet = s.world.map_index;
@@ -2743,7 +2760,7 @@ pub fn build_scene(
          \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
-         \"paperdoll\":{paperdoll},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps},\
+         \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",
         s.confirms, s.denies
     )
@@ -2950,6 +2967,21 @@ mod tests {
         assert_eq!(
             prompt_json(&w),
             json!({ "active": 1, "serial": 0x77, "promptId": 42, "kind": "ascii" })
+        );
+    }
+
+    #[test]
+    fn open_urls_json_preserves_seq_and_validated_url() {
+        let mut w = World::default();
+        assert_eq!(open_urls_json(&w), json!([]));
+        w.push_open_url("https://uo.com/news".into());
+        w.push_open_url("http://localhost:8080/help".into());
+        assert_eq!(
+            open_urls_json(&w),
+            json!([
+                { "seq": 1, "url": "https://uo.com/news" },
+                { "seq": 2, "url": "http://localhost:8080/help" },
+            ])
         );
     }
 

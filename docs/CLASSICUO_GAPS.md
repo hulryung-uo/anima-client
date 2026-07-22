@@ -13,7 +13,7 @@ scene/agent exposure, and user-facing behavior (where applicable) are present.
   `src/ClassicUO.Client/Network/PacketHandlers.cs`
 - anima source: `crates/anima-core/src/net/game.rs` plus login and movement
   state machines
-- Current game decoder: 70 packet IDs after adding `0x9A ASCIIPrompt`;
+- Current game decoder: 71 packet IDs after adding `0xA5 OpenUrl`;
   `0x21`/`0x22` are handled separately by `Walker`
 
 The comparison is mechanical at the packet-ID level, followed by a semantic
@@ -41,6 +41,9 @@ that are acknowledgements/no-ops are not counted as missing game UI features.
 - `0x9A ASCIIPrompt` / `0x9A ASCIIPromptResponse`: prompt-kind-aware core state,
   ClassicUO-compatible CP1252/NUL response and cancel packets, versioned brain/
   WASM/native contracts, and the shared browser response dialog
+- `0xA5 OpenUrl`: bounded HTTP(S)-only request events, credential/authority and
+  control-character validation, versioned brain/scene exposure, and a browser
+  consent dialog whose explicit link click uses `noopener`/`noreferrer`
 - Speech, localized messages, OPL/tooltips, prompts, targeting
 - Movement confirmation/denial, pathfinding, doors, facet changes
 - Combat state, damage/effects, animations, death/corpse links
@@ -55,7 +58,6 @@ the feature. Each row is still open unless a later change moves it above.
 
 | Priority | Packet(s) | ClassicUO behavior | Required anima vertical slice |
 |---|---:|---|---|
-| P0 | `0xA5` | Open URL | Validated URL event plus explicit user confirmation before navigation |
 | P0 | `0xA6` | Tip/notice window | Tip model, renderer window, previous/next response |
 | P0 | `0xAB` | Text-entry dialog | Dialog model/UI and response packet |
 | P0 | `0xB8` | Character profile | Read/edit profile model, UI, response packet |

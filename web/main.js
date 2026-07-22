@@ -174,6 +174,10 @@ let lastSwingSeq = 0;          // highest swing event seq we've already handled
 
 // ---- server-initiated paperdoll open/refresh (0x88 DisplayPaperdoll) ----
 let lastPaperdollSeq = 0;      // highest paperdoll-signal seq we've already handled
+// ---- validated server external-URL requests (0xA5 OpenUrl) ----
+let lastOpenUrlSeq = 0;
+const openUrlQueue = [];
+let openUrlWin = null;
 // { serial, title, canLift } for whichever target the LAST server signal named —
 // read by refreshPaperdoll() to show the real title line instead of the plain
 // mobile name, when it matches the currently-displayed doll.
@@ -1443,7 +1447,7 @@ function hideLogin() {
 // ---- seq-ring priming (skip a stale backlog replay on page reload) ----
 // Every event "ring" above (character anims 0x6E/0xE2, damage 0x0B, effects
 // 0x70/0xC0/0xC7, lift-rejects 0x27, container-opens 0x24, swings 0x2F,
-// paperdoll 0x88, sounds 0x54) is keyed by a monotonic `seq` that lives in the
+// paperdoll 0x88, external URLs 0xA5, sounds 0x54) is keyed by a monotonic `seq` that lives in the
 // anima-net play server's `World`, NOT on this page: reloading the browser
 // resets every `lastXSeq` variable above to 0, but the live ServUO session
 // (and its already-fired backlog under those seqs) keeps running underneath —
@@ -1475,6 +1479,7 @@ function primeSeqRings(s) {
   lastSwingSeq = Math.max(lastSwingSeq, maxSeq(s.swings));
   lastSoundSeq = Math.max(lastSoundSeq, maxSeq(s.sounds));
   if (s.paperdoll) lastPaperdollSeq = Math.max(lastPaperdollSeq, s.paperdoll.seq | 0);
+  lastOpenUrlSeq = Math.max(lastOpenUrlSeq, maxSeq(s.openUrls));
   // Per-serial, unlike the rings above — see `lastMapOpenSeq`'s doc.
   if (s.maps) for (const m of s.maps) lastMapOpenSeq.set(m.serial >>> 0, m.openSeq | 0);
 }
@@ -1503,6 +1508,7 @@ async function poll() {
     ingestDragCompletions(scene); // reconcile held-item cursor acknowledgements (0x28/0x29)
     ingestDeathScreen(scene); // start ClassicUO's short death banner timer (0x2C)
     ingestContainerOpens(scene); // open a window for each server-initiated container open (0x24)
+    ingestOpenUrls(scene); // ask before opening each validated external URL (0xA5)
     ingestSwings(scene); // briefly face the attacker toward the defender (0x2F Swing)
     ingestPaperdoll(scene); // open/refresh a paperdoll the server told us to show (0x88)
     refreshMapWindows(scene); // treasure/decoration map windows (0x90/0xF5 + 0x56)
@@ -6460,6 +6466,85 @@ function openSplitDialog(serial, g, amount, clientX, clientY) {
   });
   input.focus(); input.select();
   makeDraggable(el, el.querySelector(".gump-title"));
+}
+
+// ---- server external-URL confirmation (0xA5 OpenUrl) -----------------------
+// Core already accepts only bounded, credential-free absolute HTTP(S) URLs.
+// Validate again at the navigation boundary so an older/misconfigured scene
+// producer still cannot turn this UI into a javascript:/file: launcher.
+function normalizedServerHttpUrl(raw) {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > 2048) return null;
+  try {
+    const url = new URL(raw);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || !url.hostname) return null;
+    if (url.username || url.password) return null;
+    return url.href;
+  } catch (_) {
+    return null;
+  }
+}
+
+function closeOpenUrlDialog() {
+  if (openUrlWin) { openUrlWin.remove(); openUrlWin = null; }
+  // Yield once so a link's default new-tab navigation runs before building the
+  // next queued consent dialog.
+  setTimeout(showNextOpenUrlDialog, 0);
+}
+
+function showNextOpenUrlDialog() {
+  if (openUrlWin || openUrlQueue.length === 0) return;
+  const request = openUrlQueue.shift();
+  const url = normalizedServerHttpUrl(request.url);
+  if (!url) { showNextOpenUrlDialog(); return; }
+
+  const parsed = new URL(url);
+  const el = document.createElement("div");
+  el.className = "gump-win open-url-win";
+  el.innerHTML = '<div class="gump-title"><span>Open external page?</span><span class="gump-close">✕</span></div>'
+    + '<div class="gump-body open-url-body">'
+    + '<div class="open-url-warning">The game server requested permission to open this website.</div>'
+    + '<div class="open-url-host"></div><code class="open-url-value"></code>'
+    + '<div class="open-url-actions"></div></div>';
+
+  el.querySelector(".open-url-host").textContent = parsed.host;
+  el.querySelector(".open-url-value").textContent = url;
+  const actions = el.querySelector(".open-url-actions");
+  const open = document.createElement("a");
+  open.className = "dlg-btn open-url-open";
+  open.textContent = "Open in new tab";
+  open.href = url;
+  open.target = "_blank";
+  open.rel = "noopener noreferrer";
+  open.referrerPolicy = "no-referrer";
+  const cancel = document.createElement("button");
+  cancel.className = "dlg-btn open-url-cancel";
+  cancel.textContent = "Cancel";
+  actions.append(open, cancel);
+
+  document.body.appendChild(el);
+  openUrlWin = el;
+  // Leave the anchor connected through its default activation; remove the
+  // dialog on the next task after the browser has committed the new-tab open.
+  open.addEventListener("click", () => setTimeout(closeOpenUrlDialog, 0));
+  cancel.addEventListener("click", closeOpenUrlDialog);
+  el.querySelector(".gump-close").addEventListener("click", closeOpenUrlDialog);
+  el.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.code === "Escape") { e.preventDefault(); closeOpenUrlDialog(); }
+  });
+  makeDraggable(el, el.querySelector(".gump-title"));
+  cancel.focus(); // safe default: Enter does not silently accept on initial focus
+}
+
+function ingestOpenUrls(s) {
+  for (const event of (s && s.openUrls) || []) {
+    const seq = Number(event.seq) || 0;
+    if (seq <= lastOpenUrlSeq) continue;
+    lastOpenUrlSeq = seq;
+    const url = normalizedServerHttpUrl(event.url);
+    if (url && openUrlQueue.length < 16) openUrlQueue.push({ seq, url });
+  }
+  showNextOpenUrlDialog();
 }
 
 // ---- server text-prompt dialog (ClassicUO ASCII/Unicode "enter text") -----
