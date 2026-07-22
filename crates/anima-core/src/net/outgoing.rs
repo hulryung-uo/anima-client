@@ -149,6 +149,25 @@ pub fn build_war_mode(war: bool) -> Vec<u8> {
     w.into_vec()
 }
 
+/// 0x73 Ping — `[0x73][seq]` (2 bytes). A keepalive heartbeat: the server echoes
+/// it back (incoming 0x73), and sending it periodically resets the server's
+/// idle-disconnect timer so an idle client isn't dropped (ClassicUO `Send_Ping`).
+pub fn build_ping(seq: u8) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x73).u8(seq);
+    w.into_vec()
+}
+
+/// 0xC8 ClientViewRange — `[0xC8][range]` (2 bytes). Tells the server our desired
+/// draw range in tiles (clamped to UO's 5..=24); the server echoes it (incoming
+/// 0xC8) and uses it to decide which mobiles/items fall in view. Sent on world
+/// entry, mirroring ClassicUO `Send_ClientViewRange`.
+pub fn build_client_view_range(range: u8) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xC8).u8(range.clamp(5, 24));
+    w.into_vec()
+}
+
 /// AsciiSpeech `0x03` (variable): say `text` in-game.
 /// `[0x03][len u16][type u8][hue u16][font u16][ascii + NUL]`.
 pub fn build_say(text: &str, msg_type: u8, hue: u16, font: u16) -> Vec<u8> {
@@ -1208,5 +1227,17 @@ mod tests {
         assert_eq!(u32::from_be_bytes([p[8], p[9], p[10], p[11]]), 500); // gold
         assert_eq!(u32::from_be_bytes([p[12], p[13], p[14], p[15]]), 2); // platinum
         assert_eq!(p.len(), 16);
+    }
+
+    #[test]
+    fn ping_shape() {
+        assert_eq!(build_ping(0x2A), vec![0x73, 0x2A]);
+    }
+
+    #[test]
+    fn client_view_range_clamps() {
+        assert_eq!(build_client_view_range(18), vec![0xC8, 18]);
+        assert_eq!(build_client_view_range(2), vec![0xC8, 5]); // clamp up to MIN
+        assert_eq!(build_client_view_range(99), vec![0xC8, 24]); // clamp down to MAX
     }
 }

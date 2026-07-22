@@ -20,7 +20,8 @@ use anima_assets::MapData;
 use anima_core::agent::{Action, Observation};
 use anima_core::net::outgoing::{
     build_ascii_prompt_response, build_attack, build_book_page_request, build_buy,
-    build_cast_spell, build_double_click, build_drop, build_equip, build_gump_response,
+    build_cast_spell, build_client_view_range, build_double_click, build_drop, build_equip,
+    build_gump_response, build_ping,
     build_house_design_request, build_hue_picker_response, build_legacy_menu_response,
     build_logout_request, build_opl_request, build_party_accept, build_party_decline,
     build_party_invite, build_party_leave, build_party_message, build_pick_up, build_popup_request,
@@ -104,6 +105,13 @@ const CONNECT_READ_TIMEOUT: Duration = Duration::from_secs(20);
 // often the loop checks it. A long read timeout stalls the loop on the socket
 // when no packet is arriving, which throttled running down to walk speed.
 const PUMP_READ_TIMEOUT: Duration = Duration::from_millis(20);
+
+/// Keepalive-ping cadence (0x73). A client that sends nothing for long enough is
+/// dropped by the server's idle timeout; ClassicUO pings on a similar heartbeat.
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+/// Draw range (tiles) we advertise to the server on world entry (0xC8). 18 is
+/// the classic-client default; the server uses it to decide what falls in view.
+const DEFAULT_VIEW_RANGE: u8 = 18;
 
 /// [`Action::WalkTo`] step cadence, mirroring the play-server's own
 /// click-to-walk pacing (`anima-net/src/bin/play.rs`'s `AUTO_WALK_STEP_MS`):
@@ -429,6 +437,10 @@ pub struct Session {
     logout_handshake: bool,
     /// Immediate-disconnect path used when that capability flag is absent.
     logout_immediate: bool,
+    /// Last time we sent a 0x73 keepalive ping.
+    last_ping: Instant,
+    /// Rolling sequence byte for the keepalive ping.
+    ping_seq: u8,
 }
 
 impl Session {
@@ -479,11 +491,17 @@ impl Session {
             logout_handshake: result.character_list_flags & CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE
                 != 0,
             logout_immediate: false,
+            last_ping: Instant::now(),
+            ping_seq: 0,
         };
         // ServUO doesn't push our stats/skills unsolicited — request them so the
         // first Observation carries them (ClassicUO does the same on login).
         session.send(&build_status_request(4, result.serial))?; // stats (0x11)
         session.send(&build_status_request(5, result.serial))?; // skills (0x3A)
+        // Advertise our draw range so the server sends mobiles/items in view
+        // (ClassicUO sends 0xC8 on login); keep World in sync with what we asked.
+        session.send(&build_client_view_range(DEFAULT_VIEW_RANGE))?;
+        session.world.client_view_range = DEFAULT_VIEW_RANGE;
         Ok(session)
     }
 
@@ -982,6 +1000,13 @@ impl Session {
     /// Read whatever is available once and apply every complete game packet to
     /// the world. Returns the number of packets applied (0 on a read timeout).
     pub fn pump_once(&mut self) -> Result<usize, DriverError> {
+        // Keepalive: nudge the server's idle timer so an inactive client isn't
+        // dropped. pump_once runs on a tight loop, so gate on the interval.
+        if self.last_ping.elapsed() >= PING_INTERVAL {
+            self.send(&build_ping(self.ping_seq))?;
+            self.ping_seq = self.ping_seq.wrapping_add(1);
+            self.last_ping = Instant::now();
+        }
         let mut buf = [0u8; 8192];
         match self.stream.read(&mut buf) {
             Ok(0) => return Err(DriverError::ConnectionClosed),
