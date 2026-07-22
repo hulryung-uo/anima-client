@@ -634,6 +634,44 @@ pub fn build_text_entry_dialog_response(
     finish_variable(w.into_vec())
 }
 
+/// Request a player's character profile with 0xB8 type 0. ServUO validates
+/// range/visibility and answers with the same opcode's display shape.
+/// `[0xB8][len:u16=8][type=0][serial:u32]`.
+pub fn build_profile_request(serial: u32) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xB8).u16(0).u8(0).u32(serial);
+    finish_variable(w.into_vec())
+}
+
+/// Update a character profile with 0xB8 type 1. ClassicUO writes an opaque
+/// `u16=1`, then a UTF-16-code-unit count and UTF-16BE text. ServUO rejects a
+/// body over 511 units, so clamp a whole-character prefix without splitting a
+/// surrogate pair: `[id][len][1][serial][1:u16][units:u16][utf16be...]`.
+pub fn build_profile_update(serial: u32, text: &str) -> Vec<u8> {
+    const MAX_PROFILE_UNITS: usize = 511;
+    let mut units = Vec::new();
+    for ch in text.chars() {
+        let needed = ch.len_utf16();
+        if units.len() + needed > MAX_PROFILE_UNITS {
+            break;
+        }
+        let mut encoded = [0u16; 2];
+        units.extend_from_slice(ch.encode_utf16(&mut encoded));
+    }
+
+    let mut w = PacketWriter::new();
+    w.u8(0xB8)
+        .u16(0)
+        .u8(1)
+        .u32(serial)
+        .u16(1)
+        .u16(units.len() as u16);
+    for unit in units {
+        w.u16(unit);
+    }
+    finish_variable(w.into_vec())
+}
+
 /// Match ClassicUO `StringHelper.UnicodeToCp1252`. The C1 control range is
 /// deliberately replaced with `?`; printable Windows-1252 punctuation maps to
 /// its extension byte, and code points outside the repertoire also become `?`.
@@ -1089,6 +1127,34 @@ mod tests {
             build_text_entry_dialog_response(1, 2, 3, &"a".repeat(70_000), true, 0, u32::MAX);
         assert_eq!(huge.len(), u16::MAX as usize);
         assert_eq!(u16::from_be_bytes([huge[1], huge[2]]), u16::MAX);
+    }
+
+    #[test]
+    fn profile_request_and_update_match_classicuo_and_servuo_limits() {
+        assert_eq!(
+            build_profile_request(0x0102_0304),
+            vec![0xB8, 0, 8, 0, 1, 2, 3, 4]
+        );
+
+        let update = build_profile_update(0x0102_0304, "Hi 😀");
+        assert_eq!(update[0], 0xB8);
+        assert_eq!(
+            u16::from_be_bytes([update[1], update[2]]) as usize,
+            update.len()
+        );
+        assert_eq!(&update[3..8], &[1, 1, 2, 3, 4]);
+        assert_eq!(&update[8..10], &[0, 1]);
+        assert_eq!(&update[10..12], &[0, 5], "length is UTF-16 units");
+        assert_eq!(
+            &update[12..],
+            &[0, b'H', 0, b'i', 0, b' ', 0xD8, 0x3D, 0xDE, 0x00]
+        );
+
+        let text = format!("{}😀tail", "a".repeat(510));
+        let clamped = build_profile_update(7, &text);
+        assert_eq!(u16::from_be_bytes([clamped[10], clamped[11]]), 510);
+        assert_eq!(clamped.len(), 12 + 510 * 2);
+        assert!(clamped[12..].chunks_exact(2).all(|pair| pair == [0, b'a']));
     }
 
     #[test]

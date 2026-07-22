@@ -6,13 +6,13 @@
 //! The shapes are also mirrored by `anima2/anima2/contract.py` — keep that
 //! consumer in lockstep.
 //!
-//! ## Schema (v14 — snake_case, versioned)
+//! ## Schema (v15 — snake_case, versioned)
 //!
 //! [`observation_to_json`] emits one object with these top-level keys, one per
 //! [`Observation`] field: `player`, `mobiles`, `items`, `new_journal`,
 //! `pending_target`, `skills`, `gumps`, `prompt`, `trades`, `buffs`,
 //! `shop_buy`, `shop_sell`, `popup`, `legacy_menus`, `hue_pickers`, `open_urls`, `tips`,
-//! `text_entry_dialogs`, `book`, `party`, `quest_arrow`, `waypoints`,
+//! `text_entry_dialogs`, `character_profiles`, `book`, `party`, `quest_arrow`, `waypoints`,
 //! `weather`, `season`, `light`, `war`, `last_attack`, `combatant`, `corpse_of`,
 //! `corpse_equip`, `map_index`, `aos`, `opl`, `recent_damage`, `spellbooks`,
 //! `map_gumps`. A
@@ -66,13 +66,15 @@
 //! monotonic `seq`; consumers must still ask the user before opening one. v13:
 //! added `tips`, concurrent 0xA6 Tip/Notice windows, plus `TipNavigate` and
 //! `TipClose` actions. v14: added concurrent 0xAB `text_entry_dialogs` plus
-//! `TextEntryResponse` and `TextEntryClose` actions.)
+//! `TextEntryResponse` and `TextEntryClose` actions. v15: added 0xB8
+//! `character_profiles` plus `ProfileRequest`, `ProfileUpdate`, and
+//! `ProfileClose` actions.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 14;
+pub const SCHEMA_VERSION: u32 = 15;
 
 use anima_core::agent::{
     Action, GumpView, ItemView, MobileView, Observation, PlayerView, SkillView, WaypointView,
@@ -80,9 +82,10 @@ use anima_core::agent::{
 use anima_core::gump_layout::{GumpElement, HtmlText};
 use anima_core::types::Position;
 use anima_core::world::{
-    Book, Buff, HuePicker, JournalEntry, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, MapView,
-    OpenUrlRequest, Party, PopupEntry, PopupMenu, PromptState, ShopBuy, ShopSell, ShopSellItem,
-    SpellbookContent, TargetCursor, TextEntryDialog, TipNotice, TradeState, Weather,
+    Book, Buff, CharacterProfile, HuePicker, JournalEntry, LegacyMenu, LegacyMenuEntry,
+    LegacyMenuKind, MapView, OpenUrlRequest, Party, PopupEntry, PopupMenu, PromptState, ShopBuy,
+    ShopSell, ShopSellItem, SpellbookContent, TargetCursor, TextEntryDialog, TipNotice, TradeState,
+    Weather,
 };
 use serde_json::{json, Value};
 
@@ -341,6 +344,17 @@ fn text_entry_dialog_json(dialog: &TextEntryDialog) -> Value {
     })
 }
 
+fn character_profile_json(profile: &CharacterProfile) -> Value {
+    json!({
+        "seq": profile.seq,
+        "serial": profile.serial,
+        "header": profile.header,
+        "footer": profile.footer,
+        "body": profile.body,
+        "can_edit": profile.can_edit,
+    })
+}
+
 fn book_json(b: &Book) -> Value {
     json!({
         "serial": b.serial, "title": b.title, "author": b.author,
@@ -425,6 +439,7 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "open_urls": obs.open_urls.iter().map(open_url_json).collect::<Vec<_>>(),
         "tips": obs.tips.iter().map(tip_json).collect::<Vec<_>>(),
         "text_entry_dialogs": obs.text_entry_dialogs.iter().map(text_entry_dialog_json).collect::<Vec<_>>(),
+        "character_profiles": obs.character_profiles.iter().map(character_profile_json).collect::<Vec<_>>(),
         "book": obs.book.as_ref().map(book_json),
         "party": party_json(&obs.party),
         "quest_arrow": obs.quest_arrow.map(|(x, y)| json!({ "x": x, "y": y })),
@@ -658,6 +673,16 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         "TextEntryClose" => Ok(Action::TextEntryClose {
             seq: req_u64("seq")?,
         }),
+        "ProfileRequest" => Ok(Action::ProfileRequest {
+            serial: req_u32("serial")?,
+        }),
+        "ProfileUpdate" => Ok(Action::ProfileUpdate {
+            seq: req_u64("seq")?,
+            text: text("text"),
+        }),
+        "ProfileClose" => Ok(Action::ProfileClose {
+            seq: req_u64("seq")?,
+        }),
         "TradeAccept" => Ok(Action::TradeAccept {
             container: req_u32("container")?,
             accept: v.get("accept").and_then(Value::as_bool).unwrap_or(true),
@@ -872,6 +897,21 @@ mod tests {
                 Action::TextEntryClose { seq: 12 },
             ),
             (
+                json!({"type": "ProfileRequest", "serial": 13}),
+                Action::ProfileRequest { serial: 13 },
+            ),
+            (
+                json!({"type": "ProfileUpdate", "seq": 14, "text": "Biography"}),
+                Action::ProfileUpdate {
+                    seq: 14,
+                    text: "Biography".into(),
+                },
+            ),
+            (
+                json!({"type": "ProfileClose", "seq": 15}),
+                Action::ProfileClose { seq: 15 },
+            ),
+            (
                 json!({"type": "TradeAccept", "container": 55, "accept": true}),
                 Action::TradeAccept {
                     container: 55,
@@ -946,8 +986,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v14_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 14);
+    fn schema_v15_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 15);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,
@@ -1134,6 +1174,32 @@ mod tests {
     }
 
     #[test]
+    fn schema_v15_serializes_character_profiles_exactly() {
+        let obs = Observation {
+            character_profiles: vec![CharacterProfile {
+                seq: 8,
+                serial: 0x0102_0304,
+                header: "Anima the Adventurer".into(),
+                footer: "This account is 10 days old.".into(),
+                body: "Hello 😀".into(),
+                can_edit: true,
+            }],
+            ..Observation::default()
+        };
+        assert_eq!(
+            observation_to_json(&obs)["character_profiles"],
+            json!([{
+                "seq": 8,
+                "serial": 0x0102_0304u32,
+                "header": "Anima the Adventurer",
+                "footer": "This account is 10 days old.",
+                "body": "Hello 😀",
+                "can_edit": true,
+            }])
+        );
+    }
+
+    #[test]
     fn observation_json_has_expected_keys() {
         let obs = Observation::default();
         let v = observation_to_json(&obs);
@@ -1156,6 +1222,7 @@ mod tests {
             "open_urls",
             "tips",
             "text_entry_dialogs",
+            "character_profiles",
             "book",
             "party",
             "quest_arrow",
@@ -1192,6 +1259,7 @@ mod tests {
         assert_eq!(v["open_urls"], json!([]));
         assert_eq!(v["tips"], json!([]));
         assert_eq!(v["text_entry_dialogs"], json!([]));
+        assert_eq!(v["character_profiles"], json!([]));
     }
 
     /// Schema v5: `items[].is_multi` — a placed boat/house shows up in

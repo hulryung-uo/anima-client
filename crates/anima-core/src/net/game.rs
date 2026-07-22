@@ -88,6 +88,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0xA5 => open_url(world, frame)?,
         0xA6 => tip_window(world, frame)?,
         0xAB => text_entry_dialog(world, frame)?,
+        0xB8 => character_profile(world, frame)?,
         0xC2 => unicode_prompt(world, frame)?,
         0x6F => secure_trade(world, frame)?,
         0x3B => end_vendor(world, frame)?,
@@ -1735,6 +1736,46 @@ fn text_entry_dialog(world: &mut World, frame: &[u8]) -> PResult<()> {
         description,
     );
     Ok(())
+}
+
+/// 0xB8 CharacterProfile response — `[id][len:u16][serial:u32]
+/// [header:cp1252-NUL][footer:utf16be-NUL][body:utf16be-NUL]`. ClassicUO
+/// replaces an existing profile gump with the same response serial and permits
+/// editing only when that serial equals the local player's. ServUO deliberately
+/// sends serial zero for a locked self profile, making it read-only. All three
+/// strings are decoded atomically so truncation cannot replace a valid window.
+fn character_profile(world: &mut World, frame: &[u8]) -> PResult<()> {
+    if frame.len() < 12 {
+        return Ok(());
+    }
+    let serial = u32::from_be_bytes([frame[3], frame[4], frame[5], frame[6]]);
+    let payload = &frame[7..];
+    let Some(header_end) = payload.iter().position(|&byte| byte == 0) else {
+        return Err(PacketError::InvalidData("profile header has no terminator"));
+    };
+    let header = ascii_string(&payload[..header_end]);
+    let mut offset = header_end + 1;
+    let footer = take_utf16be_nul(payload, &mut offset)?;
+    let body = take_utf16be_nul(payload, &mut offset)?;
+    world.set_character_profile(serial, header, footer, body);
+    Ok(())
+}
+
+fn take_utf16be_nul(bytes: &[u8], offset: &mut usize) -> PResult<String> {
+    let start = *offset;
+    let remaining = bytes.get(start..).ok_or(PacketError::InvalidData(
+        "profile string offset out of range",
+    ))?;
+    for (index, pair) in remaining.chunks_exact(2).enumerate() {
+        if pair == [0, 0] {
+            let end = start + index * 2;
+            *offset = end + 2;
+            return Ok(decode_unicode(&bytes[start..end], true));
+        }
+    }
+    Err(PacketError::InvalidData(
+        "profile unicode string has no terminator",
+    ))
 }
 
 /// 0xC2 UnicodePrompt — the server asks us to answer with typed text (pet rename,
@@ -4477,6 +4518,99 @@ mod tests {
             w.text_entry_dialogs.last().map(|dialog| dialog.seq),
             Some(20)
         );
+    }
+
+    fn character_profile_packet(serial: u32, header: &[u8], footer: &str, body: &str) -> Vec<u8> {
+        let mut p = PacketWriter::new();
+        p.u8(0xB8).u16(0).u32(serial).bytes(header).u8(0);
+        for unit in footer.encode_utf16() {
+            p.u16(unit);
+        }
+        p.u16(0);
+        for unit in body.encode_utf16() {
+            p.u16(unit);
+        }
+        p.u16(0);
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1..3].copy_from_slice(&len.to_be_bytes());
+        frame
+    }
+
+    #[test]
+    fn character_profile_decodes_strings_editability_and_replacement() {
+        let mut w = World::new();
+        w.player = Some(crate::types::Serial(0x0102_0304));
+        assert!(apply_packet(
+            &mut w,
+            &character_profile_packet(
+                0x0102_0304,
+                b"Anima \x80",
+                "Account 😀",
+                "Original biography",
+            )
+        ));
+        assert!(apply_packet(
+            &mut w,
+            &character_profile_packet(9, b"Visitor", "Friend", "Read only")
+        ));
+
+        assert_eq!(w.character_profiles.len(), 2);
+        let own = &w.character_profiles[0];
+        assert_eq!(own.seq, 1);
+        assert_eq!(own.header, "Anima €");
+        assert_eq!(own.footer, "Account 😀");
+        assert_eq!(own.body, "Original biography");
+        assert!(own.can_edit);
+        assert!(!w.character_profiles[1].can_edit);
+
+        assert!(apply_packet(
+            &mut w,
+            &character_profile_packet(0x0102_0304, b"Anima", "Updated", "New body")
+        ));
+        assert_eq!(
+            w.character_profiles.len(),
+            2,
+            "same serial replaces its gump"
+        );
+        assert_eq!(w.character_profiles[0].serial, 9);
+        assert_eq!(w.character_profiles[1].seq, 3);
+        assert_eq!(w.character_profiles[1].body, "New body");
+
+        // ServUO hides the real serial for a locked self profile, so ClassicUO
+        // treats the serial-zero response as read-only.
+        assert!(apply_packet(
+            &mut w,
+            &character_profile_packet(0, b"Anima", "Locked", "No edits")
+        ));
+        assert!(!w.character_profiles.last().unwrap().can_edit);
+    }
+
+    #[test]
+    fn character_profile_is_atomic_bounded_and_exactly_closed() {
+        let mut w = World::new();
+        assert!(apply_packet(
+            &mut w,
+            &character_profile_packet(7, b"Valid", "Footer", "Body")
+        ));
+        let mut truncated = character_profile_packet(7, b"Replacement", "Footer", "Body");
+        truncated.pop();
+        assert!(apply_packet(&mut w, &truncated));
+        assert_eq!(w.character_profiles.len(), 1);
+        assert_eq!(w.character_profiles[0].header, "Valid");
+
+        for serial in 100..120 {
+            assert!(apply_packet(
+                &mut w,
+                &character_profile_packet(serial, b"P", "", "")
+            ));
+        }
+        assert_eq!(w.character_profiles.len(), 16);
+        assert_eq!(w.character_profiles.first().map(|p| p.serial), Some(104));
+        let seq = w.character_profiles[3].seq;
+        w.close_character_profile(seq);
+        assert!(w.character_profile(seq).is_none());
+        assert_eq!(w.character_profiles.len(), 15);
     }
 
     /// Patch the big-endian length word at `[1..3]` of a variable-framed test packet.

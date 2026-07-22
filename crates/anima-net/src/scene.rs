@@ -1424,6 +1424,28 @@ fn text_entry_dialogs_json(world: &World) -> Value {
     )
 }
 
+/// Open 0xB8 character profiles. These are persistent windows rather than an
+/// event ring: an exact `seq` remains present until the user closes/saves it,
+/// and a newer response for the same serial replaces it with a fresh identity.
+fn character_profiles_json(world: &World) -> Value {
+    Value::Array(
+        world
+            .character_profiles
+            .iter()
+            .map(|profile| {
+                json!({
+                    "seq": profile.seq,
+                    "serial": profile.serial,
+                    "header": profile.header,
+                    "footer": profile.footer,
+                    "body": profile.body,
+                    "canEdit": profile.can_edit,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Build the `party` object for the scene (0xBF/0x06). `leader` is the party
 /// leader's serial (0 = none), `members` lists each member `{serial, name, hits,
 /// hitsMax}`, and `invite` is the serial of a leader who invited us (0 = none).
@@ -2704,6 +2726,9 @@ pub fn build_scene(
     // Concurrent modal 0xAB text-entry dialogs, keyed in the browser by seq.
     let text_entry_dialogs =
         serde_json::to_string(&text_entry_dialogs_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    // Persistent 0xB8 character profile windows, keyed by exact response seq.
+    let profiles =
+        serde_json::to_string(&character_profiles_json(&s.world)).unwrap_or_else(|_| "[]".into());
     // The open book (0x93/0xD4 + 0x66), or null.
     let book = serde_json::to_string(&book_json(&s.world)).unwrap_or_else(|_| "null".into());
     // Known spellbook contents (0xBF/0x1B), one entry per book we've been told
@@ -2805,7 +2830,7 @@ pub fn build_scene(
          \"statics\":[{statics}],\"mobiles\":{mobiles},\"items\":{items},\"contItems\":{cont_items},\
          \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"tanims\":{tanims},\"damage\":{damage},\"effects\":{effects},\"music\":{music},\
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
-         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
+         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
          \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps},\
@@ -3372,6 +3397,50 @@ mod tests {
                 "maxLength": 12,
                 "description": "Digits only",
             }])
+        );
+    }
+
+    #[test]
+    fn character_profiles_json_preserves_order_text_and_editability() {
+        let mut w = World::default();
+        w.character_profiles = vec![
+            anima_core::world::CharacterProfile {
+                seq: 7,
+                serial: 0x0102_0304,
+                header: "Header €".into(),
+                footer: "Footer 😀".into(),
+                body: "Biography".into(),
+                can_edit: true,
+            },
+            anima_core::world::CharacterProfile {
+                seq: 8,
+                serial: 0,
+                header: "Locked".into(),
+                footer: String::new(),
+                body: "Read only".into(),
+                can_edit: false,
+            },
+        ];
+        assert_eq!(
+            character_profiles_json(&w),
+            json!([
+                {
+                    "seq": 7,
+                    "serial": 0x0102_0304u32,
+                    "header": "Header €",
+                    "footer": "Footer 😀",
+                    "body": "Biography",
+                    "canEdit": true,
+                },
+                {
+                    "seq": 8,
+                    "serial": 0,
+                    "header": "Locked",
+                    "footer": "",
+                    "body": "Read only",
+                    "canEdit": false,
+                },
+            ])
         );
     }
 

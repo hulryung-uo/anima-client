@@ -24,10 +24,10 @@ use anima_core::net::outgoing::{
     build_house_design_request, build_hue_picker_response, build_legacy_menu_response,
     build_opl_request, build_party_accept, build_party_decline, build_party_invite,
     build_party_leave, build_party_message, build_pick_up, build_popup_request, build_popup_select,
-    build_prompt_response, build_say, build_sell, build_single_click, build_skill_lock,
-    build_status_request, build_target_response, build_text_entry_dialog_response,
-    build_tip_request, build_trade_accept, build_trade_cancel, build_trade_gold, build_unicode_say,
-    build_use_ability, build_use_skill, build_war_mode,
+    build_profile_request, build_profile_update, build_prompt_response, build_say, build_sell,
+    build_single_click, build_skill_lock, build_status_request, build_target_response,
+    build_text_entry_dialog_response, build_tip_request, build_trade_accept, build_trade_cancel,
+    build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
 };
 use anima_core::net::{
     apply_packet, build_client_version, CharacterChoice, CharacterList, FramingError, LoginConfig,
@@ -647,6 +647,9 @@ impl Session {
                     self.world.close_text_entry_dialog(*seq);
                 }
             }
+            Action::ProfileRequest { serial } => self.send(&build_profile_request(*serial))?,
+            Action::ProfileUpdate { seq, text } => self.update_profile(*seq, text)?,
+            Action::ProfileClose { seq } => self.world.close_character_profile(*seq),
             // No-op if no session has `container` (the brain raced it away — it
             // may have just closed, or belongs to a session with a different
             // opponent that never existed on our side).
@@ -891,6 +894,25 @@ impl Session {
             dialog.max_length,
         ))?;
         self.world.close_text_entry_dialog(seq);
+        Ok(())
+    }
+
+    /// Persist a changed editable self profile on close. The live profile owns
+    /// both callback permission and original text; stale/read-only actions are
+    /// inert rather than becoming forged updates.
+    fn update_profile(&mut self, seq: u64, text: &str) -> Result<(), DriverError> {
+        let Some(profile) = self
+            .world
+            .character_profile(seq)
+            .filter(|profile| profile.can_edit)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        if text != profile.body {
+            self.send(&build_profile_update(profile.serial, text))?;
+        }
+        self.world.close_character_profile(seq);
         Ok(())
     }
 

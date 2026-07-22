@@ -184,6 +184,9 @@ const tipNoticeWindows = new Map(); // seq -> live DOM window
 // ---- legacy modal text-entry dialogs (0xAB) ----
 const textEntryWindows = new Map(); // seq -> live DOM window
 const suppressedTextEntrySeqs = new Set(); // answered locally; wait for scene removal
+// ---- character profile windows (0xB8) ----
+const profileWindows = new Map(); // exact response seq -> live DOM window
+const suppressedProfileSeqs = new Set(); // closed/saved locally; wait for scene removal
 // { serial, title, canLift } for whichever target the LAST server signal named —
 // read by refreshPaperdoll() to show the real title line instead of the plain
 // mobile name, when it matches the currently-displayed doll.
@@ -1540,6 +1543,7 @@ async function poll() {
     refreshHuePickers(scene); // server dye color pickers (0x95)
     refreshTipNotices(scene); // pageable tips / close-only notices (0xA6)
     refreshTextEntryDialogs(scene); // legacy modal text-entry dialogs (0xAB)
+    refreshProfiles(scene); // editable self / read-only character profiles (0xB8)
     refreshPopup(scene);  // right-click context menu (0xBF/0x14)
     refreshBook(scene);   // open book reader (0x93/0xD4 + 0x66)
     refreshPrompt(scene); // server text-prompt dialog (0x9A ASCII / 0xC2 Unicode)
@@ -5207,6 +5211,8 @@ function refreshPaperdoll() {
     h += `<div class="row"><span class="k">Gold</span><span>${p.gold}</span></div>`;
   }
   h += "</div>";
+  h += `<div class="pd-profile-actions"><button type="button" class="dlg-btn pd-profile"`
+    + ` data-profile="${targetSerial}">PROFILE</button></div>`;
   // Appearance: hair & facial hair are part of the body, not worn gear — show them
   // in their own section with an inline dye-colour swatch (no OPL/weight/AR exists).
   const hairItems = equip.filter((e) => e.layer === 11 || e.layer === 16);
@@ -6750,6 +6756,104 @@ function refreshTextEntryDialogs(s) {
   }
 }
 
+// ---- character profiles (0xB8 request/display/update) ---------------------
+function removeProfileWindow(seq) {
+  const el = profileWindows.get(seq);
+  if (el) el.remove();
+  profileWindows.delete(seq);
+}
+
+// ClassicUO commits an editable profile when its gump is disposed. The native
+// driver compares against the exact response's original body, so this command
+// closes unchanged text without emitting a needless update packet.
+function closeProfileWindow(seq) {
+  const el = profileWindows.get(seq);
+  if (!el) return;
+  suppressedProfileSeqs.add(seq);
+  removeProfileWindow(seq);
+  if (el._canEdit) {
+    sendInput("profileupdate:" + seq + ":" + el._body.value);
+  } else {
+    sendInput("profileclose:" + seq);
+  }
+}
+
+function toggleProfileMinimized(el) {
+  const minimized = !el.classList.contains("minimized");
+  el.classList.toggle("minimized", minimized);
+  const button = el.querySelector(".profile-minimize");
+  if (button) {
+    button.textContent = minimized ? "□" : "—";
+    button.title = minimized ? "Restore" : "Minimize";
+  }
+}
+
+function openProfileWindow(profile) {
+  const seq = Number(profile.seq) || 0;
+  if (!seq || profileWindows.has(seq) || suppressedProfileSeqs.has(seq)) return;
+
+  const el = document.createElement("div");
+  el.className = "gump-win profile-win";
+  el.setAttribute("role", "dialog");
+  const offset = (profileWindows.size % 8) * 22;
+  el.style.left = (245 + offset) + "px";
+  el.style.top = (86 + offset) + "px";
+  el.innerHTML = '<div class="gump-title profile-title"><span>CHARACTER PROFILE</span>'
+    + '<span class="profile-title-actions"><span class="gump-close profile-minimize" title="Minimize">—</span>'
+    + '<span class="gump-close profile-close" title="Close">✕</span></span></div>'
+    + '<div class="gump-body profile-body"><div class="profile-header"></div>'
+    + '<textarea class="profile-text" maxlength="511" spellcheck="true"></textarea>'
+    + '<div class="profile-footer"></div><div class="profile-mode"></div></div>';
+
+  el.querySelector(".profile-header").textContent = String(profile.header || "");
+  el.querySelector(".profile-footer").textContent = String(profile.footer || "");
+  const body = el.querySelector(".profile-text");
+  body.value = String(profile.body || "");
+  const canEdit = profile.canEdit === true;
+  body.readOnly = !canEdit;
+  el.querySelector(".profile-mode").textContent = canEdit
+    ? "Editable · changes save when closed"
+    : "Read only";
+  el._body = body;
+  el._canEdit = canEdit;
+  el._serial = Number(profile.serial) >>> 0;
+
+  el.querySelector(".profile-close").addEventListener("click", () => closeProfileWindow(seq));
+  el.querySelector(".profile-minimize").addEventListener("click", () => toggleProfileMinimized(el));
+  const title = el.querySelector(".profile-title");
+  title.addEventListener("dblclick", (event) => {
+    if (event.target.closest(".gump-close")) return;
+    toggleProfileMinimized(el);
+  });
+  el.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    closeProfileWindow(seq);
+  });
+  el.addEventListener("mousedown", () => bringToFront(el));
+  document.body.appendChild(el);
+  makeDraggable(el, title);
+  profileWindows.set(seq, el);
+  if (canEdit) body.focus();
+}
+
+function refreshProfiles(s) {
+  const active = new Set();
+  for (const profile of (s && s.profiles) || []) {
+    const seq = Number(profile.seq) || 0;
+    if (!seq) continue;
+    active.add(seq);
+    if (!suppressedProfileSeqs.has(seq) && !profileWindows.has(seq)) {
+      openProfileWindow(profile);
+    }
+  }
+  for (const seq of [...profileWindows.keys()]) {
+    if (!active.has(seq)) removeProfileWindow(seq);
+  }
+  for (const seq of [...suppressedProfileSeqs]) {
+    if (!active.has(seq)) suppressedProfileSeqs.delete(seq);
+  }
+}
+
 // ---- server text-prompt dialog (ClassicUO ASCII/Unicode "enter text") -----
 // scene.prompt = { active, serial, promptId, kind } (0x9A/0xC2). The
 // question text itself is NOT carried on that packet — ServUO sends it
@@ -7696,6 +7800,14 @@ function setupInput() {
   // — there's no static #trade element to wire once at startup anymore.
   const pdb = document.getElementById("pd-body");
   pdb.addEventListener("click", (e) => {
+    const profile = e.target.closest(".pd-profile[data-profile]");
+    if (profile) {
+      const serial = (+profile.dataset.profile) >>> 0;
+      const existing = [...profileWindows.values()].find((win) => win._serial === serial);
+      if (existing) bringToFront(existing);
+      else sendInput("profile:" + serial);
+      return;
+    }
     const row = e.target.closest(".eq-row");
     if (!row) return;
     if (row.dataset.bp === "1") openBackpack();

@@ -369,6 +369,26 @@
       .eq-row.bp { cursor: pointer; border-radius: 4px; }
       .eq-row.bp:hover { background: rgba(138, 180, 248, .1); }
       .eq-open { margin-left: auto; color: #8ab4f8; font-size: 11px; }
+      .pd-profile-actions { display: flex; justify-content: center; margin: 8px 0 2px; }
+      .pd-profile { min-width: 112px; letter-spacing: .08em; }
+      /* ---- character profile (0xB8) ---- */
+      .profile-win { width: min(310px, calc(100vw - 24px)); z-index: 43; }
+      .profile-title-actions { display: flex; align-items: center; gap: 2px; }
+      .profile-body { display: flex; flex-direction: column; gap: 8px; }
+      .profile-header { min-height: 18px; color: #f0d58b; font: 13px/1.35 Georgia, serif;
+        white-space: pre-wrap; overflow-wrap: anywhere; text-align: center; }
+      .profile-text { width: 100%; min-height: 170px; resize: vertical; box-sizing: border-box;
+        padding: 9px; color: #e6dfca; background: rgba(15, 12, 8, .72);
+        border: 1px solid #5b4a2b; border-radius: 4px;
+        font: 13px/1.45 Georgia, "Times New Roman", serif; overflow-wrap: anywhere; }
+      .profile-text:focus { outline: 1px solid #d4b86a; border-color: #d4b86a; }
+      .profile-text[readonly] { color: #c8c1ad; cursor: default; resize: none; }
+      .profile-footer { min-height: 16px; color: #9da4ad; font-size: 11px;
+        line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; text-align: center; }
+      .profile-mode { color: #6f7782; font-size: 10px; text-align: right; }
+      .profile-win.minimized { width: 230px; }
+      .profile-win.minimized .profile-body { display: none; }
+      .profile-win.minimized .gump-title { border-bottom: 0; }
       /* ---- spellbook (power words + reagents list) ---- */
       #spellbook { top: 60px; right: 16px; width: 250px; display: none; }
       #spellbook.on { display: block; }

@@ -2348,6 +2348,8 @@ fn content_type(path: &str) -> &'static str {
 /// 0xA6 Tip/Notice window) ·
 /// `textentry:<seq>:<0|1>:<text>` / `textentryclose:<seq>` (Cancel/OK response
 /// or permitted silent close for an exact 0xAB dialog) ·
+/// `profile:<serial>` / `profileupdate:<seq>:<text>` / `profileclose:<seq>`
+/// (request, save/close an editable profile, or close a read-only 0xB8 profile) ·
 /// `tradeaccept:<mycont>:<0|1>` / `tradecancel:<mycont>` /
 /// `tradegold:<mycont>:<gold>:<platinum>` (answer the secure-trade session
 /// keyed by our own container serial `mycont`, 0x6F — multiple concurrent
@@ -2355,6 +2357,7 @@ fn content_type(path: &str) -> &'static str {
 /// from `scene.trades[].myCont`; items move via the normal `drop` command
 /// targeting that same container serial).
 fn parse_command(body: &str) -> Option<Action> {
+    let raw_body = body;
     let body = body.trim();
     let (cmd, arg) = body.split_once(':').unwrap_or((body, ""));
     match cmd {
@@ -2596,6 +2599,25 @@ fn parse_command(body: &str) -> Option<Action> {
         "textentryclose" => Some(Action::TextEntryClose {
             seq: arg.parse().ok()?,
         }),
+        // profile:<serial> — request a character's 0xB8 profile.
+        "profile" => Some(Action::ProfileRequest {
+            serial: parse_serial(arg)?,
+        }),
+        // profileupdate:<seq>:<text> — save and close an exact editable
+        // profile. Parse the text from the untrimmed request body so leading/
+        // trailing whitespace and terminal newlines remain part of the profile.
+        "profileupdate" => {
+            let raw_arg = raw_body.trim_start().strip_prefix("profileupdate:")?;
+            let (seq, text) = raw_arg.split_once(':')?;
+            Some(Action::ProfileUpdate {
+                seq: seq.parse().ok()?,
+                text: text.to_string(),
+            })
+        }
+        // profileclose:<seq> — dismiss an exact read-only profile locally.
+        "profileclose" => Some(Action::ProfileClose {
+            seq: arg.parse().ok()?,
+        }),
         // tradeaccept:<mycont>:<0|1> — toggle our accept checkbox on the secure
         // trade session keyed by our own container serial (0x6F action 2).
         "tradeaccept" => {
@@ -2741,6 +2763,44 @@ mod hue_palette_tests {
         );
         assert!(parse_command("textentry:42:maybe:no").is_none());
         assert!(parse_command("textentryclose:bad").is_none());
+    }
+
+    #[test]
+    fn profile_commands_preserve_serial_seq_and_body_colons() {
+        assert_eq!(
+            parse_command("profile:0x01020304"),
+            Some(Action::ProfileRequest {
+                serial: 0x0102_0304,
+            })
+        );
+        assert_eq!(
+            parse_command("profileupdate:42:Born in: Britain"),
+            Some(Action::ProfileUpdate {
+                seq: 42,
+                text: "Born in: Britain".into(),
+            })
+        );
+        assert_eq!(
+            parse_command("profileupdate:42:"),
+            Some(Action::ProfileUpdate {
+                seq: 42,
+                text: String::new(),
+            })
+        );
+        assert_eq!(
+            parse_command("profileupdate:42:  verse\n"),
+            Some(Action::ProfileUpdate {
+                seq: 42,
+                text: "  verse\n".into(),
+            })
+        );
+        assert_eq!(
+            parse_command("profileclose:42"),
+            Some(Action::ProfileClose { seq: 42 })
+        );
+        assert!(parse_command("profile:bad").is_none());
+        assert!(parse_command("profileupdate:bad:text").is_none());
+        assert!(parse_command("profileclose:bad").is_none());
     }
 
     #[test]

@@ -12,9 +12,9 @@
 use crate::gump_layout::GumpElement;
 use crate::types::Position;
 use crate::world::{
-    is_ghost_body, Book, Buff, HuePicker, JournalEntry, LegacyMenu, MapView, OpenUrlRequest, Party,
-    PopupMenu, PromptState, ShopBuy, ShopSell, SpellbookContent, TargetCursor, TextEntryDialog,
-    TipNotice, TradeState, Weather, World,
+    is_ghost_body, Book, Buff, CharacterProfile, HuePicker, JournalEntry, LegacyMenu, MapView,
+    OpenUrlRequest, Party, PopupMenu, PromptState, ShopBuy, ShopSell, SpellbookContent,
+    TargetCursor, TextEntryDialog, TipNotice, TradeState, Weather, World,
 };
 
 /// A skill value, in human units (50.0 == GM-half). Derived from [`crate::world::Skill`].
@@ -173,6 +173,11 @@ pub struct Observation {
     /// exact dialog with [`Action::TextEntryResponse`], or silently dismiss it
     /// with [`Action::TextEntryClose`] only when `can_close` is true.
     pub text_entry_dialogs: Vec<TextEntryDialog>,
+    /// Open character-profile windows (0xB8), in gump order. Request one with
+    /// [`Action::ProfileRequest`]; editable self profiles can be saved/closed
+    /// with [`Action::ProfileUpdate`], while [`Action::ProfileClose`] dismisses
+    /// a window without changing its original body.
+    pub character_profiles: Vec<CharacterProfile>,
     /// The currently open book (0x93/0xD4 + 0x66), if any. See [`Book`].
     /// Request more pages with [`Action::BookRequest`].
     pub book: Option<Book>,
@@ -433,6 +438,16 @@ pub enum Action {
     /// Silently close an exact 0xAB dialog without a packet. This only succeeds
     /// when the server's `can_close` flag permits ClassicUO's right-click close.
     TextEntryClose { seq: u64 },
+    /// Request the character profile of `serial` (0xB8 type 0). The server
+    /// performs player/range/visibility checks and returns an open profile.
+    ProfileRequest { serial: u32 },
+    /// Save and close an exact editable self profile (0xB8 type 1). Callback
+    /// serial/edit permission/original text come from the live `seq`; stale or
+    /// read-only profiles are inert. An unchanged body closes without a packet,
+    /// matching ClassicUO's dispose-time change detection.
+    ProfileUpdate { seq: u64, text: String },
+    /// Close an exact profile locally without changing its original body.
+    ProfileClose { seq: u64 },
     /// Toggle our side's accept checkbox on a secure trade (0x6F action 2).
     /// `container` selects which session (its `my_container`, from
     /// [`crate::world::World::trades`] — multiple can be open at once with
@@ -621,6 +636,7 @@ impl World {
             open_urls: self.recent_open_urls.clone(),
             tips: self.tips.clone(),
             text_entry_dialogs: self.text_entry_dialogs.clone(),
+            character_profiles: self.character_profiles.clone(),
             book: self.book.clone(),
             party: self.party.clone(),
             quest_arrow: self.quest_arrow,

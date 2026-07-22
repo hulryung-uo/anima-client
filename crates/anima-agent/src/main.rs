@@ -141,6 +141,11 @@ fn main() {
                     accepted,
                 } => format!("textentry({seq},{accepted},{text:?})"),
                 Action::TextEntryClose { seq } => format!("textentryclose({seq})"),
+                Action::ProfileRequest { serial } => format!("profilereq(0x{serial:08X})"),
+                Action::ProfileUpdate { seq, text } => {
+                    format!("profileupdate({seq},{text:?})")
+                }
+                Action::ProfileClose { seq } => format!("profileclose({seq})"),
                 Action::TradeAccept { container, accept } => {
                     format!("tradeaccept(0x{container:08X},{accept})")
                 }

@@ -283,6 +283,44 @@ impl WasmClient {
         true
     }
 
+    /// Request a character profile (0xB8 type 0). The server decides whether
+    /// the target is a visible player in range and returns the display packet.
+    pub fn profile_request(&mut self, serial: u32) {
+        self.outbox
+            .extend(anima_core::net::outgoing::build_profile_request(serial));
+    }
+
+    /// Save and close an exact editable self profile. Returns false for stale or
+    /// read-only windows; unchanged text closes without emitting an update.
+    pub fn profile_update(&mut self, seq: u64, text: String) -> bool {
+        let Some(profile) = self
+            .world
+            .character_profile(seq)
+            .filter(|profile| profile.can_edit)
+            .cloned()
+        else {
+            return false;
+        };
+        if text != profile.body {
+            self.outbox
+                .extend(anima_core::net::outgoing::build_profile_update(
+                    profile.serial,
+                    &text,
+                ));
+        }
+        self.world.close_character_profile(seq);
+        true
+    }
+
+    /// Dismiss one exact profile locally without modifying it.
+    pub fn profile_close(&mut self, seq: u64) -> bool {
+        if self.world.character_profile(seq).is_none() {
+            return false;
+        }
+        self.world.close_character_profile(seq);
+        true
+    }
+
     /// Current perception using the shared, versioned Observation JSON schema.
     pub fn observation_json(&mut self) -> String {
         let obs = self.world.observe(&mut self.journal_cursor);
@@ -467,6 +505,46 @@ mod tests {
             "Close me".into(),
         );
         assert!(client.text_entry_close(2));
+        assert!(client.take_outbox().is_empty());
+    }
+
+    #[test]
+    fn profile_request_update_and_read_only_close_have_distinct_semantics() {
+        let mut client = WasmClient::new("user".into(), "pass".into());
+        client.login = None;
+        client.outbox.clear();
+
+        client.profile_request(0x0102_0304);
+        assert_eq!(
+            client.take_outbox(),
+            anima_core::net::outgoing::build_profile_request(0x0102_0304)
+        );
+
+        client.world.player = Some(anima_core::Serial(0x0102_0304));
+        client.world.set_character_profile(
+            0x0102_0304,
+            "Anima".into(),
+            "Account".into(),
+            "Old".into(),
+        );
+        assert!(client.profile_update(1, "New".into()));
+        assert_eq!(
+            client.take_outbox(),
+            anima_core::net::outgoing::build_profile_update(0x0102_0304, "New")
+        );
+        assert!(!client.profile_update(1, "stale".into()));
+
+        client
+            .world
+            .set_character_profile(9, "Other".into(), "".into(), "Read only".into());
+        assert!(!client.profile_update(2, "forged".into()));
+        assert!(client.profile_close(2));
+        assert!(client.take_outbox().is_empty());
+
+        client
+            .world
+            .set_character_profile(0x0102_0304, "Anima".into(), "".into(), "Same".into());
+        assert!(client.profile_update(3, "Same".into()));
         assert!(client.take_outbox().is_empty());
     }
 }

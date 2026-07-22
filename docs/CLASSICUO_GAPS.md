@@ -13,7 +13,7 @@ scene/agent exposure, and user-facing behavior (where applicable) are present.
   `src/ClassicUO.Client/Network/PacketHandlers.cs`
 - anima source: `crates/anima-core/src/net/game.rs` plus login and movement
   state machines
-- Current game decoder: 73 packet IDs after adding `0xAB TextEntryDialog`;
+- Current game decoder: 74 packet IDs after adding `0xB8 CharacterProfile`;
   `0x21`/`0x22` are handled separately by `Walker`
 
 The comparison is mechanical at the packet-ID level, followed by a semantic
@@ -51,6 +51,10 @@ that are acknowledgements/no-ops are not counted as missing game UI features.
   dialogs with exact callback identity, CP1252 labels/responses, numeric and
   UTF-16 length constraints, explicit OK/Cancel replies, permission-gated silent
   close, versioned brain/native/WASM actions, and browser UI
+- `0xB8 CharacterProfile`: CP1252 header plus UTF-16 footer/body decoding,
+  concurrent exact-response state, self-only editable profiles, ClassicUO-style
+  request and save-on-close behavior, ServUO's 511 UTF-16-unit update limit,
+  versioned brain/native/WASM actions, and Paperdoll/browser profile windows
 - Speech, localized messages, OPL/tooltips, prompts, targeting
 - Movement confirmation/denial, pathfinding, doors, facet changes
 - Combat state, damage/effects, animations, death/corpse links
@@ -65,7 +69,6 @@ the feature. Each row is still open unless a later change moves it above.
 
 | Priority | Packet(s) | ClassicUO behavior | Required anima vertical slice |
 |---|---:|---|---|
-| P0 | `0xB8` | Character profile | Read/edit profile model, UI, response packet |
 | P0 | `0xD1` | Server logout | Session termination reason and return-to-login UX |
 | P0 | `0xF6` | Smooth boat movement | Boat/passenger movement state and renderer interpolation |
 | P1 | `0x15` | Follow response | Follow/autowalk state |
@@ -95,7 +98,7 @@ assessment before being promoted into the gameplay table.
 
 Packet registration parity alone does not equal ClassicUO feature parity. Major
 systems that require their own audits include custom-house **editing** (viewing
-is implemented), complete boat controls, bulletin boards, profile editing,
-remaining legacy prompts, assistant/plugin APIs, settings/profile persistence,
+is implemented), complete boat controls, bulletin boards, remaining legacy
+prompts, assistant/plugin APIs, settings persistence,
 accessibility, and renderer polish. This file should stay evidence-based: add a
 ClassicUO source location and an end-to-end acceptance test when closing a row.

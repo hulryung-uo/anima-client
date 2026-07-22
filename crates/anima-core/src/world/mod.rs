@@ -531,6 +531,21 @@ pub struct TextEntryDialog {
     pub description: String,
 }
 
+/// One open character profile returned by 0xB8. `serial` is the callback serial
+/// supplied by the server (it may deliberately be zero for a locked self
+/// profile); `can_edit` exactly mirrors ClassicUO's `serial == player.serial`
+/// rule. A fresh response for the same serial replaces the previous gump and
+/// receives a new local `seq` so stale UI actions cannot update it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharacterProfile {
+    pub seq: u64,
+    pub serial: u32,
+    pub header: String,
+    pub footer: String,
+    pub body: String,
+    pub can_edit: bool,
+}
+
 /// Wire encoding used by a pending server text prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
@@ -978,6 +993,10 @@ pub struct World {
     pub text_entry_dialogs: Vec<TextEntryDialog>,
     /// Monotonic counter assigning each text-entry dialog a unique local id.
     pub text_entry_dialog_seq: u64,
+    /// Open character-profile gumps (0xB8), one per response serial.
+    pub character_profiles: Vec<CharacterProfile>,
+    /// Monotonic counter assigning each fresh profile response a local identity.
+    pub character_profile_seq: u64,
     /// Recent 0x24 (DrawContainer/ContainerDisplay(HS)) events: each `(seq,
     /// serial, gump_id)`, newest last, capped like `recent_lift_rejects`. This
     /// is deliberately a **raw, unfiltered data log** — every `gump_id` ServUO
@@ -1079,6 +1098,8 @@ const MAX_RECENT_OPEN_URLS: usize = 16;
 const MAX_TIPS: usize = 16;
 /// Defensive cap for concurrently open server text-entry dialogs.
 const MAX_TEXT_ENTRY_DIALOGS: usize = 16;
+/// Defensive cap for concurrently open character-profile gumps.
+const MAX_CHARACTER_PROFILES: usize = 16;
 /// Retained chat history for temporarily-paused consumers. The interactive
 /// renderer keeps a smaller presentation ring of its own.
 const MAX_JOURNAL_ENTRIES: usize = 512;
@@ -1492,6 +1513,46 @@ impl World {
     /// Consume exactly one dialog after a response or silent close.
     pub fn close_text_entry_dialog(&mut self, seq: u64) {
         self.text_entry_dialogs.retain(|dialog| dialog.seq != seq);
+    }
+
+    /// Open or replace a 0xB8 profile. ClassicUO disposes the existing gump with
+    /// the same response serial before adding the new one, so replacement moves
+    /// to the newest end and receives a fresh sequence identity.
+    pub fn set_character_profile(
+        &mut self,
+        serial: u32,
+        header: String,
+        footer: String,
+        body: String,
+    ) {
+        self.character_profile_seq += 1;
+        self.character_profiles
+            .retain(|profile| profile.serial != serial);
+        self.character_profiles.push(CharacterProfile {
+            seq: self.character_profile_seq,
+            serial,
+            header,
+            footer,
+            body,
+            can_edit: self.player.is_some_and(|player| player.0 == serial),
+        });
+        let overflow = self
+            .character_profiles
+            .len()
+            .saturating_sub(MAX_CHARACTER_PROFILES);
+        if overflow > 0 {
+            self.character_profiles.drain(0..overflow);
+        }
+    }
+
+    pub fn character_profile(&self, seq: u64) -> Option<&CharacterProfile> {
+        self.character_profiles
+            .iter()
+            .find(|profile| profile.seq == seq)
+    }
+
+    pub fn close_character_profile(&mut self, seq: u64) {
+        self.character_profiles.retain(|profile| profile.seq != seq);
     }
 
     /// Record a server-initiated paperdoll open/refresh (0x88 DisplayPaperdoll).
