@@ -37,6 +37,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x1D => delete(world, frame)?,
         0x11 => char_status(world, frame)?,
         0x98 => update_name(world, frame)?,
+        0x16 => health_bar_status(world, frame)?,
         0x17 => health_bar_status(world, frame)?,
         0xDE => update_mobile_status(world, frame)?,
         0xC4 => semivisible(world, frame)?,
@@ -110,6 +111,8 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0xD8 => custom_house(world, frame)?,
         0xE5 => display_waypoint(world, frame)?,
         0xE6 => remove_waypoint(world, frame)?,
+        0x97 => move_player(world, frame)?,
+        0xD2 => update_character(world, frame)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -158,27 +161,44 @@ fn mobile_update(world: &mut World, frame: &[u8]) -> PResult<()> {
     Ok(())
 }
 
-/// 0x17 MobileHealthbarStatus (Stygian-Abyss+): `[id][len:u16][serial:u32]
-/// [count:u16]` then `count × [type:u16][flag:u8]`. Modern shards carry
-/// poison/blessed state HERE, not in the mobile-flags byte (which uses 0x04 for
-/// Flying). type 1 = poison bar (ServUO `HealthbarPoison` writes `level + 1`, so
-/// `flag > 0` means poisoned); type 2 = yellow/blessed (ignored for now). ServUO
-/// sends this after each `MobileIncoming` and whenever the state changes, so the
-/// poison flag re-derives naturally (a cure sends `flag == 0`).
+/// 0x16/0x17 NewHealthbarUpdate/MobileHealthbarStatus (ClassicUO
+/// `NewHealthbarUpdate`; ServUO `HealthbarPoison`/`HealthbarYellow`):
+/// `[id][len:u16][serial:u32][count:u16]` then `count × [type:u16][flag:u8]`.
+/// Both ids share this layout (0x16 is the pre-Stygian-Abyss form); we route
+/// both here. type 1 = poison bar: `flag > 0` means poisoned, and the poison
+/// level is `flag - 1` (ServUO writes `level + 1`, so a cure sends `flag == 0`
+/// → level -1). type 2 = yellow/blessed bar: `flag != 0` means yellow. A
+/// packet only ever reports the type(s) that changed, so we only touch the
+/// field(s) for types actually present — a poison-only packet must never
+/// clobber `yellow_health`, and vice versa. **EXISTING-ONLY:** like
+/// ClassicUO's handler (which returns when `Mobiles.Get(serial)` is null),
+/// this packet carries no position, so it must never spawn a phantom mobile —
+/// no-op if `serial` isn't already known (works for self too: the player's
+/// own Mobile is already present once in-game).
 fn health_bar_status(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[3..]); // skip id + u16 length
     let serial = r.u32()?;
     let count = r.u16()?;
     let mut poisoned = None;
+    let mut yellow = None;
     for _ in 0..count {
         let kind = r.u16()?;
         let flag = r.u8()?;
-        if kind == 1 {
-            poisoned = Some(flag != 0);
+        match kind {
+            1 => poisoned = Some(flag),
+            2 => yellow = Some(flag != 0),
+            _ => {}
         }
     }
-    if let Some(p) = poisoned {
-        world.mobile_mut(serial).poisoned = p;
+    let Some(m) = world.mobiles.get_mut(&serial) else {
+        return Ok(());
+    };
+    if let Some(flag) = poisoned {
+        m.poisoned = flag > 0;
+        m.poison_level = flag as i8 - 1;
+    }
+    if let Some(y) = yellow {
+        m.yellow_health = y;
     }
     Ok(())
 }
@@ -490,6 +510,52 @@ fn mobile_moving(world: &mut World, frame: &[u8]) -> PResult<()> {
 
     let m = world.mobile_mut(serial);
     m.body = body;
+    m.pos.x = x;
+    m.pos.y = y;
+    m.pos.z = z;
+    m.direction = direction;
+    m.hue = hue;
+    m.notoriety = notoriety;
+    m.hidden = flags & FLAG_HIDDEN != 0;
+    Ok(())
+}
+
+/// 0xD2 UpdateCharacter — a legacy full mobile update. Fixed 25 bytes on the
+/// wire (`lengths.rs`), but ClassicUO's `UpdateCharacter` — the SAME handler
+/// function it also registers for 0x77 — only reads the leading
+/// `[serial:u32][graphic:u16][x:u16][y:u16][z:i8][direction:u8][hue:u16]
+/// [flags:u8][notoriety:u8]` (17 bytes incl. id) and leaves the remaining 8
+/// bytes unread; we mirror that exactly, reading only what's needed.
+/// **EXISTING-ONLY:** like that handler (which returns when `Mobiles.Get(serial)`
+/// is null), no-op if `serial` isn't already known.
+fn update_character(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let serial = r.u32()?;
+    let graphic = r.u16()?;
+    let x = r.u16()?;
+    let y = r.u16()?;
+    let z = r.i8()?;
+    let direction = r.u8()? & 0x07;
+    let hue = r.u16()?;
+    let flags = r.u8()?;
+    let notoriety = r.u8()?;
+
+    let is_self = world.is_player(serial);
+    let Some(m) = world.mobiles.get_mut(&serial) else {
+        return Ok(());
+    };
+
+    // For self, only visual/flags refresh — never position (mirror
+    // mobile_moving's self-guard: the Walker owns our own pos/facing).
+    if is_self {
+        m.body = graphic;
+        m.hue = hue;
+        m.notoriety = notoriety;
+        m.hidden = flags & FLAG_HIDDEN != 0;
+        return Ok(());
+    }
+
+    m.body = graphic;
     m.pos.x = x;
     m.pos.y = y;
     m.pos.z = z;
@@ -1646,6 +1712,17 @@ fn pathfinding(world: &mut World, frame: &[u8]) -> PResult<()> {
     let y = r.u16()?;
     let z = r.u16()?;
     world.set_server_pathfind(x, y, z);
+    Ok(())
+}
+
+/// 0x97 MovePlayer — `[id][direction:u8]` (2 bytes). ClassicUO forces
+/// `Player.Walk(dir & 0x07, running = dir & 0x80)` directly; core has no
+/// Walker here, so it records the request for the movement driver to execute
+/// (mirrors 0x38 pathfinding above).
+fn move_player(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let d = r.u8()?;
+    world.set_forced_walk(d & 0x07, d & 0x80 != 0);
     Ok(())
 }
 
@@ -3628,12 +3705,13 @@ mod tests {
 
     #[test]
     fn health_bar_status_poison_sets_and_clears() {
-        // 0x17 MobileHealthbarStatus: [id][len:u16][serial:u32][count:u16]
-        // then count × [type:u16][flag:u8]. type 1 = poison bar (ServUO
-        // HealthbarPoison writes `p.Level + 1`, i.e. > 0 while poisoned).
-        let build = |type_: u16, flag: u8| {
+        // 0x16/0x17 NewHealthbarUpdate/MobileHealthbarStatus:
+        // [id][len:u16][serial:u32][count:u16] then count × [type:u16][flag:u8].
+        // type 1 = poison bar (ServUO HealthbarPoison writes `p.Level + 1`, i.e.
+        // > 0 while poisoned); type 2 = yellow/blessed bar.
+        let build = |id: u8, type_: u16, flag: u8| {
             let mut p = PacketWriter::new();
-            p.u8(0x17).u16(0); // id + length placeholder
+            p.u8(id).u16(0); // id + length placeholder
             p.u32(0x0BAD).u16(1).u16(type_).u8(flag);
             let mut v = p.into_vec();
             let len = v.len() as u16;
@@ -3642,19 +3720,50 @@ mod tests {
             v
         };
         let mut w = World::new();
-        // Poison level 2 → flag byte 3 (>0) → poisoned.
-        assert!(apply_packet(&mut w, &build(1, 3)));
+        w.mobile_mut(0x0BAD); // existing-only: pre-create, no phantom spawn
+                              // Poison level 2 → flag byte 3 (>0) → poisoned, level = 3 - 1 = 2.
+        assert!(apply_packet(&mut w, &build(0x17, 1, 3)));
         assert!(w.mobiles[&0x0BAD].poisoned);
-        // Cured → flag 0 → not poisoned (not sticky).
-        assert!(apply_packet(&mut w, &build(1, 0)));
+        assert_eq!(w.mobiles[&0x0BAD].poison_level, 2);
+        // Cured → flag 0 → not poisoned (not sticky), level -1.
+        assert!(apply_packet(&mut w, &build(0x17, 1, 0)));
         assert!(!w.mobiles[&0x0BAD].poisoned);
-        // A yellow-healthbar update (type 2) must NOT touch the poison flag.
-        assert!(apply_packet(&mut w, &build(1, 2))); // re-poison
-        assert!(apply_packet(&mut w, &build(2, 1))); // blessed/yellow, type 2
+        assert_eq!(w.mobiles[&0x0BAD].poison_level, -1);
+        // A yellow-healthbar update (type 2) must NOT touch the poison flag,
+        // and must work identically via 0x16.
+        assert!(apply_packet(&mut w, &build(0x17, 1, 2))); // re-poison
+        assert!(apply_packet(&mut w, &build(0x16, 2, 1))); // blessed/yellow, type 2, via 0x16
         assert!(
             w.mobiles[&0x0BAD].poisoned,
             "type-2 update left poison alone"
         );
+        assert!(
+            w.mobiles[&0x0BAD].yellow_health,
+            "type-2 sets yellow_health"
+        );
+        // A poison-only packet must not disturb yellow_health.
+        assert!(apply_packet(&mut w, &build(0x17, 1, 0))); // cure, type 1 only
+        assert!(
+            w.mobiles[&0x0BAD].yellow_health,
+            "type-1 update left yellow_health alone"
+        );
+    }
+
+    #[test]
+    fn health_bar_status_does_not_spawn_phantom_mobile() {
+        // Unlike the old mobile_mut-based implementation, a status packet for
+        // a serial we don't already know must be a no-op (ClassicUO's
+        // NewHealthbarUpdate returns early when Mobiles.Get(serial) is null).
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0x17).u16(0);
+        p.u32(0xDEAD).u16(1).u16(1).u8(3);
+        let mut v = p.into_vec();
+        let len = v.len() as u16;
+        v[1] = (len >> 8) as u8;
+        v[2] = (len & 0xFF) as u8;
+        assert!(apply_packet(&mut w, &v));
+        assert!(!w.mobiles.contains_key(&0xDEAD));
     }
 
     #[test]
@@ -5903,5 +6012,107 @@ mod tests {
             &waypoint_frame(10, 100, 100, 0, 0, 6, false, 1_062_613, "Healer 🐉")
         ));
         assert_eq!(w.waypoints[&10].name, "Healer 🐉");
+    }
+
+    #[test]
+    fn move_player_records_direction_and_running_and_bumps_seq() {
+        // 0x97 MovePlayer: [id][direction:u8] (2 bytes). ClassicUO forces
+        // Player.Walk(dir & 7, running = dir & 0x80).
+        let mut w = World::new();
+        assert!(w.forced_walk.is_none());
+
+        let mut p = PacketWriter::new();
+        p.u8(0x97).u8(0x03); // dir 3 (south), not running
+        assert!(apply_packet(&mut w, &p.into_vec()));
+        assert_eq!(
+            w.forced_walk,
+            Some(crate::world::ForcedWalkRequest {
+                dir: 3,
+                run: false,
+                seq: 1,
+            })
+        );
+
+        let mut p2 = PacketWriter::new();
+        p2.u8(0x97).u8(0x87); // dir 7 | running bit 0x80
+        assert!(apply_packet(&mut w, &p2.into_vec()));
+        assert_eq!(
+            w.forced_walk,
+            Some(crate::world::ForcedWalkRequest {
+                dir: 7,
+                run: true,
+                seq: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn update_character_is_existing_only_and_respects_self_guard() {
+        // 0xD2 UpdateCharacter: [id][serial:u32][graphic:u16][x:u16][y:u16]
+        // [z:i8][direction:u8][hue:u16][flags:u8][notoriety:u8].
+        let build = |serial: u32,
+                     graphic: u16,
+                     x: u16,
+                     y: u16,
+                     z: i8,
+                     dir: u8,
+                     hue: u16,
+                     flags: u8,
+                     noto: u8| {
+            let mut p = PacketWriter::new();
+            p.u8(0xD2)
+                .u32(serial)
+                .u16(graphic)
+                .u16(x)
+                .u16(y)
+                .u8(z as u8)
+                .u8(dir)
+                .u16(hue)
+                .u8(flags)
+                .u8(noto);
+            p.into_vec()
+        };
+
+        let mut w = World::new();
+
+        // Unknown serial: no phantom mobile is created.
+        assert!(apply_packet(
+            &mut w,
+            &build(0x9999, 0x0190, 100, 200, 5, 3, 0, 0, 1)
+        ));
+        assert!(!w.mobiles.contains_key(&0x9999));
+
+        // Pre-created non-self mobile: full update (pos/body/hue/notoriety).
+        w.mobile_mut(0x1234);
+        assert!(apply_packet(
+            &mut w,
+            &build(0x1234, 0x0190, 100, 200, 5, 0x83, 0x0022, FLAG_HIDDEN, 6)
+        ));
+        let m = &w.mobiles[&0x1234];
+        assert_eq!(m.body, 0x0190);
+        assert_eq!(m.pos.x, 100);
+        assert_eq!(m.pos.y, 200);
+        assert_eq!(m.pos.z, 5);
+        assert_eq!(m.direction, 0x03); // low 3 bits only
+        assert_eq!(m.hue, 0x0022);
+        assert_eq!(m.notoriety, 6);
+        assert!(m.hidden);
+
+        // Self mobile: visual/flags only, position untouched.
+        w.player = Some(crate::types::Serial(0x311));
+        w.mobile_mut(0x311).pos = crate::types::Position { x: 50, y: 60, z: 7 };
+        assert!(apply_packet(
+            &mut w,
+            &build(0x311, 0x0191, 999, 999, 9, 2, 0x0033, 0, 3)
+        ));
+        let me = &w.mobiles[&0x311];
+        assert_eq!(me.body, 0x0191);
+        assert_eq!(me.hue, 0x0033);
+        assert_eq!(me.notoriety, 3);
+        assert_eq!(
+            me.pos,
+            crate::types::Position { x: 50, y: 60, z: 7 },
+            "self position must not move"
+        );
     }
 }

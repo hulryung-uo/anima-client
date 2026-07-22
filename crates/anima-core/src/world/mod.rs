@@ -43,11 +43,20 @@ pub struct Mobile {
     /// flags byte on every 0x20/0x77/0x78 (not sticky): a later update that
     /// omits the bit clears it back to `false`.
     pub hidden: bool,
-    /// Poisoned status from 0x17 MobileHealthbarStatus type 1. In UO the health
-    /// bar turns green while this is set, independent of the actual HP fraction.
-    /// ServUO sends 0x17 after MobileIncoming and whenever poison changes, so a
-    /// cure explicitly clears this back to `false`.
+    /// Poisoned status from 0x16/0x17 MobileHealthbarStatus type 1. In UO the
+    /// health bar turns green while this is set, independent of the actual HP
+    /// fraction. ServUO sends this after MobileIncoming and whenever poison
+    /// changes, so a cure explicitly clears this back to `false`.
     pub poisoned: bool,
+    /// Poison level from the same type-1 entry as `poisoned`, derived as
+    /// `flag - 1` (ServUO `HealthbarPoison` writes `level + 1`). `-1` once
+    /// cured (`flag == 0`), `0..=3` for Lesser/Regular/Greater/Deadly while
+    /// poisoned.
+    pub poison_level: i8,
+    /// Yellow/blessed health bar from 0x16/0x17 type 2 (ServUO
+    /// `HealthbarYellow`/invulnerable NPCs). Independent of `poisoned` — a
+    /// packet reporting only one type must never clobber the other.
+    pub yellow_health: bool,
 }
 
 /// An item — on the ground, in a container, or equipped.
@@ -205,6 +214,17 @@ pub struct ServerPathfindRequest {
     pub x: u16,
     pub y: u16,
     pub z: u16,
+}
+
+/// Latest server-forced walk step (0x97). ClassicUO's `MovePlayer` calls
+/// `Player.Walk(dir & 7, running)` directly; core has no Walker here, so it
+/// just records the request with a monotonic sequence for the movement
+/// driver to execute (mirrors [`ServerPathfindRequest`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForcedWalkRequest {
+    pub dir: u8,
+    pub run: bool,
+    pub seq: u64,
 }
 
 /// Current weather state (from 0x65). `kind` reuses the wire type byte:
@@ -946,6 +966,11 @@ pub struct World {
     pub server_pathfind: Option<ServerPathfindRequest>,
     /// Monotonic counter for [`World::server_pathfind`].
     pub server_pathfind_seq: u64,
+    /// Latest 0x97 server-forced walk step. Consumers gate on `seq` so a
+    /// byte-identical resend still restarts execution. See [`ForcedWalkRequest`].
+    pub forced_walk: Option<ForcedWalkRequest>,
+    /// Monotonic counter for [`World::forced_walk`].
+    pub forced_walk_seq: u64,
     /// The player's active buffs/debuffs (0xDF), keyed by `icon`. See [`Buff`].
     pub buffs: Vec<Buff>,
     /// The current vendor BUY window (0x74), if one is open. See [`ShopBuy`].
@@ -1490,6 +1515,18 @@ impl World {
             x,
             y,
             z,
+        });
+    }
+
+    /// Record a server-forced 0x97 walk step. Like `set_server_pathfind`, this
+    /// stays an event rather than movement state: core has no Walker to drive
+    /// directly, so the movement driver executes the step.
+    pub fn set_forced_walk(&mut self, dir: u8, run: bool) {
+        self.forced_walk_seq += 1;
+        self.forced_walk = Some(ForcedWalkRequest {
+            dir,
+            run,
+            seq: self.forced_walk_seq,
         });
     }
 
