@@ -50,6 +50,18 @@ pub struct PlayerView {
     pub weight_max: u16,
     /// Armor rating (AR), [`crate::world::PlayerStats::armor`].
     pub armor: i16,
+    /// Current follower/pet count, [`crate::world::PlayerStats::followers`].
+    pub followers: u8,
+    /// Maximum follower/pet count, [`crate::world::PlayerStats::followers_max`].
+    pub followers_max: u8,
+    /// Fire resistance, [`crate::world::PlayerStats::fire_resistance`].
+    pub fire_resistance: i16,
+    /// Cold resistance, [`crate::world::PlayerStats::cold_resistance`].
+    pub cold_resistance: i16,
+    /// Poison resistance, [`crate::world::PlayerStats::poison_resistance`].
+    pub poison_resistance: i16,
+    /// Energy resistance, [`crate::world::PlayerStats::energy_resistance`].
+    pub energy_resistance: i16,
     /// Current body graphic. ServUO changes this to a race-specific ghost body
     /// on death, which is more stable than treating a transient zero-HP update
     /// as the complete death contract.
@@ -507,6 +519,12 @@ impl World {
             weight: self.player_stats.weight,
             weight_max: self.player_stats.weight_max,
             armor: self.player_stats.armor,
+            followers: self.player_stats.followers,
+            followers_max: self.player_stats.followers_max,
+            fire_resistance: self.player_stats.fire_resistance,
+            cold_resistance: self.player_stats.cold_resistance,
+            poison_resistance: self.player_stats.poison_resistance,
+            energy_resistance: self.player_stats.energy_resistance,
             body: pm.body,
             poisoned: pm.poisoned,
             dead: is_ghost_body(pm.body),

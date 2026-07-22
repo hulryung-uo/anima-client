@@ -141,6 +141,29 @@ pub struct PlayerStats {
     pub armor: i16,
     pub weight: u16,
     pub weight_max: u16,
+    /// Race byte from the 0x11 CharacterStatus ML tail (`type >= 5`), stored
+    /// raw as sent on the wire. ClassicUO remaps a wire `0` to `1`
+    /// (`RaceType.Human`); we keep the untranslated byte since the core has
+    /// no race enum of its own.
+    pub race: u8,
+    /// Stat cap from the 0x11 CharacterStatus Renaissance tail (`type >= 3`).
+    pub stats_cap: i16,
+    /// Current follower/pet count (0x11 CharacterStatus, `type >= 3`).
+    pub followers: u8,
+    /// Maximum follower/pet count (0x11 CharacterStatus, `type >= 3`).
+    pub followers_max: u8,
+    /// AOS resistances from the 0x11 CharacterStatus tail (`type >= 4`).
+    pub fire_resistance: i16,
+    pub cold_resistance: i16,
+    pub poison_resistance: i16,
+    pub energy_resistance: i16,
+    /// Luck (0x11 CharacterStatus, `type >= 4`).
+    pub luck: u16,
+    /// Damage range (0x11 CharacterStatus, `type >= 4`).
+    pub damage_min: i16,
+    pub damage_max: i16,
+    /// Tithing points (0x11 CharacterStatus, `type >= 4`).
+    pub tithing_points: u32,
     /// Stat-training lock for Strength from 0xBF/0x19 ExtendedStats version 2
     /// (`state >> 4 & 0x03`). 0 = Up, 1 = Down, 2 = Locked.
     pub str_lock: u8,

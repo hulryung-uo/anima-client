@@ -2640,7 +2640,11 @@ fn delete(world: &mut World, frame: &[u8]) -> PResult<()> {
     Ok(())
 }
 
-/// 0x11 CharacterStatus — name + full stat block for self, name/hits for others.
+/// 0x11 CharacterStatus — name + full stat block for self, name/hits for
+/// others. The self-only stat block is itself version-gated on `flag`
+/// (ClassicUO's `type` byte): `>= 1` unlocks the basic block up through
+/// `weight`, then `>= 5`/`>= 3`/`>= 4` each unlock a further tail (ML,
+/// Renaissance, AOS) — see the ML/Renaissance/AOS comments below.
 fn char_status(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[3..]); // variable
     let serial = r.u32()?;
@@ -2679,6 +2683,41 @@ fn char_status(world: &mut World, frame: &[u8]) -> PResult<()> {
         stats.gold = gold;
         stats.armor = armor;
         stats.weight = weight;
+
+        // Version-gated tail (ClassicUO `CharacterStatus`; `flag` here is its
+        // `type` byte). ClassicUO reads these three blocks unconditionally in
+        // this order — ML, then Renaissance, then AOS — each gated on the
+        // same `flag`, regardless of which combination of thresholds it
+        // clears. Every field read uses `?`, so a truncated packet stops
+        // partway through rather than misreading a later block's bytes as an
+        // earlier one's.
+        if flag >= 5 {
+            // ML: weight cap + race. `weight_max` already existed on
+            // `PlayerStats` but was never written until now.
+            stats.weight_max = r.u16()?;
+            stats.race = r.u8()?;
+        }
+        if flag >= 3 {
+            // Renaissance: stat cap + follower count.
+            stats.stats_cap = r.i16()?;
+            stats.followers = r.u8()?;
+            stats.followers_max = r.u8()?;
+        }
+        if flag >= 4 {
+            // AOS: resistances, luck, damage range, tithing points.
+            stats.fire_resistance = r.i16()?;
+            stats.cold_resistance = r.i16()?;
+            stats.poison_resistance = r.i16()?;
+            stats.energy_resistance = r.i16()?;
+            stats.luck = r.u16()?;
+            stats.damage_min = r.i16()?;
+            stats.damage_max = r.i16()?;
+            stats.tithing_points = r.u32()?;
+        }
+        // `flag >= 6` adds an extended combat-bonus tail (max resists,
+        // defense/hit/swing/damage increase, etc.) that we intentionally do
+        // not parse or store — the packet is self-framed, so those trailing
+        // bytes are harmlessly discarded once this handler returns.
 
         let m = world.mobile_mut(serial);
         m.stam = stam;
@@ -6345,6 +6384,106 @@ mod tests {
         q.u8(0xBF).u16(0).u16(0x0026).u8(0xFF); // out of range
         assert!(apply_packet(&mut w, &patch_len(q.into_vec())));
         assert_eq!(w.player_stats.speed_mode, 0);
+    }
+
+    #[test]
+    fn char_status_flag5_reads_ml_ren_aos_tail_in_wire_order() {
+        // 0x11 CharacterStatus, flag=5 (ML): ClassicUO reads the ML tail,
+        // then unconditionally checks (and reads) Renaissance, then AOS —
+        // all three gated on the same flag/`type` byte, in that wire order.
+        let mut w = World::new();
+        w.player = Some(crate::types::Serial(0x1001));
+
+        let mut p = PacketWriter::new();
+        p.u8(0x11).u16(0); // id + length placeholder
+        p.u32(0x1001) // serial
+            .fixed_ascii("Anima", 30)
+            .u16(90) // hits
+            .u16(100) // hits_max
+            .u8(0) // name_change_flag
+            .u8(5); // flag
+        p.u8(0) // is_female
+            .u16(60) // strength
+            .u16(70) // dexterity
+            .u16(80) // intelligence
+            .u16(50) // stam
+            .u16(55) // stam_max
+            .u16(40) // mana
+            .u16(45) // mana_max
+            .u32(12_345) // gold
+            .u16(25u16) // armor (i16 25)
+            .u16(400); // weight
+
+        // ML tail (flag >= 5): weight_max, race.
+        p.u16(500).u8(2);
+        // Renaissance tail (flag >= 3): stats_cap, followers, followers_max.
+        p.u16(225u16).u8(3).u8(5);
+        // AOS tail (flag >= 4): resistances, luck, damage range, tithing.
+        p.u16(10u16) // fire_resistance
+            .u16(20u16) // cold_resistance
+            .u16(30u16) // poison_resistance
+            .u16(40u16) // energy_resistance
+            .u16(77) // luck
+            .u16(5u16) // damage_min
+            .u16(12u16) // damage_max
+            .u32(999); // tithing_points
+
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        let s = &w.player_stats;
+        assert_eq!(s.weight_max, 500);
+        assert_eq!(s.race, 2);
+        assert_eq!(s.stats_cap, 225);
+        assert_eq!(s.followers, 3);
+        assert_eq!(s.followers_max, 5);
+        assert_eq!(s.fire_resistance, 10);
+        assert_eq!(s.cold_resistance, 20);
+        assert_eq!(s.poison_resistance, 30);
+        assert_eq!(s.energy_resistance, 40);
+        assert_eq!(s.luck, 77);
+        assert_eq!(s.damage_min, 5);
+        assert_eq!(s.damage_max, 12);
+        assert_eq!(s.tithing_points, 999);
+    }
+
+    #[test]
+    fn char_status_flag3_reads_only_renaissance_tail() {
+        // flag=3: only the Renaissance block is present on the wire — the ML
+        // and AOS blocks must not be read (there's nothing left to read).
+        let mut w = World::new();
+        w.player = Some(crate::types::Serial(0x1002));
+
+        let mut p = PacketWriter::new();
+        p.u8(0x11).u16(0);
+        p.u32(0x1002)
+            .fixed_ascii("Anima", 30)
+            .u16(90)
+            .u16(100)
+            .u8(0)
+            .u8(3); // flag
+        p.u8(0)
+            .u16(60)
+            .u16(70)
+            .u16(80)
+            .u16(50)
+            .u16(55)
+            .u16(40)
+            .u16(45)
+            .u32(12_345)
+            .u16(25u16)
+            .u16(400);
+        // Renaissance tail only.
+        p.u16(200u16).u8(1).u8(4);
+
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        let s = &w.player_stats;
+        assert_eq!(s.stats_cap, 200);
+        assert_eq!(s.followers, 1);
+        assert_eq!(s.followers_max, 4);
+        // No ML/AOS bytes were on the wire — these must stay at defaults.
+        assert_eq!(s.weight_max, 0);
+        assert_eq!(s.race, 0);
+        assert_eq!(s.fire_resistance, 0);
+        assert_eq!(s.tithing_points, 0);
     }
 
     #[test]

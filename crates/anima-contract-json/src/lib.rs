@@ -101,6 +101,9 @@ fn player_json(p: &PlayerView) -> Value {
         "mana": p.mana, "mana_max": p.mana_max, "stam": p.stam, "stam_max": p.stam_max,
         "strength": p.strength, "dexterity": p.dexterity, "intelligence": p.intelligence,
         "gold": p.gold, "weight": p.weight, "weight_max": p.weight_max, "armor": p.armor,
+        "followers": p.followers, "followers_max": p.followers_max,
+        "fire_resistance": p.fire_resistance, "cold_resistance": p.cold_resistance,
+        "poison_resistance": p.poison_resistance, "energy_resistance": p.energy_resistance,
         "body": p.body, "poisoned": p.poisoned, "dead": p.dead,
     })
 }
