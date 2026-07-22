@@ -10,9 +10,9 @@
 
 use super::packet::{PacketError, PacketReader, Result as PResult};
 use crate::world::{
-    BoatMovedEntity, BoatMovement, Effect, GameTime, Gump, HouseDesign, HousePlane, HuePicker,
-    JournalEntry, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, PopupEntry, PopupMenu, PromptKind,
-    PromptState, Skill, TargetCursor, TipKind, TradeState, Waypoint, World,
+    BoatMovedEntity, BoatMovement, DragAnimation, Effect, GameTime, Gump, HouseDesign, HousePlane,
+    HuePicker, JournalEntry, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, PopupEntry, PopupMenu,
+    PromptKind, PromptState, Skill, TargetCursor, TipKind, TradeState, Waypoint, World,
 };
 
 /// Decode one framed game packet (id byte included) into `world`.
@@ -84,6 +84,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0xAF => display_death(world, frame)?,
         0xAA => change_combatant(world, frame)?,
         0x15 => follow_r(world, frame)?,
+        0x23 => drag_animation(world, frame)?,
         0x27 => lift_reject(world, frame)?,
         0x28 => end_dragging_item(world, frame)?,
         0x29 => drop_item_accepted(world)?,
@@ -113,6 +114,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0xE6 => remove_waypoint(world, frame)?,
         0x97 => move_player(world, frame)?,
         0xD2 => update_character(world, frame)?,
+        0xD3 => update_object(world, frame)?,
         _ => return Ok(false),
     }
     Ok(true)
@@ -631,6 +633,69 @@ fn mobile_incoming(world: &mut World, frame: &[u8]) -> PResult<()> {
 
     // Worn items follow as fixed records: serial(u32) graphic(u16) layer(u8) hue(u16).
     // (NewMobileIncoming / CV_70331 format — hue always present, no 0x8000 flag.)
+    while r.remaining() >= 4 {
+        let item_serial = r.u32()?;
+        if item_serial == 0 {
+            break;
+        }
+        if r.remaining() < 5 {
+            break;
+        }
+        let graphic = r.u16()?;
+        let layer = r.u8()?;
+        let ihue = r.u16()?;
+        let it = world.item_mut(item_serial);
+        it.graphic = graphic;
+        it.layer = layer;
+        it.hue = ihue;
+        it.container = Some(serial);
+    }
+    Ok(())
+}
+
+/// 0xD3 UpdateObject — the legacy sibling of 0x78 MobileIncoming. ClassicUO
+/// registers a SEPARATE `UpdateObject` handler for 0xD3, but it's the same
+/// shape as `UpdateGameObject`'s caller for 0x78 plus 6 extra bytes: `if
+/// (p[0] != 0x78) p.Skip(6);` (`UpdateObject` in PacketHandlers.cs). Otherwise
+/// this mirrors `mobile_incoming` exactly, including the create-if-missing
+/// (`mobile_mut`, NOT existing-only like 0xD2) and worn-item list.
+fn update_object(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[3..]); // variable: skip id + length
+    let serial = r.u32()?;
+    let body = r.u16()?;
+    let x = r.u16()?;
+    let y = r.u16()?;
+    let z = r.i8()?;
+    let direction = r.u8()? & 0x07;
+    let hue = r.u16()?;
+    let flags = r.u8()?;
+    let notoriety = r.u8()?;
+    r.skip(6)?; // 0xD3-only padding — absent on 0x78 MobileIncoming
+
+    // For self, the Walker owns position/facing — only refresh body/hue, never
+    // pos/dir (see mobile_moving). Still parse the worn-item list below.
+    let is_self = world.is_player(serial);
+    let old_body = world.mobiles.get(&serial).map(|m| m.body).unwrap_or(body);
+    {
+        let m = world.mobile_mut(serial);
+        m.body = body;
+        m.hue = hue;
+        // Hidden/notoriety are visual attributes, not movement state — refresh
+        // them for self too (same reasoning as mobile_incoming).
+        m.hidden = flags & FLAG_HIDDEN != 0;
+        m.notoriety = notoriety;
+        if !is_self {
+            m.pos.x = x;
+            m.pos.y = y;
+            m.pos.z = z;
+            m.direction = direction;
+        }
+    }
+    if is_self {
+        world.on_player_body_changed(old_body, body);
+    }
+
+    // Worn items follow as fixed records: serial(u32) graphic(u16) layer(u8) hue(u16).
     while r.remaining() >= 4 {
         let item_serial = r.u32()?;
         if item_serial == 0 {
@@ -1661,6 +1726,71 @@ fn follow_r(world: &mut World, frame: &[u8]) -> PResult<()> {
     let _follower = r.u32()?;
     let followed = r.u32()?;
     world.follow_target = if followed == 0 { None } else { Some(followed) };
+    Ok(())
+}
+
+/// 0x23 DragAnimation — an item graphic flying from a source to a destination
+/// (e.g. splitting gold off a stack). Fixed 26 bytes on the wire. `apply_packet`
+/// can't render, so this just resolves the event (graphic remap + live source/
+/// dest mobile position) and records it via [`World::push_drag_anim`] for the
+/// renderer to play. Mirrors ClassicUO's `DragAnimation`.
+fn drag_animation(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let mut r = PacketReader::new(&frame[1..]);
+    let mut graphic = r.u16()?;
+    // ClassicUO adds the graphic-increment byte into a `ushort` (wraps); use
+    // wrapping_add so a malformed graphic near u16::MAX can't debug-panic and
+    // crash the session (apply_packet only swallows parse *errors*, not panics).
+    graphic = graphic.wrapping_add(r.u8()? as u16);
+    let hue = r.u16()?;
+    let count = r.u16()?;
+    let mut source = r.u32()?;
+    let mut source_x = r.u16()?;
+    let mut source_y = r.u16()?;
+    let mut source_z = r.i8()?;
+    let mut dest = r.u32()?;
+    let mut dest_x = r.u16()?;
+    let mut dest_y = r.u16()?;
+    let mut dest_z = r.i8()?;
+
+    // Gold/gem stacks drag as their "in flight" variant graphic.
+    match graphic {
+        0x0EED => graphic = 0x0EEF,
+        0x0EEA => graphic = 0x0EEC,
+        0x0EF0 => graphic = 0x0EF2,
+        _ => {}
+    }
+
+    // ClassicUO re-derives source/dest from the live mobile's position (and
+    // zeroes the serial when it isn't a mobile we currently know about).
+    if let Some(m) = world.mobiles.get(&source) {
+        source_x = m.pos.x;
+        source_y = m.pos.y;
+        source_z = m.pos.z;
+    } else {
+        source = 0;
+    }
+    if let Some(m) = world.mobiles.get(&dest) {
+        dest_x = m.pos.x;
+        dest_y = m.pos.y;
+        dest_z = m.pos.z;
+    } else {
+        dest = 0;
+    }
+
+    world.push_drag_anim(DragAnimation {
+        seq: 0,
+        graphic,
+        hue,
+        count,
+        source,
+        source_x,
+        source_y,
+        source_z,
+        dest,
+        dest_x,
+        dest_y,
+        dest_z,
+    });
     Ok(())
 }
 
@@ -6113,6 +6243,181 @@ mod tests {
             me.pos,
             crate::types::Position { x: 50, y: 60, z: 7 },
             "self position must not move"
+        );
+    }
+
+    #[test]
+    fn update_object_creates_mobile_and_parses_worn_item_past_padding() {
+        // 0xD3 UpdateObject: same leading shape as 0x78 MobileIncoming plus 6
+        // padding bytes before the worn-item list — assert those 6 bytes are
+        // correctly skipped (not mistaken for part of the item list) by
+        // checking the worn item parses with the right serial/graphic/layer/hue.
+        let mut w = World::new();
+
+        let mut p = PacketWriter::new();
+        p.u8(0xD3).u16(0); // id + length placeholder
+        p.u32(0xBEEF) // serial (new — not yet known)
+            .u16(0x0190) // body
+            .u16(100) // x
+            .u16(200) // y
+            .u8(5i8 as u8) // z
+            .u8(0x03) // dir
+            .u16(0x0044) // hue
+            .u8(0) // flags
+            .u8(2) // notoriety
+            .zeros(6); // 0xD3-only padding, absent on 0x78
+        p.u32(0xCAFE).u16(0x1234).u8(0x01).u16(0x0055); // worn item
+        p.u32(0); // terminator
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+
+        assert!(apply_packet(&mut w, &frame));
+
+        let m = &w.mobiles[&0xBEEF];
+        assert_eq!(m.body, 0x0190);
+        assert_eq!(m.pos.x, 100);
+        assert_eq!(m.pos.y, 200);
+        assert_eq!(m.pos.z, 5);
+        assert_eq!(m.direction, 0x03);
+        assert_eq!(m.hue, 0x0044);
+        assert_eq!(m.notoriety, 2);
+
+        let it = &w.items[&0xCAFE];
+        assert_eq!(it.graphic, 0x1234);
+        assert_eq!(it.layer, 0x01);
+        assert_eq!(it.hue, 0x0055);
+        assert_eq!(it.container, Some(0xBEEF));
+    }
+
+    #[test]
+    fn update_object_self_guard_leaves_position_untouched() {
+        // Like mobile_incoming, 0xD3 must never move the Walker-owned self
+        // position/facing, but should still refresh visual attributes.
+        let mut w = World::new();
+        w.player = Some(crate::types::Serial(0x311));
+        w.mobile_mut(0x311).pos = crate::types::Position { x: 50, y: 60, z: 7 };
+
+        let mut p = PacketWriter::new();
+        p.u8(0xD3).u16(0);
+        p.u32(0x311)
+            .u16(0x0192)
+            .u16(999)
+            .u16(999)
+            .u8(9i8 as u8)
+            .u8(2)
+            .u16(0x0033)
+            .u8(0)
+            .u8(3)
+            .zeros(6);
+        p.u32(0); // no worn items
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+
+        assert!(apply_packet(&mut w, &frame));
+
+        let me = &w.mobiles[&0x311];
+        assert_eq!(me.body, 0x0192);
+        assert_eq!(me.hue, 0x0033);
+        assert_eq!(me.notoriety, 3);
+        assert_eq!(
+            me.pos,
+            crate::types::Position { x: 50, y: 60, z: 7 },
+            "self position must not move"
+        );
+    }
+
+    fn drag_animation_frame(
+        graphic: u16,
+        inc: u8,
+        hue: u16,
+        count: u16,
+        source: u32,
+        source_x: u16,
+        source_y: u16,
+        source_z: i8,
+        dest: u32,
+        dest_x: u16,
+        dest_y: u16,
+        dest_z: i8,
+    ) -> Vec<u8> {
+        let mut p = PacketWriter::new();
+        p.u8(0x23)
+            .u16(graphic)
+            .u8(inc)
+            .u16(hue)
+            .u16(count)
+            .u32(source)
+            .u16(source_x)
+            .u16(source_y)
+            .u8(source_z as u8)
+            .u32(dest)
+            .u16(dest_x)
+            .u16(dest_y)
+            .u8(dest_z as u8);
+        p.into_vec()
+    }
+
+    #[test]
+    fn drag_animation_remaps_gold_and_substitutes_known_source() {
+        let mut w = World::new();
+        w.mobile_mut(0xAAAA).pos = crate::types::Position { x: 10, y: 20, z: 3 };
+
+        // Gold's "in flight" graphic remap; dest is a serial we've never seen,
+        // so its wire-supplied coordinates should pass through unchanged.
+        assert!(apply_packet(
+            &mut w,
+            &drag_animation_frame(0x0EED, 0, 5, 1, 0xAAAA, 999, 999, 9, 0xDEAD, 111, 222, 4)
+        ));
+
+        let anim = w.recent_drag_anims.last().expect("event pushed");
+        assert_eq!(anim.seq, 1);
+        assert_eq!(anim.graphic, 0x0EEF, "gold remaps to its flight graphic");
+        assert_eq!(anim.hue, 5);
+        assert_eq!(anim.count, 1);
+        assert_eq!(anim.source, 0xAAAA, "known source serial kept");
+        assert_eq!(anim.source_x, 10, "position substituted from live mobile");
+        assert_eq!(anim.source_y, 20);
+        assert_eq!(anim.source_z, 3);
+        assert_eq!(anim.dest, 0, "unknown dest serial is zeroed");
+        assert_eq!(anim.dest_x, 111, "unknown dest keeps wire coordinates");
+        assert_eq!(anim.dest_y, 222);
+        assert_eq!(anim.dest_z, 4);
+    }
+
+    #[test]
+    fn drag_animation_zeroes_unknown_source_and_bumps_seq() {
+        let mut w = World::new();
+
+        assert!(apply_packet(
+            &mut w,
+            &drag_animation_frame(0x0EEA, 0, 0, 1, 0x1111, 5, 6, 1, 0x2222, 7, 8, 2)
+        ));
+        assert_eq!(w.recent_drag_anims.last().unwrap().seq, 1);
+        assert_eq!(
+            w.recent_drag_anims.last().unwrap().graphic,
+            0x0EEC,
+            "gem remaps to its flight graphic"
+        );
+        assert_eq!(
+            w.recent_drag_anims.last().unwrap().source,
+            0,
+            "unknown source serial is zeroed"
+        );
+
+        // A second event bumps the monotonic seq.
+        assert!(apply_packet(
+            &mut w,
+            &drag_animation_frame(0x0EF0, 0, 0, 1, 0x1111, 5, 6, 1, 0x2222, 7, 8, 2)
+        ));
+        let last = w.recent_drag_anims.last().unwrap();
+        assert_eq!(last.seq, 2);
+        assert_eq!(
+            last.graphic, 0x0EF2,
+            "gem stack remaps to its flight graphic"
         );
     }
 }

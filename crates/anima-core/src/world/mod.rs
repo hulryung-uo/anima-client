@@ -195,6 +195,28 @@ pub struct DragCompletion {
     pub token: Option<u32>,
 }
 
+/// A 0x23 DragAnimation event: an item graphic flying from a source to a
+/// destination (e.g. splitting gold off a stack). Mirrors [`Effect`] — a
+/// capped queue with a monotonic `seq` so the renderer spawns each visual
+/// exactly once. `source`/`dest` are 0 when that serial wasn't a mobile we
+/// currently know about (ClassicUO zeroes the serial in that case and keeps
+/// the wire-supplied coordinates as-is).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DragAnimation {
+    pub seq: u64,
+    pub graphic: u16,
+    pub hue: u16,
+    pub count: u16,
+    pub source: u32,
+    pub source_x: u16,
+    pub source_y: u16,
+    pub source_z: i8,
+    pub dest: u32,
+    pub dest_x: u16,
+    pub dest_y: u16,
+    pub dest_z: i8,
+}
+
 /// Latest ClassicUO-style death-screen trigger (0x2C). This is deliberately an
 /// event, not the player's alive/dead state: ServUO sends actions 0 and 2 during
 /// one death sequence, while the authoritative state transition arrives as a
@@ -1075,6 +1097,13 @@ pub struct World {
     pub recent_drag_completions: Vec<DragCompletion>,
     /// Monotonic counter assigning each drag-completion event a unique `seq`.
     pub drag_completion_seq: u64,
+    /// Recent 0x23 DragAnimation events (item graphic flying source→dest, e.g.
+    /// splitting gold off a stack), newest last, capped to the most recent few.
+    /// The renderer spawns a visual for each `seq` it hasn't shown yet (like
+    /// `recent_effects`). See [`DragAnimation`].
+    pub recent_drag_anims: Vec<DragAnimation>,
+    /// Monotonic counter assigning each drag-animation event a unique `seq`.
+    pub drag_anim_seq: u64,
     /// An outstanding 0x9A ASCII or 0xC2 Unicode server text prompt, if pending.
     /// See [`PromptState`].
     pub prompt: Option<PromptState>,
@@ -1196,6 +1225,8 @@ const MAX_RECENT_EFFECTS: usize = 32;
 const MAX_RECENT_LIFT_REJECTS: usize = 16;
 /// How many recent item-drag completion events [`World::push_drag_completion`] keeps.
 const MAX_RECENT_DRAG_COMPLETIONS: usize = 16;
+/// How many recent drag-animation events [`World::push_drag_anim`] keeps.
+const MAX_RECENT_DRAG_ANIMS: usize = 16;
 /// Defensive cap for server-triggered war-mode replies awaiting the driver.
 const MAX_PENDING_WAR_MODE_REQUESTS: usize = 16;
 /// How many recent container-open events [`World::push_container_open`] keeps.
@@ -1434,6 +1465,22 @@ impl World {
             .saturating_sub(MAX_RECENT_DRAG_COMPLETIONS);
         if overflow > 0 {
             self.recent_drag_completions.drain(0..overflow);
+        }
+    }
+
+    /// Record a 0x23 DragAnimation event. Assigns the next monotonic `seq`
+    /// (the caller may leave `anim.seq` at 0) and keeps only the most recent
+    /// [`MAX_RECENT_DRAG_ANIMS`].
+    pub fn push_drag_anim(&mut self, mut anim: DragAnimation) {
+        self.drag_anim_seq += 1;
+        anim.seq = self.drag_anim_seq;
+        self.recent_drag_anims.push(anim);
+        let overflow = self
+            .recent_drag_anims
+            .len()
+            .saturating_sub(MAX_RECENT_DRAG_ANIMS);
+        if overflow > 0 {
+            self.recent_drag_anims.drain(0..overflow);
         }
     }
 
