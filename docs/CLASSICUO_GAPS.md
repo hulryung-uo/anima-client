@@ -13,8 +13,12 @@ scene/agent exposure, and user-facing behavior (where applicable) are present.
   `src/ClassicUO.Client/Network/PacketHandlers.cs`
 - anima source: `crates/anima-core/src/net/game.rs` plus login and movement
   state machines
-- Current game decoder: 76 packet IDs after adding `0xF6 BoatMoving`;
-  `0x21`/`0x22` are handled separately by `Walker`
+- Current game decoder: 89 packet IDs after adding the 13 previously-missing
+  P1 gameplay handlers below (0x15/0x16/0x23/0x5B/0x71/0x97/0x98/0xB2/0xC4/
+  0xC8/0xD2/0xD3/0xDE); `0x21`/`0x22` are handled separately by `Walker`.
+  The new handlers were validated live (a `play` session logged into ServUO,
+  entered the world, and rendered the real packet stream with no panic) and
+  passed a multi-agent adversarial audit against the ClassicUO/Python sources.
 
 The comparison is mechanical at the packet-ID level, followed by a semantic
 review of the corresponding ClassicUO handler. Login-only packets and handlers
@@ -70,26 +74,30 @@ that are acknowledgements/no-ops are not counted as missing game UI features.
 - Skills, buffs, spellbooks, books, maps, waypoints
 - Vendors, secure trade, popup menus, gumps, custom-house viewing
 - Light, weather, season, sound, and music
+- `0x98 UpdateName`: existing-only mobile rename (no phantom, like ClassicUO)
+- `0x16`/`0x17 NewHealthbarUpdate`: unified poison (bool + level) and
+  yellow/blessed bar, existing-only, only the field the packet carried
+- `0xDE UpdateMobileStatus` / `0xC4 Semivisible`: parse-only, matching
+  ClassicUO's own no-op handlers (recognized, never a phantom)
+- `0x5B SetTime`: `World::game_time` clock (ported from anima's handler)
+- `0xC8 ClientViewRange`: `World::client_view_range`
+- `0x15 FollowR`: `World::follow_target`
+- `0x97 MovePlayer`: server-forced step recorded as `World::forced_walk`
+  (+seq), mirroring the 0x38 pathfinding request pattern
+- `0xD2 UpdateCharacter` / `0xD3 UpdateObject`: legacy full mobile updates
+  (self-guarded; 0xD3 also parses the worn-item list past its 6-byte padding)
+- `0x23 DragAnimation`: item-drag visual as a `World::recent_drag_anims`
+  event log, with ClassicUO's gold/gem graphic remap and live endpoint
+  position substitution
+- `0x71 BulletinBoardData`: board + summaries + full-message state model
+- `0xB2 ChatMessage`: chat channel/status state + capped message log
 
 ## Missing gameplay handlers
 
-Priority reflects player impact and how much state/UI already exists to support
-the feature. Each row is still open unless a later change moves it above.
-
-| Priority | Packet(s) | ClassicUO behavior | Required anima vertical slice |
-|---|---:|---|---|
-| P1 | `0x15` | Follow response | Follow/autowalk state |
-| P1 | `0x16` | Older health-bar status | Version-compatible poison/yellow health parsing |
-| P1 | `0x23` | Drag animation | World-to-world item movement animation |
-| P1 | `0x5B` | Server time | World clock state and optional HUD exposure |
-| P1 | `0x71` | Bulletin board | Board/message model and compose/reply UI |
-| P1 | `0x97` | Forced player movement | Server-directed step through movement prediction |
-| P1 | `0x98` | Name update | Mobile rename without a status refresh |
-| P1 | `0xB2` | Legacy chat message | Chat-channel state/UI where supported by the shard |
-| P1 | `0xC4` | Semivisible | Explicit translucency state |
-| P1 | `0xC8` | Client view range | Dynamic scene/range limits |
-| P1 | `0xD2`, `0xD3` | Legacy mobile/item updates | Older-client compatibility parsers |
-| P1 | `0xDE` | Mobile status update | SA-era status flags not covered by `0x17` |
+All P1 gameplay handlers previously listed here (`0x15`, `0x16`, `0x23`,
+`0x5B`, `0x71`, `0x97`, `0x98`, `0xB2`, `0xC4`, `0xC8`, `0xD2`, `0xD3`,
+`0xDE`) are now implemented (see the vertical slices above) and validated
+live + audited. No P1 gameplay packet handlers remain open.
 
 ## Protocol/session items to audit separately
 
@@ -105,7 +113,16 @@ assessment before being promoted into the gameplay table.
 
 Packet registration parity alone does not equal ClassicUO feature parity. Major
 systems that require their own audits include custom-house **editing** (viewing
-is implemented), complete boat controls, bulletin boards, remaining legacy
-prompts, assistant/plugin APIs, settings persistence,
-accessibility, and renderer polish. This file should stay evidence-based: add a
-ClassicUO source location and an end-to-end acceptance test when closing a row.
+is implemented), complete boat controls, bulletin-board / chat compose+reply UI
+(the packet *state models* are now decoded; the renderer/brain surfaces for
+authoring are not built), remaining legacy prompts, assistant/plugin APIs,
+settings persistence, accessibility, and renderer polish. This file should stay
+evidence-based: add a ClassicUO source location and an end-to-end acceptance test
+when closing a row.
+
+Known minor divergence (low priority, tracked by the adversarial audit): the
+mobile-incoming family (`0x78`, and the new `0xD3`) does not yet clear a
+mobile's *stale* worn items before applying the incoming equipment list, so an
+unequipped item can linger in `World::items` until overwritten. ClassicUO
+removes non-backpack worn items first. `0x78` has always had this gap; fold the
+fix into both when the equipment list is next touched.
