@@ -591,6 +591,22 @@
         white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
       .tip-notice-actions { display: flex; gap: 6px; }
       .tip-notice-actions .dlg-btn { flex: 1; height: 24px; line-height: 22px; }
+      /* ---- legacy modal text-entry dialog (0xAB / response 0xAC) ---- */
+      .text-entry-modal-layer { position: fixed; inset: 0; z-index: 49;
+        background: transparent; pointer-events: auto; }
+      .text-entry-win { width: min(350px, calc(100vw - 24px)); z-index: 1; }
+      .text-entry-win .gump-title { cursor: default; }
+      .text-entry-body { display: flex; flex-direction: column; gap: 9px; padding: 12px; }
+      .text-entry-text { color: #f0d58b; font-size: 13px; line-height: 1.35;
+        min-height: 36px; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .text-entry-description { color: #c6ccd5; font-size: 12px; line-height: 1.35;
+        min-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .text-entry-input { width: 100%; box-sizing: border-box; background: #14171c;
+        color: #f2f3f5; border: 1px solid #5b4a2b; border-radius: 4px;
+        padding: 6px 8px; font: 13px/1.25 monospace; }
+      .text-entry-input:focus { outline: 1px solid #d4b86a; border-color: #d4b86a; }
+      .text-entry-actions { display: flex; justify-content: center; gap: 10px; }
+      .text-entry-actions .dlg-btn { min-width: 92px; text-align: center; }
       /* ---- server text-prompt dialog (0x9A ASCII / 0xC2 Unicode: pet rename,
          house sign, guild abbreviation, …) — the question itself already showed up as
          a journal line; this is just the response box. Centered (no cursor

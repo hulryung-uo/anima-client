@@ -6,13 +6,13 @@
 //! The shapes are also mirrored by `anima2/anima2/contract.py` — keep that
 //! consumer in lockstep.
 //!
-//! ## Schema (v13 — snake_case, versioned)
+//! ## Schema (v14 — snake_case, versioned)
 //!
 //! [`observation_to_json`] emits one object with these top-level keys, one per
 //! [`Observation`] field: `player`, `mobiles`, `items`, `new_journal`,
 //! `pending_target`, `skills`, `gumps`, `prompt`, `trades`, `buffs`,
 //! `shop_buy`, `shop_sell`, `popup`, `legacy_menus`, `hue_pickers`, `open_urls`, `tips`,
-//! `book`, `party`, `quest_arrow`, `waypoints`,
+//! `text_entry_dialogs`, `book`, `party`, `quest_arrow`, `waypoints`,
 //! `weather`, `season`, `light`, `war`, `last_attack`, `combatant`, `corpse_of`,
 //! `corpse_equip`, `map_index`, `aos`, `opl`, `recent_damage`, `spellbooks`,
 //! `map_gumps`. A
@@ -65,13 +65,14 @@
 //! added `open_urls`, validated 0xA5 HTTP(S) navigation requests carrying a
 //! monotonic `seq`; consumers must still ask the user before opening one. v13:
 //! added `tips`, concurrent 0xA6 Tip/Notice windows, plus `TipNavigate` and
-//! `TipClose` actions.)
+//! `TipClose` actions. v14: added concurrent 0xAB `text_entry_dialogs` plus
+//! `TextEntryResponse` and `TextEntryClose` actions.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 13;
+pub const SCHEMA_VERSION: u32 = 14;
 
 use anima_core::agent::{
     Action, GumpView, ItemView, MobileView, Observation, PlayerView, SkillView, WaypointView,
@@ -81,7 +82,7 @@ use anima_core::types::Position;
 use anima_core::world::{
     Book, Buff, HuePicker, JournalEntry, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, MapView,
     OpenUrlRequest, Party, PopupEntry, PopupMenu, PromptState, ShopBuy, ShopSell, ShopSellItem,
-    SpellbookContent, TargetCursor, TipNotice, TradeState, Weather,
+    SpellbookContent, TargetCursor, TextEntryDialog, TipNotice, TradeState, Weather,
 };
 use serde_json::{json, Value};
 
@@ -326,6 +327,20 @@ fn tip_json(tip: &TipNotice) -> Value {
     })
 }
 
+fn text_entry_dialog_json(dialog: &TextEntryDialog) -> Value {
+    json!({
+        "seq": dialog.seq,
+        "serial": dialog.serial,
+        "parent_id": dialog.parent_id,
+        "button_id": dialog.button_id,
+        "text": dialog.text,
+        "can_close": dialog.can_close,
+        "variant": dialog.variant,
+        "max_length": dialog.max_length,
+        "description": dialog.description,
+    })
+}
+
 fn book_json(b: &Book) -> Value {
     json!({
         "serial": b.serial, "title": b.title, "author": b.author,
@@ -409,6 +424,7 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "hue_pickers": obs.hue_pickers.iter().map(hue_picker_json).collect::<Vec<_>>(),
         "open_urls": obs.open_urls.iter().map(open_url_json).collect::<Vec<_>>(),
         "tips": obs.tips.iter().map(tip_json).collect::<Vec<_>>(),
+        "text_entry_dialogs": obs.text_entry_dialogs.iter().map(text_entry_dialog_json).collect::<Vec<_>>(),
         "book": obs.book.as_ref().map(book_json),
         "party": party_json(&obs.party),
         "quest_arrow": obs.quest_arrow.map(|(x, y)| json!({ "x": x, "y": y })),
@@ -634,6 +650,14 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         "TipClose" => Ok(Action::TipClose {
             seq: req_u64("seq")?,
         }),
+        "TextEntryResponse" => Ok(Action::TextEntryResponse {
+            seq: req_u64("seq")?,
+            text: text("text"),
+            accepted: v.get("accepted").and_then(Value::as_bool).unwrap_or(true),
+        }),
+        "TextEntryClose" => Ok(Action::TextEntryClose {
+            seq: req_u64("seq")?,
+        }),
         "TradeAccept" => Ok(Action::TradeAccept {
             container: req_u32("container")?,
             accept: v.get("accept").and_then(Value::as_bool).unwrap_or(true),
@@ -836,6 +860,18 @@ mod tests {
                 Action::TipClose { seq: 10 },
             ),
             (
+                json!({"type": "TextEntryResponse", "seq": 11, "text": "123", "accepted": false}),
+                Action::TextEntryResponse {
+                    seq: 11,
+                    text: "123".into(),
+                    accepted: false,
+                },
+            ),
+            (
+                json!({"type": "TextEntryClose", "seq": 12}),
+                Action::TextEntryClose { seq: 12 },
+            ),
+            (
                 json!({"type": "TradeAccept", "container": 55, "accept": true}),
                 Action::TradeAccept {
                     container: 55,
@@ -910,8 +946,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v13_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 13);
+    fn schema_v14_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 14);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,
@@ -1066,6 +1102,38 @@ mod tests {
     }
 
     #[test]
+    fn schema_v14_serializes_text_entry_dialogs_exactly() {
+        let obs = Observation {
+            text_entry_dialogs: vec![TextEntryDialog {
+                seq: 7,
+                serial: 0x0102_0304,
+                parent_id: 5,
+                button_id: 6,
+                text: "Account €".into(),
+                can_close: true,
+                variant: 2,
+                max_length: 12,
+                description: "Digits only".into(),
+            }],
+            ..Observation::default()
+        };
+        assert_eq!(
+            observation_to_json(&obs)["text_entry_dialogs"],
+            json!([{
+                "seq": 7,
+                "serial": 0x0102_0304u32,
+                "parent_id": 5,
+                "button_id": 6,
+                "text": "Account €",
+                "can_close": true,
+                "variant": 2,
+                "max_length": 12,
+                "description": "Digits only",
+            }])
+        );
+    }
+
+    #[test]
     fn observation_json_has_expected_keys() {
         let obs = Observation::default();
         let v = observation_to_json(&obs);
@@ -1087,6 +1155,7 @@ mod tests {
             "hue_pickers",
             "open_urls",
             "tips",
+            "text_entry_dialogs",
             "book",
             "party",
             "quest_arrow",
@@ -1122,6 +1191,7 @@ mod tests {
         assert_eq!(v["hue_pickers"], json!([]));
         assert_eq!(v["open_urls"], json!([]));
         assert_eq!(v["tips"], json!([]));
+        assert_eq!(v["text_entry_dialogs"], json!([]));
     }
 
     /// Schema v5: `items[].is_multi` — a placed boat/house shows up in

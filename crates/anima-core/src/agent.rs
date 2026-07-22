@@ -13,8 +13,8 @@ use crate::gump_layout::GumpElement;
 use crate::types::Position;
 use crate::world::{
     is_ghost_body, Book, Buff, HuePicker, JournalEntry, LegacyMenu, MapView, OpenUrlRequest, Party,
-    PopupMenu, PromptState, ShopBuy, ShopSell, SpellbookContent, TargetCursor, TipNotice,
-    TradeState, Weather, World,
+    PopupMenu, PromptState, ShopBuy, ShopSell, SpellbookContent, TargetCursor, TextEntryDialog,
+    TipNotice, TradeState, Weather, World,
 };
 
 /// A skill value, in human units (50.0 == GM-half). Derived from [`crate::world::Skill`].
@@ -169,6 +169,10 @@ pub struct Observation {
     /// tip with [`Action::TipNavigate`], or dismiss either kind with
     /// [`Action::TipClose`].
     pub tips: Vec<TipNotice>,
+    /// Open legacy 0xAB modal text-entry dialogs in arrival order. Answer an
+    /// exact dialog with [`Action::TextEntryResponse`], or silently dismiss it
+    /// with [`Action::TextEntryClose`] only when `can_close` is true.
+    pub text_entry_dialogs: Vec<TextEntryDialog>,
     /// The currently open book (0x93/0xD4 + 0x66), if any. See [`Book`].
     /// Request more pages with [`Action::BookRequest`].
     pub book: Option<Book>,
@@ -417,6 +421,18 @@ pub enum Action {
     /// Dismiss exactly one 0xA6 Tip/Notice window locally without sending a
     /// packet, matching ClassicUO's close/right-click behavior.
     TipClose { seq: u64 },
+    /// Answer an exact 0xAB text-entry dialog. `accepted=false` is the explicit
+    /// Cancel button and still sends the current text, matching ClassicUO.
+    /// The driver derives all callback fields and input constraints from the
+    /// live dialog; a stale `seq` is a no-op.
+    TextEntryResponse {
+        seq: u64,
+        text: String,
+        accepted: bool,
+    },
+    /// Silently close an exact 0xAB dialog without a packet. This only succeeds
+    /// when the server's `can_close` flag permits ClassicUO's right-click close.
+    TextEntryClose { seq: u64 },
     /// Toggle our side's accept checkbox on a secure trade (0x6F action 2).
     /// `container` selects which session (its `my_container`, from
     /// [`crate::world::World::trades`] — multiple can be open at once with
@@ -604,6 +620,7 @@ impl World {
             hue_pickers,
             open_urls: self.recent_open_urls.clone(),
             tips: self.tips.clone(),
+            text_entry_dialogs: self.text_entry_dialogs.clone(),
             book: self.book.clone(),
             party: self.party.clone(),
             quest_arrow: self.quest_arrow,

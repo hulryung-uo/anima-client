@@ -579,6 +579,61 @@ pub fn build_ascii_prompt_response(
     finish_variable(w.into_vec())
 }
 
+/// TextEntryDialogResponse `0xAC` (variable) — answer one 0xAB legacy modal.
+/// The callback tuple is echoed verbatim, `accepted` is ClassicUO's `code`
+/// byte, and the entered text is sent for both OK and Cancel. Text is CP1252,
+/// NUL-padded to `(UTF-16 code units + 1)` exactly as ClassicUO's
+/// `WriteASCII(text, text.Length + 1)` does. Variant 2 admits only numeric
+/// characters; a positive server maximum is enforced in UTF-16 units, while
+/// zero means unlimited up to the protocol's u16 packet-size ceiling.
+#[allow(clippy::too_many_arguments)]
+pub fn build_text_entry_dialog_response(
+    serial: u32,
+    parent_id: u8,
+    button_id: u8,
+    text: &str,
+    accepted: bool,
+    variant: u8,
+    max_length: u32,
+) -> Vec<u8> {
+    const MAX_TEXT_UNITS: usize = u16::MAX as usize - 13;
+    let server_limit = if max_length == 0 {
+        MAX_TEXT_UNITS
+    } else {
+        usize::try_from(max_length)
+            .unwrap_or(usize::MAX)
+            .min(MAX_TEXT_UNITS)
+    };
+    let mut encoded = Vec::new();
+    let mut units = 0usize;
+    for ch in text.chars() {
+        if variant == 2 && !ch.is_numeric() {
+            continue;
+        }
+        let ch_units = ch.len_utf16();
+        if units + ch_units > server_limit {
+            break;
+        }
+        units += ch_units;
+        encoded.push(unicode_to_cp1252(ch));
+    }
+
+    let wire_text_len = units + 1;
+    let mut w = PacketWriter::new();
+    w.u8(0xAC)
+        .u16(0)
+        .u32(serial)
+        .u8(parent_id)
+        .u8(button_id)
+        .u8(accepted as u8)
+        .u16(wire_text_len as u16)
+        .bytes(&encoded);
+    for _ in encoded.len()..wire_text_len {
+        w.u8(0);
+    }
+    finish_variable(w.into_vec())
+}
+
 /// Match ClassicUO `StringHelper.UnicodeToCp1252`. The C1 control range is
 /// deliberately replaced with `?`; printable Windows-1252 punctuation maps to
 /// its extension byte, and code points outside the repertoire also become `?`.
@@ -1008,6 +1063,32 @@ mod tests {
         assert_eq!(p.len(), 15 + 128 + 1);
         assert!(p[15..15 + 128].iter().all(|&b| b == b'a'));
         assert_eq!(p.last(), Some(&0));
+    }
+
+    #[test]
+    fn text_entry_dialog_response_matches_callbacks_cancel_cp1252_and_limits() {
+        let accepted = build_text_entry_dialog_response(0x0102_0304, 5, 6, "12a€345", true, 2, 4);
+        assert_eq!(
+            accepted,
+            vec![
+                0xAC, 0x00, 0x11, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x01, 0x00, 0x05, b'1', b'2',
+                b'3', b'4', 0x00,
+            ]
+        );
+
+        let canceled = build_text_entry_dialog_response(7, 8, 9, "Café", false, 0, 0);
+        assert_eq!(canceled[9], 0, "Cancel uses code=false but retains text");
+        assert_eq!(&canceled[10..12], &[0, 5]);
+        assert_eq!(&canceled[12..], &[b'C', b'a', b'f', 0xE9, 0]);
+
+        let astral = build_text_entry_dialog_response(1, 2, 3, "😀", true, 0, 2);
+        assert_eq!(&astral[10..12], &[0, 3], "wire length uses UTF-16 units");
+        assert_eq!(&astral[12..], &[b'?', 0, 0]);
+
+        let huge =
+            build_text_entry_dialog_response(1, 2, 3, &"a".repeat(70_000), true, 0, u32::MAX);
+        assert_eq!(huge.len(), u16::MAX as usize);
+        assert_eq!(u16::from_be_bytes([huge[1], huge[2]]), u16::MAX);
     }
 
     #[test]

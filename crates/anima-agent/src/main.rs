@@ -135,6 +135,12 @@ fn main() {
                     format!("tipnav({seq},{})", if *next { "next" } else { "prev" })
                 }
                 Action::TipClose { seq } => format!("tipclose({seq})"),
+                Action::TextEntryResponse {
+                    seq,
+                    text,
+                    accepted,
+                } => format!("textentry({seq},{accepted},{text:?})"),
+                Action::TextEntryClose { seq } => format!("textentryclose({seq})"),
                 Action::TradeAccept { container, accept } => {
                     format!("tradeaccept(0x{container:08X},{accept})")
                 }

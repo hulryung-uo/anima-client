@@ -249,6 +249,40 @@ impl WasmClient {
         true
     }
 
+    /// Answer one exact 0xAB text-entry dialog. `accepted=false` is the explicit
+    /// Cancel button and still carries the current text.
+    pub fn text_entry_response(&mut self, seq: u64, text: String, accepted: bool) -> bool {
+        let Some(dialog) = self.world.text_entry_dialog(seq).cloned() else {
+            return false;
+        };
+        self.outbox
+            .extend(anima_core::net::outgoing::build_text_entry_dialog_response(
+                dialog.serial,
+                dialog.parent_id,
+                dialog.button_id,
+                &text,
+                accepted,
+                dialog.variant,
+                dialog.max_length,
+            ));
+        self.world.close_text_entry_dialog(seq);
+        true
+    }
+
+    /// Silently right-click-close one exact 0xAB dialog when the server allows
+    /// it. Explicit Cancel uses `text_entry_response(..., false)` instead.
+    pub fn text_entry_close(&mut self, seq: u64) -> bool {
+        if !self
+            .world
+            .text_entry_dialog(seq)
+            .is_some_and(|dialog| dialog.can_close)
+        {
+            return false;
+        }
+        self.world.close_text_entry_dialog(seq);
+        true
+    }
+
     /// Current perception using the shared, versioned Observation JSON schema.
     pub fn observation_json(&mut self) -> String {
         let obs = self.world.observe(&mut self.journal_cursor);
@@ -388,5 +422,51 @@ mod tests {
         assert!(client.tip_close(2));
         assert!(client.take_outbox().is_empty());
         assert!(!client.tip_close(2));
+    }
+
+    #[test]
+    fn text_entry_response_echoes_live_callback_and_close_permission() {
+        let mut client = WasmClient::new("user".into(), "pass".into());
+        client.login = None;
+        client.outbox.clear();
+        client.world.push_text_entry_dialog(
+            0x0102_0304,
+            5,
+            6,
+            "Amount".into(),
+            false,
+            2,
+            3,
+            "Digits".into(),
+        );
+
+        assert!(!client.text_entry_close(1));
+        assert!(client.text_entry_response(1, "1a234".into(), false));
+        assert_eq!(
+            client.take_outbox(),
+            anima_core::net::outgoing::build_text_entry_dialog_response(
+                0x0102_0304,
+                5,
+                6,
+                "1a234",
+                false,
+                2,
+                3,
+            )
+        );
+        assert!(!client.text_entry_response(1, "stale".into(), true));
+
+        client.world.push_text_entry_dialog(
+            7,
+            8,
+            9,
+            "Optional".into(),
+            true,
+            0,
+            0,
+            "Close me".into(),
+        );
+        assert!(client.text_entry_close(2));
+        assert!(client.take_outbox().is_empty());
     }
 }

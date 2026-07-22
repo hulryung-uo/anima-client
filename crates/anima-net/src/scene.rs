@@ -1400,6 +1400,30 @@ fn tips_json(world: &World) -> Value {
     )
 }
 
+/// Open 0xAB modal text-entry dialogs. Arrival order and local `seq` preserve
+/// repeated callback tuples as distinct ClassicUO windows.
+fn text_entry_dialogs_json(world: &World) -> Value {
+    Value::Array(
+        world
+            .text_entry_dialogs
+            .iter()
+            .map(|dialog| {
+                json!({
+                    "seq": dialog.seq,
+                    "serial": dialog.serial,
+                    "parentId": dialog.parent_id,
+                    "buttonId": dialog.button_id,
+                    "text": dialog.text,
+                    "canClose": dialog.can_close,
+                    "variant": dialog.variant,
+                    "maxLength": dialog.max_length,
+                    "description": dialog.description,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Build the `party` object for the scene (0xBF/0x06). `leader` is the party
 /// leader's serial (0 = none), `members` lists each member `{serial, name, hits,
 /// hitsMax}`, and `invite` is the serial of a leader who invited us (0 = none).
@@ -2677,6 +2701,9 @@ pub fn build_scene(
         serde_json::to_string(&hue_pickers_json(&s.world)).unwrap_or_else(|_| "[]".into());
     // Concurrent 0xA6 Tip/Notice windows. Only kind "tip" has prev/next.
     let tips = serde_json::to_string(&tips_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    // Concurrent modal 0xAB text-entry dialogs, keyed in the browser by seq.
+    let text_entry_dialogs =
+        serde_json::to_string(&text_entry_dialogs_json(&s.world)).unwrap_or_else(|_| "[]".into());
     // The open book (0x93/0xD4 + 0x66), or null.
     let book = serde_json::to_string(&book_json(&s.world)).unwrap_or_else(|_| "null".into());
     // Known spellbook contents (0xBF/0x1B), one entry per book we've been told
@@ -2778,7 +2805,7 @@ pub fn build_scene(
          \"statics\":[{statics}],\"mobiles\":{mobiles},\"items\":{items},\"contItems\":{cont_items},\
          \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"tanims\":{tanims},\"damage\":{damage},\"effects\":{effects},\"music\":{music},\
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
-         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
+         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
          \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps},\
@@ -3315,6 +3342,36 @@ mod tests {
                 { "seq": 1, "tip": 0x1234_5678u32, "kind": "tip", "text": "First\nSecond" },
                 { "seq": 2, "tip": 9, "kind": "notice", "text": "Maintenance" },
             ])
+        );
+    }
+
+    #[test]
+    fn text_entry_dialogs_json_preserves_callbacks_and_constraints() {
+        let mut w = World::default();
+        assert_eq!(text_entry_dialogs_json(&w), json!([]));
+        w.push_text_entry_dialog(
+            0x0102_0304,
+            5,
+            6,
+            "Account €".into(),
+            true,
+            2,
+            12,
+            "Digits only".into(),
+        );
+        assert_eq!(
+            text_entry_dialogs_json(&w),
+            json!([{
+                "seq": 1,
+                "serial": 0x0102_0304u32,
+                "parentId": 5,
+                "buttonId": 6,
+                "text": "Account €",
+                "canClose": true,
+                "variant": 2,
+                "maxLength": 12,
+                "description": "Digits only",
+            }])
         );
     }
 

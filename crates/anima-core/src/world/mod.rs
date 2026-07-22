@@ -512,6 +512,25 @@ pub struct TipNotice {
     pub text: String,
 }
 
+/// One server-owned legacy text-entry dialog (0xAB). The three wire callback
+/// fields must be echoed unchanged in the 0xAC response; `seq` is a local
+/// identity so repeated callbacks cannot be answered by a stale browser/brain
+/// action. Variant 2 accepts numbers only. `can_close` controls only a silent
+/// right-click dismissal in ClassicUO; the explicit Cancel button is always
+/// present and sends a negative response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextEntryDialog {
+    pub seq: u64,
+    pub serial: u32,
+    pub parent_id: u8,
+    pub button_id: u8,
+    pub text: String,
+    pub can_close: bool,
+    pub variant: u8,
+    pub max_length: u32,
+    pub description: String,
+}
+
 /// Wire encoding used by a pending server text prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
@@ -954,6 +973,11 @@ pub struct World {
     pub tips: Vec<TipNotice>,
     /// Monotonic counter assigning each tip/notice window a unique `seq`.
     pub tip_seq: u64,
+    /// Open server 0xAB text-entry dialogs in arrival order. ClassicUO adds a
+    /// fresh modal gump for every packet, so repeated callback ids coexist.
+    pub text_entry_dialogs: Vec<TextEntryDialog>,
+    /// Monotonic counter assigning each text-entry dialog a unique local id.
+    pub text_entry_dialog_seq: u64,
     /// Recent 0x24 (DrawContainer/ContainerDisplay(HS)) events: each `(seq,
     /// serial, gump_id)`, newest last, capped like `recent_lift_rejects`. This
     /// is deliberately a **raw, unfiltered data log** — every `gump_id` ServUO
@@ -1053,6 +1077,8 @@ const MAX_RECENT_SWINGS: usize = 16;
 const MAX_RECENT_OPEN_URLS: usize = 16;
 /// Defensive cap for concurrently open server tip/notice windows.
 const MAX_TIPS: usize = 16;
+/// Defensive cap for concurrently open server text-entry dialogs.
+const MAX_TEXT_ENTRY_DIALOGS: usize = 16;
 /// Retained chat history for temporarily-paused consumers. The interactive
 /// renderer keeps a smaller presentation ring of its own.
 const MAX_JOURNAL_ENTRIES: usize = 512;
@@ -1420,6 +1446,52 @@ impl World {
     /// Close exactly one client-side tip/notice gump by its monotonic identity.
     pub fn close_tip(&mut self, seq: u64) {
         self.tips.retain(|tip| tip.seq != seq);
+    }
+
+    /// Open one 0xAB modal text-entry dialog. Repeated wire callback values are
+    /// distinct windows, just as they are in ClassicUO's UI manager.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_text_entry_dialog(
+        &mut self,
+        serial: u32,
+        parent_id: u8,
+        button_id: u8,
+        text: String,
+        can_close: bool,
+        variant: u8,
+        max_length: u32,
+        description: String,
+    ) {
+        self.text_entry_dialog_seq += 1;
+        self.text_entry_dialogs.push(TextEntryDialog {
+            seq: self.text_entry_dialog_seq,
+            serial,
+            parent_id,
+            button_id,
+            text,
+            can_close,
+            variant,
+            max_length,
+            description,
+        });
+        let overflow = self
+            .text_entry_dialogs
+            .len()
+            .saturating_sub(MAX_TEXT_ENTRY_DIALOGS);
+        if overflow > 0 {
+            self.text_entry_dialogs.drain(0..overflow);
+        }
+    }
+
+    pub fn text_entry_dialog(&self, seq: u64) -> Option<&TextEntryDialog> {
+        self.text_entry_dialogs
+            .iter()
+            .find(|dialog| dialog.seq == seq)
+    }
+
+    /// Consume exactly one dialog after a response or silent close.
+    pub fn close_text_entry_dialog(&mut self, seq: u64) {
+        self.text_entry_dialogs.retain(|dialog| dialog.seq != seq);
     }
 
     /// Record a server-initiated paperdoll open/refresh (0x88 DisplayPaperdoll).

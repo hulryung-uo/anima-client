@@ -25,9 +25,9 @@ use anima_core::net::outgoing::{
     build_opl_request, build_party_accept, build_party_decline, build_party_invite,
     build_party_leave, build_party_message, build_pick_up, build_popup_request, build_popup_select,
     build_prompt_response, build_say, build_sell, build_single_click, build_skill_lock,
-    build_status_request, build_target_response, build_tip_request, build_trade_accept,
-    build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability, build_use_skill,
-    build_war_mode,
+    build_status_request, build_target_response, build_text_entry_dialog_response,
+    build_tip_request, build_trade_accept, build_trade_cancel, build_trade_gold, build_unicode_say,
+    build_use_ability, build_use_skill, build_war_mode,
 };
 use anima_core::net::{
     apply_packet, build_client_version, CharacterChoice, CharacterList, FramingError, LoginConfig,
@@ -633,6 +633,20 @@ impl Session {
             Action::PromptCancel => self.respond_prompt("", true)?,
             Action::TipNavigate { seq, next } => self.navigate_tip(*seq, *next)?,
             Action::TipClose { seq } => self.world.close_tip(*seq),
+            Action::TextEntryResponse {
+                seq,
+                text,
+                accepted,
+            } => self.respond_text_entry(*seq, text, *accepted)?,
+            Action::TextEntryClose { seq } => {
+                if self
+                    .world
+                    .text_entry_dialog(*seq)
+                    .is_some_and(|dialog| dialog.can_close)
+                {
+                    self.world.close_text_entry_dialog(*seq);
+                }
+            }
             // No-op if no session has `container` (the brain raced it away — it
             // may have just closed, or belongs to a session with a different
             // opponent that never existed on our side).
@@ -853,6 +867,30 @@ impl Session {
         };
         self.send(&build_tip_request(tip, next))?;
         self.world.close_tip(seq);
+        Ok(())
+    }
+
+    /// Answer one exact 0xAB callback using only its server-owned fields. Both
+    /// OK and explicit Cancel send 0xAC; stale seqs are intentionally inert.
+    fn respond_text_entry(
+        &mut self,
+        seq: u64,
+        text: &str,
+        accepted: bool,
+    ) -> Result<(), DriverError> {
+        let Some(dialog) = self.world.text_entry_dialog(seq).cloned() else {
+            return Ok(());
+        };
+        self.send(&build_text_entry_dialog_response(
+            dialog.serial,
+            dialog.parent_id,
+            dialog.button_id,
+            text,
+            accepted,
+            dialog.variant,
+            dialog.max_length,
+        ))?;
+        self.world.close_text_entry_dialog(seq);
         Ok(())
     }
 

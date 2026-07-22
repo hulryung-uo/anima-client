@@ -87,6 +87,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x9A => ascii_prompt(world, frame)?,
         0xA5 => open_url(world, frame)?,
         0xA6 => tip_window(world, frame)?,
+        0xAB => text_entry_dialog(world, frame)?,
         0xC2 => unicode_prompt(world, frame)?,
         0x6F => secure_trade(world, frame)?,
         0x3B => end_vendor(world, frame)?,
@@ -1698,6 +1699,41 @@ fn tip_window(world: &mut World, frame: &[u8]) -> PResult<()> {
         TipKind::Notice
     };
     world.push_tip(tip, kind, text);
+    Ok(())
+}
+
+/// 0xAB TextEntryDialog — legacy modal string query:
+/// `[id][len:u16][serial:u32][parentId:u8][buttonId:u8][textLen:u16]
+/// [text:cp1252*len][canClose:u8][variant:u8][maxLength:u32][descLen:u16]
+/// [description:cp1252*len]`. Variant 2 is numeric-only. `canClose` controls a
+/// silent right-click dismissal, not the explicit Cancel button (which always
+/// emits 0xAC). Decode atomically so a truncated trailing description cannot
+/// leave a half-valid callback in the world.
+fn text_entry_dialog(world: &mut World, frame: &[u8]) -> PResult<()> {
+    if frame.len() < 19 {
+        return Ok(());
+    }
+    let mut r = PacketReader::new(&frame[3..]);
+    let serial = r.u32()?;
+    let parent_id = r.u8()?;
+    let button_id = r.u8()?;
+    let text_len = r.u16()? as usize;
+    let text = ascii_string(r.bytes(text_len)?);
+    let can_close = r.u8()? != 0;
+    let variant = r.u8()?;
+    let max_length = r.u32()?;
+    let description_len = r.u16()? as usize;
+    let description = ascii_string(r.bytes(description_len)?);
+    world.push_text_entry_dialog(
+        serial,
+        parent_id,
+        button_id,
+        text,
+        can_close,
+        variant,
+        max_length,
+        description,
+    );
     Ok(())
 }
 
@@ -4352,6 +4388,95 @@ mod tests {
         assert_eq!(w.tips.len(), 16);
         assert_eq!(w.tips.first().map(|tip| tip.seq), Some(5));
         assert_eq!(w.tips.last().map(|tip| tip.seq), Some(20));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn text_entry_dialog_packet(
+        serial: u32,
+        parent_id: u8,
+        button_id: u8,
+        text: &[u8],
+        can_close: bool,
+        variant: u8,
+        max_length: u32,
+        description: &[u8],
+    ) -> Vec<u8> {
+        let mut p = PacketWriter::new();
+        p.u8(0xAB)
+            .u16(0)
+            .u32(serial)
+            .u8(parent_id)
+            .u8(button_id)
+            .u16(text.len() as u16)
+            .bytes(text)
+            .u8(can_close as u8)
+            .u8(variant)
+            .u32(max_length)
+            .u16(description.len() as u16)
+            .bytes(description);
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1..3].copy_from_slice(&len.to_be_bytes());
+        frame
+    }
+
+    #[test]
+    fn text_entry_dialog_preserves_callbacks_constraints_and_cp1252() {
+        let mut w = World::new();
+        let packet = text_entry_dialog_packet(
+            0x0102_0304,
+            5,
+            6,
+            b"Account \x80",
+            true,
+            2,
+            12,
+            b"Digits only \x99",
+        );
+        assert!(apply_packet(&mut w, &packet));
+        assert!(apply_packet(&mut w, &packet));
+
+        assert_eq!(w.text_entry_dialogs.len(), 2);
+        let dialog = &w.text_entry_dialogs[0];
+        assert_eq!(dialog.seq, 1);
+        assert_eq!(dialog.serial, 0x0102_0304);
+        assert_eq!((dialog.parent_id, dialog.button_id), (5, 6));
+        assert_eq!(dialog.text, "Account €");
+        assert!(dialog.can_close);
+        assert_eq!(dialog.variant, 2);
+        assert_eq!(dialog.max_length, 12);
+        assert_eq!(dialog.description, "Digits only ™");
+        assert_eq!(w.text_entry_dialogs[1].seq, 2);
+
+        w.close_text_entry_dialog(1);
+        assert!(w.text_entry_dialog(1).is_none());
+        assert_eq!(w.text_entry_dialogs.len(), 1);
+    }
+
+    #[test]
+    fn text_entry_dialog_is_atomic_and_bounded() {
+        let mut w = World::new();
+        let mut truncated =
+            text_entry_dialog_packet(1, 2, 3, b"Title", false, 0, 20, b"Description");
+        truncated.pop();
+        assert!(apply_packet(&mut w, &truncated));
+        assert!(w.text_entry_dialogs.is_empty());
+
+        for serial in 0..20 {
+            assert!(apply_packet(
+                &mut w,
+                &text_entry_dialog_packet(serial, 0, 0, b"T", false, 0, 8, b"D")
+            ));
+        }
+        assert_eq!(w.text_entry_dialogs.len(), 16);
+        assert_eq!(
+            w.text_entry_dialogs.first().map(|dialog| dialog.seq),
+            Some(5)
+        );
+        assert_eq!(
+            w.text_entry_dialogs.last().map(|dialog| dialog.seq),
+            Some(20)
+        );
     }
 
     /// Patch the big-endian length word at `[1..3]` of a variable-framed test packet.

@@ -2346,6 +2346,8 @@ fn content_type(path: &str) -> &'static str {
 /// (answer/cancel a pending 0x9A ASCII / 0xC2 Unicode server text prompt) ·
 /// `tipnav:<seq>:<0|1>` / `tipclose:<seq>` (previous/next or dismiss an exact
 /// 0xA6 Tip/Notice window) ·
+/// `textentry:<seq>:<0|1>:<text>` / `textentryclose:<seq>` (Cancel/OK response
+/// or permitted silent close for an exact 0xAB dialog) ·
 /// `tradeaccept:<mycont>:<0|1>` / `tradecancel:<mycont>` /
 /// `tradegold:<mycont>:<gold>:<platinum>` (answer the secure-trade session
 /// keyed by our own container serial `mycont`, 0x6F — multiple concurrent
@@ -2573,6 +2575,27 @@ fn parse_command(body: &str) -> Option<Action> {
         "tipclose" => Some(Action::TipClose {
             seq: arg.parse().ok()?,
         }),
+        // textentry:<seq>:<0|1>:<text> — explicit Cancel/OK on an exact 0xAB
+        // dialog. splitn preserves colons in the actual text.
+        "textentry" => {
+            let mut p = arg.splitn(3, ':');
+            let seq = p.next()?.parse().ok()?;
+            let accepted = match p.next()? {
+                "0" => false,
+                "1" => true,
+                _ => return None,
+            };
+            let text = p.next().unwrap_or_default().to_string();
+            Some(Action::TextEntryResponse {
+                seq,
+                text,
+                accepted,
+            })
+        }
+        // textentryclose:<seq> — silent close; the driver enforces canClose.
+        "textentryclose" => Some(Action::TextEntryClose {
+            seq: arg.parse().ok()?,
+        }),
         // tradeaccept:<mycont>:<0|1> — toggle our accept checkbox on the secure
         // trade session keyed by our own container serial (0x6F action 2).
         "tradeaccept" => {
@@ -2692,6 +2715,32 @@ mod hue_palette_tests {
         );
         assert!(parse_command("tipnav:bad:1").is_none());
         assert!(parse_command("tipclose:bad").is_none());
+    }
+
+    #[test]
+    fn text_entry_commands_preserve_seq_code_and_colons() {
+        assert_eq!(
+            parse_command("textentry:42:1:part:two"),
+            Some(Action::TextEntryResponse {
+                seq: 42,
+                text: "part:two".into(),
+                accepted: true,
+            })
+        );
+        assert_eq!(
+            parse_command("textentry:42:0:"),
+            Some(Action::TextEntryResponse {
+                seq: 42,
+                text: String::new(),
+                accepted: false,
+            })
+        );
+        assert_eq!(
+            parse_command("textentryclose:42"),
+            Some(Action::TextEntryClose { seq: 42 })
+        );
+        assert!(parse_command("textentry:42:maybe:no").is_none());
+        assert!(parse_command("textentryclose:bad").is_none());
     }
 
     #[test]

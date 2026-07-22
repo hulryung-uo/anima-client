@@ -13,7 +13,7 @@ scene/agent exposure, and user-facing behavior (where applicable) are present.
   `src/ClassicUO.Client/Network/PacketHandlers.cs`
 - anima source: `crates/anima-core/src/net/game.rs` plus login and movement
   state machines
-- Current game decoder: 72 packet IDs after adding `0xA6 TipWindow`;
+- Current game decoder: 73 packet IDs after adding `0xAB TextEntryDialog`;
   `0x21`/`0x22` are handled separately by `Walker`
 
 The comparison is mechanical at the packet-ID level, followed by a semantic
@@ -47,6 +47,10 @@ that are acknowledgements/no-ops are not counted as missing game UI features.
 - `0xA6 TipWindow` / `0xA7 TipRequest`: concurrent pageable tips and close-only
   notices, CP1252/CR-normalized text, versioned brain/native/WASM actions, and
   browser windows with ClassicUO-compatible previous/next/close behavior
+- `0xAB TextEntryDialog` / `0xAC TextEntryDialogResponse`: concurrent modal
+  dialogs with exact callback identity, CP1252 labels/responses, numeric and
+  UTF-16 length constraints, explicit OK/Cancel replies, permission-gated silent
+  close, versioned brain/native/WASM actions, and browser UI
 - Speech, localized messages, OPL/tooltips, prompts, targeting
 - Movement confirmation/denial, pathfinding, doors, facet changes
 - Combat state, damage/effects, animations, death/corpse links
@@ -61,7 +65,6 @@ the feature. Each row is still open unless a later change moves it above.
 
 | Priority | Packet(s) | ClassicUO behavior | Required anima vertical slice |
 |---|---:|---|---|
-| P0 | `0xAB` | Text-entry dialog | Dialog model/UI and response packet |
 | P0 | `0xB8` | Character profile | Read/edit profile model, UI, response packet |
 | P0 | `0xD1` | Server logout | Session termination reason and return-to-login UX |
 | P0 | `0xF6` | Smooth boat movement | Boat/passenger movement state and renderer interpolation |

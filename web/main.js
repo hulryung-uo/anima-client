@@ -181,6 +181,9 @@ let openUrlWin = null;
 // ---- server Tip/Notice windows (0xA6 ScrollMessage) ----
 let lastTipNoticeSeq = 0;
 const tipNoticeWindows = new Map(); // seq -> live DOM window
+// ---- legacy modal text-entry dialogs (0xAB) ----
+const textEntryWindows = new Map(); // seq -> live DOM window
+const suppressedTextEntrySeqs = new Set(); // answered locally; wait for scene removal
 // { serial, title, canLift } for whichever target the LAST server signal named —
 // read by refreshPaperdoll() to show the real title line instead of the plain
 // mobile name, when it matches the currently-displayed doll.
@@ -1536,6 +1539,7 @@ async function poll() {
     refreshLegacyMenus(scene); // legacy icon/question menus (0x7C)
     refreshHuePickers(scene); // server dye color pickers (0x95)
     refreshTipNotices(scene); // pageable tips / close-only notices (0xA6)
+    refreshTextEntryDialogs(scene); // legacy modal text-entry dialogs (0xAB)
     refreshPopup(scene);  // right-click context menu (0xBF/0x14)
     refreshBook(scene);   // open book reader (0x93/0xD4 + 0x66)
     refreshPrompt(scene); // server text-prompt dialog (0x9A ASCII / 0xC2 Unicode)
@@ -6627,6 +6631,122 @@ function refreshTipNotices(s) {
   // bounded core list expired this window: remove it without another command.
   for (const seq of [...tipNoticeWindows.keys()]) {
     if (!active.has(seq)) removeTipNoticeWindow(seq, false);
+  }
+}
+
+// ---- legacy modal text-entry dialogs (0xAB / response 0xAC) ---------------
+function removeTextEntryWindow(seq) {
+  const el = textEntryWindows.get(seq);
+  if (el) (el._modalLayer || el).remove();
+  textEntryWindows.delete(seq);
+}
+
+function respondTextEntry(seq, accepted) {
+  const el = textEntryWindows.get(seq);
+  if (!el) return;
+  const text = el._input ? el._input.value : "";
+  suppressedTextEntrySeqs.add(seq);
+  removeTextEntryWindow(seq);
+  sendInput("textentry:" + seq + ":" + (accepted ? "1" : "0") + ":" + text);
+}
+
+function silentlyCloseTextEntry(seq) {
+  const el = textEntryWindows.get(seq);
+  if (!el || !el._canClose) return;
+  suppressedTextEntrySeqs.add(seq);
+  removeTextEntryWindow(seq);
+  sendInput("textentryclose:" + seq);
+}
+
+function openTextEntryWindow(dialog) {
+  const seq = Number(dialog.seq) || 0;
+  if (!seq || textEntryWindows.has(seq) || suppressedTextEntrySeqs.has(seq)) return;
+
+  const layer = document.createElement("div");
+  layer.className = "text-entry-modal-layer";
+  const el = document.createElement("div");
+  el.className = "gump-win text-entry-win";
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-modal", "true");
+  el.innerHTML = '<div class="gump-title"><span>Text Entry</span><span class="gump-close">✕</span></div>'
+    + '<div class="gump-body text-entry-body">'
+    + '<div class="text-entry-text"></div><div class="text-entry-description"></div>'
+    + '<input type="text" class="text-entry-input" autocomplete="off">'
+    + '<div class="text-entry-actions"><button class="dlg-btn text-entry-ok">OK</button>'
+    + '<button class="dlg-btn text-entry-cancel">Cancel</button></div></div>';
+
+  el.querySelector(".text-entry-text").textContent = String(dialog.text || "");
+  el.querySelector(".text-entry-description").textContent = String(dialog.description || "");
+  const input = el.querySelector(".text-entry-input");
+  const maxLength = Math.min(65522, Math.max(0, Number(dialog.maxLength) || 0));
+  if (maxLength > 0) input.maxLength = maxLength;
+  if ((Number(dialog.variant) || 0) === 2) {
+    input.inputMode = "numeric";
+    input.addEventListener("input", () => {
+      const filtered = input.value.replace(/[^\p{N}]/gu, "");
+      if (filtered !== input.value) input.value = filtered;
+    });
+  }
+
+  el._input = input;
+  el._modalLayer = layer;
+  el._canClose = dialog.canClose === true;
+  const close = el.querySelector(".gump-close");
+  if (!el._canClose) close.hidden = true;
+  else close.addEventListener("click", () => silentlyCloseTextEntry(seq));
+  el.querySelector(".text-entry-ok").addEventListener("click", () => respondTextEntry(seq, true));
+  el.querySelector(".text-entry-cancel").addEventListener("click", () => respondTextEntry(seq, false));
+  el.addEventListener("contextmenu", (e) => {
+    if (!el._canClose) return;
+    e.preventDefault();
+    silentlyCloseTextEntry(seq);
+  });
+  el.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.code === "Enter" || e.code === "NumpadEnter") {
+      e.preventDefault();
+      respondTextEntry(seq, true);
+    } else if (e.code === "Escape") {
+      // ClassicUO does not make this gump Esc-closeable. Keep Escape local so
+      // it cannot accidentally cancel a game target while the modal has focus.
+      e.preventDefault();
+    }
+  });
+
+  // ClassicUO fixes these gumps at (143,172) and marks them non-movable.
+  const cascade = (textEntryWindows.size % 6) * 14;
+  el.style.left = (143 + cascade) + "px";
+  el.style.top = (172 + cascade) + "px";
+  // IsModal=true in ClassicUO: intercept all pointer input before it can reach
+  // the world canvas or another gump. Button handlers still run before this
+  // bubbling boundary stops the event.
+  for (const eventName of ["pointerdown", "mousedown", "click", "contextmenu"]) {
+    layer.addEventListener(eventName, (e) => {
+      e.stopPropagation();
+      if (e.target === layer || eventName === "contextmenu") e.preventDefault();
+    });
+  }
+  layer.appendChild(el);
+  document.body.appendChild(layer);
+  textEntryWindows.set(seq, el);
+  input.focus();
+}
+
+function refreshTextEntryDialogs(s) {
+  const active = new Set();
+  for (const dialog of (s && s.textEntryDialogs) || []) {
+    const seq = Number(dialog.seq) || 0;
+    if (!seq) continue;
+    active.add(seq);
+    if (!suppressedTextEntrySeqs.has(seq) && !textEntryWindows.has(seq)) {
+      openTextEntryWindow(dialog);
+    }
+  }
+  for (const seq of [...textEntryWindows.keys()]) {
+    if (!active.has(seq)) removeTextEntryWindow(seq);
+  }
+  for (const seq of [...suppressedTextEntrySeqs]) {
+    if (!active.has(seq)) suppressedTextEntrySeqs.delete(seq);
   }
 }
 
