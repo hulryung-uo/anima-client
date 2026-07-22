@@ -652,6 +652,43 @@ pub struct LogoutAck {
     pub allowed: bool,
 }
 
+/// An open bulletin board window (0x71 sub `0`), keyed by the board item's own
+/// serial. `summaries` accumulates as sub `1` messages arrive for this same
+/// board; opening a fresh board (another sub `0` for any serial) replaces the
+/// whole thing and starts `summaries` over, mirroring ClassicUO's
+/// `BulletinBoardGump` being disposed and recreated on every open.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BulletinBoard {
+    pub serial: u32,
+    pub name: String,
+    pub summaries: Vec<BulletinSummary>,
+}
+
+/// One message summary line on an open [`BulletinBoard`] (0x71 sub `1`).
+/// `parent` is nonzero for a reply, naming the message it replies to.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BulletinSummary {
+    pub serial: u32,
+    pub parent: u32,
+    pub poster: String,
+    pub subject: String,
+    pub datetime: String,
+}
+
+/// A full bulletin board message body (0x71 sub `2`), fetched on request after
+/// picking a [`BulletinSummary`]. `poster`/`datetime` are CP1252 ("ASCII") like
+/// ClassicUO decodes them; `subject`/`body` are UTF-8 — this ASCII/UTF-8 mix is
+/// a genuine ClassicUO quirk in the wire handler, not a bug to "fix" here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BulletinMessage {
+    pub board: u32,
+    pub serial: u32,
+    pub poster: String,
+    pub subject: String,
+    pub datetime: String,
+    pub body: String,
+}
+
 /// Wire encoding used by a pending server text prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
@@ -1206,6 +1243,11 @@ pub struct World {
     /// [`crate::net::outgoing::build_house_design_request`] for each. Deduped
     /// on push by the 0xBF/0x1D handler in [`crate::net::game`].
     pub pending_house_design_requests: Vec<u32>,
+    /// The currently open bulletin board window (0x71 sub `0`/`1`). `None`
+    /// until a board is opened; replaced wholesale by each fresh sub `0`.
+    pub bulletin_board: Option<BulletinBoard>,
+    /// The most recently fetched full bulletin message body (0x71 sub `2`).
+    pub bulletin_message: Option<BulletinMessage>,
 }
 
 /// Notoriety values treated as hostile for auto-attack selection:

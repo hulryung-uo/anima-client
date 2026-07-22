@@ -10,9 +10,10 @@
 
 use super::packet::{PacketError, PacketReader, Result as PResult};
 use crate::world::{
-    BoatMovedEntity, BoatMovement, DragAnimation, Effect, GameTime, Gump, HouseDesign, HousePlane,
-    HuePicker, JournalEntry, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, PopupEntry, PopupMenu,
-    PromptKind, PromptState, Skill, TargetCursor, TipKind, TradeState, Waypoint, World,
+    BoatMovedEntity, BoatMovement, BulletinBoard, BulletinMessage, BulletinSummary, DragAnimation,
+    Effect, GameTime, Gump, HouseDesign, HousePlane, HuePicker, JournalEntry, LegacyMenu,
+    LegacyMenuEntry, LegacyMenuKind, PopupEntry, PopupMenu, PromptKind, PromptState, Skill,
+    TargetCursor, TipKind, TradeState, Waypoint, World,
 };
 
 /// Decode one framed game packet (id byte included) into `world`.
@@ -61,6 +62,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x6E => character_anim(world, frame)?,
         0xE2 => typed_anim(world, frame)?,
         0x6D => play_music(world, frame)?,
+        0x71 => bulletin_board_data(world, frame)?,
         0x72 => war_mode(world, frame)?,
         0x4F => overall_light(world, frame)?,
         0x4E => personal_light(world, frame)?,
@@ -920,6 +922,108 @@ fn play_music(world: &mut World, frame: &[u8]) -> PResult<()> {
         Some(music_id)
     };
     Ok(())
+}
+
+/// 0x71 BulletinBoardData — variable-length, multiplexed by a leading
+/// sub-command byte. Ported from ClassicUO `PacketHandlers.BulletinBoardData`:
+/// - sub `0` (open board): `[serial:u32][name:utf8*22]`. Sets a fresh
+///   [`BulletinBoard`], discarding any previously accumulated summaries —
+///   mirrors ClassicUO disposing and recreating its `BulletinBoardGump`.
+/// - sub `1` (message summary): `[boardSerial:u32][serial:u32][parent:u32]
+///   [posterLen:u8][poster:utf8*posterLen][subjectLen:u8][subject:utf8*subjectLen]
+///   [datetimeLen:u8][datetime:utf8*datetimeLen]`. Only appended when a board
+///   with a matching serial is currently open, mirroring ClassicUO only
+///   adding to a `BulletinBoardGump` it can actually find.
+/// - sub `2` (full message): `[boardSerial:u32][serial:u32][posterLen:u8]
+///   [poster:ascii*posterLen][subjectLen:u8][subject:utf8*subjectLen]
+///   [datetimeLen:u8][datetime:ascii*datetimeLen][unused:4][unk:u8]
+///   [unk*4 bytes][lines:u8]{[lineLen:u8][line:utf8*lineLen if lineLen>0]}`.
+///   Poster/datetime decode as CP1252 ("ASCII") while subject/body decode as
+///   UTF-8 — a genuine ClassicUO wire quirk (mixed encodings in one packet),
+///   not a bug to "fix" here. Non-empty lines are joined with `\n` and the
+///   result is left-trimmed, matching ClassicUO's `msg.TrimStart()`.
+///
+/// Any other sub value is ignored.
+fn bulletin_board_data(world: &mut World, frame: &[u8]) -> PResult<()> {
+    if frame.len() < 3 {
+        return Ok(());
+    }
+    let mut r = PacketReader::new(&frame[3..]);
+    match r.u8()? {
+        0 => {
+            let serial = r.u32()?;
+            let name = utf8_string(r.bytes(22)?);
+            world.bulletin_board = Some(BulletinBoard {
+                serial,
+                name,
+                summaries: Vec::new(),
+            });
+        }
+        1 => {
+            let board_serial = r.u32()?;
+            let serial = r.u32()?;
+            let parent = r.u32()?;
+            let poster_len = r.u8()? as usize;
+            let poster = utf8_string(r.bytes(poster_len)?);
+            let subject_len = r.u8()? as usize;
+            let subject = utf8_string(r.bytes(subject_len)?);
+            let datetime_len = r.u8()? as usize;
+            let datetime = utf8_string(r.bytes(datetime_len)?);
+            if let Some(board) = world
+                .bulletin_board
+                .as_mut()
+                .filter(|b| b.serial == board_serial)
+            {
+                board.summaries.push(BulletinSummary {
+                    serial,
+                    parent,
+                    poster,
+                    subject,
+                    datetime,
+                });
+            }
+        }
+        2 => {
+            let board = r.u32()?;
+            let serial = r.u32()?;
+            let poster_len = r.u8()? as usize;
+            let poster = ascii_string(r.bytes(poster_len)?);
+            let subject_len = r.u8()? as usize;
+            let subject = utf8_string(r.bytes(subject_len)?);
+            let datetime_len = r.u8()? as usize;
+            let datetime = ascii_string(r.bytes(datetime_len)?);
+            r.skip(4)?;
+            let unk = r.u8()?;
+            r.skip(unk as usize * 4)?;
+            let lines = r.u8()?;
+            let mut body_lines = Vec::with_capacity(lines as usize);
+            for _ in 0..lines {
+                let line_len = r.u8()? as usize;
+                if line_len > 0 {
+                    body_lines.push(utf8_string(r.bytes(line_len)?));
+                }
+            }
+            world.bulletin_message = Some(BulletinMessage {
+                board,
+                serial,
+                poster,
+                subject,
+                datetime,
+                body: body_lines.join("\n").trim_start().to_string(),
+            });
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Decode a length-prefixed UTF-8 field, trimming at the first NUL (ClassicUO
+/// `StackDataReader.ReadUTF8` decodes the field then truncates at the first
+/// embedded NUL it finds, even though the cursor still advances by the full
+/// field length).
+fn utf8_string(bytes: &[u8]) -> String {
+    let end = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
 /// 0x4F OverallLightLevel — `[id][level:u8]` (2 bytes). 0 = brightest day,
@@ -6419,5 +6523,121 @@ mod tests {
             last.graphic, 0x0EF2,
             "gem stack remaps to its flight graphic"
         );
+    }
+
+    /// Push a length-prefixed (`u8` length) string field, as used by 0x71 subs 1/2.
+    fn push_str8(p: &mut PacketWriter, s: &str) {
+        let bytes = s.as_bytes();
+        p.u8(bytes.len() as u8).bytes(bytes);
+    }
+
+    #[test]
+    fn bulletin_board_open_sets_name_and_serial() {
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0x71).u16(0); // id + length placeholder
+        p.u8(0).u32(0xB0A2D); // sub 0, board serial
+        p.fixed_ascii("Trade Board", 22); // 22-byte name field, NUL-padded
+        let frame = patch_len(p.into_vec());
+
+        assert!(apply_packet(&mut w, &frame));
+        let board = w.bulletin_board.as_ref().expect("board opened");
+        assert_eq!(board.serial, 0xB0A2D);
+        assert_eq!(board.name, "Trade Board");
+        assert!(board.summaries.is_empty());
+    }
+
+    #[test]
+    fn bulletin_board_summary_appends_only_for_the_open_board() {
+        let mut w = World::new();
+
+        // sub 1 with no board open at all: no-op, no panic.
+        let mut none_open = PacketWriter::new();
+        none_open.u8(0x71).u16(0);
+        none_open.u8(1).u32(0xB0A2D).u32(1).u32(0);
+        push_str8(&mut none_open, "Alice");
+        push_str8(&mut none_open, "Selling swords");
+        push_str8(&mut none_open, "Jul 1 12:00");
+        assert!(apply_packet(&mut w, &patch_len(none_open.into_vec())));
+        assert!(w.bulletin_board.is_none());
+
+        // Open board 0xB0A2D.
+        let mut open = PacketWriter::new();
+        open.u8(0x71).u16(0);
+        open.u8(0).u32(0xB0A2D);
+        open.fixed_ascii("Trade Board", 22);
+        assert!(apply_packet(&mut w, &patch_len(open.into_vec())));
+
+        // sub 1 for a DIFFERENT board serial: ignored (mirrors ClassicUO only
+        // updating a `BulletinBoardGump` it can find open for that serial).
+        let mut mismatched = PacketWriter::new();
+        mismatched.u8(0x71).u16(0);
+        mismatched.u8(1).u32(0xFFFFFF).u32(2).u32(0);
+        push_str8(&mut mismatched, "Bob");
+        push_str8(&mut mismatched, "Buying shields");
+        push_str8(&mut mismatched, "Jul 2 09:00");
+        assert!(apply_packet(&mut w, &patch_len(mismatched.into_vec())));
+        assert!(w.bulletin_board.as_ref().unwrap().summaries.is_empty());
+
+        // sub 1 for the matching board serial: appended.
+        let mut matched = PacketWriter::new();
+        matched.u8(0x71).u16(0);
+        matched.u8(1).u32(0xB0A2D).u32(3).u32(0);
+        push_str8(&mut matched, "Alice");
+        push_str8(&mut matched, "Selling swords");
+        push_str8(&mut matched, "Jul 1 12:00");
+        assert!(apply_packet(&mut w, &patch_len(matched.into_vec())));
+
+        let board = w.bulletin_board.as_ref().unwrap();
+        assert_eq!(board.summaries.len(), 1);
+        let summary = &board.summaries[0];
+        assert_eq!(summary.serial, 3);
+        assert_eq!(summary.parent, 0);
+        assert_eq!(summary.poster, "Alice");
+        assert_eq!(summary.subject, "Selling swords");
+        assert_eq!(summary.datetime, "Jul 1 12:00");
+    }
+
+    #[test]
+    fn bulletin_board_full_message_reconstructs_multiline_body() {
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0x71).u16(0); // id + length placeholder
+        p.u8(2).u32(0xB0A2D).u32(3); // sub 2, board serial, message serial
+        push_str8(&mut p, "Alice"); // poster (ASCII)
+        push_str8(&mut p, "Selling swords"); // subject (UTF-8)
+        push_str8(&mut p, "Jul 1 12:00"); // datetime (ASCII)
+        p.zeros(4); // unused
+        p.u8(1); // unk count
+        p.zeros(4); // unk*4 skipped bytes
+        p.u8(3); // line count
+        push_str8(&mut p, " Hello"); // leading space, trimmed only at body start
+        push_str8(&mut p, ""); // empty line: dropped, not joined
+        push_str8(&mut p, "World");
+        let frame = patch_len(p.into_vec());
+
+        assert!(apply_packet(&mut w, &frame));
+        let msg = w.bulletin_message.as_ref().expect("message stored");
+        assert_eq!(msg.board, 0xB0A2D);
+        assert_eq!(msg.serial, 3);
+        assert_eq!(msg.poster, "Alice");
+        assert_eq!(msg.subject, "Selling swords");
+        assert_eq!(msg.datetime, "Jul 1 12:00");
+        assert_eq!(msg.body, "Hello\nWorld");
+    }
+
+    #[test]
+    fn bulletin_board_truncated_frame_is_swallowed_without_partial_state() {
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0x71).u16(0);
+        p.u8(2).u32(0xB0A2D).u32(3);
+        push_str8(&mut p, "Alice");
+        // Cut off mid-subject: length byte says more follows than actually does.
+        p.u8(200).bytes(b"short");
+        let frame = patch_len(p.into_vec());
+
+        assert!(apply_packet(&mut w, &frame), "swallowed, not fatal");
+        assert!(w.bulletin_message.is_none());
     }
 }
