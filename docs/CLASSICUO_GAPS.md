@@ -132,6 +132,22 @@ UseAbility path to also track the armed slot), `0xBF/0x10 DisplayEquipInfo`
 patches (asset concern), and the `0x11 flag>=6` combat-bonus tail (shard-
 dependent; framing harmlessly drops it).
 
+## Outgoing (client → server) parity
+
+A diff of ClassicUO `OutgoingPackets.cs` vs anima `net/outgoing.rs` (~42
+builders): the client already sends everything the agent/renderer drives
+(move, attack, say, target, gump/context/prompt responses, buy/sell, trade,
+party, skills, OPL request, logout, house design, …). Two always-active
+session packets were missing and are now sent: `0x73 Ping` (keepalive) and
+`0xC8 ClientViewRange` (world-entry handshake). The rest of ClassicUO's
+outgoing set is login-phase (handled by `LoginMachine`), EC-only (`0xEC`), or
+**feature-completing builders that only matter once a UI/agent action drives
+them** — `0x98 NameRequest`, `0x75 RenameRequest`, the `0x71` bulletin-board
+post/read requests, the `0xB3/0xB5` chat commands, `0x93/0xD4` book-header
+edit, `0x2C` death-screen response, `0xF0` party/guild query. These pair with
+already-decoded incoming state; add each builder alongside the input/agent
+action that triggers it.
+
 ## Beyond packet parity
 
 Packet registration parity alone does not equal ClassicUO feature parity. Major
