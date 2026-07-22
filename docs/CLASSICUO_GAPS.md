@@ -13,12 +13,15 @@ scene/agent exposure, and user-facing behavior (where applicable) are present.
   `src/ClassicUO.Client/Network/PacketHandlers.cs`
 - anima source: `crates/anima-core/src/net/game.rs` plus login and movement
   state machines
-- Current game decoder: 89 packet IDs after adding the 13 previously-missing
-  P1 gameplay handlers below (0x15/0x16/0x23/0x5B/0x71/0x97/0x98/0xB2/0xC4/
-  0xC8/0xD2/0xD3/0xDE); `0x21`/`0x22` are handled separately by `Walker`.
-  The new handlers were validated live (a `play` session logged into ServUO,
-  entered the world, and rendered the real packet stream with no panic) and
-  passed a multi-agent adversarial audit against the ClassicUO/Python sources.
+- Current game decoder: ~90 packet IDs. Two waves closed the ClassicUO gap:
+  (1) the 13 previously-missing P1 gameplay handlers below (0x15/0x16/0x23/
+  0x5B/0x71/0x97/0x98/0xB2/0xC4/0xC8/0xD2/0xD3/0xDE); (2) 0xF7 PacketList plus
+  the *sub-command / field* gaps inside already-dispatched multiplexed handlers
+  (mobile war-mode/paralysis flags, 0xBF 0x22/0x19/0x26, and the full 0x11
+  CharacterStatus version tail). `0x21`/`0x22` movement stay in `Walker`. Every
+  change was validated live (a `play` session logged into ServUO, entered the
+  world, and processed the real packet stream with no panic) and passed
+  multi-agent adversarial audits against the ClassicUO/ServUO/Python sources.
 
 The comparison is mechanical at the packet-ID level, followed by a semantic
 review of the corresponding ClassicUO handler. Login-only packets and handlers
@@ -91,6 +94,18 @@ that are acknowledgements/no-ops are not counted as missing game UI features.
   position substitution
 - `0x71 BulletinBoardData`: board + summaries + full-message state model
 - `0xB2 ChatMessage`: chat channel/status state + capped message log
+- `0xF7 PacketList`: batch container — dispatches each 0xF3 world-item
+  sub-packet (defensive parity; framing would otherwise drop them)
+- Mobile status-flags byte (0x20/0x77/0x78/0xD2/0xD3): now also decodes
+  `war_mode` (0x40) and `paralyzed` (0x01), not just Hidden — the only wire
+  source for another mobile's war-mode/paralysis
+- `0xBF/0x22 New Damage` (AOS twin of 0x0B) → the damage log; `0xBF/0x19`
+  ExtendedStats (v0 bonded-pet death → `Mobile::is_dead`; v2 stat-training
+  locks → `PlayerStats::{str,dex,int}_lock`); `0xBF/0x26 SpeedMode` →
+  `PlayerStats::speed_mode` (server-forced walk)
+- `0x11 CharacterStatus` version-gated tail: weight_max (+ non-ML strength
+  fallback), race, stats_cap, followers, four resistances, luck, damage
+  range, tithing — the full character sheet (surfaced through `PlayerView`)
 
 ## Missing gameplay handlers
 
@@ -101,13 +116,21 @@ live + audited. No P1 gameplay packet handlers remain open.
 
 ## Protocol/session items to audit separately
 
-These ClassicUO registrations are login negotiation, shard extensions,
-acknowledgements, or currently intentional no-ops rather than standalone game
-features: `0x32`, `0x53`, `0x55`, `0x73`, `0x82`, `0x85`, `0x86`, `0x8C`,
-`0xA8`, `0xA9`, `0xB7`, `0xB9`, `0xBB`, `0xBD`, `0xBE`, `0xC6`, `0xCA`,
-`0xCB`, `0xD0`, `0xD7`, `0xDB`, `0xE3`, `0xF0`, `0xF1`, `0xF7`, `0xFD`.
-Several are already consumed by `LoginMachine`; the rest need a per-shard value
-assessment before being promoted into the gameplay table.
+These ClassicUO registrations were assessed (ClassicUO-vs-anima handler diff)
+and left unimplemented on purpose — they are login negotiation (handled by
+`LoginMachine`/session: `0x53`, `0x55`, `0xF1`, `0xFD`, `0xDB`, `0x32`),
+Enhanced-Client-only (`0xE3`), or ClassicUO's own empty no-ops whose return
+value anima's caller already ignores (`0xC6`, `0xCA`, `0xCB`, `0xD0`, `0xD7`,
+`0x73` ping, `0xB7` help, `0xBB` messenger). Recognizing them as parsed
+no-ops has no functional effect (the framing table already consumes each
+frame). `0xF7` was the one carrying real payload and is now handled (above).
+
+Lower-priority open items (evidence-based, deferred): `0xF0 KrriosClientSpecial`
+(assist-tool party radar), `0xBF/0x21 ClearWeaponAbility` (needs the outgoing
+UseAbility path to also track the armed slot), `0xBF/0x10 DisplayEquipInfo`
+(pre-OPL, superseded by the implemented 0xD6/0xDC OPL), `0xBF/0x18` map-file
+patches (asset concern), and the `0x11 flag>=6` combat-bonus tail (shard-
+dependent; framing harmlessly drops it).
 
 ## Beyond packet parity
 
