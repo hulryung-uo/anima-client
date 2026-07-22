@@ -544,6 +544,75 @@ pub fn build_prompt_response(serial: u32, prompt_id: u32, text: &str, cancel: bo
     data
 }
 
+/// ASCIIPromptResponse `0x9A` (variable) — answer (or cancel) a pending legacy
+/// 0x9A server prompt. The two opaque ids and `type` have the same meaning as
+/// the Unicode response, but the trailing string is ClassicUO's CP1252 encoding
+/// plus a NUL terminator: `[0x9A][len:u16][serial:u32][promptId:u32][type:u32]
+/// [text:cp1252][0]`. ServUO rejects responses longer than 128 decoded chars,
+/// so the payload is clamped before encoding. A cancel always carries an empty
+/// string, matching ClassicUO's `CancelServerPrompt` path.
+pub fn build_ascii_prompt_response(
+    serial: u32,
+    prompt_id: u32,
+    text: &str,
+    cancel: bool,
+) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x9A).u16(0);
+    w.u32(serial).u32(prompt_id);
+    w.u32(if cancel { 0 } else { 1 });
+    if !cancel {
+        for ch in text.trim().chars().take(128) {
+            w.u8(unicode_to_cp1252(ch));
+        }
+    }
+    w.u8(0);
+    finish_variable(w.into_vec())
+}
+
+/// Match ClassicUO `StringHelper.UnicodeToCp1252`. The C1 control range is
+/// deliberately replaced with `?`; printable Windows-1252 punctuation maps to
+/// its extension byte, and code points outside the repertoire also become `?`.
+fn unicode_to_cp1252(ch: char) -> u8 {
+    let code = ch as u32;
+    if (0x80..=0x9F).contains(&code) {
+        return b'?';
+    }
+    if code <= 0xFF {
+        return code as u8;
+    }
+    match code {
+        0x20AC => 128, // €
+        0x201A => 130, // ‚
+        0x0192 => 131, // ƒ
+        0x201E => 132, // „
+        0x2026 => 133, // …
+        0x2020 => 134, // †
+        0x2021 => 135, // ‡
+        0x02C6 => 136, // ˆ
+        0x2030 => 137, // ‰
+        0x0160 => 138, // Š
+        0x2039 => 139, // ‹
+        0x0152 => 140, // Œ
+        0x017D => 142, // Ž
+        0x2018 => 145, // ‘
+        0x2019 => 146, // ’
+        0x201C => 147, // “
+        0x201D => 148, // ”
+        0x2022 => 149, // •
+        0x2013 => 150, // –
+        0x2014 => 151, // —
+        0x02DC => 152, // ˜
+        0x2122 => 153, // ™
+        0x0161 => 154, // š
+        0x203A => 155, // ›
+        0x0153 => 156, // œ
+        0x017E => 158, // ž
+        0x0178 => 159, // Ÿ
+        _ => b'?',
+    }
+}
+
 /// SecureTrade `0x6F` (variable), action `1` Cancel — cancel the open trade
 /// window; items on both sides return to their owners. `my_container` is
 /// always the CALLER's own trade-container serial (ClassicUO `TradingGump`
@@ -899,6 +968,31 @@ mod tests {
         let decoded = String::from_utf16(&units).expect("must not split a surrogate pair");
         assert_eq!(decoded.chars().count(), 64);
         assert!(decoded.chars().all(|c| c == '\u{1F600}'));
+    }
+
+    #[test]
+    fn ascii_prompt_response_layout_cancel_and_cp1252() {
+        let p = build_ascii_prompt_response(0xDEAD_BEEF, 0x2A, "  Café € 한글  ", false);
+        assert_eq!(p[0], 0x9A);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(&p[3..7], &[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(u32::from_be_bytes([p[7], p[8], p[9], p[10]]), 0x2A);
+        assert_eq!(u32::from_be_bytes([p[11], p[12], p[13], p[14]]), 1);
+        // ClassicUO CP1252: é is direct 0xE9, € is extension 0x80, Korean is
+        // outside the repertoire and becomes one '?' byte per code point.
+        assert_eq!(&p[15..], b"Caf\xE9 \x80 ??\0");
+
+        let c = build_ascii_prompt_response(1, 2, "ignored", true);
+        assert_eq!(c, vec![0x9A, 0, 16, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn ascii_prompt_response_clamps_to_128_encoded_characters() {
+        let text = format!("{}tail", "a".repeat(128));
+        let p = build_ascii_prompt_response(1, 2, &text, false);
+        assert_eq!(p.len(), 15 + 128 + 1);
+        assert!(p[15..15 + 128].iter().all(|&b| b == b'a'));
+        assert_eq!(p.last(), Some(&0));
     }
 
     #[test]

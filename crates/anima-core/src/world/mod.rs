@@ -471,13 +471,31 @@ pub struct Paperdoll {
     pub can_lift: bool,
 }
 
-/// An outstanding server text prompt (from a 0xC2 UnicodePrompt request) — the
-/// mechanism behind ~38 ServUO flows (pet rename, house sign, guild abbreviation,
-/// …). The actual question text is *not* carried on this packet (ServUO sends it
-/// separately as a cliloc/system message just before opening the prompt — it
-/// already lands in [`World::journal`]); this only carries the two ids the
-/// response must echo. Cleared when we answer (see
-/// [`crate::agent::Action::PromptResponse`]/[`crate::agent::Action::PromptCancel`]).
+/// Wire encoding used by a pending server text prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptKind {
+    /// Legacy 0x9A prompt; the response text is CP1252 and NUL-terminated.
+    Ascii,
+    /// Modern 0xC2 prompt; the response text is UTF-16 LE.
+    Unicode,
+}
+
+impl PromptKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ascii => "ascii",
+            Self::Unicode => "unicode",
+        }
+    }
+}
+
+/// An outstanding server text prompt (0x9A ASCII or 0xC2 Unicode) — the
+/// mechanism behind pet rename, house sign, guild abbreviation, and similar
+/// flows. The actual question text is *not* carried on this packet (servers
+/// normally send it separately as a journal/system message just before opening
+/// the prompt); this only carries the kind and two ids the response must echo.
+/// Cleared when we answer (see [`crate::agent::Action::PromptResponse`]/
+/// [`crate::agent::Action::PromptCancel`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptState {
     /// The prompt's sender serial (usually our own) — echoed back verbatim.
@@ -485,6 +503,8 @@ pub struct PromptState {
     /// Opaque id identifying which `Prompt` subclass the server is waiting on
     /// (ServUO `Prompt.TypeId`); echoed back verbatim so it can resume the right one.
     pub prompt_id: u32,
+    /// Selects the matching response packet and text encoding.
+    pub kind: PromptKind,
 }
 
 /// The player's party (0xBF/0x06). `members` are the current member serials in
@@ -874,7 +894,7 @@ pub struct World {
     pub recent_drag_completions: Vec<DragCompletion>,
     /// Monotonic counter assigning each drag-completion event a unique `seq`.
     pub drag_completion_seq: u64,
-    /// An outstanding server text prompt (0xC2 UnicodePrompt), if one is pending.
+    /// An outstanding 0x9A ASCII or 0xC2 Unicode server text prompt, if pending.
     /// See [`PromptState`].
     pub prompt: Option<PromptState>,
     /// The latest server-initiated paperdoll open/refresh (0x88), if any has

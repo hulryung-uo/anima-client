@@ -1526,7 +1526,7 @@ async function poll() {
     refreshHuePickers(scene); // server dye color pickers (0x95)
     refreshPopup(scene);  // right-click context menu (0xBF/0x14)
     refreshBook(scene);   // open book reader (0x93/0xD4 + 0x66)
-    refreshPrompt(scene); // server text-prompt dialog (0xC2 UnicodePrompt)
+    refreshPrompt(scene); // server text-prompt dialog (0x9A ASCII / 0xC2 Unicode)
     refreshTrade(scene);  // secure trade window(s) (0x6F), one per session, auto-open/close
     updateTargetUI(); // reflect the server's target-cursor state (crosshair + banner)
     updateDeathUI(scene); // grayscale + "You are dead" banner while the player is a ghost
@@ -6462,21 +6462,21 @@ function openSplitDialog(serial, g, amount, clientX, clientY) {
   makeDraggable(el, el.querySelector(".gump-title"));
 }
 
-// ---- server text-prompt dialog (ClassicUO's Unicode "enter text" prompt) --
-// scene.prompt = { active, serial, promptId } (0xC2 UnicodePrompt). The
+// ---- server text-prompt dialog (ClassicUO ASCII/Unicode "enter text") -----
+// scene.prompt = { active, serial, promptId, kind } (0x9A/0xC2). The
 // question text itself is NOT carried on that packet — ServUO sends it
 // separately as a journal/system line just before opening the prompt — so
 // this is only the response box: pet rename, house sign, guild abbreviation,
 // … (~38 flows).
 let promptWin = null;        // the live dialog element (null = hidden)
-let promptDialogKey = null;  // (serial,promptId) key `promptWin` was built for, or null
+let promptDialogKey = null;  // (kind,serial,promptId) identity this dialog was built for
 // Key we just answered/canceled locally: the server often takes a beat to
 // clear/replace its prompt, so a re-poll can still report the SAME key we just
 // submitted for — suppress reopening it until the key actually changes (either
 // to a different prompt, chained straight out of ServUO's OnResponse/OnCancel,
 // or to `null` once the server catches up and clears it).
 let promptSuppressKey = null;
-function keyOfPrompt(p) { return p ? p.serial + ":" + p.promptId : null; }
+function keyOfPrompt(p) { return p ? (p.kind || "unicode") + ":" + p.serial + ":" + p.promptId : null; }
 function closePromptDialog() {
   if (promptWin) { promptWin.remove(); promptWin = null; }
   promptDialogKey = null;
@@ -6494,12 +6494,13 @@ function cancelPromptDialog() {
   closePromptDialog();
   sendInput("promptcancel");
 }
-function openPromptDialog(key) {
+function openPromptDialog(key, kind) {
   closePromptDialog();
   promptDialogKey = key;
   const el = document.createElement("div");
   el.className = "gump-win prompt-win";
-  el.innerHTML = '<div class="gump-title"><span>Enter response</span><span class="gump-close">✕</span></div>'
+  const title = kind === "ascii" ? "Enter ASCII response" : "Enter response";
+  el.innerHTML = '<div class="gump-title"><span>' + title + '</span><span class="gump-close">✕</span></div>'
     + '<div class="gump-body prompt-body">'
     + '<input type="text" class="prompt-input" maxlength="128">'
     + '<div class="prompt-actions"><button class="dlg-btn prompt-ok">OK</button>'
@@ -6523,7 +6524,7 @@ function openPromptDialog(key) {
   input.focus();
 }
 // Open/rebuild the dialog whenever the pending prompt's IDENTITY (serial +
-// promptId) differs from the one the current dialog was built for — NOT on
+// kind + promptId) differs from the one the current dialog was built for — NOT on
 // the active flag's 0→1 edge. ServUO routinely chains prompts (the next
 // `Prompt` is set right inside `OnResponse`/OnCancel, e.g.
 // GuildCharterPrompt.cs, AdminGump.cs), so the server can go straight from
@@ -6541,7 +6542,7 @@ function refreshPrompt(s) {
     return;
   }
   if (key === promptSuppressKey) return; // we just answered/canceled this one — wait for the server to move on
-  if (key !== promptDialogKey) openPromptDialog(key); // new identity (fresh prompt or a chained one) — (re)build for it
+  if (key !== promptDialogKey) openPromptDialog(key, p.kind); // fresh or chained prompt — (re)build for it
 }
 
 function setupItemDnD() {

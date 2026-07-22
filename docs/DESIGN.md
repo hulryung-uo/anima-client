@@ -214,7 +214,7 @@ anima-client/
     │       │   ├── framing.rs           # frame decoder + game-mode (Huffman) + StreamDecoder
     │       │   ├── huffman.rs           # server→client decompression
     │       │   ├── login.rs             # builders/parsers + LoginMachine (+ char create)
-    │       │   ├── game.rs              # game packet codec → World mutation (69 incoming ids, §8)
+    │       │   ├── game.rs              # game packet codec → World mutation (70 incoming ids, §8)
     │       │   ├── movement.rs          # walk requests + Walker (seq/confirm/deny) + 0x21/0x22
     │       │   └── outgoing.rs          # client version + action builders
     │       ├── world/mod.rs             # World/Mobile/Item/PlayerStats/journal/gumps/trades/…
@@ -316,12 +316,12 @@ The driver is the only code that knows about sockets — write it once for nativ
    `build_delete_character`, `CharacterAppearance`), including the browser's
    server-provided list and confirmation-gated deletion flow.
 5. ✅ Game packet codec → World mutation (`net/game.rs`): originally 0x20/0x77/0x78/
-   0x1A/0x1D/0x11/0xA1-3/0x1C/0xAE/0xBF; now **69 incoming ids** dispatched (count
+   0x1A/0x1D/0x11/0xA1-3/0x1C/0xAE/0xBF; now **70 incoming ids** dispatched (count
    the match arms in `dispatch()`) covering combat/damage/effects, full vitals,
    containers,
    gumps (incl. packed/compressed 0xDD), targeting, vendors, skills, books,
    party, buffs, quest arrows, weather/season/light, corpses (0xAF/0x89),
-   prompts (0xC2), combatant (0xAA), secure trading (0x6F), facet change
+   ASCII/Unicode prompts (0x9A/0xC2), combatant (0xAA), secure trading (0x6F), facet change
    (0xBF/0x08) — see §8.
 6. ✅ Movement (`net/movement.rs`): walk 0x02 + seq + confirm/deny + resync +
    fastwalk; `Session::advance_route` adds a non-blocking `Action::WalkTo`
@@ -440,7 +440,7 @@ Distilled from `anima/CLAUDE.md` — verify against ClassicUO/captures while imp
 - **Key packet ids** (login phase): `0x1B` EnterWorld, `0x55` LoginComplete.
   (Full incoming-packet handler list: ClassicUO `PacketHandlers.cs`.)
 - **Game-phase incoming coverage (current, verified by counting `net::game::dispatch`'s
-  match arms):** **69** packet ids handled in `net/game.rs` — `0x20` MobileUpdate,
+  match arms):** **70** packet ids handled in `net/game.rs` — `0x20` MobileUpdate,
   `0x77`/`0x78` mobile moving/incoming, `0x2E` EquipItem, `0x1A`/`0xF3` world item
   (legacy/HS), `0x1D` Delete, `0x11` CharacterStatus, `0xA1-3` vitals, `0x1C`/`0xAE`
   Talk/UnicodeTalk, `0xBF` general-info subcommands (facet change, party, …), `0x6C`
@@ -452,12 +452,12 @@ Distilled from `anima/CLAUDE.md` — verify against ClassicUO/captures while imp
   `0xDF` buff, `0xB0`/`0xDD` gumps (incl. zlib-packed), `0xBA` quest arrow, `0xD6`/
   `0xDC` OPL, `0x93`/`0xD4`/`0x66` books, `0xAF` corpse-of-death, `0xAA` combatant,
   `0x27` lift-reject, `0x28`/`0x29` item-drag completion, `0x2C` death status,
-  `0x2D` full mobile attributes, `0x38` server pathfinding, `0x89` corpse equip, `0xC2`
-  prompt, `0x6F` secure trade, `0x3B` vendor close, `0x24` container display,
+  `0x2D` full mobile attributes, `0x38` server pathfinding, `0x89` corpse equip,
+  `0x9A`/`0xC2` ASCII/Unicode prompts, `0x6F` secure trade, `0x3B` vendor close, `0x24` container display,
   `0x88` paperdoll, `0x2F` swing, `0x90`/`0xF5` maps, `0x56` map commands, `0x99`
   multi target, `0xD8` custom houses, and `0xE5`/`0xE6` waypoints — plus
   `0x21`/`0x22` (confirm/deny walk), owned separately by `net::movement::Walker`,
-  for **71** total. Outgoing login-phase `0x83` delete-character is handled
+  for **72** total. Outgoing login-phase `0x83` delete-character is handled
   separately. Remaining ClassicUO gaps are maintained in
   [`CLASSICUO_GAPS.md`](CLASSICUO_GAPS.md).
 

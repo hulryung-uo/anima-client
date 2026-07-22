@@ -13,7 +13,7 @@ scene/agent exposure, and user-facing behavior (where applicable) are present.
   `src/ClassicUO.Client/Network/PacketHandlers.cs`
 - anima source: `crates/anima-core/src/net/game.rs` plus login and movement
   state machines
-- Current game decoder: 69 packet IDs after adding `0x95 DisplayHuePicker`;
+- Current game decoder: 70 packet IDs after adding `0x9A ASCIIPrompt`;
   `0x21`/`0x22` are handled separately by `Walker`
 
 The comparison is mechanical at the packet-ID level, followed by a semantic
@@ -38,6 +38,9 @@ that are acknowledgements/no-ops are not counted as missing game UI features.
 - `0x95 DisplayHuePicker` / `0x95 HuePickerResponse`: concurrent server dye
   pickers, ServUO-compatible `2..=1001` hue normalization, versioned brain/WASM/
   native contracts, a real `hues.mul` palette API, and browser grid/preview UI
+- `0x9A ASCIIPrompt` / `0x9A ASCIIPromptResponse`: prompt-kind-aware core state,
+  ClassicUO-compatible CP1252/NUL response and cancel packets, versioned brain/
+  WASM/native contracts, and the shared browser response dialog
 - Speech, localized messages, OPL/tooltips, prompts, targeting
 - Movement confirmation/denial, pathfinding, doors, facet changes
 - Combat state, damage/effects, animations, death/corpse links
@@ -52,7 +55,6 @@ the feature. Each row is still open unless a later change moves it above.
 
 | Priority | Packet(s) | ClassicUO behavior | Required anima vertical slice |
 |---|---:|---|---|
-| P0 | `0x9A` | ASCII text prompt | Prompt model/UI and ASCII response/cancel packet |
 | P0 | `0xA5` | Open URL | Validated URL event plus explicit user confirmation before navigation |
 | P0 | `0xA6` | Tip/notice window | Tip model, renderer window, previous/next response |
 | P0 | `0xAB` | Text-entry dialog | Dialog model/UI and response packet |

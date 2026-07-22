@@ -6,7 +6,7 @@
 //! The shapes are also mirrored by `anima2/anima2/contract.py` — keep that
 //! consumer in lockstep.
 //!
-//! ## Schema (v10 — snake_case, versioned)
+//! ## Schema (v11 — snake_case, versioned)
 //!
 //! [`observation_to_json`] emits one object with these top-level keys, one per
 //! [`Observation`] field: `player`, `mobiles`, `items`, `new_journal`,
@@ -58,13 +58,15 @@
 //! the core world already tracks. v8: added `waypoints`, the server's 0xE5
 //! corpse/resurrection/quest markers with 0xE6 removal semantics. v9: added
 //! `legacy_menus`, the server's concurrent 0x7C item/question menus. v10:
-//! added `hue_pickers`, the server's concurrent 0x95 dye color pickers.)
+//! added `hue_pickers`, the server's concurrent 0x95 dye color pickers. v11:
+//! added `prompt.kind` (`"ascii"` or `"unicode"`) so consumers can preserve
+//! the identity of legacy 0x9A prompts separately from 0xC2 prompts.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 use anima_core::agent::{
     Action, GumpView, ItemView, MobileView, Observation, PlayerView, SkillView, WaypointView,
@@ -198,7 +200,11 @@ fn target_json(t: &TargetCursor) -> Value {
 }
 
 fn prompt_json(p: &PromptState) -> Value {
-    json!({ "sender_serial": p.sender_serial, "prompt_id": p.prompt_id })
+    json!({
+        "sender_serial": p.sender_serial,
+        "prompt_id": p.prompt_id,
+        "kind": p.kind.as_str(),
+    })
 }
 
 fn trade_json(t: &TradeState) -> Value {
@@ -615,6 +621,7 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anima_core::world::PromptKind;
 
     /// Table-driven: every [`Action`] variant round-trips through
     /// `{"type": ..} -> action_from_json -> Action`. Add a row here whenever
@@ -863,8 +870,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v10_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 10);
+    fn schema_v11_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 11);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,
@@ -927,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v10_serializes_hue_pickers_exact_shape() {
+    fn schema_v11_serializes_hue_pickers_exact_shape() {
         let obs = Observation {
             hue_pickers: vec![HuePicker {
                 serial: 0x0102_0304,
@@ -939,6 +946,31 @@ mod tests {
             observation_to_json(&obs)["hue_pickers"],
             json!([{ "serial": 0x0102_0304u32, "graphic": 0x0FAB }])
         );
+    }
+
+    #[test]
+    fn schema_v11_serializes_prompt_kind_exactly() {
+        for (kind, expected) in [
+            (PromptKind::Ascii, "ascii"),
+            (PromptKind::Unicode, "unicode"),
+        ] {
+            let obs = Observation {
+                prompt: Some(PromptState {
+                    sender_serial: 0x0102_0304,
+                    prompt_id: 0xDEAD_BEEF,
+                    kind,
+                }),
+                ..Observation::default()
+            };
+            assert_eq!(
+                observation_to_json(&obs)["prompt"],
+                json!({
+                    "sender_serial": 0x0102_0304u32,
+                    "prompt_id": 0xDEAD_BEEFu32,
+                    "kind": expected,
+                })
+            );
+        }
     }
 
     #[test]

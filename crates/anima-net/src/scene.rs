@@ -1579,8 +1579,8 @@ fn poisoned_field(poisoned: bool) -> Value {
     }
 }
 
-/// Build the `prompt` object for the scene: an outstanding server text prompt
-/// (0xC2 UnicodePrompt), or `{"active":0}` when none. The question text itself
+/// Build the `prompt` object for the scene: an outstanding 0x9A ASCII or 0xC2
+/// Unicode server text prompt, or `{"active":0}` when none. The question text itself
 /// already arrived as a journal line (see `World::prompt`'s doc) — the client
 /// just needs to know a response is due. `promptId` is included alongside
 /// `serial` so the client can tell a fresh, server-chained prompt (ServUO
@@ -1590,7 +1590,12 @@ fn poisoned_field(poisoned: bool) -> Value {
 /// unit-testable directly.
 fn prompt_json(world: &World) -> Value {
     match world.prompt {
-        Some(p) => json!({ "active": 1, "serial": p.sender_serial, "promptId": p.prompt_id }),
+        Some(p) => json!({
+            "active": 1,
+            "serial": p.sender_serial,
+            "promptId": p.prompt_id,
+            "kind": p.kind.as_str(),
+        }),
         None => json!({ "active": 0 }),
     }
 }
@@ -2681,7 +2686,7 @@ pub fn build_scene(
     // AOS expansion (SupportedFeatures 0xB9): gates AOS-only UI like the weapon
     // special-ability bar. T2A servers don't advertise it → the client hides it.
     let aos = s.world.aos;
-    // An outstanding server text prompt (0xC2 UnicodePrompt), or `{"active":0}`.
+    // An outstanding 0x9A ASCII / 0xC2 Unicode server prompt, or `{"active":0}`.
     // See [`prompt_json`]'s doc.
     let prompt =
         serde_json::to_string(&prompt_json(&s.world)).unwrap_or_else(|_| "{\"active\":0}".into());
@@ -2880,7 +2885,7 @@ mod tests {
     use anima_core::types::{Position, Serial};
     use anima_core::world::{
         Book, HuePicker, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, PopupEntry, PopupMenu,
-        PromptState, TradeState,
+        PromptKind, PromptState, TradeState,
     };
 
     #[test]
@@ -2940,10 +2945,11 @@ mod tests {
         w.prompt = Some(PromptState {
             sender_serial: 0x77,
             prompt_id: 42,
+            kind: PromptKind::Ascii,
         });
         assert_eq!(
             prompt_json(&w),
-            json!({ "active": 1, "serial": 0x77, "promptId": 42 })
+            json!({ "active": 1, "serial": 0x77, "promptId": 42, "kind": "ascii" })
         );
     }
 

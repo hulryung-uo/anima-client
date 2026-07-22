@@ -11,8 +11,8 @@
 use super::packet::{PacketError, PacketReader, Result as PResult};
 use crate::world::{
     Effect, Gump, HouseDesign, HousePlane, HuePicker, JournalEntry, LegacyMenu, LegacyMenuEntry,
-    LegacyMenuKind, PopupEntry, PopupMenu, PromptState, Skill, TargetCursor, TradeState, Waypoint,
-    World,
+    LegacyMenuKind, PopupEntry, PopupMenu, PromptKind, PromptState, Skill, TargetCursor,
+    TradeState, Waypoint, World,
 };
 
 /// Decode one framed game packet (id byte included) into `world`.
@@ -84,6 +84,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x2D => mobile_attributes(world, frame)?,
         0x38 => pathfinding(world, frame)?,
         0x89 => corpse_equip(world, frame)?,
+        0x9A => ascii_prompt(world, frame)?,
         0xC2 => unicode_prompt(world, frame)?,
         0x6F => secure_trade(world, frame)?,
         0x3B => end_vendor(world, frame)?,
@@ -1550,6 +1551,25 @@ fn corpse_equip(world: &mut World, frame: &[u8]) -> PResult<()> {
     Ok(())
 }
 
+/// 0x9A ASCIIPrompt — legacy counterpart to 0xC2. ClassicUO reads the request's
+/// entire payload as one opaque big-endian u64; ServUO's response handler splits
+/// it back into `[senderSerial:u32][promptId:u32]`. The request is therefore the
+/// variable 11-byte frame `[id][len:u16][senderSerial:u32][promptId:u32]`.
+fn ascii_prompt(world: &mut World, frame: &[u8]) -> PResult<()> {
+    if frame.len() < 11 {
+        return Ok(());
+    }
+    let mut r = PacketReader::new(&frame[3..]);
+    let sender_serial = r.u32()?;
+    let prompt_id = r.u32()?;
+    world.prompt = Some(PromptState {
+        sender_serial,
+        prompt_id,
+        kind: PromptKind::Ascii,
+    });
+    Ok(())
+}
+
 /// 0xC2 UnicodePrompt — the server asks us to answer with typed text (pet rename,
 /// house sign, guild abbreviation, … — ~38 ServUO flows). Fixed 21 bytes as
 /// ServUO sends it: `[id][len:u16][senderSerial:u32][promptId:u32][type:u32=0]
@@ -1569,6 +1589,7 @@ fn unicode_prompt(world: &mut World, frame: &[u8]) -> PResult<()> {
     world.prompt = Some(PromptState {
         sender_serial,
         prompt_id,
+        kind: PromptKind::Unicode,
     });
     Ok(())
 }
@@ -4009,6 +4030,37 @@ mod tests {
         assert!(apply_packet(&mut w, &frame));
         let p = w.prompt.expect("prompt pending");
         assert_eq!((p.sender_serial, p.prompt_id), (0x0102_0304, 0xDEAD_BEEF));
+        assert_eq!(p.kind, PromptKind::Unicode);
+    }
+
+    #[test]
+    fn ascii_prompt_sets_kind_and_replaces_the_pending_prompt() {
+        let mut w = World::new();
+        w.prompt = Some(PromptState {
+            sender_serial: 1,
+            prompt_id: 2,
+            kind: PromptKind::Unicode,
+        });
+
+        let mut p = PacketWriter::new();
+        p.u8(0x9A).u16(11).u32(0x0102_0304).u32(0xDEAD_BEEF);
+        assert!(apply_packet(&mut w, &p.into_vec()));
+        assert_eq!(
+            w.prompt,
+            Some(PromptState {
+                sender_serial: 0x0102_0304,
+                prompt_id: 0xDEAD_BEEF,
+                kind: PromptKind::Ascii,
+            })
+        );
+
+        // A malformed resend is recognized but cannot erase/partially replace
+        // the complete prompt already being shown.
+        assert!(apply_packet(&mut w, &[0x9A, 0, 10, 0, 0, 0, 9]));
+        assert_eq!(
+            w.prompt.expect("original prompt retained").kind,
+            PromptKind::Ascii
+        );
     }
 
     /// Patch the big-endian length word at `[1..3]` of a variable-framed test packet.

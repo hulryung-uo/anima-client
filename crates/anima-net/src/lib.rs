@@ -19,21 +19,21 @@ pub mod scene;
 use anima_assets::MapData;
 use anima_core::agent::{Action, Observation};
 use anima_core::net::outgoing::{
-    build_attack, build_book_page_request, build_buy, build_cast_spell, build_double_click,
-    build_drop, build_equip, build_gump_response, build_house_design_request,
-    build_hue_picker_response, build_legacy_menu_response, build_opl_request, build_party_accept,
-    build_party_decline, build_party_invite, build_party_leave, build_party_message, build_pick_up,
-    build_popup_request, build_popup_select, build_prompt_response, build_say, build_sell,
-    build_single_click, build_skill_lock, build_status_request, build_target_response,
-    build_trade_accept, build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability,
-    build_use_skill, build_war_mode,
+    build_ascii_prompt_response, build_attack, build_book_page_request, build_buy,
+    build_cast_spell, build_double_click, build_drop, build_equip, build_gump_response,
+    build_house_design_request, build_hue_picker_response, build_legacy_menu_response,
+    build_opl_request, build_party_accept, build_party_decline, build_party_invite,
+    build_party_leave, build_party_message, build_pick_up, build_popup_request, build_popup_select,
+    build_prompt_response, build_say, build_sell, build_single_click, build_skill_lock,
+    build_status_request, build_target_response, build_trade_accept, build_trade_cancel,
+    build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
 };
 use anima_core::net::{
     apply_packet, build_client_version, CharacterChoice, CharacterList, FramingError, LoginConfig,
     LoginDirective, LoginError, LoginMachine, LoginResult, StreamDecoder, Walker,
 };
 use anima_core::path::{find_path, find_path_near, Terrain, DEFAULT_MAX_EXPANSIONS};
-use anima_core::world::{LegacyMenuKind, World};
+use anima_core::world::{LegacyMenuKind, PromptKind, World};
 
 // `DOOR_USE_COOLDOWN`/`MAX_DOOR_OPEN_ATTEMPTS` are only referenced by
 // `route_tests` below (production code only needs `decide_blocked_step` to
@@ -817,14 +817,21 @@ impl Session {
         Ok(())
     }
 
-    /// Answer (or cancel) the pending server text prompt (0xC2 UnicodePrompt),
-    /// echoing its `sender_serial`/`prompt_id`, and clear it locally. No-op when
-    /// nothing is pending (the brain raced the prompt away).
+    /// Answer (or cancel) the pending 0x9A ASCII / 0xC2 Unicode server text
+    /// prompt with its matching wire encoding, echoing the two opaque ids and
+    /// clearing it locally. No-op when the brain raced the prompt away.
     fn respond_prompt(&mut self, text: &str, cancel: bool) -> Result<(), DriverError> {
         let Some(p) = self.world.prompt else {
             return Ok(());
         };
-        let pkt = build_prompt_response(p.sender_serial, p.prompt_id, text, cancel);
+        let pkt = match p.kind {
+            PromptKind::Ascii => {
+                build_ascii_prompt_response(p.sender_serial, p.prompt_id, text, cancel)
+            }
+            PromptKind::Unicode => {
+                build_prompt_response(p.sender_serial, p.prompt_id, text, cancel)
+            }
+        };
         self.send(&pkt)?;
         self.world.prompt = None;
         Ok(())

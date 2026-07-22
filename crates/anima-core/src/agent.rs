@@ -131,8 +131,8 @@ pub struct Observation {
     /// Open server gumps/dialogs (0xB0/0xDD) — e.g. a craft menu. Answer with
     /// [`Action::GumpResponse`].
     pub gumps: Vec<GumpView>,
-    /// An outstanding server text prompt (0xC2 UnicodePrompt — pet rename, house
-    /// sign, guild abbreviation, …), if one is pending. Answer with
+    /// An outstanding 0x9A ASCII or 0xC2 Unicode server text prompt (pet rename,
+    /// house sign, guild abbreviation, …), if one is pending. Answer with
     /// [`Action::PromptResponse`]/[`Action::PromptCancel`].
     pub prompt: Option<PromptState>,
     /// Active player-to-player secure trade sessions (0x6F), if any — normally
@@ -391,8 +391,9 @@ pub enum Action {
     PartyDecline { leader: u32 },
     /// Leave the current party (0xBF/0x06/0x02); the driver fills our own serial.
     PartyLeave,
-    /// Answer a pending server text prompt (0xC2 UnicodePrompt — pet rename, house
-    /// sign, guild abbreviation, …) with typed `text`. The driver echoes the
+    /// Answer a pending 0x9A ASCII or 0xC2 Unicode server text prompt (pet rename,
+    /// house sign, guild abbreviation, …) with typed `text`. The driver selects
+    /// the prompt kind's matching packet/text encoding and echoes the
     /// prompt's `sender_serial`/`prompt_id` from [`crate::world::World::prompt`]
     /// (cleared once answered); a no-op if nothing is pending.
     PromptResponse { text: String },

@@ -185,6 +185,44 @@ impl WasmClient {
         true
     }
 
+    /// Answer the currently pending 0x9A ASCII or 0xC2 Unicode text prompt.
+    /// Returns false when the callback is stale and no prompt remains.
+    pub fn prompt_response(&mut self, text: String) -> bool {
+        self.answer_prompt(&text, false)
+    }
+
+    /// Cancel the currently pending server text prompt.
+    pub fn prompt_cancel(&mut self) -> bool {
+        self.answer_prompt("", true)
+    }
+
+    fn answer_prompt(&mut self, text: &str, cancel: bool) -> bool {
+        let Some(prompt) = self.world.prompt else {
+            return false;
+        };
+        let packet = match prompt.kind {
+            anima_core::world::PromptKind::Ascii => {
+                anima_core::net::outgoing::build_ascii_prompt_response(
+                    prompt.sender_serial,
+                    prompt.prompt_id,
+                    text,
+                    cancel,
+                )
+            }
+            anima_core::world::PromptKind::Unicode => {
+                anima_core::net::outgoing::build_prompt_response(
+                    prompt.sender_serial,
+                    prompt.prompt_id,
+                    text,
+                    cancel,
+                )
+            }
+        };
+        self.outbox.extend(packet);
+        self.world.prompt = None;
+        true
+    }
+
     /// Current perception using the shared, versioned Observation JSON schema.
     pub fn observation_json(&mut self) -> String {
         let obs = self.world.observe(&mut self.journal_cursor);
@@ -278,5 +316,25 @@ mod tests {
         );
         assert!(client.world.hue_pickers.is_empty());
         assert!(!client.hue_picker_select(0x0102_0304, 10));
+    }
+
+    #[test]
+    fn ascii_prompt_response_queues_matching_packet_and_consumes_prompt() {
+        let mut client = WasmClient::new("user".into(), "pass".into());
+        client.login = None;
+        client.outbox.clear();
+        client.handle(&[0x9A, 0, 11, 0x01, 0x02, 0x03, 0x04, 0xDE, 0xAD, 0xBE, 0xEF]);
+        assert!(client.prompt_response("Café".into()));
+        assert_eq!(
+            client.take_outbox(),
+            anima_core::net::outgoing::build_ascii_prompt_response(
+                0x0102_0304,
+                0xDEAD_BEEF,
+                "Café",
+                false
+            )
+        );
+        assert!(client.world.prompt.is_none());
+        assert!(!client.prompt_cancel());
     }
 }

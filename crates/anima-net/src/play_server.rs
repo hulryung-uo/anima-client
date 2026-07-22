@@ -2343,7 +2343,7 @@ fn content_type(path: &str) -> &'static str {
 /// entries can't contain `:`, `,`, or `=`) · `menusel:<serial>:<index>` (legacy
 /// 0x7C menu; index 0 cancels) · `huepick:<serial>:<hue>` (0x95 dye picker) ·
 /// `prompt:<text>` / `promptcancel`
-/// (answer/cancel a pending server text prompt, 0xC2 UnicodePrompt) ·
+/// (answer/cancel a pending 0x9A ASCII / 0xC2 Unicode server text prompt) ·
 /// `tradeaccept:<mycont>:<0|1>` / `tradecancel:<mycont>` /
 /// `tradegold:<mycont>:<gold>:<platinum>` (answer the secure-trade session
 /// keyed by our own container serial `mycont`, 0x6F — multiple concurrent
@@ -2552,8 +2552,8 @@ fn parse_command(body: &str) -> Option<Action> {
                 graphic: p.next().and_then(|s| s.parse().ok()).unwrap_or(0),
             })
         }
-        // prompt:<text> — answer a pending server text prompt (0xC2 UnicodePrompt:
-        // pet rename, house sign, guild abbreviation, …).
+        // prompt:<text> — answer a pending 0x9A ASCII / 0xC2 Unicode server
+        // prompt (pet rename, house sign, guild abbreviation, …).
         "prompt" => Some(Action::PromptResponse {
             text: arg.to_string(),
         }),
