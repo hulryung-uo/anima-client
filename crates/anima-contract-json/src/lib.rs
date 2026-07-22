@@ -6,13 +6,13 @@
 //! The shapes are also mirrored by `anima2/anima2/contract.py` — keep that
 //! consumer in lockstep.
 //!
-//! ## Schema (v15 — snake_case, versioned)
+//! ## Schema (v16 — snake_case, versioned)
 //!
 //! [`observation_to_json`] emits one object with these top-level keys, one per
 //! [`Observation`] field: `player`, `mobiles`, `items`, `new_journal`,
 //! `pending_target`, `skills`, `gumps`, `prompt`, `trades`, `buffs`,
 //! `shop_buy`, `shop_sell`, `popup`, `legacy_menus`, `hue_pickers`, `open_urls`, `tips`,
-//! `text_entry_dialogs`, `character_profiles`, `book`, `party`, `quest_arrow`, `waypoints`,
+//! `text_entry_dialogs`, `character_profiles`, `logout_ack`, `book`, `party`, `quest_arrow`, `waypoints`,
 //! `weather`, `season`, `light`, `war`, `last_attack`, `combatant`, `corpse_of`,
 //! `corpse_equip`, `map_index`, `aos`, `opl`, `recent_damage`, `spellbooks`,
 //! `map_gumps`. A
@@ -68,13 +68,14 @@
 //! `TipClose` actions. v14: added concurrent 0xAB `text_entry_dialogs` plus
 //! `TextEntryResponse` and `TextEntryClose` actions. v15: added 0xB8
 //! `character_profiles` plus `ProfileRequest`, `ProfileUpdate`, and
-//! `ProfileClose` actions.)
+//! `ProfileClose` actions. v16: added 0xD1 `logout_ack` plus the `Logout`
+//! action.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 15;
+pub const SCHEMA_VERSION: u32 = 16;
 
 use anima_core::agent::{
     Action, GumpView, ItemView, MobileView, Observation, PlayerView, SkillView, WaypointView,
@@ -83,9 +84,9 @@ use anima_core::gump_layout::{GumpElement, HtmlText};
 use anima_core::types::Position;
 use anima_core::world::{
     Book, Buff, CharacterProfile, HuePicker, JournalEntry, LegacyMenu, LegacyMenuEntry,
-    LegacyMenuKind, MapView, OpenUrlRequest, Party, PopupEntry, PopupMenu, PromptState, ShopBuy,
-    ShopSell, ShopSellItem, SpellbookContent, TargetCursor, TextEntryDialog, TipNotice, TradeState,
-    Weather,
+    LegacyMenuKind, LogoutAck, MapView, OpenUrlRequest, Party, PopupEntry, PopupMenu, PromptState,
+    ShopBuy, ShopSell, ShopSellItem, SpellbookContent, TargetCursor, TextEntryDialog, TipNotice,
+    TradeState, Weather,
 };
 use serde_json::{json, Value};
 
@@ -355,6 +356,10 @@ fn character_profile_json(profile: &CharacterProfile) -> Value {
     })
 }
 
+fn logout_ack_json(ack: &LogoutAck) -> Value {
+    json!({ "seq": ack.seq, "allowed": ack.allowed })
+}
+
 fn book_json(b: &Book) -> Value {
     json!({
         "serial": b.serial, "title": b.title, "author": b.author,
@@ -440,6 +445,7 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "tips": obs.tips.iter().map(tip_json).collect::<Vec<_>>(),
         "text_entry_dialogs": obs.text_entry_dialogs.iter().map(text_entry_dialog_json).collect::<Vec<_>>(),
         "character_profiles": obs.character_profiles.iter().map(character_profile_json).collect::<Vec<_>>(),
+        "logout_ack": obs.logout_ack.as_ref().map(logout_ack_json),
         "book": obs.book.as_ref().map(book_json),
         "party": party_json(&obs.party),
         "quest_arrow": obs.quest_arrow.map(|(x, y)| json!({ "x": x, "y": y })),
@@ -683,6 +689,7 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         "ProfileClose" => Ok(Action::ProfileClose {
             seq: req_u64("seq")?,
         }),
+        "Logout" => Ok(Action::Logout),
         "TradeAccept" => Ok(Action::TradeAccept {
             container: req_u32("container")?,
             accept: v.get("accept").and_then(Value::as_bool).unwrap_or(true),
@@ -911,6 +918,7 @@ mod tests {
                 json!({"type": "ProfileClose", "seq": 15}),
                 Action::ProfileClose { seq: 15 },
             ),
+            (json!({"type": "Logout"}), Action::Logout),
             (
                 json!({"type": "TradeAccept", "container": 55, "accept": true}),
                 Action::TradeAccept {
@@ -986,8 +994,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v15_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 15);
+    fn schema_v16_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 16);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,
@@ -1200,6 +1208,21 @@ mod tests {
     }
 
     #[test]
+    fn schema_v16_serializes_logout_ack_exactly() {
+        let obs = Observation {
+            logout_ack: Some(LogoutAck {
+                seq: 4,
+                allowed: false,
+            }),
+            ..Observation::default()
+        };
+        assert_eq!(
+            observation_to_json(&obs)["logout_ack"],
+            json!({ "seq": 4, "allowed": false })
+        );
+    }
+
+    #[test]
     fn observation_json_has_expected_keys() {
         let obs = Observation::default();
         let v = observation_to_json(&obs);
@@ -1223,6 +1246,7 @@ mod tests {
             "tips",
             "text_entry_dialogs",
             "character_profiles",
+            "logout_ack",
             "book",
             "party",
             "quest_arrow",
@@ -1260,6 +1284,7 @@ mod tests {
         assert_eq!(v["tips"], json!([]));
         assert_eq!(v["text_entry_dialogs"], json!([]));
         assert_eq!(v["character_profiles"], json!([]));
+        assert!(v["logout_ack"].is_null());
     }
 
     /// Schema v5: `items[].is_multi` — a placed boat/house shows up in

@@ -147,6 +147,12 @@ enum WalkToStart {
     Stop,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GameSessionEnd {
+    ConnectionLost,
+    LoggedOut,
+}
+
 /// Validate and resolve a browser- or server-requested WalkTo through the same
 /// pathfinder policy. A blocked exact goal falls back to a nearby reachable
 /// tile, matching ClassicUO's distance-1 relaxation; malformed/far/no-path
@@ -391,6 +397,13 @@ fn parse_login_attempt(body: &str) -> Result<LoginAttempt, &'static str> {
         interactive,
         create,
     })
+}
+
+fn login_attempt_expected(scene: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(scene)
+        .ok()
+        .and_then(|value| value.get("auth")?.as_str().map(str::to_owned))
+        .is_some_and(|auth| matches!(auth.as_str(), "login" | "error"))
 }
 
 fn parse_character_appearance(
@@ -740,605 +753,641 @@ impl PlayServer {
                 Session::connect_and_login(&endpoint, c)
             }
         };
-        let mut session = if !cfg.login_page {
-            println!(
-                "play: connecting to {}:{} as {} ...",
-                cfg.host, cfg.port, cfg.user
-            );
-            match connect(LoginAttempt {
-                host: cfg.host.clone(),
-                port: cfg.port,
-                username: cfg.user.clone(),
-                password: cfg.pass.clone(),
-                character_slot: None,
-                interactive: false,
-                create: None,
-            }) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("login failed: {e}");
-                    // Library code must not exit the process out from under an
-                    // embedding GUI (anima-desktop) — return the error instead;
-                    // the `play` bin maps it back to the same log line + exit(1).
-                    return Err(io::Error::other(e));
-                }
-            }
-        } else {
-            *scene.lock().unwrap() = r#"{"auth":"login"}"#.into();
-            println!("play: login page at http://127.0.0.1:{port}/  (enter server + account)");
-            loop {
-                let attempt = match login_rx.recv() {
-                    Ok(v) => v,
-                    // Sender dropped (the HTTP worker pool is gone) — nothing can
-                    // submit the login form anymore. Same reasoning as above: return
-                    // rather than exit, so an embedding GUI keeps control.
-                    Err(e) => return Err(io::Error::other(e)),
-                };
-                let (lh, lp, lu) = (attempt.host.clone(), attempt.port, attempt.username.clone());
-                *scene.lock().unwrap() = r#"{"auth":"connecting"}"#.into();
-                println!("play: connecting to {lh}:{lp} as {lu} ...");
-                match connect(attempt) {
-                    Ok(s) => break s,
-                    Err(DriverError::CharacterChoiceCancelled) => {
-                        println!("play: character selection cancelled");
-                        *scene.lock().unwrap() = r#"{"auth":"login"}"#.into();
-                    }
+        'connections: loop {
+            let mut session = if !cfg.login_page {
+                println!(
+                    "play: connecting to {}:{} as {} ...",
+                    cfg.host, cfg.port, cfg.user
+                );
+                match connect(LoginAttempt {
+                    host: cfg.host.clone(),
+                    port: cfg.port,
+                    username: cfg.user.clone(),
+                    password: cfg.pass.clone(),
+                    character_slot: None,
+                    interactive: false,
+                    create: None,
+                }) {
+                    Ok(s) => s,
                     Err(e) => {
                         eprintln!("login failed: {e}");
-                        let msg = format!("{e}").replace(['"', '\\', '\n'], " ");
-                        *scene.lock().unwrap() = format!(r#"{{"auth":"error","msg":"{msg}"}}"#);
+                        // Library code must not exit the process out from under an
+                        // embedding GUI (anima-desktop) — return the error instead;
+                        // the `play` bin maps it back to the same log line + exit(1).
+                        return Err(io::Error::other(e));
                     }
                 }
-            }
-        };
-        println!("play: in world. open http://127.0.0.1:{port}/  (WASD/arrows move, T to talk)");
+            } else {
+                *scene.lock().unwrap() = r#"{"auth":"login"}"#.into();
+                println!("play: login page at http://127.0.0.1:{port}/  (enter server + account)");
+                loop {
+                    let attempt = match login_rx.recv() {
+                        Ok(v) => v,
+                        // Sender dropped (the HTTP worker pool is gone) — nothing can
+                        // submit the login form anymore. Same reasoning as above: return
+                        // rather than exit, so an embedding GUI keeps control.
+                        Err(e) => return Err(io::Error::other(e)),
+                    };
+                    let (lh, lp, lu) =
+                        (attempt.host.clone(), attempt.port, attempt.username.clone());
+                    *scene.lock().unwrap() = r#"{"auth":"connecting"}"#.into();
+                    println!("play: connecting to {lh}:{lp} as {lu} ...");
+                    match connect(attempt) {
+                        Ok(s) => break s,
+                        Err(DriverError::CharacterChoiceCancelled) => {
+                            println!("play: character selection cancelled");
+                            *scene.lock().unwrap() = r#"{"auth":"login"}"#.into();
+                        }
+                        Err(e) => {
+                            eprintln!("login failed: {e}");
+                            let msg = format!("{e}").replace(['"', '\\', '\n'], " ");
+                            *scene.lock().unwrap() = format!(r#"{{"auth":"error","msg":"{msg}"}}"#);
+                        }
+                    }
+                }
+            };
+            println!(
+                "play: in world. open http://127.0.0.1:{port}/  (WASD/arrows move, T to talk)"
+            );
 
-        let mut journal: Vec<serde_json::Value> = Vec::new();
-        let mut journal_seq: u64 = 0; // monotonic id so the client floats each line once
-        let mut cursor = 0usize;
-        let mut last_ping = std::time::Instant::now();
-        let mut last_build = Instant::now() - Duration::from_secs(1);
-        // Seed from the live spawn position so the first step's Z is resolved from
-        // the right current_z (not a phantom 0).
-        let mut last_pos = session
-            .world
-            .player_mobile()
-            .map(|p| (p.pos.x, p.pos.y, p.pos.z))
-            .unwrap_or((0u16, 0u16, 0i8));
-        let mut dirty = true;
-        // Last seen seqs for the time-sensitive event queues (sound 0x54, damage 0x0B,
-        // effects 0x70/0xC0/0xC7). These don't move the player or add journal lines, so
-        // without this the scene would only rebuild on the 250ms timer → audible/visible
-        // lag (a sound could sit up to ~250ms before it even reaches the served scene).
-        // Bump `dirty` the instant any advances so the next poll (≤150ms) plays it.
-        let mut last_event_seqs = (0u64, 0u64, 0u64); // (sound, damage, effect)
-        let mut last_heartbeat = Instant::now(); // SSE keepalive + dead-connection reaper
-                                                 // Click-to-walk (server-paced auto-walk) state. Unlike manual walk (browser-
-                                                 // paced), the server owns the route: it re-paths to `auto_goal` each cadence,
-                                                 // issues one step, and blacklists denied tiles so it routes around them.
-        let mut auto_goal: Option<(u32, u32)> = None;
-        let mut auto_blocked: std::collections::HashSet<(u32, u32)> =
-            std::collections::HashSet::new();
-        // Bookkeeping for `Use` attempts sent to open a closed door blocking a
-        // given tile on the current route — see `decide_blocked_step`, which
-        // this feeds: how many attempts so far, when the most recent one was
-        // sent, and the door's own graphic at that moment (to detect a
-        // visible state change since — see `DoorUseAttempt`'s doc).
-        let mut auto_door_attempts: std::collections::HashMap<(u32, u32), DoorUseAttempt> =
-            std::collections::HashMap::new();
-        let mut auto_steps: u32 = 0;
-        let mut last_step = Instant::now() - Duration::from_millis(AUTO_WALK_STEP_MS);
-        // Whether the last issued step was a real move (vs a turn) and where we were
-        // when we issued it — so we can detect a server deny (position didn't change).
-        let mut auto_pending_move = false;
-        let mut auto_from = (0u16, 0u16);
-        let mut auto_target = (0u32, 0u32);
-        let mut auto_max_expansions = AUTO_WALK_MAX_EXPANSIONS;
-        let mut auto_max_steps = AUTO_WALK_MAX_STEPS;
-        // Last core 0x38 event mirrored into this loop's own auto-walk state.
-        let mut server_pathfind_seq = 0u64;
-        // Movement (ClassicUO model): the *browser* is the pacer. Its prediction commits
-        // one step per UO cadence (ClassicUO `Walker.LastStepRequestTime`) and sends one
-        // `walk` per committed step; we just execute each step once. There is no
-        // server-side pacing/`desired` window, so a key tap = exactly one step and a
-        // release stops immediately — no "한 발자국 더" overshoot.
-        // diagnostics
-        let mut diag_since = Instant::now();
-        let mut builds = 0u32;
-        let mut build_max_us = 0u128;
-        let mut build_sum_us = 0u128;
-        let mut last_reqs = 0u64;
-        let trace_t0 = Instant::now(); // ANIMA_DEBUG movement trace clock
-        loop {
-            // Drain input. The browser paces (ClassicUO model): each `walk` is one step
-            // it already committed, so we execute it once — no `desired`/cadence here.
-            // `None` (old stop signal) is now a no-op. We still resolve CanWalk so a
-            // blocked diagonal slides along the wall, matching the browser's prediction.
-            while let Ok(msg) = rx.try_recv() {
-                match msg {
-                    None => {}
-                    Some(Action::Walk { dir, run }) => {
-                        // A manual movement key cancels any active auto-walk route.
-                        auto_goal = None;
-                        let (facing, px, py, pz) = session
-                            .world
-                            .player_mobile()
-                            .map(|p| (p.direction, p.pos.x as i64, p.pos.y as i64, p.pos.z as i32))
-                            .unwrap_or((dir & 7, 0, 0, 0));
-                        let req = dir & 7;
-                        let resolved = map.as_mut().and_then(|m| {
-                            can_walk(&session.world, m, multis.as_ref(), px, py, pz, req)
-                        });
-                        let send = if facing == req {
-                            resolved.map(|(nd, _, _)| nd)
-                        } else {
-                            Some(resolved.map(|(nd, _, _)| nd).unwrap_or(req))
-                        };
-                        if std::env::var("ANIMA_DEBUG").is_ok() {
-                            eprintln!(
+            let mut journal: Vec<serde_json::Value> = Vec::new();
+            let mut journal_seq: u64 = 0; // monotonic id so the client floats each line once
+            let mut cursor = 0usize;
+            let mut last_ping = std::time::Instant::now();
+            let mut last_build = Instant::now() - Duration::from_secs(1);
+            // Seed from the live spawn position so the first step's Z is resolved from
+            // the right current_z (not a phantom 0).
+            let mut last_pos = session
+                .world
+                .player_mobile()
+                .map(|p| (p.pos.x, p.pos.y, p.pos.z))
+                .unwrap_or((0u16, 0u16, 0i8));
+            let mut dirty = true;
+            // Last seen seqs for the time-sensitive event queues (sound 0x54, damage 0x0B,
+            // effects 0x70/0xC0/0xC7). These don't move the player or add journal lines, so
+            // without this the scene would only rebuild on the 250ms timer → audible/visible
+            // lag (a sound could sit up to ~250ms before it even reaches the served scene).
+            // Bump `dirty` the instant any advances so the next poll (≤150ms) plays it.
+            let mut last_event_seqs = (0u64, 0u64, 0u64); // (sound, damage, effect)
+            let mut last_heartbeat = Instant::now(); // SSE keepalive + dead-connection reaper
+                                                     // Click-to-walk (server-paced auto-walk) state. Unlike manual walk (browser-
+                                                     // paced), the server owns the route: it re-paths to `auto_goal` each cadence,
+                                                     // issues one step, and blacklists denied tiles so it routes around them.
+            let mut auto_goal: Option<(u32, u32)> = None;
+            let mut auto_blocked: std::collections::HashSet<(u32, u32)> =
+                std::collections::HashSet::new();
+            // Bookkeeping for `Use` attempts sent to open a closed door blocking a
+            // given tile on the current route — see `decide_blocked_step`, which
+            // this feeds: how many attempts so far, when the most recent one was
+            // sent, and the door's own graphic at that moment (to detect a
+            // visible state change since — see `DoorUseAttempt`'s doc).
+            let mut auto_door_attempts: std::collections::HashMap<(u32, u32), DoorUseAttempt> =
+                std::collections::HashMap::new();
+            let mut auto_steps: u32 = 0;
+            let mut last_step = Instant::now() - Duration::from_millis(AUTO_WALK_STEP_MS);
+            // Whether the last issued step was a real move (vs a turn) and where we were
+            // when we issued it — so we can detect a server deny (position didn't change).
+            let mut auto_pending_move = false;
+            let mut auto_from = (0u16, 0u16);
+            let mut auto_target = (0u32, 0u32);
+            let mut auto_max_expansions = AUTO_WALK_MAX_EXPANSIONS;
+            let mut auto_max_steps = AUTO_WALK_MAX_STEPS;
+            // Last core 0x38 event mirrored into this loop's own auto-walk state.
+            let mut server_pathfind_seq = 0u64;
+            // Movement (ClassicUO model): the *browser* is the pacer. Its prediction commits
+            // one step per UO cadence (ClassicUO `Walker.LastStepRequestTime`) and sends one
+            // `walk` per committed step; we just execute each step once. There is no
+            // server-side pacing/`desired` window, so a key tap = exactly one step and a
+            // release stops immediately — no "한 발자국 더" overshoot.
+            // diagnostics
+            let mut diag_since = Instant::now();
+            let mut builds = 0u32;
+            let mut build_max_us = 0u128;
+            let mut build_sum_us = 0u128;
+            let mut last_reqs = 0u64;
+            let trace_t0 = Instant::now(); // ANIMA_DEBUG movement trace clock
+            let mut session_end = GameSessionEnd::ConnectionLost;
+            loop {
+                // Drain input. The browser paces (ClassicUO model): each `walk` is one step
+                // it already committed, so we execute it once — no `desired`/cadence here.
+                // `None` (old stop signal) is now a no-op. We still resolve CanWalk so a
+                // blocked diagonal slides along the wall, matching the browser's prediction.
+                while let Ok(msg) = rx.try_recv() {
+                    match msg {
+                        None => {}
+                        Some(Action::Walk { dir, run }) => {
+                            // A manual movement key cancels any active auto-walk route.
+                            auto_goal = None;
+                            let (facing, px, py, pz) = session
+                                .world
+                                .player_mobile()
+                                .map(|p| {
+                                    (p.direction, p.pos.x as i64, p.pos.y as i64, p.pos.z as i32)
+                                })
+                                .unwrap_or((dir & 7, 0, 0, 0));
+                            let req = dir & 7;
+                            let resolved = map.as_mut().and_then(|m| {
+                                can_walk(&session.world, m, multis.as_ref(), px, py, pz, req)
+                            });
+                            let send = if facing == req {
+                                resolved.map(|(nd, _, _)| nd)
+                            } else {
+                                Some(resolved.map(|(nd, _, _)| nd).unwrap_or(req))
+                            };
+                            if std::env::var("ANIMA_DEBUG").is_ok() {
+                                eprintln!(
                                 "[srv {}] rx walk req={req} run={} facing={facing} -> send={:?} pos=({px},{py})",
                                 trace_t0.elapsed().as_millis(),
                                 run as u8,
                                 send
                             );
-                        }
-                        if let Some(sd) = send {
-                            let _ = session.walk(sd, run);
-                        }
-                    }
-                    // Click-to-walk: set the goal. The actual stepping happens below in
-                    // the loop body at the walk cadence. A far/out-of-range click is
-                    // rejected up front so it fails fast. A new WalkTo replaces any
-                    // active route (and clears the denied-tile blacklist).
-                    Some(Action::WalkTo { x, y }) => {
-                        match prepare_walkto(
-                            &mut session.world,
-                            map.as_mut(),
-                            multis.as_ref(),
-                            x,
-                            y,
-                            Some(AUTO_WALK_MAX_RANGE),
-                            AUTO_WALK_MAX_EXPANSIONS,
-                        ) {
-                            WalkToStart::Start(goal) => {
-                                auto_goal = Some(goal);
-                                auto_blocked.clear();
-                                auto_door_attempts.clear();
-                                auto_steps = 0;
-                                auto_pending_move = false;
-                                auto_max_expansions = AUTO_WALK_MAX_EXPANSIONS;
-                                auto_max_steps = AUTO_WALK_MAX_STEPS;
-                                last_step =
-                                    Instant::now() - Duration::from_millis(AUTO_WALK_STEP_MS);
                             }
-                            WalkToStart::Stop => auto_goal = None,
+                            if let Some(sd) = send {
+                                let _ = session.walk(sd, run);
+                            }
+                        }
+                        // Click-to-walk: set the goal. The actual stepping happens below in
+                        // the loop body at the walk cadence. A far/out-of-range click is
+                        // rejected up front so it fails fast. A new WalkTo replaces any
+                        // active route (and clears the denied-tile blacklist).
+                        Some(Action::WalkTo { x, y }) => {
+                            match prepare_walkto(
+                                &mut session.world,
+                                map.as_mut(),
+                                multis.as_ref(),
+                                x,
+                                y,
+                                Some(AUTO_WALK_MAX_RANGE),
+                                AUTO_WALK_MAX_EXPANSIONS,
+                            ) {
+                                WalkToStart::Start(goal) => {
+                                    auto_goal = Some(goal);
+                                    auto_blocked.clear();
+                                    auto_door_attempts.clear();
+                                    auto_steps = 0;
+                                    auto_pending_move = false;
+                                    auto_max_expansions = AUTO_WALK_MAX_EXPANSIONS;
+                                    auto_max_steps = AUTO_WALK_MAX_STEPS;
+                                    last_step =
+                                        Instant::now() - Duration::from_millis(AUTO_WALK_STEP_MS);
+                                }
+                                WalkToStart::Stop => auto_goal = None,
+                            }
+                        }
+                        // Equip with layer 0 means "figure out the layer for me": look up the
+                        // item's graphic in the world and resolve its tiledata wear layer.
+                        Some(Action::Equip { serial, layer: 0 }) => {
+                            let layer = session
+                                .world
+                                .items
+                                .get(&serial)
+                                .map(|it| it.graphic)
+                                .and_then(|g| tiledata.as_ref().map(|t| t.item_layer(g)))
+                                .unwrap_or(0);
+                            let _ = session.apply_action(&Action::Equip { serial, layer });
+                        }
+                        Some(other) => {
+                            let _ = session.apply_action(&other);
                         }
                     }
-                    // Equip with layer 0 means "figure out the layer for me": look up the
-                    // item's graphic in the world and resolve its tiledata wear layer.
-                    Some(Action::Equip { serial, layer: 0 }) => {
-                        let layer = session
-                            .world
-                            .items
-                            .get(&serial)
-                            .map(|it| it.graphic)
-                            .and_then(|g| tiledata.as_ref().map(|t| t.item_layer(g)))
-                            .unwrap_or(0);
-                        let _ = session.apply_action(&Action::Equip { serial, layer });
+                }
+                if last_ping.elapsed().as_secs() >= 15 {
+                    let _ = session.send(&[0x73, 0x00]);
+                    last_ping = std::time::Instant::now();
+                }
+                // Pump the network briefly (keeps input responsive).
+                // Short pump so the loop ticks fast → the movement cadence gate fires near
+                // its exact UO step time (low jitter). Confirms are still processed every
+                // loop. (A long pump made the loop coarse → uneven step timing.)
+                if session.observe(Duration::from_millis(20)).is_err() {
+                    eprintln!("play: connection closed");
+                    break;
+                }
+                if let Some(allowed) = session.take_logout_ack() {
+                    if allowed {
+                        println!("play: server authorized logout");
+                        session_end = GameSessionEnd::LoggedOut;
+                        break;
                     }
-                    Some(other) => {
-                        let _ = session.apply_action(&other);
+                    session
+                        .world
+                        .push_system_note("The server refused the logout request.");
+                    dirty = true;
+                }
+
+                // A facet change and a server Pathfind request can arrive in the same
+                // pump. Reload first so route validation never consults the map we just
+                // left (the old loop did this only after one auto-walk tick).
+                let want_facet = session.world.map_index;
+                if map.as_ref().map(MapData::facet) != Some(want_facet) {
+                    match MapData::open_facet(&cfg.data_dir, want_facet) {
+                        Ok(m) => map = Some(m),
+                        Err(e) => eprintln!(
+                            "play: facet {want_facet} map load failed: {e} (keeping current map)"
+                        ),
                     }
                 }
-            }
-            if last_ping.elapsed().as_secs() >= 15 {
-                let _ = session.send(&[0x73, 0x00]);
-                last_ping = std::time::Instant::now();
-            }
-            // Pump the network briefly (keeps input responsive).
-            // Short pump so the loop ticks fast → the movement cadence gate fires near
-            // its exact UO step time (low jitter). Confirms are still processed every
-            // loop. (A long pump made the loop coarse → uneven step timing.)
-            if session.observe(Duration::from_millis(20)).is_err() {
-                eprintln!("play: connection closed");
-                break;
-            }
 
-            // A facet change and a server Pathfind request can arrive in the same
-            // pump. Reload first so route validation never consults the map we just
-            // left (the old loop did this only after one auto-walk tick).
-            let want_facet = session.world.map_index;
-            if map.as_ref().map(MapData::facet) != Some(want_facet) {
-                match MapData::open_facet(&cfg.data_dir, want_facet) {
-                    Ok(m) => map = Some(m),
-                    Err(e) => eprintln!(
-                        "play: facet {want_facet} map load failed: {e} (keeping current map)"
-                    ),
-                }
-            }
-
-            // 0x38 Pathfinding is a server-issued WalkTo. Feed it through the
-            // same map/blocked-goal policy as a browser click, but with
-            // ClassicUO's 10,000-node bound and no browser-only 32-tile cap.
-            // A resend to the same tile deliberately restarts it.
-            if let Some(request) = session
-                .world
-                .server_pathfind
-                .filter(|request| request.seq > server_pathfind_seq)
-            {
-                server_pathfind_seq = request.seq;
-                match prepare_walkto(
-                    &mut session.world,
-                    map.as_mut(),
-                    multis.as_ref(),
-                    request.x,
-                    request.y,
-                    None,
-                    SERVER_PATHFIND_MAX_EXPANSIONS,
-                ) {
-                    WalkToStart::Start(goal) => {
-                        auto_goal = Some(goal);
-                        auto_blocked.clear();
-                        auto_door_attempts.clear();
-                        auto_steps = 0;
-                        auto_pending_move = false;
-                        auto_max_expansions = SERVER_PATHFIND_MAX_EXPANSIONS;
-                        auto_max_steps = SERVER_PATHFIND_MAX_STEPS;
-                        last_step = Instant::now() - Duration::from_millis(AUTO_WALK_STEP_MS);
-                    }
-                    WalkToStart::Stop => auto_goal = None,
-                }
-            }
-
-            // --- Click-to-walk advance: re-path to the goal and issue one step per
-            // walk cadence (server-paced, unlike manual browser-paced walk). Confirms
-            // have been processed by observe() above, so the player tile here is
-            // current. Cancelled by a manual Walk / new WalkTo (handled above). ---
-            if let Some((gx, gy)) = auto_goal {
-                let here = session
+                // 0x38 Pathfinding is a server-issued WalkTo. Feed it through the
+                // same map/blocked-goal policy as a browser click, but with
+                // ClassicUO's 10,000-node bound and no browser-only 32-tile cap.
+                // A resend to the same tile deliberately restarts it.
+                if let Some(request) = session
                     .world
-                    .player_mobile()
-                    .map(|p| (p.pos.x, p.pos.y, p.pos.z, p.direction));
-                match here {
-                    Some((px, py, _, _)) if (px as u32, py as u32) == (gx, gy) => {
-                        auto_goal = None; // arrived
-                    }
-                    Some((px, py, pz, facing))
-                        if last_step.elapsed() >= Duration::from_millis(AUTO_WALK_STEP_MS) =>
-                    {
-                        // Did the previous *move* land? If our tile didn't change, the
-                        // server denied that tile → blacklist it so the re-path detours.
-                        if auto_pending_move && (px, py) == auto_from {
-                            auto_blocked.insert(auto_target);
+                    .server_pathfind
+                    .filter(|request| request.seq > server_pathfind_seq)
+                {
+                    server_pathfind_seq = request.seq;
+                    match prepare_walkto(
+                        &mut session.world,
+                        map.as_mut(),
+                        multis.as_ref(),
+                        request.x,
+                        request.y,
+                        None,
+                        SERVER_PATHFIND_MAX_EXPANSIONS,
+                    ) {
+                        WalkToStart::Start(goal) => {
+                            auto_goal = Some(goal);
+                            auto_blocked.clear();
+                            auto_door_attempts.clear();
+                            auto_steps = 0;
+                            auto_pending_move = false;
+                            auto_max_expansions = SERVER_PATHFIND_MAX_EXPANSIONS;
+                            auto_max_steps = SERVER_PATHFIND_MAX_STEPS;
+                            last_step = Instant::now() - Duration::from_millis(AUTO_WALK_STEP_MS);
                         }
-                        auto_pending_move = false;
+                        WalkToStart::Stop => auto_goal = None,
+                    }
+                }
 
-                        let path = map.as_mut().and_then(|m| {
-                            let mut terrain = MapTerrain {
-                                world: &session.world,
-                                map: m,
-                                blocked: &auto_blocked,
-                                multis: multis.as_ref(),
-                            };
-                            find_path(
-                                &mut terrain,
-                                (px as u32, py as u32, pz as i32),
-                                (gx, gy),
-                                auto_max_expansions,
-                            )
-                        });
-                        match path {
-                            Some(p) if !p.is_empty() => {
-                                let want = p[0].dir;
-                                // Resolve like a manual key: a blocked diagonal slides to
-                                // a free cardinal; a turn precedes a move on a new facing.
-                                let resolved = map.as_mut().and_then(|m| {
-                                    can_walk(
-                                        &session.world,
-                                        m,
-                                        multis.as_ref(),
-                                        px as i64,
-                                        py as i64,
-                                        pz as i32,
-                                        want,
-                                    )
-                                });
-                                let send = if facing == want {
-                                    resolved.map(|(nd, _, _)| nd)
-                                } else {
-                                    Some(resolved.map(|(nd, _, _)| nd).unwrap_or(want))
+                // --- Click-to-walk advance: re-path to the goal and issue one step per
+                // walk cadence (server-paced, unlike manual browser-paced walk). Confirms
+                // have been processed by observe() above, so the player tile here is
+                // current. Cancelled by a manual Walk / new WalkTo (handled above). ---
+                if let Some((gx, gy)) = auto_goal {
+                    let here = session
+                        .world
+                        .player_mobile()
+                        .map(|p| (p.pos.x, p.pos.y, p.pos.z, p.direction));
+                    match here {
+                        Some((px, py, _, _)) if (px as u32, py as u32) == (gx, gy) => {
+                            auto_goal = None; // arrived
+                        }
+                        Some((px, py, pz, facing))
+                            if last_step.elapsed() >= Duration::from_millis(AUTO_WALK_STEP_MS) =>
+                        {
+                            // Did the previous *move* land? If our tile didn't change, the
+                            // server denied that tile → blacklist it so the re-path detours.
+                            if auto_pending_move && (px, py) == auto_from {
+                                auto_blocked.insert(auto_target);
+                            }
+                            auto_pending_move = false;
+
+                            let path = map.as_mut().and_then(|m| {
+                                let mut terrain = MapTerrain {
+                                    world: &session.world,
+                                    map: m,
+                                    blocked: &auto_blocked,
+                                    multis: multis.as_ref(),
                                 };
-                                if let Some(sd) = send {
-                                    if session.walk(sd, false).unwrap_or(false) {
-                                        auto_from = (px, py);
-                                        // Same-facing = a real tile move; a facing change
-                                        // is a turn (no move) and must not count as a deny.
-                                        auto_pending_move = facing == sd;
-                                        auto_target = resolved
-                                            .map(|(_, nx, ny)| (nx as u32, ny as u32))
-                                            .unwrap_or((px as u32, py as u32));
-                                        auto_steps += 1;
-                                        if auto_steps > auto_max_steps {
-                                            auto_goal = None; // runaway guard
-                                        }
-                                    }
-                                } else {
-                                    // Fully blocked here. A closed door isn't a wall — it's
-                                    // something we can open (see `decide_blocked_step`) — so
-                                    // try that a bounded number of times before giving up on
-                                    // the tile like any other blocker.
-                                    let tile = (p[0].x, p[0].y);
-                                    let door = map.as_ref().and_then(|m| {
-                                        door_blocking_at(
+                                find_path(
+                                    &mut terrain,
+                                    (px as u32, py as u32, pz as i32),
+                                    (gx, gy),
+                                    auto_max_expansions,
+                                )
+                            });
+                            match path {
+                                Some(p) if !p.is_empty() => {
+                                    let want = p[0].dir;
+                                    // Resolve like a manual key: a blocked diagonal slides to
+                                    // a free cardinal; a turn precedes a move on a new facing.
+                                    let resolved = map.as_mut().and_then(|m| {
+                                        can_walk(
                                             &session.world,
                                             m,
-                                            tile.0 as i64,
-                                            tile.1 as i64,
+                                            multis.as_ref(),
+                                            px as i64,
+                                            py as i64,
                                             pz as i32,
+                                            want,
                                         )
                                     });
-                                    let prior = auto_door_attempts.get(&tile).copied();
-                                    let attempts = prior.map_or(0, |p| p.count);
-                                    // Has the door's own graphic moved since our last `Use`? If
-                                    // so, that `Use` already landed (ServUO toggled it) — safe
-                                    // (and necessary, e.g. it toggled back closed) to act again
-                                    // immediately, cooldown or not. `door` being `None` here
-                                    // (the tile's blocker vanished/changed identity) also counts
-                                    // as "changed" so a stale wait can't get stuck.
-                                    let door_state_changed = match (door, prior) {
-                                        (Some(serial), Some(p)) => session
-                                            .world
-                                            .items
-                                            .get(&serial)
-                                            .is_none_or(|it| it.graphic != p.graphic_at_send),
-                                        _ => true,
+                                    let send = if facing == want {
+                                        resolved.map(|(nd, _, _)| nd)
+                                    } else {
+                                        Some(resolved.map(|(nd, _, _)| nd).unwrap_or(want))
                                     };
-                                    let pending_use_sent_at = prior.map(|p| p.sent_at);
-                                    match decide_blocked_step(
-                                        door,
-                                        attempts,
-                                        pending_use_sent_at,
-                                        door_state_changed,
-                                        Instant::now(),
-                                    ) {
-                                        BlockedStepAction::OpenDoor(serial) => {
-                                            if std::env::var("ANIMA_DEBUG").is_ok() {
-                                                eprintln!(
+                                    if let Some(sd) = send {
+                                        if session.walk(sd, false).unwrap_or(false) {
+                                            auto_from = (px, py);
+                                            // Same-facing = a real tile move; a facing change
+                                            // is a turn (no move) and must not count as a deny.
+                                            auto_pending_move = facing == sd;
+                                            auto_target = resolved
+                                                .map(|(_, nx, ny)| (nx as u32, ny as u32))
+                                                .unwrap_or((px as u32, py as u32));
+                                            auto_steps += 1;
+                                            if auto_steps > auto_max_steps {
+                                                auto_goal = None; // runaway guard
+                                            }
+                                        }
+                                    } else {
+                                        // Fully blocked here. A closed door isn't a wall — it's
+                                        // something we can open (see `decide_blocked_step`) — so
+                                        // try that a bounded number of times before giving up on
+                                        // the tile like any other blocker.
+                                        let tile = (p[0].x, p[0].y);
+                                        let door = map.as_ref().and_then(|m| {
+                                            door_blocking_at(
+                                                &session.world,
+                                                m,
+                                                tile.0 as i64,
+                                                tile.1 as i64,
+                                                pz as i32,
+                                            )
+                                        });
+                                        let prior = auto_door_attempts.get(&tile).copied();
+                                        let attempts = prior.map_or(0, |p| p.count);
+                                        // Has the door's own graphic moved since our last `Use`? If
+                                        // so, that `Use` already landed (ServUO toggled it) — safe
+                                        // (and necessary, e.g. it toggled back closed) to act again
+                                        // immediately, cooldown or not. `door` being `None` here
+                                        // (the tile's blocker vanished/changed identity) also counts
+                                        // as "changed" so a stale wait can't get stuck.
+                                        let door_state_changed = match (door, prior) {
+                                            (Some(serial), Some(p)) => {
+                                                session.world.items.get(&serial).is_none_or(|it| {
+                                                    it.graphic != p.graphic_at_send
+                                                })
+                                            }
+                                            _ => true,
+                                        };
+                                        let pending_use_sent_at = prior.map(|p| p.sent_at);
+                                        match decide_blocked_step(
+                                            door,
+                                            attempts,
+                                            pending_use_sent_at,
+                                            door_state_changed,
+                                            Instant::now(),
+                                        ) {
+                                            BlockedStepAction::OpenDoor(serial) => {
+                                                if std::env::var("ANIMA_DEBUG").is_ok() {
+                                                    eprintln!(
                                                     "play: walkto ({gx},{gy}) opening door {serial:#x} at {tile:?} (attempt {})",
                                                     attempts + 1
                                                 );
+                                                }
+                                                let graphic_at_send = session
+                                                    .world
+                                                    .items
+                                                    .get(&serial)
+                                                    .map_or(0, |it| it.graphic);
+                                                auto_door_attempts.insert(
+                                                    tile,
+                                                    DoorUseAttempt {
+                                                        count: attempts + 1,
+                                                        sent_at: Instant::now(),
+                                                        graphic_at_send,
+                                                    },
+                                                );
+                                                let _ =
+                                                    session.apply_action(&Action::Use { serial });
                                             }
-                                            let graphic_at_send = session
-                                                .world
-                                                .items
-                                                .get(&serial)
-                                                .map_or(0, |it| it.graphic);
-                                            auto_door_attempts.insert(
-                                                tile,
-                                                DoorUseAttempt {
-                                                    count: attempts + 1,
-                                                    sent_at: Instant::now(),
-                                                    graphic_at_send,
-                                                },
-                                            );
-                                            let _ = session.apply_action(&Action::Use { serial });
-                                        }
-                                        BlockedStepAction::AwaitDoor => {
-                                            // A `Use` for this door hasn't had time to land / show
-                                            // an effect yet — do nothing this tick (see
-                                            // `decide_blocked_step`'s doc); resending now would
-                                            // risk toggling shut what the first `Use` is about to
-                                            // open (the very race FIX 5 exists to close).
-                                        }
-                                        BlockedStepAction::Blacklist => {
-                                            auto_blocked.insert(tile);
+                                            BlockedStepAction::AwaitDoor => {
+                                                // A `Use` for this door hasn't had time to land / show
+                                                // an effect yet — do nothing this tick (see
+                                                // `decide_blocked_step`'s doc); resending now would
+                                                // risk toggling shut what the first `Use` is about to
+                                                // open (the very race FIX 5 exists to close).
+                                            }
+                                            BlockedStepAction::Blacklist => {
+                                                auto_blocked.insert(tile);
+                                            }
                                         }
                                     }
+                                    last_step = Instant::now();
                                 }
-                                last_step = Instant::now();
-                            }
-                            // No route given what we've learned (boxed in by newly-
-                            // blacklisted denied tiles) → stop, and say so. This fires at
-                            // most once per abandoned route (clearing `auto_goal` stops
-                            // this block from running again), so no spam risk.
-                            _ => {
-                                eprintln!("play: walkto ({gx},{gy}) abandoned: boxed in");
-                                session.world.push_system_note(format!(
-                                    "walkto ({gx},{gy}) abandoned: boxed in"
-                                ));
-                                auto_goal = None;
+                                // No route given what we've learned (boxed in by newly-
+                                // blacklisted denied tiles) → stop, and say so. This fires at
+                                // most once per abandoned route (clearing `auto_goal` stops
+                                // this block from running again), so no spam risk.
+                                _ => {
+                                    eprintln!("play: walkto ({gx},{gy}) abandoned: boxed in");
+                                    session.world.push_system_note(format!(
+                                        "walkto ({gx},{gy}) abandoned: boxed in"
+                                    ));
+                                    auto_goal = None;
+                                }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
 
-            // Keep the shared facet in step so `/regions.json` can filter its
-            // guard-zone rects to wherever the player currently is (0xBF/0x08
-            // MapChange updates `world.map_index` directly; see its doc).
-            facet.store(session.world.map_index, Ordering::Relaxed);
-            let obs = session.world.observe(&mut cursor);
-            for j in &obs.new_journal {
-                journal_seq += 1;
-                // For a localized (cliloc) line, `j.text` holds the raw tab-separated
-                // args; resolve them against the Cliloc table into display text so the
-                // journal + overhead show real words instead of a blank line. Fall back
-                // to `#<id>` when the id isn't in the table.
-                let text = if j.cliloc != 0 {
-                    cliloc
-                        .as_deref()
-                        .and_then(|c| c.format(j.cliloc, &j.text))
-                        .unwrap_or_else(|| format!("#{}", j.cliloc))
-                } else {
-                    j.text.clone()
-                };
-                journal.push(serde_json::json!({
-                    "seq": journal_seq, "serial": j.serial, "name": j.name,
-                    "text": text, "type": j.msg_type, "hue": j.hue, "cliloc": j.cliloc
-                }));
-                dirty = true;
-            }
-            while journal.len() > 50 {
-                journal.remove(0);
-            }
-            // Rebuild the (expensive) scene only when the player moved, the journal
-            // changed, or ~250ms passed — not on every 100ms loop iteration.
-            // Include Z so climbing stairs (Z changes, maybe same X/Y) rebuilds the
-            // scene → maxDrawZ recomputes and the visible floor switches with you.
-            let pos = session
-                .world
-                .player_mobile()
-                .map(|p| (p.pos.x, p.pos.y, p.pos.z))
-                .unwrap_or(last_pos);
-            if (pos.0, pos.1) != (last_pos.0, last_pos.1) {
-                dirty = true;
-                if std::env::var("ANIMA_DEBUG").is_ok() {
-                    eprintln!(
-                        "[srv {}] MOVED ({},{}) -> ({},{})  confirms={} denies={}",
-                        trace_t0.elapsed().as_millis(),
-                        last_pos.0,
-                        last_pos.1,
-                        pos.0,
-                        pos.1,
-                        session.confirms,
-                        session.denies
-                    );
+                // Keep the shared facet in step so `/regions.json` can filter its
+                // guard-zone rects to wherever the player currently is (0xBF/0x08
+                // MapChange updates `world.map_index` directly; see its doc).
+                facet.store(session.world.map_index, Ordering::Relaxed);
+                let obs = session.world.observe(&mut cursor);
+                for j in &obs.new_journal {
+                    journal_seq += 1;
+                    // For a localized (cliloc) line, `j.text` holds the raw tab-separated
+                    // args; resolve them against the Cliloc table into display text so the
+                    // journal + overhead show real words instead of a blank line. Fall back
+                    // to `#<id>` when the id isn't in the table.
+                    let text = if j.cliloc != 0 {
+                        cliloc
+                            .as_deref()
+                            .and_then(|c| c.format(j.cliloc, &j.text))
+                            .unwrap_or_else(|| format!("#{}", j.cliloc))
+                    } else {
+                        j.text.clone()
+                    };
+                    journal.push(serde_json::json!({
+                        "seq": journal_seq, "serial": j.serial, "name": j.name,
+                        "text": text, "type": j.msg_type, "hue": j.hue, "cliloc": j.cliloc
+                    }));
+                    dirty = true;
                 }
-                // The server's ConfirmWalk (0x22) carries no Z; like ClassicUO
-                // (Pathfinder.CalculateNewZ) the client resolves the standing Z of the
-                // tile it stepped onto from the map — bounded by the tile it came from
-                // and the step's direction, picking the surface/bridge nearest the
-                // current Z with clearance. This is what makes stairs/ramps climb.
-                let mut nz = pos.2;
-                if let Some(m) = map.as_mut() {
-                    let dir = delta_dir(
-                        pos.0 as i64 - last_pos.0 as i64,
-                        pos.1 as i64 - last_pos.1 as i64,
-                    );
-                    if let Some(z) = calculate_new_z(
-                        &session.world,
-                        m,
-                        multis.as_ref(),
-                        pos.0 as i64,
-                        pos.1 as i64,
-                        last_pos.2 as i32,
-                        dir,
-                    ) {
-                        nz = z as i8;
-                        if let Some(p) = session.world.player_mobile_mut() {
-                            p.pos.z = nz;
-                        }
-                        // Stairs/ramps show up here as a Z change with the same (or a
-                        // 1-tile) X/Y — best-effort detail only (diagnostics, not
-                        // correctness-critical): name the static whose [z, z+height)
-                        // span covers the resolved Z if one is cheaply findable, else
-                        // just say the land surface accounts for it.
-                        if std::env::var("ANIMA_DEBUG").is_ok() && nz != last_pos.2 {
-                            let land_z = m.land(pos.0 as u32, pos.1 as u32).z;
-                            let static_note = m
-                                .statics(pos.0 as u32, pos.1 as u32)
-                                .into_iter()
-                                .find(|s| (s.z as i32) <= z && z <= s.z as i32 + s.height as i32)
-                                .map(|s| {
-                                    format!(
-                                        "static g=0x{:04X} top={}",
-                                        s.graphic,
-                                        s.z as i32 + s.height as i32
-                                    )
-                                })
-                                .unwrap_or_else(|| "land surface accounts for it".to_string());
-                            eprintln!(
+                while journal.len() > 50 {
+                    journal.remove(0);
+                }
+                // Rebuild the (expensive) scene only when the player moved, the journal
+                // changed, or ~250ms passed — not on every 100ms loop iteration.
+                // Include Z so climbing stairs (Z changes, maybe same X/Y) rebuilds the
+                // scene → maxDrawZ recomputes and the visible floor switches with you.
+                let pos = session
+                    .world
+                    .player_mobile()
+                    .map(|p| (p.pos.x, p.pos.y, p.pos.z))
+                    .unwrap_or(last_pos);
+                if (pos.0, pos.1) != (last_pos.0, last_pos.1) {
+                    dirty = true;
+                    if std::env::var("ANIMA_DEBUG").is_ok() {
+                        eprintln!(
+                            "[srv {}] MOVED ({},{}) -> ({},{})  confirms={} denies={}",
+                            trace_t0.elapsed().as_millis(),
+                            last_pos.0,
+                            last_pos.1,
+                            pos.0,
+                            pos.1,
+                            session.confirms,
+                            session.denies
+                        );
+                    }
+                    // The server's ConfirmWalk (0x22) carries no Z; like ClassicUO
+                    // (Pathfinder.CalculateNewZ) the client resolves the standing Z of the
+                    // tile it stepped onto from the map — bounded by the tile it came from
+                    // and the step's direction, picking the surface/bridge nearest the
+                    // current Z with clearance. This is what makes stairs/ramps climb.
+                    let mut nz = pos.2;
+                    if let Some(m) = map.as_mut() {
+                        let dir = delta_dir(
+                            pos.0 as i64 - last_pos.0 as i64,
+                            pos.1 as i64 - last_pos.1 as i64,
+                        );
+                        if let Some(z) = calculate_new_z(
+                            &session.world,
+                            m,
+                            multis.as_ref(),
+                            pos.0 as i64,
+                            pos.1 as i64,
+                            last_pos.2 as i32,
+                            dir,
+                        ) {
+                            nz = z as i8;
+                            if let Some(p) = session.world.player_mobile_mut() {
+                                p.pos.z = nz;
+                            }
+                            // Stairs/ramps show up here as a Z change with the same (or a
+                            // 1-tile) X/Y — best-effort detail only (diagnostics, not
+                            // correctness-critical): name the static whose [z, z+height)
+                            // span covers the resolved Z if one is cheaply findable, else
+                            // just say the land surface accounts for it.
+                            if std::env::var("ANIMA_DEBUG").is_ok() && nz != last_pos.2 {
+                                let land_z = m.land(pos.0 as u32, pos.1 as u32).z;
+                                let static_note = m
+                                    .statics(pos.0 as u32, pos.1 as u32)
+                                    .into_iter()
+                                    .find(|s| {
+                                        (s.z as i32) <= z && z <= s.z as i32 + s.height as i32
+                                    })
+                                    .map(|s| {
+                                        format!(
+                                            "static g=0x{:04X} top={}",
+                                            s.graphic,
+                                            s.z as i32 + s.height as i32
+                                        )
+                                    })
+                                    .unwrap_or_else(|| "land surface accounts for it".to_string());
+                                eprintln!(
                                 "play: step dir={dir} ({},{}) z {} -> {nz} (land z={land_z}, {static_note})",
                                 pos.0, pos.1, last_pos.2
                             );
+                            }
                         }
                     }
+                    last_pos = (pos.0, pos.1, nz);
                 }
-                last_pos = (pos.0, pos.1, nz);
-            }
-            // A new sound/damage/effect event must be reflected immediately (not on the
-            // 250ms timer), or it plays/shows late. Rebuild the scene the moment any of
-            // these monotonic seqs advances.
-            let seqs = (
-                session.world.sound_seq,
-                session.world.damage_seq,
-                session.world.effect_seq,
-            );
-            if seqs != last_event_seqs {
-                // Push each newly-arrived sound to the SSE clients immediately (no poll
-                // wait). Damage/effects still ride the scene poll — only sound is pushed.
-                let prev_sound = last_event_seqs.0;
-                if session.world.sound_seq > prev_sound {
-                    for &(seq, id, x, y) in &session.world.recent_sounds {
-                        if seq > prev_sound {
-                            sse_broadcast(
-                                &sse_hub,
-                                format!(
+                // A new sound/damage/effect event must be reflected immediately (not on the
+                // 250ms timer), or it plays/shows late. Rebuild the scene the moment any of
+                // these monotonic seqs advances.
+                let seqs = (
+                    session.world.sound_seq,
+                    session.world.damage_seq,
+                    session.world.effect_seq,
+                );
+                if seqs != last_event_seqs {
+                    // Push each newly-arrived sound to the SSE clients immediately (no poll
+                    // wait). Damage/effects still ride the scene poll — only sound is pushed.
+                    let prev_sound = last_event_seqs.0;
+                    if session.world.sound_seq > prev_sound {
+                        for &(seq, id, x, y) in &session.world.recent_sounds {
+                            if seq > prev_sound {
+                                sse_broadcast(
+                                    &sse_hub,
+                                    format!(
                                     "data: {{\"seq\":{seq},\"id\":{id},\"x\":{x},\"y\":{y}}}\n\n"
                                 )
-                                .as_bytes(),
-                            );
+                                    .as_bytes(),
+                                );
+                            }
                         }
                     }
+                    last_event_seqs = seqs;
+                    dirty = true;
                 }
-                last_event_seqs = seqs;
-                dirty = true;
-            }
-            // SSE keepalive: a periodic comment frame both keeps proxies from closing
-            // the stream and lets a write to a vanished client fail → that worker thread
-            // unblocks and the dead sender is reaped on the next broadcast.
-            if last_heartbeat.elapsed() >= Duration::from_secs(15) {
-                sse_broadcast(&sse_hub, b": ping\n\n");
-                last_heartbeat = Instant::now();
-            }
-            if dirty || last_build.elapsed() >= Duration::from_millis(250) {
-                let t0 = Instant::now();
-                let mut art_guard = art.as_ref().map(|a| a.lock().unwrap());
-                let json = build_scene(
-                    &mut session,
-                    map.as_mut(),
-                    art_guard.as_deref_mut(),
-                    cliloc.as_deref(),
-                    animdata.as_ref(),
-                    anim.as_deref(),
-                    multis.as_ref(),
-                    &journal,
-                );
-                drop(art_guard);
-                *scene.lock().unwrap() = json;
-                last_build = Instant::now();
-                dirty = false;
+                // SSE keepalive: a periodic comment frame both keeps proxies from closing
+                // the stream and lets a write to a vanished client fail → that worker thread
+                // unblocks and the dead sender is reaped on the next broadcast.
+                if last_heartbeat.elapsed() >= Duration::from_secs(15) {
+                    sse_broadcast(&sse_hub, b": ping\n\n");
+                    last_heartbeat = Instant::now();
+                }
+                if dirty || last_build.elapsed() >= Duration::from_millis(250) {
+                    let t0 = Instant::now();
+                    let mut art_guard = art.as_ref().map(|a| a.lock().unwrap());
+                    let json = build_scene(
+                        &mut session,
+                        map.as_mut(),
+                        art_guard.as_deref_mut(),
+                        cliloc.as_deref(),
+                        animdata.as_ref(),
+                        anim.as_deref(),
+                        multis.as_ref(),
+                        &journal,
+                    );
+                    drop(art_guard);
+                    *scene.lock().unwrap() = json;
+                    last_build = Instant::now();
+                    dirty = false;
 
-                let us = t0.elapsed().as_micros();
-                builds += 1;
-                build_sum_us += us;
-                build_max_us = build_max_us.max(us);
-                if us > 30_000 {
-                    eprintln!("[diag] slow scene build: {:.1}ms", us as f64 / 1000.0);
+                    let us = t0.elapsed().as_micros();
+                    builds += 1;
+                    build_sum_us += us;
+                    build_max_us = build_max_us.max(us);
+                    if us > 30_000 {
+                        eprintln!("[diag] slow scene build: {:.1}ms", us as f64 / 1000.0);
+                    }
+                }
+
+                // Periodic diagnostics line.
+                if diag_since.elapsed() >= Duration::from_secs(5) {
+                    let reqs = REQ_COUNT.load(Ordering::Relaxed);
+                    let avg = if builds > 0 {
+                        build_sum_us / builds as u128
+                    } else {
+                        0
+                    };
+                    eprintln!(
+                        "[diag] 5s: scene builds={builds} avg={:.1}ms max={:.1}ms | http reqs={}",
+                        avg as f64 / 1000.0,
+                        build_max_us as f64 / 1000.0,
+                        reqs - last_reqs,
+                    );
+                    diag_since = Instant::now();
+                    builds = 0;
+                    build_sum_us = 0;
+                    build_max_us = 0;
+                    last_reqs = reqs;
                 }
             }
-
-            // Periodic diagnostics line.
-            if diag_since.elapsed() >= Duration::from_secs(5) {
-                let reqs = REQ_COUNT.load(Ordering::Relaxed);
-                let avg = if builds > 0 {
-                    build_sum_us / builds as u128
-                } else {
-                    0
-                };
-                eprintln!(
-                    "[diag] 5s: scene builds={builds} avg={:.1}ms max={:.1}ms | http reqs={}",
-                    avg as f64 / 1000.0,
-                    build_max_us as f64 / 1000.0,
-                    reqs - last_reqs,
-                );
-                diag_since = Instant::now();
-                builds = 0;
-                build_sum_us = 0;
-                build_max_us = 0;
-                last_reqs = reqs;
+            if !cfg.login_page {
+                break 'connections;
             }
+            while rx.try_recv().is_ok() {}
+            let msg = match session_end {
+                GameSessionEnd::LoggedOut => "Logged out safely.",
+                GameSessionEnd::ConnectionLost => "Connection lost. You can sign in again.",
+            };
+            *scene.lock().unwrap() = serde_json::json!({
+                "auth": "login",
+                "msg": msg,
+            })
+            .to_string();
+            println!("play: {msg} waiting for a new login");
         }
         Ok(())
     }
@@ -1632,8 +1681,33 @@ fn handle_request(ctx: Ctx) {
         };
         match parse_login_attempt(&body) {
             Ok(attempt) => {
-                let _ = login.send(attempt);
-                let _ = req.respond(Response::from_string("ok"));
+                let mut current_scene = scene.lock().unwrap();
+                if !login_attempt_expected(&current_scene) {
+                    drop(current_scene);
+                    let _ = req.respond(
+                        Response::from_string("login is not expected while a session is active")
+                            .with_status_code(409),
+                    );
+                    return;
+                }
+                *current_scene = serde_json::json!({
+                    "auth": "connecting",
+                    "msg": "Connecting…",
+                })
+                .to_string();
+                drop(current_scene);
+                if login.send(attempt).is_ok() {
+                    let _ = req.respond(Response::from_string("ok"));
+                } else {
+                    *scene.lock().unwrap() = serde_json::json!({
+                        "auth": "error",
+                        "msg": "login service is unavailable",
+                    })
+                    .to_string();
+                    let _ = req.respond(
+                        Response::from_string("login service is unavailable").with_status_code(409),
+                    );
+                }
             }
             Err(message) => {
                 let _ = req.respond(Response::from_string(message).with_status_code(400));
@@ -2350,6 +2424,7 @@ fn content_type(path: &str) -> &'static str {
 /// or permitted silent close for an exact 0xAB dialog) ·
 /// `profile:<serial>` / `profileupdate:<seq>:<text>` / `profileclose:<seq>`
 /// (request, save/close an editable profile, or close a read-only 0xB8 profile) ·
+/// `logout` (negotiate 0xD1 session termination when supported) ·
 /// `tradeaccept:<mycont>:<0|1>` / `tradecancel:<mycont>` /
 /// `tradegold:<mycont>:<gold>:<platinum>` (answer the secure-trade session
 /// keyed by our own container serial `mycont`, 0x6F — multiple concurrent
@@ -2618,6 +2693,7 @@ fn parse_command(body: &str) -> Option<Action> {
         "profileclose" => Some(Action::ProfileClose {
             seq: arg.parse().ok()?,
         }),
+        "logout" => arg.is_empty().then_some(Action::Logout),
         // tradeaccept:<mycont>:<0|1> — toggle our accept checkbox on the secure
         // trade session keyed by our own container serial (0x6F action 2).
         "tradeaccept" => {
@@ -2804,6 +2880,12 @@ mod hue_palette_tests {
     }
 
     #[test]
+    fn logout_command_is_exact_and_argument_free() {
+        assert_eq!(parse_command("logout"), Some(Action::Logout));
+        assert!(parse_command("logout:anything").is_none());
+    }
+
+    #[test]
     #[ignore] // needs ~/dev/uo/uo-resource/hues.mul
     fn real_hues_mul_produces_visible_varied_picker_colors() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
@@ -2871,7 +2953,10 @@ mod resource_limit_tests {
 
 #[cfg(test)]
 mod login_request_tests {
-    use super::{parse_character_choice, parse_login_attempt, starting_skills, CharacterDecision};
+    use super::{
+        login_attempt_expected, parse_character_choice, parse_login_attempt, starting_skills,
+        CharacterDecision,
+    };
     use anima_core::net::CharacterChoice;
 
     #[test]
@@ -2884,6 +2969,17 @@ mod login_request_tests {
         assert_eq!(attempt.character_slot, None);
         assert!(!attempt.interactive);
         assert!(attempt.create.is_none());
+    }
+
+    #[test]
+    fn login_posts_are_accepted_only_on_login_or_error_scenes() {
+        assert!(login_attempt_expected(r#"{"auth":"login"}"#));
+        assert!(login_attempt_expected(
+            r#"{"auth":"error","msg":"try again"}"#
+        ));
+        assert!(!login_attempt_expected(r#"{"auth":"connecting"}"#));
+        assert!(!login_attempt_expected(r#"{"player":{"serial":7}}"#));
+        assert!(!login_attempt_expected("not json"));
     }
 
     #[test]

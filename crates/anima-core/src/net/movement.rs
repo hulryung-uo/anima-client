@@ -308,6 +308,7 @@ mod tests {
             direction: dir,
             body: 0x190,
             aos: false,
+            character_list_flags: 0,
         });
         w
     }

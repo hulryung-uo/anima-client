@@ -12,8 +12,8 @@
 use crate::gump_layout::GumpElement;
 use crate::types::Position;
 use crate::world::{
-    is_ghost_body, Book, Buff, CharacterProfile, HuePicker, JournalEntry, LegacyMenu, MapView,
-    OpenUrlRequest, Party, PopupMenu, PromptState, ShopBuy, ShopSell, SpellbookContent,
+    is_ghost_body, Book, Buff, CharacterProfile, HuePicker, JournalEntry, LegacyMenu, LogoutAck,
+    MapView, OpenUrlRequest, Party, PopupMenu, PromptState, ShopBuy, ShopSell, SpellbookContent,
     TargetCursor, TextEntryDialog, TipNotice, TradeState, Weather, World,
 };
 
@@ -178,6 +178,9 @@ pub struct Observation {
     /// with [`Action::ProfileUpdate`], while [`Action::ProfileClose`] dismisses
     /// a window without changing its original body.
     pub character_profiles: Vec<CharacterProfile>,
+    /// Latest server permission reply to [`Action::Logout`]. Consumers must
+    /// correlate its monotonic `seq` with the request they issued.
+    pub logout_ack: Option<LogoutAck>,
     /// The currently open book (0x93/0xD4 + 0x66), if any. See [`Book`].
     /// Request more pages with [`Action::BookRequest`].
     pub book: Option<Book>,
@@ -448,6 +451,11 @@ pub enum Action {
     ProfileUpdate { seq: u64, text: String },
     /// Close an exact profile locally without changing its original body.
     ProfileClose { seq: u64 },
+    /// End the current game session. When the 0xA9 capability flag is present,
+    /// send 0xD1 and keep the connection open until a fresh
+    /// [`Observation::logout_ack`] explicitly allows it. Otherwise the driver
+    /// follows ClassicUO's immediate-disconnect fallback without sending 0xD1.
+    Logout,
     /// Toggle our side's accept checkbox on a secure trade (0x6F action 2).
     /// `container` selects which session (its `my_container`, from
     /// [`crate::world::World::trades`] — multiple can be open at once with
@@ -637,6 +645,7 @@ impl World {
             tips: self.tips.clone(),
             text_entry_dialogs: self.text_entry_dialogs.clone(),
             character_profiles: self.character_profiles.clone(),
+            logout_ack: self.logout_ack,
             book: self.book.clone(),
             party: self.party.clone(),
             quest_arrow: self.quest_arrow,
@@ -675,6 +684,7 @@ mod tests {
             direction: 0,
             body: 0x190,
             aos: false,
+            character_list_flags: 0,
         });
         // Two mobiles at different distances.
         let far = w.mobile_mut(0xAA);
@@ -732,6 +742,7 @@ mod tests {
             direction: 0,
             body: 0x190,
             aos: false,
+            character_list_flags: 0,
         });
         for (serial, x, name) in [
             (0x30, 105, "same-distance-higher-serial"),

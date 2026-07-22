@@ -1446,6 +1446,16 @@ fn character_profiles_json(world: &World) -> Value {
     )
 }
 
+/// Latest 0xD1 logout permission reply. The play loop, not the renderer,
+/// performs an accepted disconnect; a denied reply remains visible long enough
+/// for the browser to restore its logout button and explain the refusal.
+fn logout_ack_json(world: &World) -> Value {
+    match world.logout_ack {
+        Some(ack) => json!({ "seq": ack.seq, "allowed": ack.allowed }),
+        None => Value::Null,
+    }
+}
+
 /// Build the `party` object for the scene (0xBF/0x06). `leader` is the party
 /// leader's serial (0 = none), `members` lists each member `{serial, name, hits,
 /// hitsMax}`, and `invite` is the serial of a leader who invited us (0 = none).
@@ -2729,6 +2739,8 @@ pub fn build_scene(
     // Persistent 0xB8 character profile windows, keyed by exact response seq.
     let profiles =
         serde_json::to_string(&character_profiles_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    let logout_ack =
+        serde_json::to_string(&logout_ack_json(&s.world)).unwrap_or_else(|_| "null".into());
     // The open book (0x93/0xD4 + 0x66), or null.
     let book = serde_json::to_string(&book_json(&s.world)).unwrap_or_else(|_| "null".into());
     // Known spellbook contents (0xBF/0x1B), one entry per book we've been told
@@ -2830,7 +2842,7 @@ pub fn build_scene(
          \"statics\":[{statics}],\"mobiles\":{mobiles},\"items\":{items},\"contItems\":{cont_items},\
          \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"tanims\":{tanims},\"damage\":{damage},\"effects\":{effects},\"music\":{music},\
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
-         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
+         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"logoutAck\":{logout_ack},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
          \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps},\
@@ -3442,6 +3454,16 @@ mod tests {
                 },
             ])
         );
+    }
+
+    #[test]
+    fn logout_ack_json_is_null_then_preserves_permission_identity() {
+        let mut w = World::default();
+        assert_eq!(logout_ack_json(&w), Value::Null);
+        w.set_logout_ack(false);
+        assert_eq!(logout_ack_json(&w), json!({ "seq": 1, "allowed": false }));
+        w.set_logout_ack(true);
+        assert_eq!(logout_ack_json(&w), json!({ "seq": 2, "allowed": true }));
     }
 
     #[test]

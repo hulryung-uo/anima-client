@@ -146,6 +146,7 @@ fn main() {
                     format!("profileupdate({seq},{text:?})")
                 }
                 Action::ProfileClose { seq } => format!("profileclose({seq})"),
+                Action::Logout => "logout".into(),
                 Action::TradeAccept { container, accept } => {
                     format!("tradeaccept(0x{container:08X},{accept})")
                 }

@@ -28,6 +28,7 @@ pub struct WasmClient {
     /// Bytes queued to send to the server (drained by JS).
     outbox: Vec<u8>,
     logged_in: bool,
+    logout_handshake: bool,
 }
 
 #[wasm_bindgen]
@@ -55,6 +56,7 @@ impl WasmClient {
             journal_cursor: 0,
             outbox: initial,
             logged_in: false,
+            logout_handshake: false,
         }
     }
 
@@ -88,6 +90,9 @@ impl WasmClient {
                         // selection, so this directive is reserved for native UI.
                         LoginDirective::ChooseCharacter(_) => {}
                         LoginDirective::Done(r) => {
+                            self.logout_handshake = r.character_list_flags
+                                & anima_core::net::CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE
+                                != 0;
                             self.world.enter_world(&r);
                             self.login = None;
                         }
@@ -321,6 +326,20 @@ impl WasmClient {
         true
     }
 
+    /// Start ending this game session. Returns `false` when a negotiated 0xD1
+    /// request was queued and the host must wait for a fresh
+    /// `observation_json().logout_ack.allowed` reply. Returns `true` when the
+    /// server did not advertise that handshake and the host may close now.
+    pub fn logout(&mut self) -> bool {
+        if self.logout_handshake {
+            self.outbox
+                .extend(anima_core::net::outgoing::build_logout_request());
+            false
+        } else {
+            true
+        }
+    }
+
     /// Current perception using the shared, versioned Observation JSON schema.
     pub fn observation_json(&mut self) -> String {
         let obs = self.world.observe(&mut self.journal_cursor);
@@ -546,5 +565,37 @@ mod tests {
             .set_character_profile(0x0102_0304, "Anima".into(), "".into(), "Same".into());
         assert!(client.profile_update(3, "Same".into()));
         assert!(client.take_outbox().is_empty());
+    }
+
+    #[test]
+    fn logout_queues_request_and_exposes_server_permission() {
+        let mut client = WasmClient::new("user".into(), "pass".into());
+        client.login = None;
+        client.outbox.clear();
+        client.logout_handshake = true;
+        assert!(!client.logout());
+        assert_eq!(
+            client.take_outbox(),
+            anima_core::net::outgoing::build_logout_request()
+        );
+        client.handle(&[0xD1, 0x00]);
+        assert_eq!(
+            client.world.logout_ack,
+            Some(anima_core::world::LogoutAck {
+                seq: 1,
+                allowed: false,
+            })
+        );
+        client.logout_handshake = false;
+        assert!(client.logout());
+        assert!(client.take_outbox().is_empty());
+        client.handle(&[0xD1, 0x01]);
+        assert_eq!(
+            client.world.logout_ack,
+            Some(anima_core::world::LogoutAck {
+                seq: 2,
+                allowed: true,
+            })
+        );
     }
 }

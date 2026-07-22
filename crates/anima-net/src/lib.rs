@@ -22,16 +22,18 @@ use anima_core::net::outgoing::{
     build_ascii_prompt_response, build_attack, build_book_page_request, build_buy,
     build_cast_spell, build_double_click, build_drop, build_equip, build_gump_response,
     build_house_design_request, build_hue_picker_response, build_legacy_menu_response,
-    build_opl_request, build_party_accept, build_party_decline, build_party_invite,
-    build_party_leave, build_party_message, build_pick_up, build_popup_request, build_popup_select,
-    build_profile_request, build_profile_update, build_prompt_response, build_say, build_sell,
-    build_single_click, build_skill_lock, build_status_request, build_target_response,
-    build_text_entry_dialog_response, build_tip_request, build_trade_accept, build_trade_cancel,
-    build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
+    build_logout_request, build_opl_request, build_party_accept, build_party_decline,
+    build_party_invite, build_party_leave, build_party_message, build_pick_up, build_popup_request,
+    build_popup_select, build_profile_request, build_profile_update, build_prompt_response,
+    build_say, build_sell, build_single_click, build_skill_lock, build_status_request,
+    build_target_response, build_text_entry_dialog_response, build_tip_request, build_trade_accept,
+    build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability, build_use_skill,
+    build_war_mode,
 };
 use anima_core::net::{
     apply_packet, build_client_version, CharacterChoice, CharacterList, FramingError, LoginConfig,
     LoginDirective, LoginError, LoginMachine, LoginResult, StreamDecoder, Walker,
+    CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE,
 };
 use anima_core::path::{find_path, find_path_near, Terrain, DEFAULT_MAX_EXPANSIONS};
 use anima_core::world::{LegacyMenuKind, PromptKind, TipKind, World};
@@ -393,6 +395,18 @@ fn next_server_pathfind_route(world: &World, last_seq: &mut u64) -> Option<Route
     Some(Route::from_server(request.x as u32, request.y as u32))
 }
 
+fn correlate_logout_ack(
+    pending: bool,
+    after_seq: u64,
+    ack: Option<anima_core::world::LogoutAck>,
+) -> Option<bool> {
+    pending
+        .then_some(ack)
+        .flatten()
+        .filter(|ack| ack.seq > after_seq)
+        .map(|ack| ack.allowed)
+}
+
 /// A live connection to a UO server: the game-phase socket plus the world state
 /// it feeds.
 pub struct Session {
@@ -407,6 +421,14 @@ pub struct Session {
     route: Option<Route>,
     /// Last 0x38 server pathfinding event converted into `route`.
     server_pathfind_seq: u64,
+    /// Whether a 0xD1 request is awaiting a fresh server permission reply.
+    logout_pending: bool,
+    /// Core reply sequence current when the pending request was sent.
+    logout_after_seq: u64,
+    /// Whether the 0xA9 character-list flags require the 0xD1 handshake.
+    logout_handshake: bool,
+    /// Immediate-disconnect path used when that capability flag is absent.
+    logout_immediate: bool,
 }
 
 impl Session {
@@ -452,6 +474,11 @@ impl Session {
             denies: 0,
             route: None,
             server_pathfind_seq: 0,
+            logout_pending: false,
+            logout_after_seq: 0,
+            logout_handshake: result.character_list_flags & CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE
+                != 0,
+            logout_immediate: false,
         };
         // ServUO doesn't push our stats/skills unsolicited — request them so the
         // first Observation carries them (ClassicUO does the same on login).
@@ -650,6 +677,7 @@ impl Session {
             Action::ProfileRequest { serial } => self.send(&build_profile_request(*serial))?,
             Action::ProfileUpdate { seq, text } => self.update_profile(*seq, text)?,
             Action::ProfileClose { seq } => self.world.close_character_profile(*seq),
+            Action::Logout => self.request_logout()?,
             // No-op if no session has `container` (the brain raced it away — it
             // may have just closed, or belongs to a session with a different
             // opponent that never existed on our side).
@@ -914,6 +942,41 @@ impl Session {
         }
         self.world.close_character_profile(seq);
         Ok(())
+    }
+
+    /// Begin logout. Send one 0xD1 request when the server advertised the
+    /// handshake; otherwise arm ClassicUO's immediate-disconnect fallback.
+    /// Repeated actions while either path is pending are inert.
+    pub fn request_logout(&mut self) -> Result<(), DriverError> {
+        if self.logout_pending || self.logout_immediate {
+            return Ok(());
+        }
+        if !self.logout_handshake {
+            self.logout_immediate = true;
+            return Ok(());
+        }
+        let after_seq = self.world.logout_ack_seq;
+        self.send(&build_logout_request())?;
+        self.logout_after_seq = after_seq;
+        self.logout_pending = true;
+        Ok(())
+    }
+
+    /// Consume the immediate fallback or the fresh server reply corresponding
+    /// to the outstanding request. An unsolicited/stale 0xD1 can never
+    /// terminate a handshake-enabled session.
+    pub fn take_logout_ack(&mut self) -> Option<bool> {
+        if self.logout_immediate {
+            self.logout_immediate = false;
+            return Some(true);
+        }
+        let allowed = correlate_logout_ack(
+            self.logout_pending,
+            self.logout_after_seq,
+            self.world.logout_ack,
+        )?;
+        self.logout_pending = false;
+        Some(allowed)
     }
 
     /// Read whatever is available once and apply every complete game packet to
@@ -1188,6 +1251,28 @@ mod route_tests {
     //! live `Session` (a connected `TcpStream`), which per this crate's testing
     //! rules stays out of unit tests.
     use super::*;
+
+    #[test]
+    fn logout_ack_requires_pending_request_and_fresh_sequence() {
+        let denied = Some(anima_core::world::LogoutAck {
+            seq: 4,
+            allowed: false,
+        });
+        assert_eq!(correlate_logout_ack(false, 0, denied), None);
+        assert_eq!(correlate_logout_ack(true, 4, denied), None);
+        assert_eq!(correlate_logout_ack(true, 3, denied), Some(false));
+        assert_eq!(
+            correlate_logout_ack(
+                true,
+                4,
+                Some(anima_core::world::LogoutAck {
+                    seq: 5,
+                    allowed: true,
+                })
+            ),
+            Some(true)
+        );
+    }
 
     #[test]
     fn server_pathfind_event_starts_once_and_resend_replaces_route() {

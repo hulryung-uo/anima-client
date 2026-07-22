@@ -359,10 +359,15 @@ pub struct LoginResult {
     pub body: u16,
     /// Server advertised the AOS expansion via SupportedFeatures `0xB9`.
     pub aos: bool,
+    /// Character-list capability flags from 0xA9. Bit 0x02 selects the
+    /// request/ack logout handshake; without it ClassicUO disconnects directly.
+    pub character_list_flags: u32,
 }
 
 /// SupportedFeatures `0xB9` AOS expansion bit (ClassicUO `LockedFeatureFlags.AOS`).
 const FEATURE_AOS: u32 = 0x0000_0010;
+/// `CharacterListFlags.OverwriteConfigButton`: use 0xD1 logout request/ack.
+pub const CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE: u32 = 0x0000_0002;
 
 /// Parse the SupportedFeatures `0xB9` flags. The payload is a big-endian u16 on
 /// pre-6.0.14.2 clients and a u32 on newer ones; we read whatever the frame
@@ -406,6 +411,7 @@ pub fn parse_character_list(frame: &[u8]) -> Result<Vec<CharSlot>, LoginError> {
 pub struct CharacterList {
     pub slots: Vec<CharSlot>,
     pub slot_count: u8,
+    pub flags: u32,
 }
 
 fn parse_character_list_with_capacity(frame: &[u8]) -> Result<CharacterList, LoginError> {
@@ -420,10 +426,28 @@ fn parse_character_list_with_capacity(frame: &[u8]) -> Result<CharacterList, Log
             slots.push(CharSlot { index: i, name });
         }
     }
+    let flags = parse_character_list_flags(r.rest());
     Ok(CharacterList {
         slots,
         slot_count: count,
+        flags,
     })
+}
+
+/// Parse the 0xA9 tail after the character slots. City records are 89 bytes in
+/// the modern packet and 63 in the legacy packet; both are followed by the
+/// big-endian CharacterListFlags u32. A 0x86 list update has no tail.
+fn parse_character_list_flags(tail: &[u8]) -> u32 {
+    let Some(&city_count) = tail.first() else {
+        return 0;
+    };
+    for stride in [89usize, 63] {
+        let offset = 1usize.saturating_add(usize::from(city_count).saturating_mul(stride));
+        if let Some(flags) = tail.get(offset..offset + 4) {
+            return u32::from_be_bytes([flags[0], flags[1], flags[2], flags[3]]);
+        }
+    }
+    0
 }
 
 /// Parse LoginConfirm `0x1B` (37 bytes).
@@ -449,6 +473,7 @@ pub fn parse_login_confirm(frame: &[u8]) -> Result<LoginResult, LoginError> {
         direction,
         body,
         aos: false, // filled in by the LoginMachine from SupportedFeatures 0xB9
+        character_list_flags: 0, // filled from the preceding 0xA9 by LoginMachine
     })
 }
 
@@ -605,6 +630,8 @@ pub struct LoginMachine {
     /// AOS expansion advertised by the server's SupportedFeatures `0xB9`. Drives
     /// client-side gating of AOS-only UI (e.g. the weapon special-ability bar).
     aos: bool,
+    /// Capabilities advertised in the most recent full 0xA9 character list.
+    character_list_flags: u32,
     /// Latches once we've sent the one-shot `cfg.delete_existing` DeleteCharacter,
     /// so a subsequent (refreshed) character list is selected/created normally
     /// instead of looping the delete forever.
@@ -623,6 +650,7 @@ impl LoginMachine {
             state: State::AwaitServerList,
             auth_key: 0,
             aos: false,
+            character_list_flags: 0,
             delete_sent: false,
             pending_characters: None,
         };
@@ -739,7 +767,14 @@ impl LoginMachine {
             }
             State::AwaitCharacterList => {
                 if id == 0xA9 || id == 0x86 {
-                    let parsed = parse_character_list_with_capacity(frame)?;
+                    let mut parsed = parse_character_list_with_capacity(frame)?;
+                    if id == 0xA9 {
+                        self.character_list_flags = parsed.flags;
+                    } else {
+                        // 0x86 refreshes slots only; retain the capabilities
+                        // negotiated by the preceding full 0xA9 list.
+                        parsed.flags = self.character_list_flags;
+                    }
                     if self.cfg.defer_character_choice {
                         self.state = State::AwaitCharacterChoice;
                         self.pending_characters = Some(parsed.clone());
@@ -827,6 +862,7 @@ impl LoginMachine {
                 if id == 0x1B {
                     let mut result = parse_login_confirm(frame)?;
                     result.aos = self.aos;
+                    result.character_list_flags = self.character_list_flags;
                     self.state = State::Done;
                     Ok(vec![LoginDirective::Done(result)])
                 } else {
@@ -922,6 +958,7 @@ mod tests {
                 direction: 3,
                 body: 400,
                 aos: false,
+                character_list_flags: 0,
             }
         );
     }
@@ -957,13 +994,14 @@ mod tests {
         // An ignorable phase-2 packet (SupportedFeatures 0xB9) before the list.
         assert_eq!(m.on_packet(&[0xB9, 0, 0, 0, 0]).unwrap(), vec![]);
 
-        // CharacterList 0xA9: one char "Anima" in slot 0.
-        let mut w = PacketWriter::new();
-        w.u8(0xA9).u16(0).u8(1).fixed_ascii("Anima", 30).zeros(30);
-        let mut char_list = w.into_vec();
-        let total = char_list.len() as u16;
-        char_list[1] = (total >> 8) as u8;
-        char_list[2] = (total & 0xFF) as u8;
+        // CharacterList 0xA9: one char "Anima" in slot 0 and the negotiated
+        // server-authorized logout capability.
+        let char_list = append_character_list_tail(
+            build_character_list_frame(0xA9, &["Anima"]),
+            89,
+            CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE,
+            true,
+        );
         let d = m.on_packet(&char_list).unwrap();
         assert_eq!(
             d,
@@ -988,7 +1026,13 @@ mod tests {
             .zeros(17);
         let confirm = w.into_vec();
         let d = m.on_packet(&confirm).unwrap();
-        assert!(matches!(d[0], LoginDirective::Done(_)));
+        let LoginDirective::Done(result) = &d[0] else {
+            panic!("expected completed login, got {:?}", d[0]);
+        };
+        assert_eq!(
+            result.character_list_flags,
+            CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE
+        );
         assert!(m.is_done());
     }
 
@@ -1022,6 +1066,43 @@ mod tests {
         frame[1] = (total >> 8) as u8;
         frame[2] = (total & 0xFF) as u8;
         frame
+    }
+
+    /// Adds one zero-filled city record, flags, and the modern-only trailer to
+    /// a full 0xA9 character list, then fixes its variable packet length.
+    fn append_character_list_tail(
+        mut frame: Vec<u8>,
+        city_stride: usize,
+        flags: u32,
+        modern_trailer: bool,
+    ) -> Vec<u8> {
+        frame.push(1);
+        frame.resize(frame.len() + city_stride, 0);
+        frame.extend_from_slice(&flags.to_be_bytes());
+        if modern_trailer {
+            frame.extend_from_slice(&u16::MAX.to_be_bytes());
+        }
+        let total = frame.len() as u16;
+        frame[1..3].copy_from_slice(&total.to_be_bytes());
+        frame
+    }
+
+    #[test]
+    fn character_list_parses_modern_and_legacy_capability_flags() {
+        for (city_stride, modern_trailer) in [(89, true), (63, false)] {
+            let frame = append_character_list_tail(
+                build_character_list_frame(0xA9, &["Anima"]),
+                city_stride,
+                CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE,
+                modern_trailer,
+            );
+            let parsed = parse_character_list_with_capacity(&frame).unwrap();
+            assert_eq!(parsed.slots[0].name, "Anima");
+            assert_eq!(
+                parsed.flags, CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE,
+                "city stride {city_stride}"
+            );
+        }
     }
 
     #[test]
@@ -1215,6 +1296,7 @@ mod tests {
                     },
                 ],
                 slot_count: 5,
+                flags: 0,
             })]
         );
         assert_eq!(
@@ -1259,7 +1341,12 @@ mod tests {
             ..Default::default()
         };
         let mut m = machine_at_character_list(cfg);
-        let list = build_character_list_frame(0xA9, &["First", "", "Third", "", ""]);
+        let list = append_character_list_tail(
+            build_character_list_frame(0xA9, &["First", "", "Third", "", ""]),
+            89,
+            CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE,
+            true,
+        );
         m.on_packet(&list).unwrap();
         let expected = build_delete_character(2, 0x7F00_0001);
         assert_eq!(
@@ -1276,6 +1363,7 @@ mod tests {
                     name: "First".into(),
                 }],
                 slot_count: 5,
+                flags: CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE,
             })]
         );
     }

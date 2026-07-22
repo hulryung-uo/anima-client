@@ -187,6 +187,9 @@ const suppressedTextEntrySeqs = new Set(); // answered locally; wait for scene r
 // ---- character profile windows (0xB8) ----
 const profileWindows = new Map(); // exact response seq -> live DOM window
 const suppressedProfileSeqs = new Set(); // closed/saved locally; wait for scene removal
+// ---- server-authorized logout (0xD1) ----
+let lastLogoutAckSeq = 0;
+let logoutPending = false;
 // { serial, title, canLift } for whichever target the LAST server signal named —
 // read by refreshPaperdoll() to show the real title line instead of the plain
 // mobile name, when it matches the currently-displayed doll.
@@ -243,7 +246,10 @@ function renderOptions() {
     + cb("damage", "Damage numbers")
     + cb("abilities", "Weapon abilities")
     + cb("guardZones", "Guard-zone lines (R)")
-    + cb("debugMove", "Movement debug");
+    + cb("debugMove", "Movement debug")
+    + '<div class="opt-sect">Session</div>'
+    + `<button type="button" class="dlg-btn opt-logout"${logoutPending ? " disabled" : ""}>`
+    + (logoutPending ? "LOGGING OUT…" : "LOG OUT") + "</button>";
 }
 // Show/hide the Options panel (force=true open, false close, omitted = toggle).
 function toggleOptions(force) {
@@ -1445,6 +1451,7 @@ function showLogin(auth, msg, slots, capacity) {
     if (go) go.disabled = false;
   } else {
     window.updateCharacterLoginStage(false);
+    if (m) m.textContent = msg || "";
     if (go) go.disabled = false;
   }
 }
@@ -1472,6 +1479,7 @@ function hideLogin() {
 // `seqPrimed`. Every later poll runs ingestX()/playSounds() as normal, so a
 // genuinely new event (seq beyond this baseline) still fires immediately.
 let seqPrimed = false;
+let wasInWorld = false;
 function maxSeq(arr) {
   let m = 0;
   if (arr) for (const ev of arr) { const sq = ev.seq | 0; if (sq > m) m = sq; }
@@ -1491,6 +1499,7 @@ function primeSeqRings(s) {
   if (s.paperdoll) lastPaperdollSeq = Math.max(lastPaperdollSeq, s.paperdoll.seq | 0);
   lastOpenUrlSeq = Math.max(lastOpenUrlSeq, maxSeq(s.openUrls));
   lastTipNoticeSeq = Math.max(lastTipNoticeSeq, maxSeq(s.tips));
+  if (s.logoutAck) lastLogoutAckSeq = Math.max(lastLogoutAckSeq, s.logoutAck.seq | 0);
   // Per-serial, unlike the rings above — see `lastMapOpenSeq`'s doc.
   if (s.maps) for (const m of s.maps) lastMapOpenSeq.set(m.serial >>> 0, m.openSeq | 0);
 }
@@ -1502,7 +1511,16 @@ async function poll() {
     if (!r.ok) throw new Error(r.status);
     scene = await r.json();
     // Not in world yet (login-page mode): show the login form instead of rendering.
-    if (scene && scene.auth) { showLogin(scene.auth, scene.msg, scene.slots, scene.capacity); return; }
+    if (scene && scene.auth) {
+      // A completed/lost game session owns a large amount of DOM and seq-gated
+      // renderer state. Reload once on the world→login transition so none of it
+      // leaks into the next character; the new page sees auth immediately and
+      // therefore does not loop.
+      if (wasInWorld) { window.location.reload(); return; }
+      showLogin(scene.auth, scene.msg, scene.slots, scene.capacity);
+      return;
+    }
+    wasInWorld = true;
     hideLogin();
     if (!seqPrimed) { primeSeqRings(scene); seqPrimed = true; }
     updateAnimStates(scene);
@@ -1544,6 +1562,7 @@ async function poll() {
     refreshTipNotices(scene); // pageable tips / close-only notices (0xA6)
     refreshTextEntryDialogs(scene); // legacy modal text-entry dialogs (0xAB)
     refreshProfiles(scene); // editable self / read-only character profiles (0xB8)
+    refreshLogoutAck(scene); // restore UI if the server denied a 0xD1 logout
     refreshPopup(scene);  // right-click context menu (0xBF/0x14)
     refreshBook(scene);   // open book reader (0x93/0xD4 + 0x66)
     refreshPrompt(scene); // server text-prompt dialog (0x9A ASCII / 0xC2 Unicode)
@@ -6854,6 +6873,19 @@ function refreshProfiles(s) {
   }
 }
 
+function refreshLogoutAck(s) {
+  const ack = s && s.logoutAck;
+  if (!ack) return;
+  const seq = Number(ack.seq) || 0;
+  if (!seq || seq <= lastLogoutAckSeq) return;
+  lastLogoutAckSeq = seq;
+  if (ack.allowed === true) return; // play server switches to auth/login immediately
+  logoutPending = false;
+  const options = document.getElementById("options");
+  if (options && options.classList.contains("on")) renderOptions();
+  setStatus("The server refused the logout request.");
+}
+
 // ---- server text-prompt dialog (ClassicUO ASCII/Unicode "enter text") -----
 // scene.prompt = { active, serial, promptId, kind } (0x9A/0xC2). The
 // question text itself is NOT carried on that packet — ServUO sends it
@@ -7767,6 +7799,15 @@ function setupInput() {
     settings[k] = (+e.target.value) / 100;
     const v = document.getElementById("optv-" + k); if (v) v.textContent = e.target.value;
     saveSettings(); applyAudioSettings();
+  });
+  optBody.addEventListener("click", (e) => {
+    const button = e.target.closest(".opt-logout");
+    if (!button || logoutPending) return;
+    if (!window.confirm("Log out of this character?")) return;
+    logoutPending = true;
+    button.disabled = true;
+    button.textContent = "LOGGING OUT…";
+    sendInput("logout");
   });
   // Paperdoll: ✕ closes, title bar drags, clicking the Backpack row opens it.
   document.getElementById("pd-close").addEventListener("click", closePaperdoll);

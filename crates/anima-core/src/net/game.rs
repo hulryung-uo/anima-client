@@ -90,6 +90,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0xAB => text_entry_dialog(world, frame)?,
         0xB8 => character_profile(world, frame)?,
         0xC2 => unicode_prompt(world, frame)?,
+        0xD1 => logout_ack(world, frame)?,
         0x6F => secure_trade(world, frame)?,
         0x3B => end_vendor(world, frame)?,
         0x24 => draw_container(world, frame)?,
@@ -1776,6 +1777,17 @@ fn take_utf16be_nul(bytes: &[u8], offset: &mut usize) -> PResult<String> {
     Err(PacketError::InvalidData(
         "profile unicode string has no terminator",
     ))
+}
+
+/// 0xD1 LogoutAck — `[id][allowed:u8]`. This is only permission to terminate:
+/// the driver still requires a matching client-side pending request before it
+/// closes the socket, matching ClassicUO's `DisconnectionRequested` gate.
+fn logout_ack(world: &mut World, frame: &[u8]) -> PResult<()> {
+    let Some(&allowed) = frame.get(1) else {
+        return Ok(());
+    };
+    world.set_logout_ack(allowed != 0);
+    Ok(())
 }
 
 /// 0xC2 UnicodePrompt — the server asks us to answer with typed text (pet rename,
@@ -4611,6 +4623,27 @@ mod tests {
         w.close_character_profile(seq);
         assert!(w.character_profile(seq).is_none());
         assert_eq!(w.character_profiles.len(), 15);
+    }
+
+    #[test]
+    fn logout_ack_preserves_allow_deny_and_monotonic_identity() {
+        let mut w = World::new();
+        assert!(apply_packet(&mut w, &[0xD1, 0x00]));
+        assert_eq!(
+            w.logout_ack,
+            Some(crate::world::LogoutAck {
+                seq: 1,
+                allowed: false,
+            })
+        );
+        assert!(apply_packet(&mut w, &[0xD1, 0x01]));
+        assert_eq!(
+            w.logout_ack,
+            Some(crate::world::LogoutAck {
+                seq: 2,
+                allowed: true,
+            })
+        );
     }
 
     /// Patch the big-endian length word at `[1..3]` of a variable-framed test packet.

@@ -672,6 +672,13 @@ pub fn build_profile_update(serial: u32, text: &str) -> Vec<u8> {
     finish_variable(w.into_vec())
 }
 
+/// Ask the server for permission to log out. ClassicUO sends the fixed packet
+/// `[0xD1, 0x00]`; a compliant server answers with the same opcode and a
+/// non-zero allow byte before the client disconnects.
+pub fn build_logout_request() -> Vec<u8> {
+    vec![0xD1, 0x00]
+}
+
 /// Match ClassicUO `StringHelper.UnicodeToCp1252`. The C1 control range is
 /// deliberately replaced with `?`; printable Windows-1252 punctuation maps to
 /// its extension byte, and code points outside the repertoire also become `?`.
@@ -1155,6 +1162,11 @@ mod tests {
         assert_eq!(u16::from_be_bytes([clamped[10], clamped[11]]), 510);
         assert_eq!(clamped.len(), 12 + 510 * 2);
         assert!(clamped[12..].chunks_exact(2).all(|pair| pair == [0, b'a']));
+    }
+
+    #[test]
+    fn logout_request_matches_classicuo_fixed_shape() {
+        assert_eq!(build_logout_request(), [0xD1, 0x00]);
     }
 
     #[test]

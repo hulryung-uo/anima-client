@@ -546,6 +546,16 @@ pub struct CharacterProfile {
     pub can_edit: bool,
 }
 
+/// The latest server reply to a client 0xD1 logout request. `allowed=true`
+/// authorizes disconnecting and returning to login; false means the session
+/// must remain in-world. `seq` prevents a stale or unsolicited acknowledgement
+/// from satisfying a later request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogoutAck {
+    pub seq: u64,
+    pub allowed: bool,
+}
+
 /// Wire encoding used by a pending server text prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
@@ -997,6 +1007,10 @@ pub struct World {
     pub character_profiles: Vec<CharacterProfile>,
     /// Monotonic counter assigning each fresh profile response a local identity.
     pub character_profile_seq: u64,
+    /// Latest 0xD1 logout permission reply from the server.
+    pub logout_ack: Option<LogoutAck>,
+    /// Monotonic counter assigning logout replies an exact arrival identity.
+    pub logout_ack_seq: u64,
     /// Recent 0x24 (DrawContainer/ContainerDisplay(HS)) events: each `(seq,
     /// serial, gump_id)`, newest last, capped like `recent_lift_rejects`. This
     /// is deliberately a **raw, unfiltered data log** — every `gump_id` ServUO
@@ -1553,6 +1567,14 @@ impl World {
 
     pub fn close_character_profile(&mut self, seq: u64) {
         self.character_profiles.retain(|profile| profile.seq != seq);
+    }
+
+    pub fn set_logout_ack(&mut self, allowed: bool) {
+        self.logout_ack_seq += 1;
+        self.logout_ack = Some(LogoutAck {
+            seq: self.logout_ack_seq,
+            allowed,
+        });
     }
 
     /// Record a server-initiated paperdoll open/refresh (0x88 DisplayPaperdoll).
@@ -2190,6 +2212,7 @@ mod tests {
             direction: 0,
             body: 0x190,
             aos: false,
+            character_list_flags: 0,
         });
         in_world.set_waypoint(waypoint(0x20, 6, 120, 0));
         in_world.on_map_change(1);
@@ -2364,6 +2387,7 @@ mod tests {
             direction: 0,
             body: 0x190,
             aos: false,
+            character_list_flags: 0,
         });
         w.set_map_view(0x4000_5555, 0x139D, 0, 0, 0, 400, 400, 200, 200);
         assert!(w.map_gumps.contains_key(&0x4000_5555));
@@ -2410,6 +2434,7 @@ mod tests {
             direction: 0,
             body: 0x190,
             aos: false,
+            character_list_flags: 0,
         });
         w.house_designs.insert(0x4000_5555, HouseDesign::default());
         w.pending_house_design_requests.push(0x4000_5555);
@@ -2449,6 +2474,7 @@ mod tests {
             direction: 0,
             body: 0x0190,
             aos: false,
+            character_list_flags: 0,
         });
         assert!(w.is_player(0x311));
         let p = w.player_mobile().unwrap();
