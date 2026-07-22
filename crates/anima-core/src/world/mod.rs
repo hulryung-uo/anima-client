@@ -803,6 +803,45 @@ pub struct TradeState {
     pub balance_platinum: u32,
 }
 
+/// Whether the server-side chat system (0xB2) is available/active. Mirrors
+/// ClassicUO's `ChatStatus`: `Disabled` (no chat), `EnabledUserRequest` (the
+/// server asked us to display the enter-username window, 0x03EB), `Enabled`
+/// (our username was accepted and chat is live, 0x03ED).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ChatStatus {
+    #[default]
+    Disabled,
+    EnabledUserRequest,
+    Enabled,
+}
+
+/// One chat conference/channel advertised by the server (0xB2 create/join).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatChannel {
+    pub name: String,
+    pub has_password: bool,
+}
+
+/// The server chat system's live state (0xB2 ChatMessage). Mirrors ClassicUO's
+/// `ChatManager`: an enable/disable status, the channel we're currently in, and
+/// the list of known channels. Cleared wholesale by 0x03EC (close chat).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatState {
+    pub enabled: ChatStatus,
+    pub current_channel: String,
+    pub channels: Vec<ChatChannel>,
+}
+
+/// One received chat line (0xB2 message subcommands). Mirrors the `recent_*`
+/// rings — a monotonic `seq` so a consumer shows each line exactly once. An
+/// empty `sender` marks a system/status line (no named speaker).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatLine {
+    pub seq: u64,
+    pub sender: String,
+    pub text: String,
+}
+
 /// One decompressed 0xD8 CustomHouse design plane, not yet position-decoded.
 /// A mode-2 (grid) plane needs the foundation's multi.mul bounds to turn its
 /// bare graphic list into `(dx,dy)` positions, and core has no multi.mul
@@ -1248,6 +1287,14 @@ pub struct World {
     pub bulletin_board: Option<BulletinBoard>,
     /// The most recently fetched full bulletin message body (0x71 sub `2`).
     pub bulletin_message: Option<BulletinMessage>,
+    /// Server chat system state (0xB2 ChatMessage): enable status, current
+    /// channel, and known channels. See [`ChatState`].
+    pub chat: ChatState,
+    /// Received chat lines (0xB2 message subcommands), newest last, capped to
+    /// [`MAX_CHAT_MESSAGES`]. See [`World::push_chat_message`] and [`ChatLine`].
+    pub chat_messages: Vec<ChatLine>,
+    /// Monotonic counter assigning each chat line a unique `seq`.
+    pub chat_seq: u64,
 }
 
 /// Notoriety values treated as hostile for auto-attack selection:
@@ -1287,6 +1334,8 @@ const MAX_CHARACTER_PROFILES: usize = 16;
 /// Retained chat history for temporarily-paused consumers. The interactive
 /// renderer keeps a smaller presentation ring of its own.
 const MAX_JOURNAL_ENTRIES: usize = 512;
+/// How many recent server chat lines [`World::push_chat_message`] keeps.
+const MAX_CHAT_MESSAGES: usize = 64;
 /// Defensive cap on [`World::corpse_of`]/[`World::corpse_equip`] — both are pruned
 /// on delete (0x1D), so this only guards against a delete we somehow missed
 /// pinning the map's growth for the rest of a long session.
@@ -1523,6 +1572,22 @@ impl World {
             .saturating_sub(MAX_RECENT_DRAG_ANIMS);
         if overflow > 0 {
             self.recent_drag_anims.drain(0..overflow);
+        }
+    }
+
+    /// Append a received chat line (0xB2 ChatMessage). Assigns the next
+    /// monotonic `seq` and keeps only the most recent [`MAX_CHAT_MESSAGES`].
+    /// An empty `sender` marks a system/status line (no named speaker).
+    pub fn push_chat_message(&mut self, sender: String, text: String) {
+        self.chat_seq += 1;
+        self.chat_messages.push(ChatLine {
+            seq: self.chat_seq,
+            sender,
+            text,
+        });
+        let overflow = self.chat_messages.len().saturating_sub(MAX_CHAT_MESSAGES);
+        if overflow > 0 {
+            self.chat_messages.drain(0..overflow);
         }
     }
 

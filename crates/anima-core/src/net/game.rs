@@ -10,10 +10,10 @@
 
 use super::packet::{PacketError, PacketReader, Result as PResult};
 use crate::world::{
-    BoatMovedEntity, BoatMovement, BulletinBoard, BulletinMessage, BulletinSummary, DragAnimation,
-    Effect, GameTime, Gump, HouseDesign, HousePlane, HuePicker, JournalEntry, LegacyMenu,
-    LegacyMenuEntry, LegacyMenuKind, PopupEntry, PopupMenu, PromptKind, PromptState, Skill,
-    TargetCursor, TipKind, TradeState, Waypoint, World,
+    BoatMovedEntity, BoatMovement, BulletinBoard, BulletinMessage, BulletinSummary, ChatChannel,
+    ChatStatus, DragAnimation, Effect, GameTime, Gump, HouseDesign, HousePlane, HuePicker,
+    JournalEntry, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, PopupEntry, PopupMenu, PromptKind,
+    PromptState, Skill, TargetCursor, TipKind, TradeState, Waypoint, World,
 };
 
 /// Decode one framed game packet (id byte included) into `world`.
@@ -76,6 +76,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x9E => sell_list(world, frame)?,
         0xDF => buff(world, frame)?,
         0xB0 => display_gump(world, frame)?,
+        0xB2 => chat_message(world, frame)?,
         0xDD => display_gump_packed(world, frame)?,
         0xBA => quest_arrow(world, frame)?,
         0xD6 => mega_cliloc(world, frame)?,
@@ -2741,6 +2742,130 @@ fn unicode_talk(world: &mut World, frame: &[u8]) -> PResult<()> {
     let name = r.fixed_ascii(30)?;
     let text = unicode_string(r.rest());
     push_journal(world, serial, name, text, msg_type, hue);
+    Ok(())
+}
+
+/// Read a UTF-16 BE, NUL-terminated string from `r` (UO's `ReadUnicodeBE`),
+/// consuming code units up to and including the `0x0000` terminator. A
+/// truncated stream (EOF before a terminator) returns what was decoded so far
+/// rather than erroring — the caller has usually already read everything it
+/// cares about by then.
+fn utf16be_string(r: &mut PacketReader) -> String {
+    let mut units = Vec::new();
+    while let Ok(c) = r.u16() {
+        if c == 0 {
+            break;
+        }
+        units.push(c);
+    }
+    String::from_utf16_lossy(&units)
+}
+
+/// 0xB2 ChatMessage — the server chat system, multiplexed by a leading `cmd`
+/// u16. Variable length: `[id][len:u16][cmd:u16]…`. Ported from ClassicUO
+/// `PacketHandlers.ChatMessage`. Most subcommands begin with a 4-byte skip
+/// (an unused header ClassicUO discards) followed by UTF-16 BE strings. We keep
+/// no user-list state (ClassicUO's `AddUser`/`RemoveUser` only feed a UI gump);
+/// unknown/unmodelled commands are parsed-and-consumed so the stream stays in
+/// sync. anima has no `Chat.enu` template table, so the localized system-text
+/// commands store the raw UTF-16 payload verbatim.
+fn chat_message(world: &mut World, frame: &[u8]) -> PResult<()> {
+    if frame.len() < 5 {
+        return Ok(());
+    }
+    let mut r = PacketReader::new(&frame[3..]); // skip id + 2-byte length
+    let cmd = r.u16()?;
+    match cmd {
+        0x03E8 => {
+            // create conference
+            r.skip(4)?;
+            let name = utf16be_string(&mut r);
+            let has_password = r.u16()? == 0x31;
+            world.chat.current_channel = name.clone();
+            if !world.chat.channels.iter().any(|c| c.name == name) {
+                world.chat.channels.push(ChatChannel { name, has_password });
+            }
+        }
+        0x03E9 => {
+            // destroy conference
+            r.skip(4)?;
+            let name = utf16be_string(&mut r);
+            world.chat.channels.retain(|c| c.name != name);
+        }
+        0x03EB => {
+            // display enter-username window
+            world.chat.enabled = ChatStatus::EnabledUserRequest;
+        }
+        0x03EC => {
+            // close chat — clears channels + current + sets Disabled
+            world.chat = crate::world::ChatState::default();
+        }
+        0x03ED => {
+            // username accepted, display chat
+            r.skip(4)?;
+            let _username = utf16be_string(&mut r);
+            world.chat.enabled = ChatStatus::Enabled;
+        }
+        0x03EE => {
+            // add user (no user-list state kept)
+            r.skip(4)?;
+            let _user_type = r.u16()?;
+            let _username = utf16be_string(&mut r);
+        }
+        0x03EF => {
+            // remove user (no user-list state kept)
+            r.skip(4)?;
+            let _username = utf16be_string(&mut r);
+        }
+        0x03F0 => {
+            // clear all players — no-op
+        }
+        0x03F1 => {
+            // you have joined a conference
+            r.skip(4)?;
+            let name = utf16be_string(&mut r);
+            world.chat.current_channel = name.clone();
+            if !world.chat.channels.iter().any(|c| c.name == name) {
+                world.chat.channels.push(ChatChannel {
+                    name,
+                    has_password: false,
+                });
+            }
+        }
+        0x03F4 => {
+            // you have left a channel
+            r.skip(4)?;
+            let _name = utf16be_string(&mut r);
+        }
+        0x0025 | 0x0026 | 0x0027 => {
+            // a chat line: [skip4][msgType:u16][username][text]
+            r.skip(4)?;
+            let _msg_type = r.u16()?;
+            let username = utf16be_string(&mut r);
+            let mut text = utf16be_string(&mut r);
+            // ClassicUO strips the first `{…}` span (a colour/format tag) from
+            // the message before printing it — mirror that.
+            if let (Some(open), Some(close)) = (text.find('{'), text.find('}')) {
+                if close > open {
+                    text.replace_range(open..=close, "");
+                }
+            }
+            world.push_chat_message(username, text);
+        }
+        _ => {
+            // Localized system text: ClassicUO looks these up in a `Chat.enu`
+            // template table (which anima lacks) and substitutes a UTF-16 arg.
+            // We have no table, so store the raw payload verbatim as a system
+            // line (empty sender). Any other cmd is ignored entirely.
+            if (0x0001..=0x0024).contains(&cmd) || (0x0028..=0x002C).contains(&cmd) {
+                r.skip(4)?;
+                let text = utf16be_string(&mut r);
+                world.push_chat_message(String::new(), text);
+            } else {
+                return Ok(());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -6639,5 +6764,113 @@ mod tests {
 
         assert!(apply_packet(&mut w, &frame), "swallowed, not fatal");
         assert!(w.bulletin_message.is_none());
+    }
+
+    /// Write a UTF-16 BE, NUL-terminated string (UO's `ReadUnicodeBE` field).
+    fn push_utf16be(p: &mut PacketWriter, s: &str) {
+        for unit in s.encode_utf16() {
+            p.u16(unit);
+        }
+        p.u16(0); // NUL terminator
+    }
+
+    #[test]
+    fn chat_create_conference_sets_channel_and_current() {
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0xB2).u16(0); // id + length placeholder
+        p.u16(0x03E8); // create conference
+        p.u32(0); // skipped header
+        push_utf16be(&mut p, "General");
+        p.u16(0x31); // has password
+        let frame = patch_len(p.into_vec());
+
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.chat.current_channel, "General");
+        assert_eq!(w.chat.channels.len(), 1);
+        assert_eq!(w.chat.channels[0].name, "General");
+        assert!(w.chat.channels[0].has_password);
+    }
+
+    #[test]
+    fn chat_join_conference_sets_current_channel() {
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0xB2).u16(0);
+        p.u16(0x03F1); // you have joined a conference
+        p.u32(0);
+        push_utf16be(&mut p, "Trade");
+        let frame = patch_len(p.into_vec());
+
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.chat.current_channel, "Trade");
+        assert_eq!(w.chat.channels.len(), 1);
+        assert_eq!(w.chat.channels[0].name, "Trade");
+        assert!(!w.chat.channels[0].has_password);
+    }
+
+    #[test]
+    fn chat_message_pushes_line_and_strips_brace_span() {
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0xB2).u16(0);
+        p.u16(0x0025); // chat message
+        p.u32(0); // skipped header
+        p.u16(0); // msg type
+        push_utf16be(&mut p, "Alice");
+        push_utf16be(&mut p, "hello {c:#FF0000}world");
+        let frame = patch_len(p.into_vec());
+
+        assert!(apply_packet(&mut w, &frame));
+        assert_eq!(w.chat_messages.len(), 1);
+        assert_eq!(w.chat_messages[0].sender, "Alice");
+        assert_eq!(w.chat_messages[0].text, "hello world");
+        assert_eq!(w.chat_messages[0].seq, 1);
+    }
+
+    #[test]
+    fn chat_close_clears_state() {
+        let mut w = World::new();
+        // Seed some state first via a create-conference.
+        let mut p = PacketWriter::new();
+        p.u8(0xB2).u16(0);
+        p.u16(0x03E8);
+        p.u32(0);
+        push_utf16be(&mut p, "General");
+        p.u16(0);
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        assert!(!w.chat.channels.is_empty());
+
+        // 0x03EC close chat clears everything back to default.
+        let mut q = PacketWriter::new();
+        q.u8(0xB2).u16(0);
+        q.u16(0x03EC);
+        assert!(apply_packet(&mut w, &patch_len(q.into_vec())));
+        assert_eq!(w.chat, crate::world::ChatState::default());
+        assert_eq!(w.chat.enabled, ChatStatus::Disabled);
+        assert!(w.chat.channels.is_empty());
+        assert!(w.chat.current_channel.is_empty());
+    }
+
+    #[test]
+    fn chat_enable_transitions() {
+        let mut w = World::new();
+        assert_eq!(w.chat.enabled, ChatStatus::Disabled);
+
+        // 0x03EB display enter-username → EnabledUserRequest.
+        let mut p = PacketWriter::new();
+        p.u8(0xB2).u16(0);
+        p.u16(0x03EB);
+        assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+        assert_eq!(w.chat.enabled, ChatStatus::EnabledUserRequest);
+
+        // 0x03ED username accepted → Enabled.
+        let mut q = PacketWriter::new();
+        q.u8(0xB2).u16(0);
+        q.u16(0x03ED);
+        q.u32(0);
+        push_utf16be(&mut q, "Bob");
+        assert!(apply_packet(&mut w, &patch_len(q.into_vec())));
+        assert_eq!(w.chat.enabled, ChatStatus::Enabled);
     }
 }
