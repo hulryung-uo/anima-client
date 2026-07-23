@@ -7032,7 +7032,13 @@ function openProfileWindow(profile) {
     event.preventDefault();
     closeProfileWindow(seq);
   });
-  el.addEventListener("mousedown", () => bringToFront(el));
+  el.addEventListener("mousedown", (e) => {
+    // Don't re-append (bringToFront = appendChild) when the press is on the ✕ /
+    // minimize button: moving the element in the DOM during mousedown cancels
+    // the subsequent click in Chrome, so the close button would never fire.
+    if (e.target.closest(".gump-close")) return;
+    bringToFront(el);
+  });
   document.body.appendChild(el);
   makeDraggable(el, title);
   profileWindows.set(seq, el);
