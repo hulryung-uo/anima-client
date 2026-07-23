@@ -1771,6 +1771,11 @@ function updateAnimStates(s) {
 function syncWorld(s) {
   const m = s.map || { radius: 14, tiles: [], cx: 0, cy: 0 };
   const span = 2 * m.radius + 1;
+  // Beyond this Chebyshev distance from the player, `m.tiles` is the grayed-out
+  // land-only context ring (server sends land but no statics out there — see
+  // scene.rs's `beyond_view`). Older/degraded scenes without `viewRange` treat
+  // the whole window as "in view" (no ring), matching the old behaviour.
+  const viewRange = (m.viewRange != null) ? m.viewRange : m.radius;
   const seenT = new Set(), seenS = new Set();
 
   // height of a tile in the window (for corner slopes); null if outside
@@ -1788,6 +1793,10 @@ function syncWorld(s) {
       // ClassicUO never draws them, so neither do we (drop any stale sprite too).
       const x = m.cx + (col - m.radius), y = m.cy + (row - m.radius);
       const key = x + "," + y;
+      // Grayed-out context ring past the player's actual view range (ClassicUO-
+      // style "you remember the land is there"): land only, dimmed/desaturated,
+      // no art/texmap loads — see the render branch below and its `gray` pool flag.
+      const beyondView = Math.max(Math.abs(col - m.radius), Math.abs(row - m.radius)) > viewRange;
       if (!t || !t.g || t.g <= 2) {
         const e = tilePool.get(key);
         if (e) { world.removeChild(e.sp); e.sp.destroy(); tilePool.delete(key); }
@@ -1810,8 +1819,12 @@ function syncWorld(s) {
       // Unchanged real tile: nothing to rebuild. A colour-fallback tile is re-evaluated
       // so it can upgrade to real art — but only rebuild it once the texture actually
       // arrives; while it's still pending (or the art is missing) keep the existing
-      // placeholder instead of re-creating an identical Graphics every poll.
-      if (e && e.g === t.g && e.z === z0) {
+      // placeholder instead of re-creating an identical Graphics every poll. A gray
+      // beyond-view tile (below) never has real art to upgrade to, so it's pooled
+      // with `fallback: false` and skips this re-check entirely — UNLESS `beyondView`
+      // itself flipped since the last poll (the player crossed the draw-distance
+      // boundary for this tile), which must force a rebuild into/out of grayscale.
+      if (e && e.g === t.g && e.z === z0 && !!e.gray === beyondView) {
         if (!e.fallback) continue;
         if (texFor(e.url) == null) continue;
       }
@@ -1827,7 +1840,13 @@ function syncWorld(s) {
       // black page background showing through). The `fallback` flag makes the unchanged-
       // check above re-evaluate it every poll until the real texture resolves.
       let sp, texUrl, fallback = false;
-      if (!sloped) {
+      if (beyondView) {
+        // Grayscale, dimmed diamond — no textured art or statics ever load for
+        // this ring (the server never sends them out here; see scene.rs), so
+        // this branch never touches texFor and never sets `fallback`.
+        const L = Math.round((0.3 * t.c[0] + 0.59 * t.c[1] + 0.11 * t.c[2]) * 0.7);
+        sp = makeColorTile(x, y, z0, z1, z2, z3, [L, L, L]);
+      } else if (!sloped) {
         texUrl = `art/land/${t.g}.png`;
         const tex = texFor(texUrl);
         if (tex) sp = makeFlatTile(x, y, z0, tex);
@@ -1845,7 +1864,7 @@ function syncWorld(s) {
       }
       if (e) { world.removeChild(e.sp); e.sp.destroy(); }
       world.addChild(sp);
-      tilePool.set(key, { sp, g: t.g, z: z0, url: texUrl, fallback });
+      tilePool.set(key, { sp, g: t.g, z: z0, url: texUrl, fallback, gray: beyondView });
     }
   }
   for (const st of s.statics || []) {

@@ -606,6 +606,14 @@ pub fn can_walk(
 /// the radius from the scene so it adapts automatically.
 pub const RADIUS: i64 = 18;
 
+/// Half-size of the LAND-only window emitted beyond `RADIUS`, rendered by the
+/// client as a desaturated flat ring for spatial context (no statics/objects
+/// out there) — the "grayed-out terrain past your view range" ClassicUO look.
+/// Must stay bigger than `RADIUS`; land tiles out to here are cheap (no
+/// per-tile static fetch), so this can be pushed further than the view range
+/// without the cost `RADIUS` itself is capped by (see doc above).
+pub const LAND_RADIUS: i64 = 24;
+
 /// Static tiledata flag bits we need for roof/floor hiding (see [`max_draw_z`])
 /// and step-Z resolution (see [`calculate_new_z`]).
 const FLAG_IMPASSABLE: u64 = 0x40;
@@ -2422,8 +2430,8 @@ pub fn build_scene(
                 }
             }
         }
-        for dy in -RADIUS..=RADIUS {
-            for dx in -RADIUS..=RADIUS {
+        for dy in -LAND_RADIUS..=LAND_RADIUS {
+            for dx in -LAND_RADIUS..=LAND_RADIUS {
                 let (x, y) = (px + dx, py + dy);
                 if x < 0 || y < 0 {
                     tiles.push_str(
@@ -2431,6 +2439,11 @@ pub fn build_scene(
                     );
                     continue;
                 }
+                // Past the actual view range this tile is land-only context (the
+                // grayed-out ring the client renders) — no static fetch, no static
+                // emission, no multi components. Cheaper AND land-only by
+                // construction.
+                let beyond_view = dx.abs() > RADIUS || dy.abs() > RADIUS;
                 let walk = tile_walkable(&s.world, map, multis, x, y, pz);
                 let land = map.land(x as u32, y as u32);
                 let c = art
@@ -2441,7 +2454,11 @@ pub fn build_scene(
                 // below shows — e.g. the surface (z=0) over a basement. We keep z so
                 // the renderer can still use it for neighbour slope corners.
                 let hidden = (land.z as i32) > max_z;
-                let tstatics = map.statics(x as u32, y as u32);
+                let tstatics = if beyond_view {
+                    Vec::new()
+                } else {
+                    map.statics(x as u32, y as u32)
+                };
                 // Standing Z hint if the player steps onto this tile — the surface
                 // or bridge (stair) nearest the current Z within one step. This is
                 // a *cheap* approximation of CalculateNewZ (the faithful version in
@@ -2506,7 +2523,11 @@ pub fn build_scene(
                 );
                 // Static objects on this tile (walls/trees/deco). Skip anything at
                 // or above max_z so a roof/upper floor over the player vanishes.
-                if n_statics < 4000 {
+                // Beyond the view range we emit land only (see `beyond_view`
+                // above) — `tstatics` is already empty there, but skip the block
+                // outright for clarity and to avoid walking `near_multis` for
+                // every one of the ~1300 extra ring tiles.
+                if !beyond_view && n_statics < 4000 {
                     for s in &tstatics {
                         // "nodraw" void placeholders (tiledata name starts "nodraw",
                         // e.g. graphic 8600 whose art is a literal "NO DRAW" bitmap):
@@ -2882,7 +2903,7 @@ pub fn build_scene(
     let maps = serde_json::to_string(&maps_json(&s.world)).unwrap_or_else(|_| "[]".into());
     format!(
         "{{\"player\":{player},\
-         \"map\":{{\"cx\":{px},\"cy\":{py},\"radius\":{RADIUS},\"tiles\":[{tiles}],\"maxZ\":{max_z},\"dbg\":{dbg}}},\
+         \"map\":{{\"cx\":{px},\"cy\":{py},\"radius\":{LAND_RADIUS},\"viewRange\":{RADIUS},\"tiles\":[{tiles}],\"maxZ\":{max_z},\"dbg\":{dbg}}},\
          \"statics\":[{statics}],\"mobiles\":{mobiles},\"items\":{items},\"contItems\":{cont_items},\
          \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"tanims\":{tanims},\"damage\":{damage},\"effects\":{effects},\"music\":{music},\
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
