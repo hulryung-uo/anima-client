@@ -14,7 +14,7 @@ const HALF = 22, ZSTEP = 4;
 // (neither returns `this`), so they're called on their own lines.
 const STATIC_GRAY = new PIXI.ColorMatrixFilter();
 STATIC_GRAY.desaturate();
-STATIC_GRAY.brightness(1.25, true);
+STATIC_GRAY.brightness(1.1, true);
 // ClassicUO people animation groups
 const WALK = 0, RUN_UNARMED = 2, STAND = 4;
 // War-mode idle stance: PAG_STAND_ONEHANDED_ATTACK (the combat-ready pose a person
@@ -1852,7 +1852,7 @@ function syncWorld(s) {
         // Grayscale, dimmed diamond — no textured art or statics ever load for
         // this ring (the server never sends them out here; see scene.rs), so
         // this branch never touches texFor and never sets `fallback`.
-        const L = Math.min(255, Math.round((0.3 * t.c[0] + 0.59 * t.c[1] + 0.11 * t.c[2]) * 0.65 + 95));
+        const L = Math.min(255, Math.round((0.3 * t.c[0] + 0.59 * t.c[1] + 0.11 * t.c[2]) * 0.65 + 50));
         sp = makeColorTile(x, y, z0, z1, z2, z3, [L, L, L]);
       } else if (!sloped) {
         texUrl = `art/land/${t.g}.png`;
