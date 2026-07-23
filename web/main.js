@@ -7,6 +7,14 @@
 // frame at their interpolated positions with walk/idle animation frames.
 
 const HALF = 22, ZSTEP = 4;
+// Shared filter for statics drawn in the grayed-out beyond-view ring (see
+// syncWorld's statics loop): grayscale + a brightness lift so it reads as a
+// light gray matching the lifted land-tile gray below, rather than a dim/dark
+// desaturation. desaturate()/brightness() aren't chainable in this PIXI build
+// (neither returns `this`), so they're called on their own lines.
+const STATIC_GRAY = new PIXI.ColorMatrixFilter();
+STATIC_GRAY.desaturate();
+STATIC_GRAY.brightness(1.25, true);
 // ClassicUO people animation groups
 const WALK = 0, RUN_UNARMED = 2, STAND = 4;
 // War-mode idle stance: PAG_STAND_ONEHANDED_ATTACK (the combat-ready pose a person
@@ -1844,7 +1852,7 @@ function syncWorld(s) {
         // Grayscale, dimmed diamond — no textured art or statics ever load for
         // this ring (the server never sends them out here; see scene.rs), so
         // this branch never touches texFor and never sets `fallback`.
-        const L = Math.round((0.3 * t.c[0] + 0.59 * t.c[1] + 0.11 * t.c[2]) * 0.7);
+        const L = Math.min(255, Math.round((0.3 * t.c[0] + 0.59 * t.c[1] + 0.11 * t.c[2]) * 0.65 + 95));
         sp = makeColorTile(x, y, z0, z1, z2, z3, [L, L, L]);
       } else if (!sloped) {
         texUrl = `art/land/${t.g}.png`;
@@ -1867,10 +1875,26 @@ function syncWorld(s) {
       tilePool.set(key, { sp, g: t.g, z: z0, url: texUrl, fallback, gray: beyondView });
     }
   }
+  // Server now sends statics across the whole land window, including the
+  // grayed-out beyond-view ring — gray those to match the land tiles there
+  // (see STATIC_GRAY above). `beyondView` is per-static, re-evaluated every
+  // poll so a static flips gray/color as the player walks past `VR`.
+  const P = s.player || { x: 0, y: 0 };
+  const VR = (s.map && s.map.viewRange != null) ? s.map.viewRange : (s.map ? s.map.radius : 18);
   for (const st of s.statics || []) {
     const key = `${st.x},${st.y},${st.g},${st.z}`;
     seenS.add(key);
-    if (staticPool.has(key)) continue; // unchanged; see the blanket LRU-touch note above
+    const beyondView = Math.max(Math.abs(st.x - P.x), Math.abs(st.y - P.y)) > VR;
+    if (staticPool.has(key)) {
+      // Unchanged sprite identity, but the player may have crossed the view
+      // boundary since the last poll — flip its filter without rebuilding it.
+      const ex = staticPool.get(key);
+      if (ex && ex._gray !== beyondView) {
+        ex.filters = beyondView ? [STATIC_GRAY] : null;
+        ex._gray = beyondView;
+      }
+      continue; // unchanged; see the blanket LRU-touch note above
+    }
     const texUrl = `art/static/${st.g}.png`;
     const tex = texFor(texUrl);
     if (!tex) continue;
@@ -1878,6 +1902,8 @@ function syncWorld(s) {
     sp.anchor.set(0.5, 1.0);
     sp.x = isoX(st.x, st.y); sp.y = isoY(st.x, st.y, st.z) + HALF;
     sp.zIndex = depthZ(st.x, st.y, st.pz ?? st.z, 4);
+    sp._gray = beyondView;
+    sp.filters = beyondView ? [STATIC_GRAY] : null;
     if (st.ms != null) {
       sp._boatSerial = st.ms >>> 0;
       sp._boatBaseX = st.x; sp._boatBaseY = st.y; sp._boatBaseZ = st.z;

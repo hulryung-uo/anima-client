@@ -2443,7 +2443,6 @@ pub fn build_scene(
                 // grayed-out ring the client renders) — no static fetch, no static
                 // emission, no multi components. Cheaper AND land-only by
                 // construction.
-                let beyond_view = dx.abs() > RADIUS || dy.abs() > RADIUS;
                 let walk = tile_walkable(&s.world, map, multis, x, y, pz);
                 let land = map.land(x as u32, y as u32);
                 let c = art
@@ -2454,11 +2453,11 @@ pub fn build_scene(
                 // below shows — e.g. the surface (z=0) over a basement. We keep z so
                 // the renderer can still use it for neighbour slope corners.
                 let hidden = (land.z as i32) > max_z;
-                let tstatics = if beyond_view {
-                    Vec::new()
-                } else {
-                    map.statics(x as u32, y as u32)
-                };
+                // Statics (trees/walls/etc.) are emitted across the whole land
+                // window, including the beyond-view gray ring — the client grays
+                // them there (they're part of "the map you can see", just no live
+                // detail).
+                let tstatics = map.statics(x as u32, y as u32);
                 // Standing Z hint if the player steps onto this tile — the surface
                 // or bridge (stair) nearest the current Z within one step. This is
                 // a *cheap* approximation of CalculateNewZ (the faithful version in
@@ -2523,11 +2522,9 @@ pub fn build_scene(
                 );
                 // Static objects on this tile (walls/trees/deco). Skip anything at
                 // or above max_z so a roof/upper floor over the player vanishes.
-                // Beyond the view range we emit land only (see `beyond_view`
-                // above) — `tstatics` is already empty there, but skip the block
-                // outright for clarity and to avoid walking `near_multis` for
-                // every one of the ~1300 extra ring tiles.
-                if !beyond_view && n_statics < 4000 {
+                // Emitted across the whole land window; the client grays the ones
+                // beyond the view range.
+                if n_statics < 4000 {
                     for s in &tstatics {
                         // "nodraw" void placeholders (tiledata name starts "nodraw",
                         // e.g. graphic 8600 whose art is a literal "NO DRAW" bitmap):
