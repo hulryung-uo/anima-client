@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use anima_net::play_server::{self, PlayConfig};
+use anima_net::uo_dir;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -25,9 +26,10 @@ struct DesktopConfig {
 
 /// Cheap sanity check that `dir` looks like an unpacked UO client install
 /// (not necessarily complete — `anima-assets` opens each file independently
-/// and logs "not loaded" for anything missing).
+/// and logs "not loaded" for anything missing). Shares the validation the
+/// `play` bin uses ([`anima_net::uo_dir::looks_like_uo_data`]).
 fn looks_like_uo_data(dir: &Path) -> bool {
-    dir.join("anim.mul").exists() || dir.join("tiledata.mul").exists()
+    uo_dir::looks_like_uo_data(dir)
 }
 
 /// Matches the `play` bin's CLI default (`$HOME/dev/uo/uo-resource`) so a
@@ -78,8 +80,16 @@ fn resolve_data_dir(app: &AppHandle) -> PathBuf {
     if looks_like_uo_data(&candidate) {
         return candidate;
     }
+    // Before bothering the user with a folder picker, search the known install
+    // locations (dev path, /Applications, a configured ClassicUO, …). Persist a
+    // hit so the picker never appears again on this machine.
+    if let Some(found) = uo_dir::detect_uo_dir() {
+        println!("anima-desktop: auto-detected UO data at {}", found.display());
+        persist_data_dir(app, &found);
+        return found;
+    }
     println!(
-        "anima-desktop: no UO client data at {}; asking the user",
+        "anima-desktop: no UO client data at {} and none auto-detected; asking the user",
         candidate.display()
     );
     let picked = app

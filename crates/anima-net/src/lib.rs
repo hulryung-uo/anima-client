@@ -15,6 +15,7 @@ pub mod json;
 pub mod play_server;
 pub mod regions;
 pub mod scene;
+pub mod uo_dir;
 
 use anima_assets::MapData;
 use anima_core::agent::{Action, Observation};
