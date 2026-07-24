@@ -1323,6 +1323,12 @@ function wizHueRange(start, end) {
 const WIZ_SKIN_HUES = wizHueRange(1002, 1058);   // skin-tone hue band
 const WIZ_HAIR_HUES = wizHueRange(1102, 1149);   // hair/beard dye band
 const WIZ_CLOTH_HUES = Array.from({ length: 120 }, (_, i) => 2 + i * 8); // cloth-dye spread, sampled
+// Extended ("special") hair/beard palette: the full dye sweep plus the bright
+// 1150–1175 band (blaze/ice/neon special dyes). Safe to offer at creation: this
+// shard's CharacterCreation copies HairHue/FacialHairHue verbatim (no
+// ClipHairHue — verified in ../servuo Scripts/Misc/CharacterCreation.cs), so
+// exotic dyes survive server-side exactly as previewed.
+const WIZ_EXT_HUES = [...WIZ_CLOTH_HUES, ...wizHueRange(1150, 1175)];
 
 function wireLogin() {
   if (loginWired) return; loginWired = true;
@@ -1333,7 +1339,30 @@ function wireLogin() {
   const createPanel = document.getElementById("lg-create-panel");
   const createToggleRow = document.getElementById("lg-create-toggle");
   const slotRow = document.getElementById("lg-slot-row");
-  const slotSelect = document.getElementById("lg-slot");
+  const charListEl = document.getElementById("lg-char-list");
+  // Existing characters, shown as a clickable list (click = select, double-click
+  // = play). `selectedSlot` is the slot index the Play/Delete buttons act on.
+  let charSlots = [];
+  let selectedSlot = null;
+  const renderCharList = () => {
+    charListEl.replaceChildren(...charSlots.map((slot) => {
+      const row = document.createElement("div");
+      row.className = "char-slot-row" + (slot.index === selectedSlot ? " sel" : "");
+      const name = document.createElement("span");
+      name.textContent = slot.name;
+      const slotn = document.createElement("span");
+      slotn.className = "slotn";
+      slotn.textContent = `slot ${slot.index + 1}`;
+      row.append(name, slotn);
+      row.addEventListener("click", () => {
+        selectedSlot = slot.index;
+        for (const el of charListEl.children) el.classList.toggle("sel", el === row);
+        updateCreation();
+      });
+      row.addEventListener("dblclick", () => { selectedSlot = slot.index; submit(); });
+      return row;
+    }));
+  };
   const accountFields = document.getElementById("lg-account-fields");
   const accountSummary = document.getElementById("lg-account-summary");
   const statInputs = ["lg-str", "lg-dex", "lg-int"].map(id => document.getElementById(id));
@@ -1344,8 +1373,8 @@ function wireLogin() {
   const wizNextBtn = document.getElementById("wiz-next");
   const wizSteps = [...document.querySelectorAll(".wiz-step")];
   const beardGroup = document.getElementById("wiz-beard-group");
-  const hairStyleSelect = document.getElementById("wiz-hair-style");
-  const beardStyleSelect = document.getElementById("wiz-beard-style");
+  const hairStylesRow = document.getElementById("wiz-hair-styles");
+  const beardStylesRow = document.getElementById("wiz-beard-styles");
   const skillRows = [0, 1, 2, 3].map(slot => ({
     select: document.querySelector(`.wiz-skill-id[data-slot="${slot}"]`),
     value: document.querySelector(`.wiz-skill-val[data-slot="${slot}"]`),
@@ -1368,8 +1397,12 @@ function wireLogin() {
   const updateCreation = () => {
     const isOn = createToggle.checked;
     createPanel.classList.toggle("on", isOn);
-    slotSelect.disabled = !characterStage || isOn || slotSelect.options.length === 0;
-    const canDelete = characterStage && !isOn && slotSelect.options.length > 0;
+    // Wizard open → widen the login box so steps lay out side-by-side (the
+    // 320px column squeezed everything into one long vertical strip).
+    document.querySelector(".login-box")?.classList.toggle("wiz-wide", characterStage && isOn);
+    // No point showing the existing-character list while creating a new one.
+    slotRow.style.display = (characterStage && !isOn && charSlots.length > 0) ? "flex" : "none";
+    const canDelete = characterStage && !isOn && selectedSlot !== null;
     backButton.style.display = characterStage ? "block" : "none";
     backButton.disabled = !characterStage;
     deleteButton.style.display = canDelete ? "block" : "none";
@@ -1386,7 +1419,7 @@ function wireLogin() {
   for (const input of statInputs) input.addEventListener("input", updateStatTotal);
   genderSelect.addEventListener("change", () => {
     beardGroup.style.display = genderSelect.value === "female" ? "none" : "flex";
-    if (wizStep === 4) rebuildWizDoll();
+    if (wizStep === 4) { rebuildWizDoll(); rebuildStyleStrips(); } // hair gumps are gender-offset
   });
 
   // ---- step 3: custom skill picker ----
@@ -1419,7 +1452,7 @@ function wireLogin() {
   }
 
   // ---- step 4: hue-swatch appearance pickers ----
-  function buildHueSwatchRow(container, hues, getHue, setHue) {
+  function buildHueSwatchRow(container, hues, getHue, setHue, withDefault = true) {
     container.replaceChildren();
     const makeSwatch = (hue, isDefault) => {
       const sw = document.createElement("div");
@@ -1434,33 +1467,108 @@ function wireLogin() {
       });
       return sw;
     };
-    container.appendChild(makeSwatch(0, true));
+    if (withDefault) container.appendChild(makeSwatch(0, true));
     for (const hue of hues) container.appendChild(makeSwatch(hue, false));
     applyWizHueSwatches();
+  }
+  // A hue picked in the natural row must unselect in the extended row (and vice
+  // versa) — the pair edits the same value.
+  function syncHueSel(kind) {
+    const value = kind === "hair" ? wizAppearance.hairHue : wizAppearance.beardHue;
+    for (const id of [`wiz-${kind}-row`, `wiz-${kind}-ext`]) {
+      const container = document.getElementById(id);
+      if (!container) continue;
+      for (const el of container.children) {
+        el.classList.toggle("sel", Number(el.dataset.hue) === value);
+      }
+    }
   }
   function buildAppearanceStep() {
     buildHueSwatchRow(document.getElementById("wiz-skin-row"), WIZ_SKIN_HUES,
       () => wizAppearance.skinHue, (hue) => { wizAppearance.skinHue = hue; rebuildWizDoll(); });
+    const pickHair = (hue) => {
+      wizAppearance.hairHue = hue; rebuildWizDoll(); rebuildStyleStrips(); syncHueSel("hair");
+    };
+    const pickBeard = (hue) => {
+      wizAppearance.beardHue = hue; rebuildWizDoll(); rebuildStyleStrips(); syncHueSel("beard");
+    };
     buildHueSwatchRow(document.getElementById("wiz-hair-row"), WIZ_HAIR_HUES,
-      () => wizAppearance.hairHue, (hue) => { wizAppearance.hairHue = hue; rebuildWizDoll(); });
+      () => wizAppearance.hairHue, pickHair);
     buildHueSwatchRow(document.getElementById("wiz-beard-row"), WIZ_HAIR_HUES,
-      () => wizAppearance.beardHue, (hue) => { wizAppearance.beardHue = hue; rebuildWizDoll(); });
+      () => wizAppearance.beardHue, pickBeard);
+    buildHueSwatchRow(document.getElementById("wiz-hair-ext"), WIZ_EXT_HUES,
+      () => wizAppearance.hairHue, pickHair, false);
+    buildHueSwatchRow(document.getElementById("wiz-beard-ext"), WIZ_EXT_HUES,
+      () => wizAppearance.beardHue, pickBeard, false);
     buildHueSwatchRow(document.getElementById("wiz-shirt-row"), WIZ_CLOTH_HUES,
-      () => wizAppearance.shirtHue, (hue) => { wizAppearance.shirtHue = hue; });
+      () => wizAppearance.shirtHue, (hue) => { wizAppearance.shirtHue = hue; rebuildWizDoll(); });
     buildHueSwatchRow(document.getElementById("wiz-pants-row"), WIZ_CLOTH_HUES,
-      () => wizAppearance.pantsHue, (hue) => { wizAppearance.pantsHue = hue; });
-    hairStyleSelect.value = String(wizAppearance.hairStyle);
-    beardStyleSelect.value = String(wizAppearance.beardStyle);
+      () => wizAppearance.pantsHue, (hue) => { wizAppearance.pantsHue = hue; rebuildWizDoll(); });
+    rebuildStyleStrips();
     rebuildWizDoll();
   }
-  hairStyleSelect.addEventListener("change", () => {
-    wizAppearance.hairStyle = Number(hairStyleSelect.value);
-    rebuildWizDoll();
-  });
-  beardStyleSelect.addEventListener("change", () => {
-    wizAppearance.beardStyle = Number(beardStyleSelect.value);
-    rebuildWizDoll();
-  });
+
+  // ---- step 4: hair/beard style strips — every style laid out as a clickable,
+  // live-hued thumbnail (the user asked to SEE the options, not a combo box).
+  // Thumbnails reuse the doll's iteminfo→gump chain, cropped to the head area. ----
+  const WIZ_HAIR_STYLES = [[0, "None"], [8251, "Short"], [8252, "Long"], [8253, "Pony Tail"],
+    [8260, "Mohawk"], [8261, "Pageboy"], [8262, "Buns"], [8263, "Afro"], [8264, "Receding"],
+    [8265, "Pig Tails"], [8266, "Topknot"]];
+  const WIZ_BEARD_STYLES = [[0, "None"], [8254, "Long"], [8255, "Short"], [8256, "Goatee"],
+    [8257, "Moustache"], [8267, "Med Short"], [8268, "Med Long"], [8269, "Vandyke"]];
+  function buildStyleStrip(container, styles, kind) {
+    if (!container) return;
+    const female = genderSelect.value === "female";
+    const selected = kind === "hair" ? wizAppearance.hairStyle : wizAppearance.beardStyle;
+    const hue = kind === "hair" ? wizAppearance.hairHue : wizAppearance.beardHue;
+    container.replaceChildren();
+    for (const [graphic, label] of styles) {
+      const cell = document.createElement("div");
+      cell.className = "wiz-style" + (graphic === selected ? " sel" : "");
+      cell.title = label;
+      const art = document.createElement("div");
+      art.className = "wiz-style-art" + (kind === "beard" ? " beard" : "");
+      if (!graphic) art.textContent = "∅";
+      const lbl = document.createElement("div");
+      lbl.className = "wiz-style-lbl";
+      lbl.textContent = label;
+      cell.append(art, lbl);
+      cell.addEventListener("click", () => {
+        if (kind === "hair") wizAppearance.hairStyle = graphic;
+        else wizAppearance.beardStyle = graphic;
+        for (const el of container.children) el.classList.toggle("sel", el === cell);
+        rebuildWizDoll();
+      });
+      container.appendChild(cell);
+      if (graphic) {
+        // Fill in the art async (AnimID lookup); the cell is clickable meanwhile.
+        wizItemAnim(graphic).then((anim) => {
+          if (anim == null || !art.isConnected) return;
+          const off = (kind === "hair" && female) ? FEMALE_GUMP_OFFSET : MALE_GUMP_OFFSET;
+          const img = document.createElement("img");
+          img.src = `gump/${anim + off}.png` + (hue ? `?hue=${hue}` : "");
+          img.alt = "";
+          img.onerror = () => img.remove();
+          art.replaceChildren(img);
+        });
+      }
+    }
+  }
+  function rebuildStyleStrips() {
+    buildStyleStrip(hairStylesRow, WIZ_HAIR_STYLES, "hair");
+    buildStyleStrip(beardStylesRow, WIZ_BEARD_STYLES, "beard");
+  }
+  // "Special colors ▸" reveals the extended dye palette (collapsed by default —
+  // the natural band stays the primary row).
+  for (const toggle of document.querySelectorAll(".wiz-ext-toggle")) {
+    toggle.addEventListener("click", () => {
+      const row = document.getElementById(toggle.dataset.ext);
+      if (!row) return;
+      const open = row.style.display === "none";
+      row.style.display = open ? "flex" : "none";
+      toggle.textContent = toggle.textContent.replace(open ? "▸" : "▾", open ? "▾" : "▸");
+    });
+  }
 
   // ---- step 4: live paperdoll preview (display-only — never touches the
   // `create` payload). Layers absolutely-positioned <img>s back-to-front —
@@ -1496,6 +1604,18 @@ function wireLogin() {
     const layers = [];
     const skinQ = wizAppearance.skinHue ? `?hue=${wizAppearance.skinHue}` : "";
     layers.push(`<img src="gump/${female ? 13 : 12}.png${skinQ}" alt="" onerror="${hide}">`);
+    // Starting clothes, worn so the shirt/pants dyes are visible on the doll —
+    // the same garments ServUO spawns a new character with (Shirt 0x1517, Long
+    // Pants 0x1539). Drawn pants-then-shirt, under hair/beard. Hue 0 = undyed.
+    const off = female ? FEMALE_GUMP_OFFSET : MALE_GUMP_OFFSET;
+    for (const [graphic, hue] of [[5433, wizAppearance.pantsHue], [5399, wizAppearance.shirtHue]]) {
+      const anim = await wizItemAnim(graphic);
+      if (seq !== wizDollSeq) return;
+      if (anim != null) {
+        const hueQ = hue ? `?hue=${hue}` : "";
+        layers.push(`<img src="gump/${anim + off}.png${hueQ}" alt="" onerror="${hide}">`);
+      }
+    }
     if (wizAppearance.hairStyle) {
       const anim = await wizItemAnim(wizAppearance.hairStyle);
       if (seq !== wizDollSeq) return; // superseded by a newer rebuild — drop it
@@ -1663,13 +1783,14 @@ function wireLogin() {
     const msg = document.getElementById("lg-msg");
     if (!username) { msg.textContent = "Enter an account name."; return; }
 
+    if (characterStage && selectedSlot === null) { msg.textContent = "Select a character."; return; }
     msg.textContent = characterStage ? "Entering world…" : "Connecting…";
     go.disabled = true;
     backButton.disabled = true;
     try {
       const endpoint = characterStage ? "character" : "login";
       const body = characterStage
-        ? { slot: Number(slotSelect.value) }
+        ? { slot: selectedSlot }
         : { host, port, username, password, interactive: true, character_slot: null, create: null };
       const response = await fetch(endpoint, {
         method: "POST",
@@ -1706,9 +1827,9 @@ function wireLogin() {
     }
   });
   deleteButton.addEventListener("click", async () => {
-    const option = slotSelect.selectedOptions[0];
-    if (!characterStage || !option) return;
-    const name = option.dataset.name || option.textContent;
+    const slot = charSlots.find((s) => s.index === selectedSlot);
+    if (!characterStage || !slot) return;
+    const name = slot.name;
     if (!window.confirm(`Permanently delete ${name}? This cannot be undone.`)) return;
     const msg = document.getElementById("lg-msg");
     msg.textContent = `Deleting ${name}…`;
@@ -1719,7 +1840,7 @@ function wireLogin() {
       const response = await fetch("character", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ delete_slot: Number(option.value) }),
+        body: JSON.stringify({ delete_slot: slot.index }),
       });
       if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
     } catch (error) {
@@ -1752,25 +1873,25 @@ function wireLogin() {
       accountSummary.textContent = active ? `Account ${user} · ${host}:${port}` : "";
       accountSummary.style.display = active ? "block" : "none";
     }
-    slotRow.style.display = active ? "flex" : "none";
     createToggleRow.style.display = active ? "flex" : "none";
     if (!active) {
       characterListKey = "";
+      charSlots = [];
+      selectedSlot = null;
       createToggle.checked = false;
       go.textContent = "Connect";
-      updateCreation();
+      updateCreation(); // also hides #lg-slot-row (characterStage is false)
       return;
     }
     const key = JSON.stringify([slots, capacity]);
     if (key !== characterListKey) {
       characterListKey = key;
-      slotSelect.replaceChildren(...slots.map(slot => {
-        const option = document.createElement("option");
-        option.value = String(slot.index);
-        option.textContent = `Slot ${slot.index + 1} — ${slot.name}`;
-        option.dataset.name = slot.name;
-        return option;
-      }));
+      charSlots = slots;
+      // Keep the selection if that slot still exists; else default to the first.
+      if (!charSlots.some((s) => s.index === selectedSlot)) {
+        selectedSlot = charSlots.length ? charSlots[0].index : null;
+      }
+      renderCharList();
       const full = slots.length >= capacity;
       createToggle.disabled = full;
       createToggle.checked = slots.length === 0 && !full;
@@ -2812,6 +2933,11 @@ function tickAnimatedStatics(now) {
 const fadedSprites = new Set();
 const R_COT = 2, R_FOL = 3;            // tile radius: circle-of-transparency / foliage
 const A_COT = 0.55, A_FOL = 0.45;      // faded alpha: statics / foliage
+// Circle-of-transparency is temporarily DISABLED — it behaved oddly around the
+// avatar. Revisit a better see-through approach later (see the note at
+// transparencyPass). Flip to true to restore the fade exactly as before; while
+// false, transparencyPass() only *undoes* any lingering fade so nothing is stuck.
+let cotEnabled = false;
 // Full-pool scan is only worth redoing when it could actually change: the player
 // crossed a tile (fade radius is tile-relative) or syncWorld just rebuilt part of
 // the static/item pool (a new/removed sprite could need (un)fading even at the
@@ -2822,6 +2948,17 @@ const A_COT = 0.55, A_FOL = 0.45;      // faded alpha: statics / foliage
 let transparencyDirty = true;
 let lastCotKey = null;
 function transparencyPass() {
+  if (!cotEnabled) {
+    // Effect off: clear any fade we applied before it was disabled, then bail.
+    if (!fadedSprites.size) return;
+    let changed = false;
+    for (const sp of fadedSprites) {
+      if (!sp.destroyed && sp.alpha !== 1) { sp.alpha = 1; changed = true; }
+    }
+    fadedSprites.clear();
+    if (changed) markDirty();
+    return;
+  }
   let ptx, pty, pz;
   if (sitting) { ptx = sitting.x; pty = sitting.y; pz = sitting.z; } // seated: fade around the chair, not the (unmoved) real tile
   else if (pred) { ptx = Math.round(pred.rx); pty = Math.round(pred.ry); pz = pred.z; }
