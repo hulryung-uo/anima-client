@@ -42,13 +42,20 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # --- macOS signing + notarization (optional; set as repo secrets) ---
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # --- macOS signing + notarization (OPT-IN) ---
+          # Do NOT list the APPLE_* secrets here as plain passthroughs: when a
+          # secret is unset it arrives as an EMPTY string, and Tauri treats an
+          # empty APPLE_CERTIFICATE as "present" and dies at `security import`
+          # ("parameters not valid"). Leaving the block out yields an unsigned
+          # (adhoc) bundle, which is what we ship until a Developer ID exists.
+          # To sign: add the secrets to the repo and UNCOMMENT these lines
+          # (see docs/DISTRIBUTION.md).
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: crates/anima-desktop
           args: ${{ matrix.args }}

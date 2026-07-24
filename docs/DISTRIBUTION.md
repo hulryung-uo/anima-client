@@ -117,8 +117,10 @@ push a `v*` tag and it builds `Anima.app`/`.dmg` on `macos-latest` and the
 `.exe`/`.msi` on `windows-latest`, then attaches them to a GitHub Release.
 
 Signing in CI is opt-in: add the Apple / Windows secrets above as repository
-secrets and the same build step picks them up; without them you get unsigned
-artifacts (fine for internal testing).
+secrets **and uncomment the `APPLE_*` block** in `release.yml` (it is commented
+out because an empty/unset `APPLE_CERTIFICATE` makes Tauri fail at
+`security import`). Without them you get unsigned artifacts — fine for internal
+testing.
 
 ## Release checklist
 
