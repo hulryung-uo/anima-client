@@ -415,11 +415,20 @@ fn parse_character_appearance(
             .and_then(|field| field.as_str())
             .unwrap_or("")
     };
-    let number = |key| {
+    let u8num = |key| {
         create
             .get(key)
             .and_then(|field| field.as_u64())
             .and_then(|number| u8::try_from(number).ok())
+    };
+    // Appearance hues/styles are optional; a missing field means "server default"
+    // (0), exactly as the previous `..Default::default()` behavior.
+    let u16opt = |key| {
+        create
+            .get(key)
+            .and_then(|field| field.as_u64())
+            .map(|number| u16::try_from(number).ok().ok_or("value out of range"))
+            .transpose()
     };
     let mut appearance = CharacterAppearance {
         name: text("name").trim().to_string(),
@@ -427,19 +436,53 @@ fn parse_character_appearance(
             .get("female")
             .and_then(|field| field.as_bool())
             .unwrap_or(false),
-        strength: number("strength").ok_or("invalid strength")?,
-        dexterity: number("dexterity").ok_or("invalid dexterity")?,
-        intelligence: number("intelligence").ok_or("invalid intelligence")?,
+        skin_hue: u16opt("skin_hue")?.unwrap_or(0),
+        hair_style: u16opt("hair_style")?.unwrap_or(0),
+        hair_hue: u16opt("hair_hue")?.unwrap_or(0),
+        facial_hair_style: u16opt("facial_hair_style")?.unwrap_or(0),
+        facial_hair_hue: u16opt("facial_hair_hue")?.unwrap_or(0),
+        shirt_hue: u16opt("shirt_hue")?.unwrap_or(0),
+        pants_hue: u16opt("pants_hue")?.unwrap_or(0),
+        strength: u8num("strength").ok_or("invalid strength")?,
+        dexterity: u8num("dexterity").ok_or("invalid dexterity")?,
+        intelligence: u8num("intelligence").ok_or("invalid intelligence")?,
         city_index: create
             .get("city_index")
             .and_then(|field| field.as_u64())
             .and_then(|number| u16::try_from(number).ok())
             .ok_or("invalid starting city")?,
-        ..Default::default()
+        skills: [(0, 0); 4],
     };
-    appearance.skills = starting_skills(text("profession")).ok_or("unknown starting profession")?;
+    // An explicit `skills` array (the custom picker) wins; otherwise fall back to
+    // the named profession's preset. `validate()` enforces the UO rules either way
+    // (each value <= 50, unique non-zero, total 100 or 120).
+    appearance.skills = match create.get("skills").and_then(|field| field.as_array()) {
+        Some(list) => parse_skill_choices(list)?,
+        None => starting_skills(text("profession")).ok_or("unknown starting profession")?,
+    };
     appearance.validate()?;
     Ok(appearance)
+}
+
+/// Parse the custom skill picker's JSON (`[{"id":N,"value":M}, …]`, up to 4)
+/// into the fixed 4-slot array `build_create_character` expects, zero-padded.
+fn parse_skill_choices(list: &[serde_json::Value]) -> Result<[(u8, u8); 4], &'static str> {
+    if list.len() > 4 {
+        return Err("at most 4 starting skills");
+    }
+    let mut skills = [(0u8, 0u8); 4];
+    for (slot, item) in list.iter().enumerate() {
+        let field = |key| {
+            item.get(key)
+                .and_then(|field| field.as_u64())
+                .and_then(|number| u8::try_from(number).ok())
+        };
+        skills[slot] = (
+            field("id").ok_or("invalid skill id")?,
+            field("value").ok_or("invalid skill value")?,
+        );
+    }
+    Ok(skills)
 }
 
 fn parse_character_choice(body: &str) -> Result<CharacterDecision, &'static str> {
@@ -3047,6 +3090,37 @@ mod login_request_tests {
         );
         assert!(parse_character_choice(r#"{"slot":1,"delete_slot":1}"#).is_err());
         assert!(parse_character_choice(r#"{"slot":1,"cancel":true}"#).is_err());
+    }
+
+    #[test]
+    fn character_create_accepts_custom_skills_and_appearance() {
+        // The step-by-step wizard sends an explicit `skills` array (overriding the
+        // profession preset) plus appearance hues/styles.
+        let choice = parse_character_choice(
+            r#"{"create":{"name":"Custom One","female":true,
+                "strength":45,"dexterity":35,"intelligence":10,"city_index":1,
+                "skills":[{"id":40,"value":50},{"id":27,"value":50},{"id":22,"value":20}],
+                "skin_hue":1024,"hair_style":8253,"hair_hue":1110,
+                "facial_hair_style":0,"facial_hair_hue":0,
+                "shirt_hue":337,"pants_hue":842}}"#,
+        )
+        .unwrap();
+        let CharacterDecision::Choose(CharacterChoice::Create(a)) = choice else {
+            panic!("expected create choice");
+        };
+        assert!(a.female);
+        assert_eq!((a.strength, a.dexterity, a.intelligence), (45, 35, 10));
+        // Custom skills win over any profession preset; padded to four slots.
+        assert_eq!(a.skills, [(40, 50), (27, 50), (22, 20), (0, 0)]);
+        assert_eq!((a.skin_hue, a.hair_style, a.hair_hue), (1024, 8253, 1110));
+        assert_eq!((a.shirt_hue, a.pants_hue), (337, 842));
+        // A custom skill total that breaks the UO rules is rejected by validate().
+        assert!(parse_character_choice(
+            r#"{"create":{"name":"Bad Skills","female":false,
+                "strength":60,"dexterity":20,"intelligence":10,"city_index":0,
+                "skills":[{"id":40,"value":50},{"id":27,"value":40}]}}"#
+        )
+        .is_err());
     }
 
     #[test]
