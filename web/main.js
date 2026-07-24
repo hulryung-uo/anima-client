@@ -637,7 +637,7 @@ function hueHex(hue) {
   if (!hueHexCache.has("r" + id)) {
     hueHexCache.set("r" + id, 1);
     fetch(`hue/${id}.json`).then((r) => r.json())
-      .then((j) => { hueHexCache.set(id, j.rgb); renderEquipTip(); applyHueSwatches(); }).catch(() => {});
+      .then((j) => { hueHexCache.set(id, j.rgb); renderEquipTip(); applyHueSwatches(); applyWizHueSwatches(); }).catch(() => {});
   }
   return null;
 }
@@ -1296,6 +1296,34 @@ function drawQuestArrow(ctx, x, y, ang, now) {
 let loginWired = false;
 let characterStage = false;
 let characterListKey = "";
+// ---- character-creation wizard state (step 3 skills / step 4 appearance) ----
+// Step 3's 4 skill rows live directly in the DOM (read via `readSkillRows()`
+// inside wireLogin); `wizAppearance` holds the raw hue/style ids exactly as the
+// `character` POST contract wants them (0 = "server default", sent as-is). It
+// persists only for the lifetime of one open wizard — resetWizard() zeroes it
+// each time the panel opens.
+let wizStep = 1;
+const WIZ_STEP_TITLES = ["Identity", "Stats", "Skills", "Appearance", "City & Review"];
+const wizAppearance = {
+  skinHue: 0, hairStyle: 0, hairHue: 0, beardStyle: 0, beardHue: 0, shirtHue: 0, pantsHue: 0,
+};
+// Quick presets for the step-3 skill picker: [skillId, value] pairs, ids index
+// SKILL_NAMES. Mirrors anima-net's `starting_skills()` (play_server.rs).
+const WIZ_SKILL_PRESETS = {
+  warrior: [[40, 50], [27, 50]], // Swordsmanship + Tactics
+  mage: [[25, 50], [16, 50]],    // Magery + Evaluating Intelligence
+  ranger: [[31, 50], [27, 50]],  // Archery + Tactics
+  crafter: [[7, 50], [45, 50]],  // Blacksmithy + Mining
+};
+function wizHueRange(start, end) {
+  const hues = [];
+  for (let hue = start; hue <= end; hue++) hues.push(hue);
+  return hues;
+}
+const WIZ_SKIN_HUES = wizHueRange(1002, 1058);   // skin-tone hue band
+const WIZ_HAIR_HUES = wizHueRange(1102, 1149);   // hair/beard dye band
+const WIZ_CLOTH_HUES = Array.from({ length: 120 }, (_, i) => 2 + i * 8); // cloth-dye spread, sampled
+
 function wireLogin() {
   if (loginWired) return; loginWired = true;
   const go = document.getElementById("lg-go");
@@ -1306,27 +1334,326 @@ function wireLogin() {
   const createToggleRow = document.getElementById("lg-create-toggle");
   const slotRow = document.getElementById("lg-slot-row");
   const slotSelect = document.getElementById("lg-slot");
-  const credentials = ["lg-host", "lg-port", "lg-user", "lg-pass"].map(id => document.getElementById(id));
+  const accountFields = document.getElementById("lg-account-fields");
+  const accountSummary = document.getElementById("lg-account-summary");
   const statInputs = ["lg-str", "lg-dex", "lg-int"].map(id => document.getElementById(id));
-  const updateCreation = () => {
-    createPanel.classList.toggle("on", createToggle.checked);
-    slotSelect.disabled = !characterStage || createToggle.checked || slotSelect.options.length === 0;
-    const canDelete = characterStage && !createToggle.checked && slotSelect.options.length > 0;
-    backButton.style.display = characterStage ? "block" : "none";
-    backButton.disabled = !characterStage;
-    deleteButton.style.display = canDelete ? "block" : "none";
-    deleteButton.disabled = !canDelete;
-    if (characterStage) go.textContent = createToggle.checked ? "Create" : "Play";
+  const genderSelect = document.getElementById("lg-gender");
+  const wizMsg = document.getElementById("wiz-msg");
+  const wizStepInd = document.getElementById("wiz-stepind");
+  const wizBackBtn = document.getElementById("wiz-back");
+  const wizNextBtn = document.getElementById("wiz-next");
+  const wizSteps = [...document.querySelectorAll(".wiz-step")];
+  const beardGroup = document.getElementById("wiz-beard-group");
+  const hairStyleSelect = document.getElementById("wiz-hair-style");
+  const beardStyleSelect = document.getElementById("wiz-beard-style");
+  const skillRows = [0, 1, 2, 3].map(slot => ({
+    select: document.querySelector(`.wiz-skill-id[data-slot="${slot}"]`),
+    value: document.querySelector(`.wiz-skill-val[data-slot="${slot}"]`),
+  }));
+  // Populate the 4 skill-picker <select>s from SKILL_NAMES once (value = id).
+  for (const row of skillRows) {
+    row.select.replaceChildren(
+      new Option("— unused —", ""),
+      ...SKILL_NAMES.map((name, id) => new Option(name, String(id))),
+    );
+  }
+
+  let createPanelWasOn = false;
+  const updateStatTotal = () => {
     const total = statInputs.reduce((sum, input) => sum + (Number(input.value) || 0), 0);
     const totalEl = document.getElementById("lg-stat-total");
     totalEl.textContent = `Total: ${total} / 90`;
     totalEl.style.color = total === 90 ? "#8896a5" : "#e5a04d";
   };
+  const updateCreation = () => {
+    const isOn = createToggle.checked;
+    createPanel.classList.toggle("on", isOn);
+    slotSelect.disabled = !characterStage || isOn || slotSelect.options.length === 0;
+    const canDelete = characterStage && !isOn && slotSelect.options.length > 0;
+    backButton.style.display = characterStage ? "block" : "none";
+    backButton.disabled = !characterStage;
+    deleteButton.style.display = canDelete ? "block" : "none";
+    deleteButton.disabled = !canDelete;
+    // The wizard drives its own Back/Next once it's open; the outer go-button
+    // only ever means "play the selected existing slot" from here on.
+    go.style.display = (characterStage && isOn) ? "none" : "block";
+    if (characterStage) go.textContent = "Play";
+    updateStatTotal();
+    if (isOn && !createPanelWasOn) resetWizard();
+    createPanelWasOn = isOn;
+  };
   createToggle.addEventListener("change", updateCreation);
-  for (const input of statInputs) input.addEventListener("input", updateCreation);
+  for (const input of statInputs) input.addEventListener("input", updateStatTotal);
+  genderSelect.addEventListener("change", () => {
+    beardGroup.style.display = genderSelect.value === "female" ? "none" : "flex";
+    if (wizStep === 4) rebuildWizDoll();
+  });
+
+  // ---- step 3: custom skill picker ----
+  const readSkillRows = () => skillRows.map(row => {
+    const id = row.select.value === "" ? null : Number(row.select.value);
+    const value = Number(row.value.value) || 0;
+    return (id === null || value <= 0) ? null : { id, value };
+  });
+  const updateSkillTotal = () => {
+    const filled = readSkillRows().filter(Boolean);
+    const total = filled.reduce((sum, s) => sum + s.value, 0);
+    const el = document.getElementById("wiz-skill-total");
+    el.textContent = `Total: ${total} (need 100 or 120)`;
+    el.style.color = (total === 100 || total === 120) ? "#8896a5" : "#e5a04d";
+  };
+  for (const row of skillRows) {
+    row.select.addEventListener("change", updateSkillTotal);
+    row.value.addEventListener("input", updateSkillTotal);
+  }
+  for (const button of document.querySelectorAll(".wiz-preset-btn")) {
+    button.addEventListener("click", () => {
+      const preset = WIZ_SKILL_PRESETS[button.dataset.preset] || [];
+      skillRows.forEach((row, slot) => {
+        const pick = preset[slot];
+        row.select.value = pick ? String(pick[0]) : "";
+        row.value.value = pick ? String(pick[1]) : "0";
+      });
+      updateSkillTotal();
+    });
+  }
+
+  // ---- step 4: hue-swatch appearance pickers ----
+  function buildHueSwatchRow(container, hues, getHue, setHue) {
+    container.replaceChildren();
+    const makeSwatch = (hue, isDefault) => {
+      const sw = document.createElement("div");
+      sw.className = "wiz-hue" + (isDefault ? " wiz-hue-default" : "");
+      sw.dataset.hue = String(hue);
+      sw.title = isDefault ? "Server default" : ("Hue " + hue);
+      if (isDefault) sw.textContent = "0";
+      if (hue === getHue()) sw.classList.add("sel");
+      sw.addEventListener("click", () => {
+        setHue(hue);
+        for (const el of container.children) el.classList.toggle("sel", el === sw);
+      });
+      return sw;
+    };
+    container.appendChild(makeSwatch(0, true));
+    for (const hue of hues) container.appendChild(makeSwatch(hue, false));
+    applyWizHueSwatches();
+  }
+  function buildAppearanceStep() {
+    buildHueSwatchRow(document.getElementById("wiz-skin-row"), WIZ_SKIN_HUES,
+      () => wizAppearance.skinHue, (hue) => { wizAppearance.skinHue = hue; rebuildWizDoll(); });
+    buildHueSwatchRow(document.getElementById("wiz-hair-row"), WIZ_HAIR_HUES,
+      () => wizAppearance.hairHue, (hue) => { wizAppearance.hairHue = hue; rebuildWizDoll(); });
+    buildHueSwatchRow(document.getElementById("wiz-beard-row"), WIZ_HAIR_HUES,
+      () => wizAppearance.beardHue, (hue) => { wizAppearance.beardHue = hue; rebuildWizDoll(); });
+    buildHueSwatchRow(document.getElementById("wiz-shirt-row"), WIZ_CLOTH_HUES,
+      () => wizAppearance.shirtHue, (hue) => { wizAppearance.shirtHue = hue; });
+    buildHueSwatchRow(document.getElementById("wiz-pants-row"), WIZ_CLOTH_HUES,
+      () => wizAppearance.pantsHue, (hue) => { wizAppearance.pantsHue = hue; });
+    hairStyleSelect.value = String(wizAppearance.hairStyle);
+    beardStyleSelect.value = String(wizAppearance.beardStyle);
+    rebuildWizDoll();
+  }
+  hairStyleSelect.addEventListener("change", () => {
+    wizAppearance.hairStyle = Number(hairStyleSelect.value);
+    rebuildWizDoll();
+  });
+  beardStyleSelect.addEventListener("change", () => {
+    wizAppearance.beardStyle = Number(beardStyleSelect.value);
+    rebuildWizDoll();
+  });
+
+  // ---- step 4: live paperdoll preview (display-only — never touches the
+  // `create` payload). Layers absolutely-positioned <img>s back-to-front —
+  // same technique as the real paperdoll render (refreshPaperdoll, ~L5648):
+  // body gump hued by skin, then hair/beard gumps hued by their own dye, each
+  // with an onerror fallback that just hides that layer instead of showing a
+  // broken-image icon. Hair/beard styles are graphic ids (from the <select>s
+  // above); the paperdoll gump needs the item's AnimID instead, so it's looked
+  // up once per graphic via the server's `iteminfo` route and memoized here. ----
+  const wizItemAnimCache = new Map(); // graphic id -> anim id, or null if unknown
+  async function wizItemAnim(graphic) {
+    if (wizItemAnimCache.has(graphic)) return wizItemAnimCache.get(graphic);
+    let anim = null;
+    try {
+      const response = await fetch("iteminfo/" + graphic);
+      if (response.ok) {
+        const data = await response.json();
+        if (Number.isFinite(data.anim)) anim = data.anim;
+      }
+    } catch { /* offline/errored — cache the miss so we don't refetch every rebuild */ }
+    wizItemAnimCache.set(graphic, anim);
+    return anim;
+  }
+  // Monotonic sequence guards against an out-of-order async response (the
+  // hair/beard `iteminfo` round-trip) overwriting a newer rebuild's result.
+  let wizDollSeq = 0;
+  async function rebuildWizDoll() {
+    const seq = ++wizDollSeq;
+    const doll = document.getElementById("wiz-doll");
+    if (!doll) return;
+    const female = genderSelect.value === "female";
+    const hide = "this.onerror=null;this.style.display='none'";
+    const layers = [];
+    const skinQ = wizAppearance.skinHue ? `?hue=${wizAppearance.skinHue}` : "";
+    layers.push(`<img src="gump/${female ? 13 : 12}.png${skinQ}" alt="" onerror="${hide}">`);
+    if (wizAppearance.hairStyle) {
+      const anim = await wizItemAnim(wizAppearance.hairStyle);
+      if (seq !== wizDollSeq) return; // superseded by a newer rebuild — drop it
+      if (anim != null) {
+        const hueQ = wizAppearance.hairHue ? `?hue=${wizAppearance.hairHue}` : "";
+        const gid = anim + (female ? FEMALE_GUMP_OFFSET : MALE_GUMP_OFFSET);
+        layers.push(`<img src="gump/${gid}.png${hueQ}" alt="" onerror="${hide}">`);
+      }
+    }
+    if (!female && wizAppearance.beardStyle) {
+      const anim = await wizItemAnim(wizAppearance.beardStyle);
+      if (seq !== wizDollSeq) return;
+      if (anim != null) {
+        const hueQ = wizAppearance.beardHue ? `?hue=${wizAppearance.beardHue}` : "";
+        layers.push(`<img src="gump/${anim + MALE_GUMP_OFFSET}.png${hueQ}" alt="" onerror="${hide}">`);
+      }
+    }
+    if (seq !== wizDollSeq) return;
+    doll.innerHTML = layers.join("");
+  }
+
+  // ---- per-step validation gates (Next is blocked until these pass) ----
+  const validateStep = (step) => {
+    if (step === 1) {
+      const name = (document.getElementById("lg-char-name").value || "").trim();
+      if (!/^[A-Za-z][A-Za-z .'-]{1,15}$/.test(name) || /[ .'-]{2}/.test(name)) {
+        return "Use 2–16 letters with single spaces, dashes, periods, or apostrophes.";
+      }
+      return null;
+    }
+    if (step === 2) {
+      const [strength, dexterity, intelligence] = statInputs.map(input => Number(input.value));
+      if ([strength, dexterity, intelligence].some(value => value < 10 || value > 60)
+          || strength + dexterity + intelligence !== 90) {
+        return "STR, DEX, and INT must each be 10–60 and total 90.";
+      }
+      return null;
+    }
+    if (step === 3) {
+      const filled = readSkillRows().filter(Boolean);
+      if (filled.some(s => s.value > 50)) return "A starting skill may not exceed 50.";
+      const ids = filled.map(s => s.id);
+      if (new Set(ids).size !== ids.length) return "Starting skills with a non-zero value must be unique.";
+      const total = filled.reduce((sum, s) => sum + s.value, 0);
+      if (total !== 100 && total !== 120) return `Skill total is ${total} — it must be exactly 100 or 120.`;
+      return null;
+    }
+    return null; // step 4 (appearance) and step 5 (review) have no gate
+  };
+
+  // ---- step 5: read-only review ----
+  function renderWizReview() {
+    const name = (document.getElementById("lg-char-name").value || "").trim();
+    const female = genderSelect.value === "female";
+    const [strength, dexterity, intelligence] = statInputs.map(input => Number(input.value));
+    const skills = readSkillRows().filter(Boolean);
+    const chip = (hue) => `<span class="wiz-review-chip" style="background:${hueHex(hue) || "#777"}"></span>`;
+    const rows = [
+      `<div class="wiz-review-row"><span>Name</span><span>${name || "—"}</span></div>`,
+      `<div class="wiz-review-row"><span>Gender</span><span>${female ? "Female" : "Male"}</span></div>`,
+      `<div class="wiz-review-row"><span>STR / DEX / INT</span><span>${strength} / ${dexterity} / ${intelligence}</span></div>`,
+      `<div class="wiz-review-row"><span>Skills</span><span>${
+        skills.length ? skills.map(s => `${skillName(s.id)} ${s.value}`).join(", ") : "none"
+      }</span></div>`,
+      `<div class="wiz-review-row"><span>Skin</span><span>${wizAppearance.skinHue || "default"}${chip(wizAppearance.skinHue)}</span></div>`,
+      `<div class="wiz-review-row"><span>Hair</span><span>${wizAppearance.hairStyle ? "#" + wizAppearance.hairStyle : "none"}${chip(wizAppearance.hairHue)}</span></div>`,
+    ];
+    if (!female) {
+      rows.push(`<div class="wiz-review-row"><span>Beard</span><span>${wizAppearance.beardStyle ? "#" + wizAppearance.beardStyle : "none"}${chip(wizAppearance.beardHue)}</span></div>`);
+    }
+    rows.push(`<div class="wiz-review-row"><span>Shirt</span><span>${chip(wizAppearance.shirtHue)}</span></div>`);
+    rows.push(`<div class="wiz-review-row"><span>Pants</span><span>${chip(wizAppearance.pantsHue)}</span></div>`);
+    document.getElementById("wiz-review").innerHTML = rows.join("");
+  }
+
+  // ---- step navigation ----
+  function wizShowStep(step) {
+    wizStep = step;
+    for (const el of wizSteps) el.classList.toggle("on", Number(el.dataset.wizStep) === step);
+    wizStepInd.textContent = `Step ${step} of 5 — ${WIZ_STEP_TITLES[step - 1]}`;
+    wizMsg.textContent = "";
+    wizBackBtn.textContent = step === 1 ? "Cancel" : "◀ Back";
+    wizNextBtn.textContent = step === 5 ? "Create character" : "Next ▶";
+    if (step === 4) buildAppearanceStep();
+    if (step === 5) renderWizReview();
+  }
+  function resetWizard() {
+    document.getElementById("lg-char-name").value = "";
+    genderSelect.value = "male";
+    beardGroup.style.display = "flex";
+    statInputs[0].value = 60; statInputs[1].value = 20; statInputs[2].value = 10;
+    updateStatTotal();
+    for (const row of skillRows) { row.select.value = ""; row.value.value = "0"; }
+    updateSkillTotal();
+    wizAppearance.skinHue = 0; wizAppearance.hairStyle = 0; wizAppearance.hairHue = 0;
+    wizAppearance.beardStyle = 0; wizAppearance.beardHue = 0;
+    wizAppearance.shirtHue = 0; wizAppearance.pantsHue = 0;
+    wizShowStep(1);
+  }
+  wizBackBtn.addEventListener("click", () => {
+    // Step 1's Back is a Cancel: un-toggle "Create" and return to the slot view,
+    // as opposed to the outer #lg-back which cancels the whole character stage.
+    if (wizStep === 1) { createToggle.checked = false; updateCreation(); return; }
+    wizShowStep(wizStep - 1);
+  });
+  wizNextBtn.addEventListener("click", () => {
+    if (wizStep === 5) { createCharacterFromWizard(); return; }
+    const error = validateStep(wizStep);
+    if (error) { wizMsg.textContent = error; return; }
+    wizShowStep(wizStep + 1);
+  });
+
   updateCreation();
   slotRow.style.display = "none";
   createToggleRow.style.display = "none";
+
+  // POST the finished `create` object (see docs/DESIGN.md character-creation
+  // contract) and surface any server rejection in #lg-msg, same as `submit()`.
+  const postCharacterCreate = async (create) => {
+    const msg = document.getElementById("lg-msg");
+    msg.textContent = "Creating character…";
+    go.disabled = true; backButton.disabled = true;
+    wizNextBtn.disabled = true; wizBackBtn.disabled = true;
+    try {
+      const response = await fetch("character", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ create }),
+      });
+      if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
+    } catch (error) {
+      msg.textContent = "Character creation failed: " + error.message;
+      go.disabled = false; backButton.disabled = false;
+      wizNextBtn.disabled = false; wizBackBtn.disabled = false;
+    }
+  };
+  function createCharacterFromWizard() {
+    const name = (document.getElementById("lg-char-name").value || "").trim();
+    const female = genderSelect.value === "female";
+    const [strength, dexterity, intelligence] = statInputs.map(input => Number(input.value));
+    const skills = readSkillRows().filter(Boolean).map(s => ({ id: s.id, value: s.value }));
+    const create = {
+      name, female, strength, dexterity, intelligence,
+      city_index: Number(document.getElementById("lg-city").value),
+      skills,
+      skin_hue: wizAppearance.skinHue,
+      hair_style: wizAppearance.hairStyle,
+      hair_hue: wizAppearance.hairHue,
+      // The wizard hides the beard block entirely for Female (step 4); enforce
+      // that server-side expectation here too in case state lingers from a
+      // gender flip after picking a beard.
+      facial_hair_style: female ? 0 : wizAppearance.beardStyle,
+      facial_hair_hue: female ? 0 : wizAppearance.beardHue,
+      shirt_hue: wizAppearance.shirtHue,
+      pants_hue: wizAppearance.pantsHue,
+    };
+    postCharacterCreate(create);
+  }
 
   const submit = async () => {
     const host = (document.getElementById("lg-host").value || "127.0.0.1").trim();
@@ -1336,38 +1663,13 @@ function wireLogin() {
     const msg = document.getElementById("lg-msg");
     if (!username) { msg.textContent = "Enter an account name."; return; }
 
-    let create = null;
-    if (characterStage && createToggle.checked) {
-      const name = (document.getElementById("lg-char-name").value || "").trim();
-      const [strength, dexterity, intelligence] = statInputs.map(input => Number(input.value));
-      if (!name) { msg.textContent = "Enter a character name."; return; }
-      if (!/^[A-Za-z][A-Za-z .'-]{1,15}$/.test(name) || /[ .'-]{2}/.test(name)) {
-        msg.textContent = "Use 2–16 letters with single spaces, dashes, periods, or apostrophes.";
-        return;
-      }
-      if ([strength, dexterity, intelligence].some(value => value < 10 || value > 60)
-          || strength + dexterity + intelligence !== 90) {
-        msg.textContent = "STR, DEX, and INT must each be 10–60 and total 90.";
-        return;
-      }
-      create = {
-        name,
-        female: document.getElementById("lg-gender").value === "female",
-        profession: document.getElementById("lg-profession").value,
-        strength, dexterity, intelligence,
-        city_index: Number(document.getElementById("lg-city").value),
-      };
-    }
-
-    msg.textContent = characterStage
-      ? (create ? "Creating character…" : "Entering world…")
-      : "Connecting…";
+    msg.textContent = characterStage ? "Entering world…" : "Connecting…";
     go.disabled = true;
     backButton.disabled = true;
     try {
       const endpoint = characterStage ? "character" : "login";
       const body = characterStage
-        ? (create ? { create } : { slot: Number(slotSelect.value) })
+        ? { slot: Number(slotSelect.value) }
         : { host, port, username, password, interactive: true, character_slot: null, create: null };
       const response = await fetch(endpoint, {
         method: "POST",
@@ -1428,11 +1730,28 @@ function wireLogin() {
     }
   });
   for (const input of document.querySelectorAll("#login input, #login select"))
-    input.addEventListener("keydown", (e) => { if (e.code === "Enter") submit(); });
+    input.addEventListener("keydown", (e) => {
+      if (e.code !== "Enter") return;
+      // While the wizard is open, Enter advances it instead of submitting the
+      // outer form (which no longer has a `create` path of its own).
+      if (characterStage && createToggle.checked) { e.preventDefault(); wizNextBtn.click(); }
+      else submit();
+    });
 
   window.updateCharacterLoginStage = (active, slots = [], capacity = 0) => {
     characterStage = active;
-    for (const input of credentials) input.disabled = active;
+    // The server/account you already logged into is no longer relevant once
+    // you're picking/creating a character — hide those fields (rather than
+    // just disabling them) and, in their place, show a small read-only
+    // reminder of what you're connected as. Values are left untouched.
+    accountFields.style.display = active ? "none" : "flex";
+    if (accountSummary) {
+      const host = document.getElementById("lg-host").value;
+      const port = document.getElementById("lg-port").value;
+      const user = document.getElementById("lg-user").value;
+      accountSummary.textContent = active ? `Account ${user} · ${host}:${port}` : "";
+      accountSummary.style.display = active ? "block" : "none";
+    }
     slotRow.style.display = active ? "flex" : "none";
     createToggleRow.style.display = active ? "flex" : "none";
     if (!active) {
@@ -1456,8 +1775,7 @@ function wireLogin() {
       createToggle.disabled = full;
       createToggle.checked = slots.length === 0 && !full;
     }
-    go.textContent = createToggle.checked ? "Create" : "Play";
-    updateCreation();
+    updateCreation(); // sets go.textContent ("Play") and opens the wizard if just toggled on
   };
 }
 // True when a key event is going to a text field (login form, etc.), so the global
@@ -5499,6 +5817,16 @@ function applyHueSwatches() {
     if (hx) sw.style.background = hx;
   }
 }
+// Fill the character-creation wizard's appearance swatches (step 4) — same
+// async hue→rgb pattern as applyHueSwatches above, scoped to `.wiz-hue` since
+// the wizard and the paperdoll are never mounted at the same time but share
+// the same cache/fetch path.
+function applyWizHueSwatches() {
+  for (const sw of document.querySelectorAll(".wiz-hue[data-hue]")) {
+    const hx = hueHex((+sw.dataset.hue) | 0);
+    if (hx) sw.style.background = hx;
+  }
+}
 
 // --- container windows (one per serial; openContainer focuses an existing one) ---
 const containerWins = new Map(); // serial -> { el, body, sig }
@@ -7089,6 +7417,26 @@ function refreshProfiles(s) {
   }
 }
 
+// Shared logout flow for both the Options-panel button (.opt-logout) and the
+// HUD's visible "log out" button (#logoutbtn): confirm, guard against a
+// second click while a request is already in flight, then fire the same 0xD1
+// "logout" input command. refreshLogoutAck() below undoes the pending state
+// if the server refuses it.
+function requestLogout() {
+  if (logoutPending) return;
+  if (!window.confirm("Log out of this character?")) return;
+  logoutPending = true;
+  setLogoutButtonsPending(true);
+  sendInput("logout");
+}
+// Reflect logoutPending on whichever logout button(s) currently exist in the
+// DOM — the Options one only exists once that panel has been rendered.
+function setLogoutButtonsPending(pending) {
+  const hudBtn = document.getElementById("logoutbtn");
+  if (hudBtn) { hudBtn.disabled = pending; hudBtn.textContent = pending ? "…" : "⎋ log out"; }
+  const optBtn = document.querySelector(".opt-logout");
+  if (optBtn) { optBtn.disabled = pending; optBtn.textContent = pending ? "LOGGING OUT…" : "LOG OUT"; }
+}
 function refreshLogoutAck(s) {
   const ack = s && s.logoutAck;
   if (!ack) return;
@@ -7097,6 +7445,7 @@ function refreshLogoutAck(s) {
   lastLogoutAckSeq = seq;
   if (ack.allowed === true) return; // play server switches to auth/login immediately
   logoutPending = false;
+  setLogoutButtonsPending(false);
   const options = document.getElementById("options");
   if (options && options.classList.contains("on")) renderOptions();
   setStatus("The server refused the logout request.");
@@ -8026,6 +8375,7 @@ function setupInput() {
   document.getElementById("wmclose").addEventListener("click", closeWorldmap);
   document.getElementById("minilabel").addEventListener("click", openWorldmap);
   document.getElementById("mutebtn")?.addEventListener("click", toggleMute);
+  document.getElementById("logoutbtn")?.addEventListener("click", () => requestLogout());
   // Options panel: button toggles, ✕ closes, title bar drags. Changes persist
   // immediately and apply live (audio volume now; display toggles next repaint).
   const optEl = document.getElementById("options");
@@ -8048,13 +8398,8 @@ function setupInput() {
     saveSettings(); applyAudioSettings();
   });
   optBody.addEventListener("click", (e) => {
-    const button = e.target.closest(".opt-logout");
-    if (!button || logoutPending) return;
-    if (!window.confirm("Log out of this character?")) return;
-    logoutPending = true;
-    button.disabled = true;
-    button.textContent = "LOGGING OUT…";
-    sendInput("logout");
+    if (!e.target.closest(".opt-logout")) return;
+    requestLogout();
   });
   // Paperdoll: ✕ closes, title bar drags, clicking the Backpack row opens it.
   document.getElementById("pd-close").addEventListener("click", closePaperdoll);

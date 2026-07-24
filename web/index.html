@@ -28,6 +28,10 @@
         color: #e6eaf0; padding: 7px 9px; font-size: 13px; outline: none; }
       .login-box input:focus, .login-box select:focus { border-color: #4a90d9; }
       .login-box select:disabled { opacity: .45; }
+      /* Server/account fields: shown only pre-login, hidden (not just disabled)
+         once you're at the character stage — see updateCharacterLoginStage(). */
+      #lg-account-fields { display: flex; flex-direction: column; gap: 9px; }
+      #lg-account-summary { font-size: 11px; color: #8a929c; }
       .login-create-toggle { flex-direction: row !important; align-items: center; gap: 8px !important;
         margin-top: 5px; color: #b9c7d8 !important; cursor: pointer; }
       .login-create-toggle input { width: auto; margin: 0; accent-color: #4a90d9; }
@@ -37,6 +41,43 @@
       .login-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
       .login-stats input { width: 100%; }
       #lg-stat-total { font-size: 10px; color: #8896a5; text-align: right; }
+      /* ---- character-creation wizard (inside #lg-create-panel) ---- */
+      .wiz-head { font-size: 11px; color: #8ab4f8; letter-spacing: .04em; }
+      .wiz-step { display: none; flex-direction: column; gap: 8px; }
+      .wiz-step.on { display: flex; }
+      .wiz-presets { display: flex; gap: 6px; flex-wrap: wrap; }
+      .wiz-preset-btn { flex: 1; min-width: 64px; padding: 6px 4px; border-radius: 5px; cursor: pointer;
+        border: 1px solid #2a3a4a; background: #1b2530; color: #8ab4f8; font-size: 11px; }
+      .wiz-preset-btn:hover { background: rgba(138,180,248,.18); color: #fff; }
+      .wiz-skill-row { display: flex; gap: 6px; }
+      .wiz-skill-row select { flex: 2; min-width: 0; }
+      .wiz-skill-row input { flex: 1; min-width: 0; }
+      #wiz-skill-total { font-size: 10px; color: #8896a5; }
+      /* Step 4: live preview doll (left) + the hue/style pickers (right). */
+      .wiz-appear-layout { display: flex; gap: 10px; align-items: flex-start; }
+      .wiz-appear-pickers { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+      .wiz-doll { position: relative; flex: none; width: 120px; height: 158px; overflow: hidden;
+        border: 1px solid #2a3a4a; border-radius: 6px; background: rgba(0,0,0,.25); }
+      .wiz-doll img { position: absolute; left: 0; top: 0; width: 100%; image-rendering: pixelated; }
+      .wiz-appear-group { display: flex; flex-direction: column; gap: 4px; }
+      .wiz-appear-label { font-size: 10px; color: #8a929c; letter-spacing: .03em; text-transform: uppercase; }
+      .wiz-swrow { display: flex; flex-wrap: wrap; gap: 3px; max-height: 74px; overflow-y: auto; padding: 2px; }
+      .wiz-hue { width: 15px; height: 15px; border-radius: 3px; cursor: pointer; flex: none;
+        border: 1px solid rgba(0,0,0,.5); background: #777; }
+      .wiz-hue:hover { border-color: #fff; transform: scale(1.2); }
+      .wiz-hue.sel { outline: 2px solid #fff; outline-offset: 1px; }
+      .wiz-hue-default { background: repeating-linear-gradient(45deg, #333, #333 3px, #222 3px, #222 6px) !important;
+        display: flex; align-items: center; justify-content: center; font-size: 8px; color: #aaa; }
+      #wiz-review { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: #b9c7d8; }
+      .wiz-review-row { display: flex; justify-content: space-between; gap: 8px; }
+      .wiz-review-chip { display: inline-block; width: 11px; height: 11px; border-radius: 2px;
+        margin-left: 4px; vertical-align: -1px; border: 1px solid rgba(0,0,0,.5); }
+      .wiz-msg { font-size: 11px; color: #e5a04d; min-height: 14px; }
+      .wiz-nav { display: flex; gap: 7px; }
+      .wiz-nav button { flex: 1; padding: 8px; border-radius: 6px; cursor: pointer;
+        border: 1px solid #2a3a4a; background: #1b2530; color: #8ab4f8; font-size: 12px; letter-spacing: .03em; }
+      .wiz-nav button:hover { background: rgba(138,180,248,.18); color: #fff; }
+      .wiz-nav button:disabled { opacity: .5; cursor: default; }
       #lg-actions { display: flex; gap: 7px; margin-top: 6px; }
       #lg-actions button { flex: 1; padding: 9px; border-radius: 6px; cursor: pointer;
         border: 1px solid #2a3a4a; background: #1b2530; color: #8ab4f8; font-size: 13px; letter-spacing: .04em; }
@@ -736,10 +777,13 @@
     <div id="login">
       <div class="login-box">
         <div class="login-title">anima-client</div>
-        <label>Server <input id="lg-host" value="127.0.0.1" spellcheck="false" autocomplete="off"></label>
-        <label>Port <input id="lg-port" value="2594" spellcheck="false" autocomplete="off"></label>
-        <label>Account <input id="lg-user" spellcheck="false" autocomplete="username"></label>
-        <label>Password <input id="lg-pass" type="password" autocomplete="current-password"></label>
+        <div id="lg-account-fields">
+          <label>Server <input id="lg-host" value="127.0.0.1" spellcheck="false" autocomplete="off"></label>
+          <label>Port <input id="lg-port" value="2594" spellcheck="false" autocomplete="off"></label>
+          <label>Account <input id="lg-user" spellcheck="false" autocomplete="username"></label>
+          <label>Password <input id="lg-pass" type="password" autocomplete="current-password"></label>
+        </div>
+        <div id="lg-account-summary" style="display:none"></div>
         <label id="lg-slot-row">Existing character
           <select id="lg-slot">
             <option value="0">Slot 1</option><option value="1">Slot 2</option>
@@ -749,27 +793,105 @@
         </label>
         <label id="lg-create-toggle" class="login-create-toggle"><input id="lg-create" type="checkbox"> Create a new character</label>
         <div id="lg-create-panel">
-          <label>Character name <input id="lg-char-name" maxlength="16" pattern="[A-Za-z][A-Za-z .'-]*" spellcheck="false" autocomplete="off"></label>
-          <label>Gender
-            <select id="lg-gender"><option value="male">Male</option><option value="female">Female</option></select>
-          </label>
-          <label>Profession
-            <select id="lg-profession">
-              <option value="warrior">Warrior — Swords / Tactics</option>
-              <option value="mage">Mage — Magery / Evaluating Intelligence</option>
-              <option value="ranger">Ranger — Archery / Tactics</option>
-              <option value="crafter">Crafter — Blacksmithing / Mining</option>
-            </select>
-          </label>
-          <div class="login-stats">
-            <label>STR <input id="lg-str" type="number" min="10" max="60" value="60"></label>
-            <label>DEX <input id="lg-dex" type="number" min="10" max="60" value="20"></label>
-            <label>INT <input id="lg-int" type="number" min="10" max="60" value="10"></label>
+          <div class="wiz-head"><span id="wiz-stepind">Step 1 of 5 — Identity</span></div>
+
+          <div class="wiz-step on" data-wiz-step="1">
+            <label>Character name <input id="lg-char-name" maxlength="16" pattern="[A-Za-z][A-Za-z .'-]*" spellcheck="false" autocomplete="off"></label>
+            <label>Gender
+              <select id="lg-gender"><option value="male">Male</option><option value="female">Female</option></select>
+            </label>
           </div>
-          <div id="lg-stat-total">Total: 90 / 90</div>
-          <label>Starting city
-            <select id="lg-city"><option value="3">Britain</option><option value="0">New Haven</option></select>
-          </label>
+
+          <div class="wiz-step" data-wiz-step="2">
+            <div class="login-stats">
+              <label>STR <input id="lg-str" type="number" min="10" max="60" value="60"></label>
+              <label>DEX <input id="lg-dex" type="number" min="10" max="60" value="20"></label>
+              <label>INT <input id="lg-int" type="number" min="10" max="60" value="10"></label>
+            </div>
+            <div id="lg-stat-total">Total: 90 / 90</div>
+          </div>
+
+          <div class="wiz-step" data-wiz-step="3">
+            <div class="wiz-presets">
+              <button type="button" class="wiz-preset-btn" data-preset="warrior">Warrior</button>
+              <button type="button" class="wiz-preset-btn" data-preset="mage">Mage</button>
+              <button type="button" class="wiz-preset-btn" data-preset="ranger">Ranger</button>
+              <button type="button" class="wiz-preset-btn" data-preset="crafter">Crafter</button>
+            </div>
+            <div class="wiz-skill-row"><select class="wiz-skill-id" data-slot="0"></select><input class="wiz-skill-val" data-slot="0" type="number" min="0" max="50" step="5" value="0"></div>
+            <div class="wiz-skill-row"><select class="wiz-skill-id" data-slot="1"></select><input class="wiz-skill-val" data-slot="1" type="number" min="0" max="50" step="5" value="0"></div>
+            <div class="wiz-skill-row"><select class="wiz-skill-id" data-slot="2"></select><input class="wiz-skill-val" data-slot="2" type="number" min="0" max="50" step="5" value="0"></div>
+            <div class="wiz-skill-row"><select class="wiz-skill-id" data-slot="3"></select><input class="wiz-skill-val" data-slot="3" type="number" min="0" max="50" step="5" value="0"></div>
+            <div id="wiz-skill-total">Total: 0 (need 100 or 120)</div>
+          </div>
+
+          <div class="wiz-step" data-wiz-step="4">
+            <div class="wiz-appear-layout">
+              <!-- Live preview only — body/hair/beard gumps layered by main.js's
+                   rebuildWizDoll(); never read back into the create payload. -->
+              <div class="wiz-doll" id="wiz-doll"></div>
+              <div class="wiz-appear-pickers">
+                <div class="wiz-appear-group">
+                  <div class="wiz-appear-label">Skin tone</div>
+                  <div class="wiz-swrow" id="wiz-skin-row"></div>
+                </div>
+                <div class="wiz-appear-group">
+                  <div class="wiz-appear-label">Hair style</div>
+                  <select id="wiz-hair-style">
+                    <option value="0">None</option>
+                    <option value="8251">Short</option>
+                    <option value="8252">Long</option>
+                    <option value="8253">Pony Tail</option>
+                    <option value="8260">Mohawk</option>
+                    <option value="8261">Pageboy</option>
+                    <option value="8262">Buns</option>
+                    <option value="8263">Afro</option>
+                    <option value="8264">Receding</option>
+                    <option value="8265">Pig Tails</option>
+                    <option value="8266">Topknot</option>
+                  </select>
+                  <div class="wiz-appear-label">Hair color</div>
+                  <div class="wiz-swrow" id="wiz-hair-row"></div>
+                </div>
+                <div class="wiz-appear-group" id="wiz-beard-group">
+                  <div class="wiz-appear-label">Beard (male only)</div>
+                  <select id="wiz-beard-style">
+                    <option value="0">None</option>
+                    <option value="8254">Long</option>
+                    <option value="8255">Short</option>
+                    <option value="8256">Goatee</option>
+                    <option value="8257">Moustache</option>
+                    <option value="8267">Medium Short</option>
+                    <option value="8268">Medium Long</option>
+                    <option value="8269">Vandyke</option>
+                  </select>
+                  <div class="wiz-appear-label">Beard color</div>
+                  <div class="wiz-swrow" id="wiz-beard-row"></div>
+                </div>
+                <div class="wiz-appear-group">
+                  <div class="wiz-appear-label">Shirt color</div>
+                  <div class="wiz-swrow" id="wiz-shirt-row"></div>
+                </div>
+                <div class="wiz-appear-group">
+                  <div class="wiz-appear-label">Pants color</div>
+                  <div class="wiz-swrow" id="wiz-pants-row"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="wiz-step" data-wiz-step="5">
+            <label>Starting city
+              <select id="lg-city"><option value="3">Britain</option><option value="0">New Haven</option></select>
+            </label>
+            <div id="wiz-review"></div>
+          </div>
+
+          <div class="wiz-msg" id="wiz-msg"></div>
+          <div class="wiz-nav">
+            <button type="button" id="wiz-back">◀ Back</button>
+            <button type="button" id="wiz-next">Next ▶</button>
+          </div>
         </div>
         <div id="lg-actions">
           <button id="lg-back" type="button">Back</button>
@@ -824,7 +946,7 @@
       <div id="status">connecting…</div>
       <div id="diag" class="legend" style="margin-top:6px; color:#6b7280"></div>
       <div class="legend" style="margin-top:10px">
-        <b>controls:</b> WASD/arrows move · Q/E/Z/C diagonals · Enter chat · M map · P doll · I bag · K spells · L skills · O macros · G all-names · R guard-zone lines · N <button id="mutebtn" type="button" style="cursor:pointer">sound</button> · <button id="optbtn" type="button" style="cursor:pointer">⚙ options</button>
+        <b>controls:</b> WASD/arrows move · Q/E/Z/C diagonals · Enter chat · M map · P doll · I bag · K spells · L skills · O macros · G all-names · R guard-zone lines · N <button id="mutebtn" type="button" style="cursor:pointer">sound</button> · <button id="optbtn" type="button" style="cursor:pointer">⚙ options</button> · <button id="logoutbtn" type="button" style="cursor:pointer">⎋ log out</button>
       </div>
     </div>
     <div id="options" class="gump-win">
