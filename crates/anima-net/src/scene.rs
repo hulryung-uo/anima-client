@@ -2347,14 +2347,19 @@ pub fn build_scene(
         // real per-hop calc from each already-resolved neighbour (its Chebyshev
         // predecessor, walking straight back toward the player) instead of a
         // single far hop keeps every step of the chain as accurate as the
-        // existing radius-1 case. `CHAIN_RADIUS` matches the browser's
-        // `LEAD_CAP` (how far prediction can run ahead of the confirmed server
-        // position — web/main.js) so a queued step's destination is (almost)
-        // never outside this window. Cost: ~80 extra `calculate_new_z` calls per
-        // build (vs. 8 before) over tiles already fetched for rendering — no
-        // extra map I/O, so this doesn't reintroduce the full-flood cost the
-        // cheap path was written to avoid.
-        const CHAIN_RADIUS: i64 = 4;
+        // existing radius-1 case. `CHAIN_RADIUS` must cover the browser's
+        // `LEAD_CAP` (3.5 — how far prediction runs ahead of the confirmed
+        // server position, web/main.js) PLUS the glide's own destination tile
+        // and diagonal slack, so a mid-glide `tileSZ()` re-read NEVER lands on
+        // a cheap-hint tile: the two calculators disagree by ±1 on slopes, and
+        // a destination tile flipping between them across polls (as the chain
+        // origin follows the player) re-targets the browser's Z ease every
+        // poll — the "height keeps re-adjusting" bobbing verified live around
+        // (1485,1600), where tiles at Chebyshev distance 4↔5 toggled sz 10↔11.
+        // Radius 6 = ceil(LEAD_CAP) + 1 (in-flight step) + 1 margin. Cost:
+        // ~168 `calculate_new_z` calls per build (vs 80 at radius 4) over
+        // tiles already fetched for rendering — still no extra map I/O.
+        const CHAIN_RADIUS: i64 = 6;
         const CHAIN_SPAN: usize = (2 * CHAIN_RADIUS as usize) + 1;
         let chain_idx = |ddx: i64, ddy: i64| -> usize {
             ((ddy + CHAIN_RADIUS) as usize) * CHAIN_SPAN + (ddx + CHAIN_RADIUS) as usize
