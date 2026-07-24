@@ -135,6 +135,15 @@ function resolveTypedAnimGroup(typ, action, mode, body, atype, mounted) {
 }
 let app, world, entLayer, mobs, overLayer, barLayer, itemLayer, guardLineLayer;
 let scene = null;
+// Mouse-wheel camera zoom: scales app.stage (world sprites auto-scale as its
+// children); world-anchored HTML/2D-canvas overlays fold camZoom into their
+// manual (stage + worldIso) math — see drawOverheads/drawDamage/drawBars/fxFrame.
+let camZoom = 1;
+const ZOOM_MIN = 0.6, ZOOM_MAX = 2.6;
+// Wheel/trackpad zoom rate: camZoom *= exp(-deltaY * K). At K=0.001 a clamped
+// mouse notch (|deltaY|→100) is ~10% per notch (the old fixed-factor feel), while
+// a trackpad's many tiny deltas accumulate smoothly instead of compounding.
+const ZOOM_WHEEL_K = 0.001;
 // Render-on-demand: only re-draw the canvas when the scene changed. markDirty()
 // requests one redraw; movement/animation/polls set it. Starts true (first draw).
 let dirty = true;
@@ -1044,6 +1053,22 @@ async function main() {
   app.canvas.style.imageRendering = "pixelated"; // crisp nearest-neighbor upscale
   window.addEventListener("resize", () => { const r = renderSize(); app.renderer.resize(r.w, r.h); markDirty(); });
   document.getElementById("map").appendChild(app.canvas);
+  // Mouse-wheel / trackpad camera zoom: the player stays centered (the per-frame
+  // camera math re-centers on every frame — see renderFrame), so this only needs
+  // to adjust camZoom and request a redraw. The zoom step is PROPORTIONAL to the
+  // scroll amount (exp(-Δ·k)), not a fixed factor per event — a mouse notch is one
+  // big Δ, but a trackpad fires dozens of tiny Δ's per gesture, and a fixed factor
+  // would compound them into a violent jump. Normalize deltaMode (Firefox reports
+  // lines/pages) and clamp per event so one accelerated flick can't leap.
+  app.canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    let dy = e.deltaY;
+    if (e.deltaMode === 1) dy *= 16;            // lines → ~px
+    else if (e.deltaMode === 2) dy *= app.screen.height; // pages → ~px
+    dy = Math.max(-100, Math.min(100, dy));     // cap a single event to ~10% zoom
+    camZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, camZoom * Math.exp(-dy * ZOOM_WHEEL_K)));
+    markDirty();
+  }, { passive: false });
   buildGameCursors();  // UO-style arrow / target-reticle mouse cursors over the game
   world = new PIXI.Container(); world.sortableChildren = true;
   entLayer = new PIXI.Graphics();
@@ -1148,8 +1173,8 @@ function fxFrame(now) {
       ctx.save();
       ctx.globalCompositeOperation = "destination-out";
       for (const L of scene.lights) {
-        const sx = (ox + isoX(L.x, L.y)) * cssX;
-        const sy = (oy + isoY(L.x, L.y, L.z)) * cssY;
+        const sx = (ox + isoX(L.x, L.y) * camZoom) * cssX;
+        const sy = (oy + isoY(L.x, L.y, L.z) * camZoom) * cssY;
         const rad = (L.r || 3) * 44 * cssX;
         if (sx < -rad || sy < -rad || sx > W + rad || sy > H + rad) continue; // off-screen
         const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, rad);
@@ -1215,8 +1240,8 @@ function fxFrame(now) {
     const cssX = app.canvas.clientWidth / app.renderer.width;
     const cssY = app.canvas.clientHeight / app.renderer.height;
     const ox = app.stage.position.x, oy = app.stage.position.y;
-    const tx = (ox + isoX(qa.x, qa.y)) * cssX;
-    const ty = (oy + isoY(qa.x, qa.y, 0)) * cssY;
+    const tx = (ox + isoX(qa.x, qa.y) * camZoom) * cssX;
+    const ty = (oy + isoY(qa.x, qa.y, 0) * camZoom) * cssY;
     const cx = W / 2, cy = H / 2;
     const margin = 44;
     let ax = tx, ay = ty;
@@ -2410,7 +2435,8 @@ function renderFrame(dt) {
   if (self) {
     const camX = sitting ? isoX(sitting.x, sitting.y) : isoX(self.rx, self.ry);
     const camY = sitting ? isoY(sitting.x, sitting.y, sitting.z) : isoY(self.rx, self.ry, self.rz ?? self.z);
-    app.stage.position.set(app.screen.width / 2 - camX, app.screen.height / 2 - camY);
+    app.stage.scale.set(camZoom);
+    app.stage.position.set(app.screen.width / 2 - camX * camZoom, app.screen.height / 2 - camY * camZoom);
   }
   // Cycle animated statics (flames/fountains/water wheels) to their current frame.
   tickAnimatedStatics(now);
@@ -3516,8 +3542,8 @@ function drawOverheads(now) {
     o.el.style.display = "block";
     applyOverheadColor(o);   // pick up a server hue that resolved after creation
     const up = stack.get(o.id) || 0;
-    o.el.style.left = ((app.stage.x + isoX(st.rx, st.ry)) * fx) + "px";
-    o.el.style.top = ((app.stage.y + isoY(st.rx, st.ry, st.rz ?? st.z) - OVERHEAD_HEAD) * fy - up) + "px";
+    o.el.style.left = ((app.stage.x + isoX(st.rx, st.ry) * camZoom) * fx) + "px";
+    o.el.style.top = ((app.stage.y + (isoY(st.rx, st.ry, st.rz ?? st.z) - OVERHEAD_HEAD) * camZoom) * fy - up) + "px";
     stack.set(o.id, up + (o.el.offsetHeight || 16) + 2);
     const left = o.ttl - age;
     o.el.style.opacity = left < 700 ? Math.max(0, left / 700) : 1;
@@ -3607,8 +3633,8 @@ function drawDamage(now) {
     if (!st) { if (o.el) o.el.style.display = "none"; continue; } // target left view
     o.el.style.display = "block";
     const t = age / o.ttl;                            // 0..1 through its life
-    o.el.style.left = ((app.stage.x + isoX(st.rx, st.ry)) * fx) + "px";
-    o.el.style.top = ((app.stage.y + isoY(st.rx, st.ry, st.rz ?? st.z) - OVERHEAD_HEAD - 18 - t * DAMAGE_RISE) * fy) + "px";
+    o.el.style.left = ((app.stage.x + isoX(st.rx, st.ry) * camZoom) * fx) + "px";
+    o.el.style.top = ((app.stage.y + (isoY(st.rx, st.ry, st.rz ?? st.z) - OVERHEAD_HEAD - 18 - t * DAMAGE_RISE) * camZoom) * fy) + "px";
     o.el.style.opacity = t > 0.5 ? Math.max(0, 1 - (t - 0.5) * 2) : 1; // fade over the back half
   }
 }
@@ -3982,8 +4008,8 @@ function drawBars(now) {
       if (d._t !== nm) { d.textContent = nm; d._t = nm; d._measure = true; }
       if (d._noto !== m.noto) { d.style.color = cssColor(notoColor(m.noto)); d._noto = m.noto; }
       const fx = window.innerWidth / app.renderer.width, fy = window.innerHeight / app.renderer.height;
-      const cx = (app.stage.x + x) * fx;
-      const naturalBottom = (app.stage.y + topY - 2) * fy;
+      const cx = (app.stage.x + x * camZoom) * fx;
+      const naturalBottom = (app.stage.y + (topY - 2) * camZoom) * fy;
       nameJobs.push({ d, serial, cx, naturalBottom, nm });
     } else {
       const d = nameDivs.get(id); if (d) d.style.display = "none";
@@ -7342,7 +7368,13 @@ function screenDir(dx, dy) {
 
 // Direction + run from the cursor relative to the screen center (the avatar).
 function mouseMove() {
-  const dx = mouseX - app.screen.width / 2, dy = mouseY - app.screen.height / 2;
+  // The avatar is drawn at the canvas CENTRE. mouseX/mouseY are CSS-client px
+  // (canvas-relative), so the centre must be the canvas's *client* size — NOT
+  // app.screen, which is the capped ~1.1MP renderer buffer (see renderSize) and
+  // is smaller than the CSS-stretched canvas. Using app.screen put the steer
+  // centre up-and-left of the real avatar, skewing every direction. Client space
+  // is also zoom-independent (the avatar stays centred at any camZoom).
+  const dx = mouseX - app.canvas.clientWidth / 2, dy = mouseY - app.canvas.clientHeight / 2;
   const range = Math.hypot(dx, dy);
   if (range < MOUSE_DEADZONE) return null;
   // screen → world dir: our iso is rotated one step (ClassicUO `facing - 1`).
@@ -7439,7 +7471,9 @@ function onEntityPointerDown(serial, e, isItem) {
 // projection isoX/isoY with HALF/ZSTEP; z is assumed to be the player's z.
 function groundTileAt(gx, gy) {
   const z = scene && scene.player ? (scene.player.z | 0) : 0;
-  const sx = gx - app.stage.position.x, sy = gy - app.stage.position.y;
+  // app.stage is scaled by camZoom (mouse-wheel zoom), so undo that scale to get
+  // back to unscaled world-iso pixels before inverting the projection.
+  const sx = (gx - app.stage.position.x) / camZoom, sy = (gy - app.stage.position.y) / camZoom;
   const a = sx / HALF, b = (sy + z * ZSTEP) / HALF;
   return { x: Math.round((a + b) / 2), y: Math.round((b - a) / 2), z };
 }
@@ -7741,6 +7775,17 @@ function chordDigit(code) {
 }
 function armSpellChord() { spellChord = { circle: null, t: performance.now() }; setStatus("Spell: circle 1-8…"); }
 
+// ---- fixed HUD panel drag persistence (localStorage) ----
+function loadPanelPos(key) {
+  try { const p = JSON.parse(localStorage.getItem(key)); if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) return p; } catch (e) {}
+  return null;
+}
+function savePanelPos(key, x, y) { try { localStorage.setItem(key, JSON.stringify({ x, y })); } catch (e) {} }
+// Clamp a saved/target position into the current viewport (matches makeDraggable's clamp).
+function clampPanel(x, y) {
+  return { x: Math.max(0, Math.min(window.innerWidth - 40, x)), y: Math.max(0, Math.min(window.innerHeight - 24, y)) };
+}
+
 function setupInput() {
   loadMacros();
   setupMacroEditor();
@@ -7785,6 +7830,13 @@ function setupInput() {
     if (e.code === "KeyU") { e.preventDefault(); toggleHud(); return; }              // U = hide/show HUD status panel
     if (e.code === "KeyJ") { e.preventDefault(); toggleJournal(); return; }          // J = hide/show journal
     if (e.code === "KeyR") { e.preventDefault(); toggleGuardZones(); return; }        // R = guard-zone lines
+    // +/- (and numpad +/-) = camera zoom in/out, same step as the mouse wheel.
+    if (e.code === "Equal" || e.code === "NumpadAdd") {
+      e.preventDefault(); camZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, camZoom * 1.1)); markDirty(); return;
+    }
+    if (e.code === "Minus" || e.code === "NumpadSubtract") {
+      e.preventDefault(); camZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, camZoom / 1.1)); markDirty(); return;
+    }
     // Esc while holding an item on the cursor → return it (backpack, else ground).
     // Takes priority over closing windows so a held item is never silently lost.
     if (e.code === "Escape" && cursorItem) { e.preventDefault(); returnCursorItem(); return; }
@@ -7875,9 +7927,14 @@ function setupInput() {
     // Our own avatar is always at the canvas centre but isn't a click target (so it
     // never eats steering). During a target cursor, a click on that centre band IS
     // self — answer with target:<self> so bandages / beneficial spells work on us.
+    // The band must track the avatar's on-screen size, which scales with camZoom
+    // (the sprite is a child of app.stage, scaled by camZoom). dxp/dyp and the
+    // 28/68/14 constants are already CSS-client px tuned at zoom 1, so the per-window
+    // stretch cancels and only camZoom needs folding in — else a self-heal misses
+    // the (larger) body when zoomed in, or grabs nearby ground tiles when zoomed out.
     const r = canvas.getBoundingClientRect();
     const dxp = (e.clientX - r.left) - r.width / 2, dyp = (e.clientY - r.top) - r.height / 2;
-    if (scene.player && Math.abs(dxp) < 28 && dyp > -68 && dyp < 14) {
+    if (scene.player && Math.abs(dxp) < 28 * camZoom && dyp > -68 * camZoom && dyp < 14 * camZoom) {
       sendInput("target:" + (scene.player.serial >>> 0));
       endTargetUI();
       return;
@@ -8027,6 +8084,33 @@ function setupInput() {
   document.getElementById("pt-close").addEventListener("click", closeParty);
   makeDraggable(document.getElementById("party"), document.getElementById("pt-title"));
   wireParty();
+  // HUD panel: draggable by its title (also carries #status, which lives inside it).
+  const hudEl = document.getElementById("hud");
+  const hudTitle = hudEl.querySelector("h1");
+  makeDraggable(hudEl, hudTitle, (x, y) => savePanelPos("anima.hudPos", x, y));
+  {
+    const p = loadPanelPos("anima.hudPos");
+    if (p) { const c = clampPanel(p.x, p.y); hudEl.style.left = c.x + "px"; hudEl.style.top = c.y + "px"; hudEl.style.right = "auto"; }
+  }
+  // Minimap cluster: minimap canvas is the drag handle; #minilabel and #buffs
+  // (neither has a safe handle of their own — the label has a click handler, the
+  // buff bar is pointer-events:none) follow it by their fixed default-CSS offsets.
+  const miniEl = document.getElementById("minimap");
+  const labelEl = document.getElementById("minilabel");
+  const buffsEl = document.getElementById("buffs");
+  const mr = miniEl.getBoundingClientRect(), lr = labelEl.getBoundingClientRect(), br = buffsEl.getBoundingClientRect();
+  const dLabel = { x: lr.left - mr.left, y: lr.top - mr.top };
+  const dBuffs = { x: br.left - mr.left, y: br.top - mr.top };
+  const placeCluster = (x, y) => {
+    miniEl.style.left = x + "px"; miniEl.style.top = y + "px"; miniEl.style.right = "auto";
+    labelEl.style.left = (x + dLabel.x) + "px"; labelEl.style.top = (y + dLabel.y) + "px";
+    buffsEl.style.left = (x + dBuffs.x) + "px"; buffsEl.style.top = (y + dBuffs.y) + "px";
+  };
+  makeDraggable(miniEl, miniEl, (x, y) => { placeCluster(x, y); savePanelPos("anima.miniPos", x, y); });
+  {
+    const p = loadPanelPos("anima.miniPos");
+    if (p) { const c = clampPanel(p.x, p.y); placeCluster(c.x, c.y); }
+  }
   // Trade windows are wired at build time (buildTradeWindow), one per session
   // — there's no static #trade element to wire once at startup anymore.
   const pdb = document.getElementById("pd-body");
