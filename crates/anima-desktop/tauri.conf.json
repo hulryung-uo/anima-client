@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Anima",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "identifier": "dev.anima.client",
   "build": {
     "frontendDist": "frontend-dist"
@@ -14,12 +14,20 @@
   },
   "bundle": {
     "active": true,
+    "targets": "all",
+    "category": "Game",
+    "shortDescription": "AI-native, cross-platform Ultima Online client",
+    "longDescription": "A from-scratch Ultima Online client. Connects directly to a UO server and renders the world in a native window. Locates your existing UO client data (the .mul/.uop files) on first run; no game data is bundled.",
+    "copyright": "© 2026 Anima",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
   }
 }

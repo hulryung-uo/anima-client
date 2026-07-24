@@ -1,0 +1,58 @@
+name: Release
+
+# Push a version tag (e.g. `v0.1.0`) to build installable bundles on macOS and
+# Windows and attach them to a (draft) GitHub Release. Signing is opt-in via
+# repo secrets (see below / docs/DISTRIBUTION.md); without them the artifacts
+# are unsigned but still usable for internal testing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # create the release and upload the bundles
+
+jobs:
+  bundle:
+    name: Bundle (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: "--target universal-apple-darwin" # one binary for Intel + Apple Silicon
+          - os: windows-latest
+            args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Add macOS universal targets
+        if: matrix.os == 'macos-latest'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      # tauri-action installs tauri-cli, runs `cargo tauri build`, and (given a
+      # tagName) creates/updates the GitHub Release with the bundles attached.
+      # No frontend build step: the web/ renderer is embedded in anima-net at
+      # compile time and frontendDist is a static placeholder.
+      - name: Build & publish bundle
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- macOS signing + notarization (optional; set as repo secrets) ---
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: crates/anima-desktop
+          args: ${{ matrix.args }}
+          tagName: ${{ github.ref_name }}
+          releaseName: "Anima ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false

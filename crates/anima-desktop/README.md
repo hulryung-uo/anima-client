@@ -24,20 +24,23 @@ no baked-in credentials (unlike `play`'s CLI-arg auto-login) — this is the
 standalone default, matching the login page mode of the `play` bin
 (`ANIMA_LOGIN=1 cargo run -p anima-net --bin play`).
 
-## Bundling a real .app / .dmg (optional)
+## Bundling an installable app (.app / .dmg / .exe)
 
-Not required for development. If you want an installable bundle:
+From the repo root:
 
 ```bash
-cargo install tauri-cli --locked
-cargo tauri build
+scripts/build-app.sh              # bundle for this machine
+scripts/build-app.sh --universal  # macOS: one binary for Intel + Apple Silicon
 ```
 
-This produces a `.app` (and `.dmg` on macOS) under
-`target/release/bundle/`. The icons in `icons/` and `tauri.conf.json` in
-this crate are already wired up for it (`tauri-build`'s codegen is what
-`cargo build`/`cargo run` already exercise, so a plain build should mostly
-just work — `cargo tauri build` additionally does the platform packaging).
+One command: installs `tauri-cli` if needed, runs `cargo tauri build` against
+this crate's `tauri.conf.json`, and prints the bundle paths under
+`target/**/release/bundle/` (macOS `.app`/`.dmg`, Windows `-setup.exe`/`.msi`).
+The icons in `icons/` are already wired up.
+
+The full distribution guide — code signing / notarization (macOS Gatekeeper),
+Windows installers, tag-driven CI releases, and versioning — is in
+[`../../docs/DISTRIBUTION.md`](../../docs/DISTRIBUTION.md).
 
 ## Notes / known limitations
 
