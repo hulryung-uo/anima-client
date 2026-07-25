@@ -479,6 +479,17 @@ const isoY = (x, y, z) => (x + y) * HALF - (z || 0) * ZSTEP;
 // secondary = priorityZ (z adjusted: land z-2, wall/height +1), tertiary = type
 // bias (land 0 < surface/static 4 < mobile 8) so floors draw under walls etc.
 const depthZ = (x, y, pz, bias) => (x + y) * 8192 + ((pz | 0) + 130) * 16 + bias;
+// A mobile outranks anything sharing its tile, the way ClassicUO's draw-time
+// bias does. There, depth is `(x + y) + (127 + z) * 0.01` (View.cs:81) and the
+// batcher adds +1.0 for mobiles vs +0.5 for statics — half a tile, i.e. FIFTY z
+// units of headroom, so only something towering (>51 z) above you on your own
+// tile can paint over you. With bare `depthZ` the gap here is bias 8 vs 4 = 4,
+// under one z step (16), so a static merely 1-2 z above your feet — a stair
+// riser you are standing on, a table, a low wall — sorted in front and hid you.
+// 800 = 50 z units, reproducing ClassicUO's headroom exactly; it stays far
+// inside the 8192 tile stride, so it can never reorder across tiles.
+const MOB_DEPTH_BIAS = 800;
+const mobDepthZ = (x, y, z) => depthZ(x, y, z + 1, 8) + MOB_DEPTH_BIAS;
 
 // ---- texture + frame-count caches ----
 // Hue is baked into the cache key/URL (the server pre-hues each PNG), so every
@@ -2486,11 +2497,6 @@ function syncWorld(s) {
   // must be removed so the interior shows.
   prune(staticPool, seenS, (e) => e);
   diag.tiles = tilePool.size + staticPool.size;
-  // The static/item pool may have changed shape this poll (new sprite could need
-  // fading right where we already stand) — force one more full transparencyPass
-  // scan next frame regardless of whether the player's tile moved. See the flag's
-  // own comment above transparencyPass().
-  transparencyDirty = true;
   // Stamp EVERY texture a live sprite/anim-part could currently be showing as
   // "just used", once per poll — not only the ones this function's own diff
   // loops happen to touch. Two real escapes found live, both live sprites the
@@ -2957,73 +2963,71 @@ function tickAnimatedStatics(now) {
   if (changed) markDirty();
 }
 
-// Circle of transparency + foliage fade. Statics/items that draw IN FRONT of the
-// player (higher zIndex → they'd occlude the avatar) and sit within a small radius
-// fade to semi-transparent, so you can always see yourself — like ClassicUO. Sprites
-// are POOLED/persistent, so we track which we faded last pass and restore any that
-// dropped out (otherwise statics would stay stuck-transparent). Cheap: a distance
-// compare per pooled sprite; far ones are already alpha 1 and skipped.
+// See-through for whatever actually COVERS the avatar (stairs, walls, trees).
+//
+// Iso draw order is correct here: a static one tile nearer the viewer genuinely
+// is in front, so it legitimately paints over you — measured live on a stair
+// climb, single statics covered 80%/66%/54% of the avatar's sprite. Sorting
+// can't fix that; something has to become see-through. ClassicUO's own Circle
+// Of Transparency (GameSceneDrawingSorting.CheckCircleOfTransparencyRadius) is
+// a SCREEN-SPACE circle with a distance gradient — and it ships disabled by
+// default (Profile.UseCircleOfTransparency).
+//
+// The first attempt here faded every static inside a square TILE radius that
+// merely sorted in front, at a flat alpha. That is why it looked wrong: in the
+// same measurement, 5 sprites actually covered the avatar while 10–17 more were
+// "near and in front" but covered nothing — and those all went translucent too,
+// popping in and out at tile boundaries.
+//
+// So the test is now the honest one: does this sprite's screen rectangle really
+// intersect the avatar's? Only then does it fade, and the alpha eases over a few
+// frames so nothing pops. Cost is bounded by a cheap tile pre-filter before any
+// bounds work.
 const fadedSprites = new Set();
-const R_COT = 2, R_FOL = 3;            // tile radius: circle-of-transparency / foliage
-const A_COT = 0.55, A_FOL = 0.45;      // faded alpha: statics / foliage
-// Circle-of-transparency is temporarily DISABLED — it behaved oddly around the
-// avatar. Revisit a better see-through approach later (see the note at
-// transparencyPass). Flip to true to restore the fade exactly as before; while
-// false, transparencyPass() only *undoes* any lingering fade so nothing is stuck.
-let cotEnabled = false;
-// Full-pool scan is only worth redoing when it could actually change: the player
-// crossed a tile (fade radius is tile-relative) or syncWorld just rebuilt part of
-// the static/item pool (a new/removed sprite could need (un)fading even at the
-// same tile). `transparencyDirty` is set at the end of every syncWorld() call
-// (each poll, ~150ms) — cheap insurance against tracking exact pool deltas —
-// so this still cuts the scan from every rendered frame (60Hz) to at most once
-// per poll plus once per tile crossing, instead of every single frame.
-let transparencyDirty = true;
-let lastCotKey = null;
+const OCC_RADIUS = 4;                    // tile pre-filter; nothing further can overlap
+const A_OCC = 0.35, A_OCC_FOLIAGE = 0.45; // faded alpha: solids / foliage
+const OCC_FADE = 0.18;                    // per-frame lerp toward the target alpha
+const OCC_PAD = 2;                        // px: also fade what merely clips the outline
 function transparencyPass() {
-  if (!cotEnabled) {
-    // Effect off: clear any fade we applied before it was disabled, then bail.
-    if (!fadedSprites.size) return;
-    let changed = false;
-    for (const sp of fadedSprites) {
-      if (!sp.destroyed && sp.alpha !== 1) { sp.alpha = 1; changed = true; }
-    }
-    fadedSprites.clear();
-    if (changed) markDirty();
-    return;
-  }
   let ptx, pty, pz;
-  if (sitting) { ptx = sitting.x; pty = sitting.y; pz = sitting.z; } // seated: fade around the chair, not the (unmoved) real tile
+  if (sitting) { ptx = sitting.x; pty = sitting.y; pz = sitting.z; } // seated: use the chair, not the (unmoved) real tile
   else if (pred) { ptx = Math.round(pred.rx); pty = Math.round(pred.ry); pz = pred.z; }
   else if (scene && scene.player) { ptx = scene.player.x; pty = scene.player.y; pz = scene.player.z; }
   else return;
-  const cotKey = ptx + "," + pty + "," + (pz | 0);
-  if (!transparencyDirty && cotKey === lastCotKey) return; // player tile unchanged, pool unchanged
-  lastCotKey = cotKey; transparencyDirty = false;
-  // The avatar's current draw depth (same formula drawMobs uses for "self").
-  const playerZi = depthZ(ptx, pty, (pz | 0) + 1, 8);
   const newFaded = new Set();
-  let changed = false;
-  const consider = (sp) => {
-    const r = sp._foliage ? R_FOL : R_COT;
-    let target = 1;
-    // Within radius (Chebyshev) AND drawn in front of the avatar → would occlude.
-    if (Math.abs(sp._tx - ptx) <= r && Math.abs(sp._ty - pty) <= r && sp.zIndex > playerZi) {
-      target = sp._foliage ? A_FOL : A_COT;
-    }
-    if (target !== 1) {
+  const body = mobSprites.get("self#body");
+  if (body && !body.destroyed && body.visible) {
+    // The avatar's real on-screen rectangle. Bounds are global, so they already
+    // account for the camera and zoom — the same space the statics report in.
+    const pb = body.getBounds();
+    const ax0 = pb.x - OCC_PAD, ay0 = pb.y - OCC_PAD;
+    const ax1 = pb.x + pb.width + OCC_PAD, ay1 = pb.y + pb.height + OCC_PAD;
+    // Same depth formula drawMobs uses for "self": anything sorting at or below
+    // this draws behind us and cannot hide us, whatever its bounds.
+    const playerZi = mobDepthZ(ptx, pty, pz | 0); // same key drawMobs sorts the avatar with
+    const consider = (sp) => {
+      if (!sp || sp.destroyed || !sp.visible) return;
+      if (Math.abs(sp._tx - ptx) > OCC_RADIUS || Math.abs(sp._ty - pty) > OCC_RADIUS) return;
+      if (sp.zIndex <= playerZi) return;
+      const b = sp.getBounds();
+      if (b.x + b.width <= ax0 || b.x >= ax1 || b.y + b.height <= ay0 || b.y >= ay1) return;
       newFaded.add(sp);
-      if (sp.alpha !== target) { sp.alpha = target; changed = true; }
-    }
-  };
-  for (const sp of staticPool.values()) consider(sp);
-  for (const e of itemPool.values()) consider(e.sp);
-  // Restore sprites that were faded last pass but aren't in the fade set now.
-  for (const sp of fadedSprites) {
-    if (!newFaded.has(sp) && !sp.destroyed && sp.alpha !== 1) { sp.alpha = 1; changed = true; }
+    };
+    for (const sp of staticPool.values()) consider(sp);
+    for (const e of itemPool.values()) consider(e.sp);
   }
-  fadedSprites.clear();
-  for (const sp of newFaded) fadedSprites.add(sp);
+  // Ease every sprite that is occluding now, or is still recovering from having
+  // occluded. Sprites are pooled/persistent, so anything we touched must be
+  // walked back to alpha 1 or it would stay stuck translucent.
+  let changed = false;
+  for (const sp of new Set([...fadedSprites, ...newFaded])) {
+    if (sp.destroyed) { fadedSprites.delete(sp); continue; }
+    const target = newFaded.has(sp) ? (sp._foliage ? A_OCC_FOLIAGE : A_OCC) : 1;
+    let a = sp.alpha + (target - sp.alpha) * OCC_FADE;
+    if (Math.abs(a - target) < 0.01) a = target;
+    if (a !== sp.alpha) { sp.alpha = a; changed = true; }
+    if (a === 1) fadedSprites.delete(sp); else fadedSprites.add(sp);
+  }
   if (changed) markDirty();
 }
 
@@ -3324,8 +3328,8 @@ function drawMobs() {
       // re-sort). All parts share the body's depth; a rank epsilon (≪ the per-z step
       // of 16) keeps them back→front regardless of which parts are present this frame.
       const zi = (isSelf && sitting)
-        ? depthZ(sitting.x, sitting.y, sitting.z + 1, 8)
-        : depthZ(Math.round(st.rx), Math.round(st.ry), st.z + 1, 8);
+        ? mobDepthZ(sitting.x, sitting.y, sitting.z)
+        : mobDepthZ(Math.round(st.rx), Math.round(st.ry), st.z);
       for (const e of entries) {
         const key = id + "#" + e.key;
         let sp = mobSprites.get(key);
