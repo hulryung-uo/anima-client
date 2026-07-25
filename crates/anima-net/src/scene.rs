@@ -614,6 +614,12 @@ pub const RADIUS: i64 = 18;
 /// without the cost `RADIUS` itself is capped by (see doc above).
 pub const LAND_RADIUS: i64 = 24;
 
+/// Statics/land within this Chebyshev distance of the player also carry the
+/// tiledata bits the browser needs to run `calculate_new_z` itself (see
+/// web/main.js). Bounded on purpose: prediction only ever steps a few tiles
+/// ahead, and shipping these for the whole window would bloat every poll.
+pub const PATH_RADIUS: i64 = 10;
+
 /// Static tiledata flag bits we need for roof/floor hiding (see [`max_draw_z`])
 /// and step-Z resolution (see [`calculate_new_z`]).
 const FLAG_IMPASSABLE: u64 = 0x40;
@@ -664,6 +670,37 @@ fn anim_suffix(map: &MapData, animdata: Option<&AnimData>, graphic: u16) -> Stri
         }
     }
     anim
+}
+
+/// Optional `h`/`pf` suffix a static's JSON entry gets when it's within
+/// [`PATH_RADIUS`] of the player: `h` is the tiledata HEIGHT, `pf` packs the
+/// three flag bits the browser's `calculate_new_z` port needs (bit 0
+/// impassable, bit 1 surface, bit 2 bridge). Each field is omitted when zero,
+/// so out-of-radius (or flag/height-less) statics serialize identically to
+/// before this existed. Shared by the real-statics loop and
+/// `emit_multi_component` so the two paths can't drift.
+fn path_suffix(in_radius: bool, height: u8, flags: u64) -> String {
+    let mut s = String::new();
+    if !in_radius {
+        return s;
+    }
+    if height != 0 {
+        let _ = write!(s, ",\"h\":{}", height as i32);
+    }
+    let mut bits = 0u8;
+    if flags & FLAG_IMPASSABLE != 0 {
+        bits |= 1;
+    }
+    if flags & FLAG_SURFACE != 0 {
+        bits |= 2;
+    }
+    if flags & FLAG_BRIDGE != 0 {
+        bits |= 4;
+    }
+    if bits != 0 {
+        let _ = write!(s, ",\"pf\":{bits}");
+    }
+    s
 }
 
 /// Real statics at `(x, y)` PLUS, when `multis` is given, any in-view multi
@@ -1914,6 +1951,9 @@ fn ensure_house_tiles(world: &mut World, multis: &Multis) {
 /// `visible`/nodraw gating for design tiles happens in the CALLER (design
 /// tiles have no `visible` flag — a graphic-0 entry was already dropped at
 /// decode) — this only applies the nodraw *tiledata* check both share.
+/// `px`/`py` are the player's position, used only to gate the [`PATH_RADIUS`]
+/// `h`/`pf` suffix (see [`path_suffix`]) — everything else here is unrelated
+/// to where the player stands.
 #[allow(clippy::too_many_arguments)]
 fn emit_multi_component(
     map: &MapData,
@@ -1929,22 +1969,28 @@ fn emit_multi_component(
     n_statics: &mut usize,
     lights: &mut Vec<Value>,
     light_cap: usize,
+    px: i64,
+    py: i64,
 ) {
     if map.item_is_nodraw(graphic) {
         return;
     }
-    let is_roof = map.item_flags(graphic) & FLAG_ROOF != 0;
+    // Fetched once and reused below (is_roof/background/height/foliage/path)
+    // instead of re-querying tiledata per check.
+    let flags = map.item_flags(graphic);
+    let height = map.item_height(graphic);
+    let is_roof = flags & FLAG_ROOF != 0;
     if cz >= max_z || (under_cover && is_roof) {
         return;
     }
     let mut spz = cz;
-    if map.item_flags(graphic) & 0x1 != 0 {
+    if flags & 0x1 != 0 {
         spz -= 1; // Background
     }
-    if map.item_height(graphic) != 0 {
+    if height != 0 {
         spz += 1; // has height (wall/solid)
     }
-    let foliage = if map.item_flags(graphic) & FLAG_FOLIAGE != 0 {
+    let foliage = if flags & FLAG_FOLIAGE != 0 {
         ",\"f\":1"
     } else {
         ""
@@ -1954,10 +2000,15 @@ fn emit_multi_component(
     // design tile must cycle frames exactly like the identical graphic would
     // as a real static, not freeze on frame 0.
     let anim = anim_suffix(map, animdata, graphic);
+    let path = path_suffix(
+        (x - px).abs() <= PATH_RADIUS && (y - py).abs() <= PATH_RADIUS,
+        height,
+        flags,
+    );
     let _ = write!(
         statics,
-        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{},\"ms\":{}{}{}}},",
-        x, y, cz, graphic, spz, multi_serial, foliage, anim
+        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{},\"ms\":{}{}{}{}}},",
+        x, y, cz, graphic, spz, multi_serial, foliage, anim, path
     );
     *n_statics += 1;
     if lights.len() < light_cap && map.item_is_light(graphic) {
@@ -2512,9 +2563,20 @@ pub fn build_scene(
                 } else {
                     sz
                 };
+                // `li` (land impassable): PATH_RADIUS-gated, like the static `h`/`pf`
+                // above — the browser's `calculate_new_z` port needs to know the LAND
+                // itself can't be stood on before it'll fall back to a static surface.
+                let land_impassable = if dx.abs() <= PATH_RADIUS
+                    && dy.abs() <= PATH_RADIUS
+                    && land.impassable()
+                {
+                    ",\"li\":1"
+                } else {
+                    ""
+                };
                 let _ = write!(
                     tiles,
-                    "{{\"w\":{},\"z\":{},\"g\":{},\"tx\":{},\"c\":[{},{},{}],\"h\":{},\"sz\":{}}},",
+                    "{{\"w\":{},\"z\":{},\"g\":{},\"tx\":{},\"c\":[{},{},{}],\"h\":{},\"sz\":{}{}}},",
                     walk as u8,
                     land.z,
                     land.graphic,
@@ -2523,7 +2585,8 @@ pub fn build_scene(
                     c[1],
                     c[2],
                     hidden as u8,
-                    sz
+                    sz,
+                    land_impassable
                 );
                 // Static objects on this tile (walls/trees/deco). Skip anything at
                 // or above max_z so a roof/upper floor over the player vanishes.
@@ -2567,10 +2630,18 @@ pub fn build_scene(
                         // ms (`ai`) so the renderer just swaps textures. Only emit when
                         // the tile is animated AND animdata gives more than one frame.
                         let anim = anim_suffix(map, animdata, s.graphic);
+                        // `h`/`pf` (PATH_RADIUS-gated): `s.height`/`s.flags` are already
+                        // fetched by `map.statics()` above, so this is free — see
+                        // `path_suffix`'s doc.
+                        let path = path_suffix(
+                            dx.abs() <= PATH_RADIUS && dy.abs() <= PATH_RADIUS,
+                            s.height,
+                            s.flags,
+                        );
                         let _ = write!(
                             statics,
-                            "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}}},",
-                            x, y, s.z, s.graphic, spz, foliage, anim
+                            "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}{}}},",
+                            x, y, s.z, s.graphic, spz, foliage, anim, path
                         );
                         n_statics += 1;
                         // A static light source (wall torch, lamp, brazier) glows
@@ -2627,6 +2698,8 @@ pub fn build_scene(
                                                 &mut n_statics,
                                                 &mut lights,
                                                 LIGHT_CAP,
+                                                px,
+                                                py,
                                             );
                                         }
                                     }
@@ -2651,6 +2724,8 @@ pub fn build_scene(
                                     &mut n_statics,
                                     &mut lights,
                                     LIGHT_CAP,
+                                    px,
+                                    py,
                                 );
                             }
                         }

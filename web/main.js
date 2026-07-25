@@ -2270,6 +2270,9 @@ function updateAnimStates(s) {
 
 // add/remove only the tiles/statics that entered/left the view
 function syncWorld(s) {
+  // Keep the calculateNewZ static index in step with the scene the rest of
+  // this function is about to render (once per poll — see its own doc).
+  rebuildStaticIndex(s.statics);
   const m = s.map || { radius: 14, tiles: [], cx: 0, cy: 0 };
   const span = 2 * m.radius + 1;
   // Beyond this Chebyshev distance from the player, `m.tiles` is the grayed-out
@@ -2624,6 +2627,286 @@ function tileSZ(x, y) {
   return t.sz !== undefined ? (t.sz | 0) : (t.z | 0);
 }
 
+// ----------------------------------------------------------------------------
+// Step-Z resolution — a faithful port of ClassicUO `Pathfinder.CalculateNewZ`
+// (+ `CalculateMinMaxZ`, `CreateItemList`), mirroring the Rust port at
+// crates/anima-net/src/scene.rs ~L789-1098. `tileSZ` above is the SERVER's
+// hint: scene.rs chains CalculateNewZ outward from the server's own live
+// position, so it's only authoritative near the server's tile and is a stale
+// guess by the time our prediction has run a few tiles ahead. Computing it
+// HERE, from the client's own predicted Z (`pred.z`, passed in as `currentZ`),
+// makes prediction self-consistent — same trick as ClassicUO, whose
+// CalculateNewZ origin is `Steps.Back().Z` (its OWN last predicted step), never
+// a server-side value.
+//
+// Unlike the Rust original (which owns the whole facet via `MapData`), the
+// client only has the windowed slice of land tiles (`scene.map`) and statics
+// (`scene.statics`) the server chose to send this poll, and — deliberately —
+// the new per-tile path fields (`t.li`, `s.h`, `s.pf`) only within 10 tiles of
+// the player. Every helper below therefore returns `null` (never a guessed
+// number) the moment it needs a tile the window doesn't have, and that null
+// propagates all the way out of `calculateNewZ` so the caller falls back to
+// `tileSZ`. This is a purely additive JS-side concern with no Rust equivalent
+// (the server never has to "not know" about its own map); the path-field
+// ABSENCE contract (`li` absent = passable, `h`/`pf` absent = 0) is separate
+// and faithfully modelled — see `tiledataPathObj`.
+// ----------------------------------------------------------------------------
+
+// ClassicUO `PATH_OBJECT_FLAGS` (we only model the NORMAL step state).
+const POF_IMPASS = 0x1; // POF_IMPASSABLE_OR_SURFACE
+const POF_SURFACE = 0x2;
+const POF_BRIDGE = 0x4;
+// `Constants.DEFAULT_BLOCK_HEIGHT` — head/body clearance needed to stand.
+const BLOCK_HEIGHT = 16;
+// 8-direction deltas (`Pathfinder._offsetX/_offsetY`), dir 0=N..7=NW. Same
+// convention/order as this file's own `DIR_DELTA`.
+const OFF_X = [0, 1, 1, 1, 0, -1, -1, -1];
+const OFF_Y = [-1, -1, 0, 1, 1, 1, 0, -1];
+
+// Per-tile index of `scene.statics` (a flat array), keyed "x,y" -> array of
+// static entries on that tile. Built ONCE per poll — indexing the flat array
+// per calculateNewZ query would be O(statics-in-window) per lookup, and a
+// step's Z is resolved every frame it's at the front of the queue until
+// `zFixed` latches it. Rebuilt only when `syncWorld` hands us a genuinely new
+// `statics` array (every real poll: `scene = await r.json()` mints a fresh
+// array each time, so this fires once per poll, never mid-poll).
+let staticIndex = new Map();
+let staticIndexSrc = null;
+function rebuildStaticIndex(statics) {
+  if (statics === staticIndexSrc) return;
+  staticIndexSrc = statics;
+  staticIndex = new Map();
+  for (const st of statics || []) {
+    const key = st.x + "," + st.y;
+    let arr = staticIndex.get(key);
+    if (!arr) { arr = []; staticIndex.set(key, arr); }
+    arr.push(st);
+  }
+}
+// The statics on world tile (x,y) this poll, or null if there are none indexed.
+function staticsAt(x, y) {
+  return staticIndex.get(x + "," + y) || null;
+}
+
+// Raw tile object from the current scene.map window at (x,y), or null when
+// (x,y) falls outside the window (mirrors tileSZ's indexing exactly).
+function tileAt(x, y) {
+  const m = scene && scene.map;
+  if (!m) return null;
+  const span = 2 * m.radius + 1;
+  const col = x - m.cx + m.radius, row = y - m.cy + m.radius;
+  if (col < 0 || col >= span || row < 0 || row >= span) return null;
+  return m.tiles[row * span + col] || null;
+}
+
+// ClassicUO `Land.Z` at (x,y): -125 for the off-world sentinel (x<0||y<0, same
+// as the Rust port), or null when the client's window simply doesn't have
+// this tile yet (the JS-only "no data" case described above).
+function landZ(x, y) {
+  if (x < 0 || y < 0) return -125;
+  const t = tileAt(x, y);
+  return t ? (t.z | 0) : null;
+}
+
+// ClassicUO `Land.ApplyStretch`'s `AverageZ`/`MinZ` from the 4 corners, plus
+// whether the tile is sloped (corners differ -> "stretched"). null if any
+// corner's tile is outside the window.
+function landAvgMin(x, y) {
+  const zTop = landZ(x, y);
+  const zRight = landZ(x + 1, y);
+  const zLeft = landZ(x, y + 1);
+  const zBottom = landZ(x + 1, y + 1);
+  if (zTop === null || zRight === null || zLeft === null || zBottom === null) return null;
+  const avg = Math.abs(zTop - zBottom) <= Math.abs(zLeft - zRight)
+    ? (zTop + zBottom) >> 1
+    : (zLeft + zRight) >> 1;
+  const min = Math.min(zTop, zRight, zLeft, zBottom);
+  const stretched = !(zTop === zRight && zRight === zLeft && zLeft === zBottom);
+  return { avg, min, stretched };
+}
+
+// ClassicUO `Land.CalculateCurrentAverageZ` — the slope Z toward `direction`.
+// null if a needed corner is outside the window.
+function calcCurrentAverageZ(x, y, direction) {
+  const zTop = landZ(x, y);
+  const zRight = landZ(x + 1, y);
+  const zBottom = landZ(x + 1, y + 1);
+  const zLeft = landZ(x, y + 1);
+  if (zTop === null || zRight === null || zBottom === null || zLeft === null) return null;
+  const gdz = (d) => {
+    switch (d & 3) {
+      case 1: return zRight;
+      case 2: return zBottom;
+      case 3: return zLeft;
+      default: return zTop;
+    }
+  };
+  const result = gdz(((direction >> 1) + 1) & 3);
+  if (direction & 1) return result;
+  return (result + gdz(direction >> 1)) >> 1;
+}
+
+// Turn a path-flags-bearing object at world Z `z` with tiledata `height` into
+// a PathObj the same way ClassicUO's `CreateItemList` treats a real static, or
+// `null` if it contributes nothing to standing (`flags == 0` — neither
+// impassable nor surface/bridge). `pf` is the wire's pre-extracted 3-bit mask
+// (bit0 IMPASSABLE, bit1 SURFACE, bit2 BRIDGE — absent/0 means none of the
+// three, i.e. a plain decorative static with no tiledata path flags, which is
+// also what a real such static resolves to in the Rust port); it happens to
+// share POF_IMPASS/POF_SURFACE/POF_BRIDGE's bit values by design, but these
+// are the RAW tiledata booleans (input), not the derived PathObj.flags
+// (output) computed below.
+function tiledataPathObj(z, height, pf) {
+  const impassable = (pf & POF_IMPASS) !== 0;
+  const isSurface = (pf & POF_SURFACE) !== 0;
+  const isBridge = (pf & POF_BRIDGE) !== 0;
+  let flags = 0;
+  if (impassable || isSurface) flags = POF_IMPASS;
+  if (!impassable) {
+    if (isSurface) flags |= POF_SURFACE;
+    if (isBridge) flags |= POF_BRIDGE;
+  }
+  if (flags === 0) return null;
+  // Bridges (stairs/ramps) stand at half height; surfaces at full. Truncating
+  // (not floor/round) integer division, matching Rust's `i32` `height / 2`.
+  const avg = (isBridge ? Math.trunc(height / 2) : height) + z;
+  return { flags, z, avgZ: avg, height, landStretched: false };
+}
+
+// ClassicUO `Pathfinder.CreateItemList`: land + statics on tile (x,y) as
+// PathObjs (mobiles and multi components are not modelled — the latter
+// already arrive inside scene.statics with an `ms` field and are covered by
+// the static loop below, same as the Rust port's multi-component pass).
+// Returns `[]` for the off-world sentinel (x<0||y<0, a valid empty list, like
+// Rust's early return), or `null` when (x,y) or a corner it needs is outside
+// the client's window — the JS-only "no data" case, which the caller must
+// propagate as a bail-to-null rather than silently building a partial list.
+function createItemList(x, y) {
+  if (x < 0 || y < 0) return [];
+  const t = tileAt(x, y);
+  if (!t) return null;
+  const list = [];
+  const g = t.g | 0;
+  // Skip the "no-draw" land graphics (void/cave markers), like ClassicUO.
+  if ((g < 0x01AE && g !== 2) || (g > 0x01B5 && g !== 0x01DB)) {
+    const lam = landAvgMin(x, y);
+    if (lam === null) return null;
+    const landImpassable = t.li === 1; // absent -> passable
+    let flags = POF_IMPASS;
+    if (!landImpassable) flags |= POF_SURFACE | POF_BRIDGE;
+    list.push({ flags, z: lam.min, avgZ: lam.avg, height: lam.avg - lam.min, landStretched: lam.stretched });
+  }
+  const statics = staticsAt(x, y);
+  if (statics) {
+    for (const s of statics) {
+      const obj = tiledataPathObj(s.z | 0, s.h | 0, s.pf | 0); // absent h/pf -> 0/0
+      if (obj) list.push(obj);
+    }
+  }
+  return list;
+}
+
+// Pure core of calcMinMaxZ (ClassicUO `Pathfinder.CalculateMinMaxZ`'s scoring
+// loop): given the tile-behind's already-built PathObj list and (for a
+// stretched/sloped land tile) its direction-biased average Z, compute the
+// step's [minZ, maxZ] bound.
+function boundMinMaxZ(source, currentZ, stretchedAvg) {
+  let minZ = -128, maxZ = currentZ;
+  for (const obj of source) {
+    const avg = obj.avgZ;
+    if (avg <= currentZ && obj.landStretched) {
+      minZ = Math.max(minZ, stretchedAvg);
+      maxZ = Math.max(maxZ, stretchedAvg);
+    } else {
+      if ((obj.flags & POF_IMPASS) !== 0 && avg <= currentZ && minZ < avg) {
+        minZ = avg;
+      }
+      if ((obj.flags & POF_BRIDGE) !== 0 && currentZ === avg) {
+        maxZ = Math.max(maxZ, obj.z + obj.height);
+        minZ = Math.min(minZ, obj.z);
+      }
+    }
+  }
+  return [minZ, maxZ + 2];
+}
+
+// ClassicUO `Pathfinder.CalculateMinMaxZ`: bound the step using the tile we
+// came *from* (opposite of `direction`). Returns `[minZ, maxZ]`, or `null`
+// when that source tile has no data in the client's window.
+function calcMinMaxZ(x, y, currentZ, direction) {
+  const back = (direction ^ 4) & 7;
+  const sx = x + OFF_X[back], sy = y + OFF_Y[back];
+  const source = createItemList(sx, sy);
+  if (source === null) return null;
+  // Only land can be "stretched" (sloped) — at most one land entry per tile.
+  const stretchedAvg = source.some((o) => o.landStretched) ? calcCurrentAverageZ(sx, sy, direction) : 0;
+  if (stretchedAvg === null) return null;
+  return boundMinMaxZ(source, currentZ, stretchedAvg);
+}
+
+// Pure core of calculateNewZ (ClassicUO `Pathfinder.CalculateNewZ`'s
+// surface/bridge/headroom scoring loop): given the destination tile's
+// already-built (unsorted) PathObj list and the step's [minZ, maxZ] bound
+// from boundMinMaxZ, resolve the standing Z. `null` when nothing in the list
+// has clearance to stand on (a real DenyWalk situation).
+function resolveStandingZ(list, minZ, maxZ, currentZ) {
+  if (list.length === 0) return null;
+  // Sort by Z then height (PathObject.CompareTo — a NUMERIC comparator; the
+  // default Array.sort is lexicographic and would be wrong here), then add
+  // the "sky" sentinel.
+  const sorted = list.slice().sort((a, b) => (a.z - b.z) || (a.height - b.height));
+  sorted.push({ flags: POF_IMPASS, z: 128, avgZ: 128, height: 128, landStretched: false });
+
+  let z = currentZ;
+  if (z < minZ) z = minZ;
+  let curMinZ = minZ;
+  let resultZ = -128;
+  let bestDelta = Infinity; // Rust i32::MAX -> Infinity (never a real delta)
+  let curZ = -128;
+
+  for (let i = 0; i < sorted.length; i++) {
+    if ((sorted[i].flags & POF_IMPASS) === 0) continue;
+    const objZ = sorted[i].z;
+    // A ceiling object with clearance above the floor below it: find the best
+    // surface/bridge under it that we can actually stand on.
+    if (objZ - curMinZ >= BLOCK_HEIGHT) {
+      for (let j = i - 1; j >= 0; j--) {
+        const t = sorted[j];
+        if ((t.flags & (POF_SURFACE | POF_BRIDGE)) === 0) continue;
+        const tavg = t.avgZ;
+        const fits = (tavg <= maxZ && (t.flags & POF_SURFACE) !== 0) ||
+          ((t.flags & POF_BRIDGE) !== 0 && t.z <= maxZ);
+        if (tavg >= curZ && objZ - tavg >= BLOCK_HEIGHT && fits) {
+          const delta = Math.abs(z - tavg);
+          if (delta < bestDelta) {
+            bestDelta = delta;
+            resultZ = tavg;
+          }
+        }
+      }
+    }
+    const avg = sorted[i].avgZ;
+    curMinZ = Math.max(curMinZ, avg);
+    curZ = Math.max(curZ, avg);
+  }
+
+  return resultZ === -128 ? null : resultZ;
+}
+
+// ClassicUO `Pathfinder.CalculateNewZ`: the standing Z when stepping onto
+// (x,y) from `currentZ` heading `direction`. `null` when the tile has no
+// valid surface to stand on (a real DenyWalk situation) OR the client's
+// window is missing path data for (x,y) or the tile behind it — the caller
+// (processSteps) must fall back to the server's `tileSZ` hint in either case.
+function calculateNewZ(x, y, currentZ, direction) {
+  if (x < 0 || y < 0) return null;
+  const bounds = calcMinMaxZ(x, y, currentZ, direction);
+  if (bounds === null) return null;
+  const list = createItemList(x, y);
+  if (list === null) return null;
+  return resolveStandingZ(list, bounds[0], bounds[1], currentZ);
+}
+
 // ClassicUO Pathfinder.CanWalk: resolve a step from (x,y) facing `dir`. Returns
 // {dir,x,y} (possibly redirected) or null if blocked. A diagonal forbids corner-
 // cutting (both flanking cardinals must be open) and, if blocked, redirects to the
@@ -2748,9 +3031,22 @@ function processSteps(now, dt) {
       // dip and recover mid-step: a poll lands, the chain origin has moved, the
       // destination resolves ±1 different, and because `ze` saturates at
       // ZEASE_FRAC the delta lands in FULL on the next frame.
+      //
+      // Which source to latch from: `tileSZ` reads the SERVER's precomputed
+      // `sz`, chained from the server's OWN live position — a different origin
+      // than ours once we've predicted a few tiles ahead. Prefer our own
+      // calculateNewZ instead, chained from `pred.z` (the client's own
+      // predicted Z), so the step we're mid-predicting is resolved from the
+      // same walk that predicted it — self-consistent, exactly like
+      // ClassicUO's CalculateNewZ, whose origin is `Steps.Back().Z` (its own
+      // last predicted step), never a server-side value. Falls back to the
+      // server hint when we can't compute it ourselves (tile outside the
+      // window, path-fields not yet present, or genuinely nothing to stand
+      // on) — see calculateNewZ's doc.
       if (!s.zFixed) {
-        const freshSz = tileSZ(s.x, s.y);
-        if (freshSz !== null) s.z = freshSz;
+        const own = calculateNewZ(s.x, s.y, pred.z, s.dir);
+        const z = own !== null ? own : tileSZ(s.x, s.y);
+        if (z !== null) s.z = z;
         s.zFixed = true;
       }
       pred.rx = pred.x + (s.x - pred.x) * prog;
