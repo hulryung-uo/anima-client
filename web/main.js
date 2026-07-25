@@ -468,7 +468,13 @@ function msgColor(type, hue) {
 
 // absolute world iso (no centering); camera does the centering
 const isoX = (x, y) => (x - y) * HALF;
-const isoY = (x, y, z) => (x + y) * HALF - (z | 0) * ZSTEP;
+// `z || 0` (not `z | 0`): x/y are already fractional here so a mobile can glide
+// smoothly, but truncating z threw the whole eased Z away — every height change
+// rendered as a hard ZSTEP (4px) jump the instant rz crossed a whole unit, which
+// is what made even a correct ±1 correction read as a pop. `|| 0` keeps the
+// undefined/NaN guard the int-cast was providing (statics/land pass integers, so
+// their positions are bit-identical).
+const isoY = (x, y, z) => (x + y) * HALF - (z || 0) * ZSTEP;
 // Iso draw order (ClassicUO Chunk.AddGameObject): primary = (x+y) screen depth,
 // secondary = priorityZ (z adjusted: land z-2, wall/height +1), tertiary = type
 // bias (land 0 < surface/static 4 < mobile 8) so floors draw under walls etc.
@@ -2224,8 +2230,20 @@ function updateAnimStates(s) {
       // and snapping to it then re-snapping forward is exactly the artifact CUO never
       // shows. Prediction is 1:1 with the server, so inside the window we just trust it.
       pred.x = p.x; pred.y = p.y; pred.z = p.z ?? pred.z; pred.dir = p.dir ?? pred.dir;
-    } else if (!moveIntent && pred.steps.length === 0 && serverStable) {
-      pred.z = p.z ?? pred.z; // keep Z authoritative at rest (forced Z changes)
+    } else if (!moveIntent && pred.steps.length === 0 && serverStable && off === 0) {
+      // Keep Z authoritative at rest (server-forced Z changes on the tile we're
+      // already standing on). `off === 0` is load-bearing: Z belongs to a TILE,
+      // so adopting the server's Z while it still reports a DIFFERENT tile
+      // paints a foreign tile's height onto ours. That is the height bob on
+      // slopes — stop walking, the server is momentarily one tile behind (its
+      // confirm lagging a poll, inside RECONCILE_HOLDOFF so the x/y branch above
+      // correctly declines to converge), and this branch used to take its Z
+      // anyway: the avatar dropped/rose to the old tile's height and then
+      // snapped back when the server caught up. Measured live near (1484,1603):
+      // 9 foreign-Z adoptions per ~40s of walking, 0 after this guard. When the
+      // server genuinely IS on another tile, the branch above converges x, y and
+      // Z together once the holdoff proves it's a real divergence.
+      pred.z = p.z ?? pred.z;
     }
     const boatPos = boatVisual(p.serial, { x: p.x, y: p.y, z: p.z ?? 0 }, now);
     if (boatPos.active) {
@@ -2705,15 +2723,30 @@ function processSteps(now, dt) {
     if (s.turn) {
       pred.dir = s.dir; pred.rx = pred.x; pred.ry = pred.y; pred.rz = pred.z; pred.moving = true;
     } else {
-      // Keep the queued step's Z target current. It was captured once at enqueue
-      // time from whatever `scene.map` snapshot was on hand then; for a tile the
-      // server's scene build hadn't yet resolved authoritatively (see scene.rs
-      // `sz_chain`) that snapshot can be a stale/cheap guess. As fresher polls
-      // land — updating `scene.map` in place — re-read it here every frame so a
-      // correction arrives as a smooth mid-glide adjustment instead of only
-      // surfacing later via the at-rest reconcile (the visible "pop").
-      const freshSz = tileSZ(s.x, s.y);
-      if (freshSz !== null) s.z = freshSz;
+      // INVARIANT: a step's Z target is resolved EXACTLY ONCE — the frame it
+      // reaches the FRONT of the queue — and is immutable for the rest of its
+      // glide. This is ClassicUO's `Mobile.Step.Z` contract (a step's Z is set
+      // at enqueue and only ever read afterwards; it has no re-read anywhere).
+      //
+      // We latch at the front rather than at enqueue because `sz` is not a
+      // property of a tile: scene.rs chains CalculateNewZ outward from the
+      // SERVER's live position, so a tile's `sz` is only authoritative within
+      // CHAIN_RADIUS (6) of it and degrades to a cheap hint past that. At
+      // enqueue the destination can be up to MAX_STEPS(5)+lead past the server —
+      // outside the chain, the stale guess the chain was built to replace. At
+      // the front it is base+1 (~2-3 tiles from the server), deep inside the
+      // chain: the best read we will ever get, taken at the one moment applying
+      // it is free (the ease has not started).
+      //
+      // Re-reading EVERY frame (what this used to do) is what made the avatar
+      // dip and recover mid-step: a poll lands, the chain origin has moved, the
+      // destination resolves ±1 different, and because `ze` saturates at
+      // ZEASE_FRAC the delta lands in FULL on the next frame.
+      if (!s.zFixed) {
+        const freshSz = tileSZ(s.x, s.y);
+        if (freshSz !== null) s.z = freshSz;
+        s.zFixed = true;
+      }
       pred.rx = pred.x + (s.x - pred.x) * prog;
       pred.ry = pred.y + (s.y - pred.y) * prog;
       // Z eases from the SOURCE tile's Z (`pred.z`, still the pre-step tile until
