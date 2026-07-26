@@ -33,7 +33,7 @@ use anima_core::net::outgoing::{
     build_war_mode,
 };
 use anima_core::net::{
-    apply_packet, build_client_version, CharacterChoice, CharacterList, FramingError, LoginConfig,
+    apply_packet, build_client_version, CharacterChoice, CharacterPrompt, FramingError, LoginConfig,
     LoginDirective, LoginError, LoginMachine, LoginResult, StreamDecoder, Walker,
     CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE,
 };
@@ -456,13 +456,17 @@ impl Session {
 
     /// Connect and pause after account authentication so a caller can display
     /// the real server-provided character list before choosing or creating.
+    /// `chooser` may be invoked more than once for a single login: a rejected
+    /// `CharacterChoice::Delete` (server `0x85`) re-invokes it with the same
+    /// list plus [`CharacterPrompt::delete_rejected`] set, instead of failing
+    /// the login (ClassicUO parity — a rejected delete is informational).
     pub fn connect_and_login_with_character_chooser<F>(
         endpoint: &Endpoint,
         mut cfg: LoginConfig,
         mut chooser: F,
     ) -> Result<Session, DriverError>
     where
-        F: FnMut(CharacterList) -> Result<CharacterChoice, DriverError>,
+        F: FnMut(CharacterPrompt) -> Result<CharacterChoice, DriverError>,
     {
         cfg.defer_character_choice = true;
         Self::connect_and_login_inner(endpoint, cfg, Some(&mut chooser))
@@ -471,7 +475,7 @@ impl Session {
     fn connect_and_login_inner(
         endpoint: &Endpoint,
         cfg: LoginConfig,
-        chooser: Option<&mut dyn FnMut(CharacterList) -> Result<CharacterChoice, DriverError>>,
+        chooser: Option<&mut dyn FnMut(CharacterPrompt) -> Result<CharacterChoice, DriverError>>,
     ) -> Result<Session, DriverError> {
         let (result, stream, decoder) = login(endpoint, cfg, chooser)?;
         let mut world = World::new();
@@ -1179,7 +1183,7 @@ impl Session {
 fn login(
     endpoint: &Endpoint,
     cfg: LoginConfig,
-    mut chooser: Option<&mut dyn FnMut(CharacterList) -> Result<CharacterChoice, DriverError>>,
+    mut chooser: Option<&mut dyn FnMut(CharacterPrompt) -> Result<CharacterChoice, DriverError>>,
 ) -> Result<(LoginResult, TcpStream, StreamDecoder), DriverError> {
     let (mut machine, initial) = LoginMachine::start(cfg);
 
@@ -1204,11 +1208,11 @@ fn login(
                         decoder.switch_to_game();
                         stream.write_all(&then)?;
                     }
-                    LoginDirective::ChooseCharacter(list) => {
+                    LoginDirective::ChooseCharacter(prompt) => {
                         let choice = chooser
                             .as_deref_mut()
                             .ok_or(DriverError::CharacterChoiceRequired)?(
-                            list
+                            prompt
                         )?;
                         for followup in machine
                             .choose_character(choice)

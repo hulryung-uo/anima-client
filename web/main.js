@@ -2007,7 +2007,7 @@ function isTypingTarget(el) {
   const t = el.tagName;
   return t === "INPUT" || t === "TEXTAREA" || t === "SELECT" || el.isContentEditable;
 }
-function showLogin(auth, msg, slots, capacity, cities) {
+function showLogin(auth, msg, slots, capacity, cities, error) {
   wireLogin();
   const el = document.getElementById("login");
   if (el) el.classList.add("on");
@@ -2015,7 +2015,11 @@ function showLogin(auth, msg, slots, capacity, cities) {
   const go = document.getElementById("lg-go");
   if (auth === "characters") {
     window.updateCharacterLoginStage(true, slots || [], capacity || 0, cities || []);
-    if (m) m.textContent = "Choose a character or create one in an empty slot.";
+    // `error` is set only when the server just rejected a delete (e.g.
+    // ServUO's 7-day too-young-to-delete window) — the session stayed up and
+    // re-showed this same list, so surface the reason here instead of the
+    // usual instructions. #lg-msg is already styled as a warning (amber).
+    if (m) m.textContent = error || "Choose a character or create one in an empty slot.";
     if (go) go.disabled = false;
   } else if (auth === "connecting") {
     if (m) m.textContent = msg || "Connecting…";
@@ -2093,7 +2097,7 @@ async function poll() {
       // leaks into the next character; the new page sees auth immediately and
       // therefore does not loop.
       if (wasInWorld) { window.location.reload(); return; }
-      showLogin(scene.auth, scene.msg, scene.slots, scene.capacity, scene.cities);
+      showLogin(scene.auth, scene.msg, scene.slots, scene.capacity, scene.cities, scene.error);
       return;
     }
     wasInWorld = true;

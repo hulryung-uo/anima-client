@@ -26,7 +26,8 @@ pub use outgoing::build_client_version;
 pub use framing::{FrameDecoder, FramingError, GameFrameDecoder, StreamDecoder};
 pub use lengths::{packet_length, PacketLength};
 pub use login::{
-    CharacterAppearance, CharacterChoice, CharacterList, LoginConfig, LoginDirective, LoginError,
-    LoginMachine, LoginResult, CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE,
+    CharacterAppearance, CharacterChoice, CharacterList, CharacterPrompt, DeleteRejection,
+    LoginConfig, LoginDirective, LoginError, LoginMachine, LoginResult,
+    CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE,
 };
 pub use packet::{PacketError, PacketReader, PacketWriter};

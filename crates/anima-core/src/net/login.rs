@@ -599,11 +599,33 @@ pub enum LoginDirective {
     /// server, switch the incoming framer to **game mode (Huffman)**, then write
     /// `then`. Everything received after this is Huffman-compressed.
     ReconnectToGameServer { then: Vec<u8> },
-    /// Account authentication succeeded. The driver must obtain a user choice
-    /// and feed it back through [`LoginMachine::choose_character`].
-    ChooseCharacter(CharacterList),
+    /// Account authentication succeeded (or a previous `CharacterChoice::Delete`
+    /// was rejected by the server). The driver must obtain a user choice and
+    /// feed it back through [`LoginMachine::choose_character`].
+    ChooseCharacter(CharacterPrompt),
     /// Login finished — we're in the world.
     Done(LoginResult),
+}
+
+/// A character-choice prompt handed to the driver: the current slot list,
+/// plus — when this prompt is a re-prompt after a rejected delete — why the
+/// server said no. ClassicUO parity: a rejected delete is informational, not
+/// fatal, so the driver gets the same list back and can choose again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharacterPrompt {
+    pub list: CharacterList,
+    /// `Some` only when this prompt follows a `0x85` DeleteResult that
+    /// rejected the `CharacterChoice::Delete` the driver most recently made.
+    pub delete_rejected: Option<DeleteRejection>,
+}
+
+/// Why the server's `0x85` DeleteResult rejected a `CharacterChoice::Delete`.
+/// `reason` is the raw `DeleteResultType` byte; `text` is the human-readable
+/// gloss from [`delete_result_text`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeleteRejection {
+    pub reason: u8,
+    pub text: &'static str,
 }
 
 /// A decision made after inspecting the server-provided character list.
@@ -633,7 +655,13 @@ pub enum LoginError {
     InvalidCharacterAppearance(&'static str),
     /// A character choice was supplied while the machine was not waiting for one.
     CharacterChoiceNotExpected,
-    /// Server rejected our `0x83` DeleteCharacter with DeleteResult `0x85`.
+    /// Server rejected our `0x83` DeleteCharacter with DeleteResult `0x85`,
+    /// and there's no driver-supplied chooser to re-prompt (the automatic
+    /// `LoginConfig::delete_existing` flow, not the interactive one) — so the
+    /// delete-then-recreate plan can't proceed and login fails. The
+    /// interactive [`LoginDirective::ChooseCharacter`] path never raises this:
+    /// it re-prompts via [`CharacterPrompt::delete_rejected`] instead, since a
+    /// rejected delete is informational, not fatal (ClassicUO parity).
     /// `reason` is the raw `DeleteResultType` byte; `text` is a human-readable
     /// gloss for logs/UI.
     CharacterDeleteRejected { reason: u8, text: &'static str },
@@ -746,6 +774,13 @@ pub struct LoginMachine {
     /// instead of looping the delete forever.
     delete_sent: bool,
     pending_characters: Option<CharacterList>,
+    /// The list shown to the driver when it most recently chose
+    /// `CharacterChoice::Delete`. Kept only so a rejected delete (`0x85`) can
+    /// re-prompt [`LoginDirective::ChooseCharacter`] with the same slots
+    /// instead of failing the whole login. Taken (cleared) by that rejection
+    /// handling, or dropped by the next successful character list (the
+    /// delete evidently went through, so it's no longer "pending").
+    pending_delete_list: Option<CharacterList>,
 }
 
 impl LoginMachine {
@@ -762,6 +797,7 @@ impl LoginMachine {
             character_list_flags: 0,
             delete_sent: false,
             pending_characters: None,
+            pending_delete_list: None,
         };
         (m, initial)
     }
@@ -810,15 +846,20 @@ impl LoginMachine {
                 ))])
             }
             CharacterChoice::Delete(index) => {
-                let slot = list
+                let slot_index = list
                     .slots
                     .iter()
                     .find(|slot| slot.index == index)
+                    .map(|slot| slot.index)
                     .ok_or(LoginError::CharacterSlotEmpty(index))?;
                 self.delete_sent = true;
                 self.state = State::AwaitCharacterList;
+                // Keep the list around: if the server rejects this delete
+                // (`0x85`), we re-prompt with exactly what the driver was
+                // just looking at instead of failing the whole login.
+                self.pending_delete_list = Some(list);
                 Ok(vec![LoginDirective::Send(build_delete_character(
-                    u32::from(slot.index),
+                    u32::from(slot_index),
                     self.cfg.client_ip,
                 ))])
             }
@@ -884,10 +925,17 @@ impl LoginMachine {
                         // negotiated by the preceding full 0xA9 list.
                         parsed.flags = self.character_list_flags;
                     }
+                    // A real list just arrived, so any delete we were tracking
+                    // for a possible rejection evidently went through — drop
+                    // it rather than let a later, unrelated `0x85` reuse it.
+                    self.pending_delete_list = None;
                     if self.cfg.defer_character_choice {
                         self.state = State::AwaitCharacterChoice;
                         self.pending_characters = Some(parsed.clone());
-                        return Ok(vec![LoginDirective::ChooseCharacter(parsed)]);
+                        return Ok(vec![LoginDirective::ChooseCharacter(CharacterPrompt {
+                            list: parsed,
+                            delete_rejected: None,
+                        })]);
                     }
                     let preferred = parsed
                         .slots
@@ -952,16 +1000,41 @@ impl LoginMachine {
                         None => Err(LoginError::NoCharacterAndCreateUnsupported),
                     }
                 } else if id == 0x85 && self.delete_sent {
-                    // DeleteResult: our 0x83 DeleteCharacter was rejected. Fail the
-                    // login rather than spin — the account still has the character
-                    // we were trying to get rid of. Gated on `delete_sent`: a 0x85
-                    // we never solicited (stray proxy echo, odd shard) must stay
-                    // ignorable chatter on the default path, exactly as before.
+                    // DeleteResult: our 0x83 DeleteCharacter was rejected. This is a
+                    // normal server answer — the account simply still has the
+                    // character we tried to remove — NOT a login failure: ClassicUO
+                    // reports the reason and lets the user pick again from the same
+                    // character list, so a rejection must not tear down the session.
+                    // Gated on `delete_sent`: a 0x85 we never solicited (stray proxy
+                    // echo, odd shard) must stay ignorable chatter on the default
+                    // path, exactly as before.
+                    self.delete_sent = false;
                     let reason = frame.get(1).copied().unwrap_or(0);
-                    Err(LoginError::CharacterDeleteRejected {
+                    let rejection = DeleteRejection {
                         reason,
                         text: delete_result_text(reason),
-                    })
+                    };
+                    match self.pending_delete_list.take() {
+                        // Interactive (chooser-driven) flow: re-prompt with the
+                        // same list the driver was showing when it chose
+                        // Delete, so it can surface the reason and let the
+                        // user choose again instead of the session dying.
+                        Some(list) => {
+                            self.state = State::AwaitCharacterChoice;
+                            self.pending_characters = Some(list.clone());
+                            Ok(vec![LoginDirective::ChooseCharacter(CharacterPrompt {
+                                list,
+                                delete_rejected: Some(rejection),
+                            })])
+                        }
+                        // Automatic (`LoginConfig::delete_existing`) flow has no
+                        // driver to re-prompt — surface the rejection as a
+                        // login failure, as before.
+                        None => Err(LoginError::CharacterDeleteRejected {
+                            reason,
+                            text: rejection.text,
+                        }),
+                    }
                 } else {
                     Ok(vec![]) // e.g. 0xB9 SupportedFeatures, 0xBD version req, etc.
                 }
@@ -1531,20 +1604,23 @@ mod tests {
         let list = build_character_list_frame(0xA9, &["First", "", "Third", "", ""]);
         assert_eq!(
             m.on_packet(&list).unwrap(),
-            vec![LoginDirective::ChooseCharacter(CharacterList {
-                slots: vec![
-                    CharSlot {
-                        index: 0,
-                        name: "First".into(),
-                    },
-                    CharSlot {
-                        index: 2,
-                        name: "Third".into(),
-                    },
-                ],
-                slot_count: 5,
-                cities: vec![],
-                flags: 0,
+            vec![LoginDirective::ChooseCharacter(CharacterPrompt {
+                list: CharacterList {
+                    slots: vec![
+                        CharSlot {
+                            index: 0,
+                            name: "First".into(),
+                        },
+                        CharSlot {
+                            index: 2,
+                            name: "Third".into(),
+                        },
+                    ],
+                    slot_count: 5,
+                    cities: vec![],
+                    flags: 0,
+                },
+                delete_rejected: None,
             })]
         );
         assert_eq!(
@@ -1605,15 +1681,72 @@ mod tests {
         let refreshed = build_character_list_frame(0x86, &["First", "", "", "", ""]);
         assert_eq!(
             m.on_packet(&refreshed).unwrap(),
-            vec![LoginDirective::ChooseCharacter(CharacterList {
-                slots: vec![CharSlot {
-                    index: 0,
-                    name: "First".into(),
-                }],
-                slot_count: 5,
-                cities: vec![],
-                flags: CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE,
+            vec![LoginDirective::ChooseCharacter(CharacterPrompt {
+                list: CharacterList {
+                    slots: vec![CharSlot {
+                        index: 0,
+                        name: "First".into(),
+                    }],
+                    slot_count: 5,
+                    cities: vec![],
+                    flags: CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE,
+                },
+                delete_rejected: None,
             })]
+        );
+    }
+
+    #[test]
+    fn deferred_delete_rejection_reprompts_instead_of_failing_login() {
+        // The exact bug this guards: a rejected delete (e.g. ServUO's 7-day
+        // `Accounts.DeleteDelay`, reason 3 "too young to delete") must NOT
+        // tear down the login — it must land back in the character-choice
+        // state with the same list, so the driver can show the reason and
+        // let the user pick again.
+        let cfg = LoginConfig {
+            defer_character_choice: true,
+            ..Default::default()
+        };
+        let mut m = machine_at_character_list(cfg);
+        let list = build_character_list_frame(0xA9, &["Anima", "", "", "", ""]);
+        let prompt_before = m.on_packet(&list).unwrap();
+        let LoginDirective::ChooseCharacter(CharacterPrompt {
+            list: shown_list, ..
+        }) = &prompt_before[0]
+        else {
+            panic!("expected a character prompt, got {:?}", prompt_before[0]);
+        };
+        let shown_list = shown_list.clone();
+
+        assert_eq!(
+            m.choose_character(CharacterChoice::Delete(0)).unwrap(),
+            vec![LoginDirective::Send(build_delete_character(0, 0x7F00_0001))]
+        );
+
+        // Reason 3 = CharTooYoung in ServUO's DeleteResultType.
+        let directives = m.on_packet(&[0x85, 3]).unwrap();
+        assert_eq!(
+            directives,
+            vec![LoginDirective::ChooseCharacter(CharacterPrompt {
+                list: shown_list,
+                delete_rejected: Some(DeleteRejection {
+                    reason: 3,
+                    text: "character is too young to delete",
+                }),
+            })]
+        );
+
+        // The machine must still be able to accept another character choice
+        // (not stuck, not erroring) — e.g. play the character we tried (and
+        // failed) to delete.
+        assert_eq!(
+            m.choose_character(CharacterChoice::Play(0)).unwrap(),
+            vec![LoginDirective::Send(build_play_character(
+                "Anima",
+                0,
+                0x7F00_0001,
+                ALL_FACET_CLIENT_FLAGS,
+            ))]
         );
     }
 

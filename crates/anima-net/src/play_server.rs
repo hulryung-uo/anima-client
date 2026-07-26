@@ -27,7 +27,7 @@ use anima_assets::{
     Anim, AnimData, Art, Cliloc, Gumps, Hues, MapData, Multis, RadarCol, Sounds, Texmaps, TileData,
     ZReason,
 };
-use anima_core::net::{CharacterAppearance, CharacterChoice, LoginConfig};
+use anima_core::net::{CharacterAppearance, CharacterChoice, CharacterPrompt, LoginConfig};
 use anima_core::path::{find_path, find_path_near};
 use anima_core::Action;
 use include_dir::{include_dir, Dir};
@@ -826,7 +826,11 @@ impl PlayServer {
             }
             let endpoint = Endpoint::new(host, port);
             if interactive {
-                Session::connect_and_login_with_character_chooser(&endpoint, c, |list| {
+                Session::connect_and_login_with_character_chooser(&endpoint, c, |prompt| {
+                    let CharacterPrompt {
+                        list,
+                        delete_rejected,
+                    } = prompt;
                     let slots: Vec<serde_json::Value> = list
                         .slots
                         .iter()
@@ -871,19 +875,35 @@ impl PlayServer {
                             value
                         })
                         .collect();
-                    *scene.lock().unwrap() = serde_json::json!({
+                    let mut scene_value = serde_json::json!({
                         "auth": "characters",
                         "slots": slots,
                         "capacity": list.slot_count.max(1),
                         "cities": cities,
-                    })
-                    .to_string();
+                    });
+                    // Set only when this prompt is a re-prompt after a
+                    // rejected delete, so the browser can show the reason
+                    // (e.g. ServUO's 7-day delete delay) without the JSON
+                    // shape changing for the common "no error" case.
+                    if let Some(rejection) = &delete_rejected {
+                        scene_value["error"] = serde_json::json!(rejection.text);
+                    }
+                    *scene.lock().unwrap() = scene_value.to_string();
                     println!(
                         "play: character list ready ({} occupied / {} slots, {} starting cities)",
                         list.slots.len(),
                         list.slot_count,
                         list.cities.len()
                     );
+                    if let Some(rejection) = &delete_rejected {
+                        // Recoverable, not a login failure: the delete simply
+                        // didn't go through (ClassicUO parity) — the session
+                        // stays up and the driver just re-shows the list above.
+                        println!(
+                            "play: character delete rejected (reason {}): {} -- staying on character selection",
+                            rejection.reason, rejection.text
+                        );
+                    }
                     match character_rx
                         .recv()
                         .map_err(|error| DriverError::Io(io::Error::other(error)))?
