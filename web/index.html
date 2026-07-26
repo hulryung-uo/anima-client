@@ -100,6 +100,13 @@
       .wiz-hue.sel { outline: 2px solid #fff; outline-offset: 1px; }
       .wiz-hue-default { background: repeating-linear-gradient(45deg, #333, #333 3px, #222 3px, #222 6px) !important;
         display: flex; align-items: center; justify-content: center; font-size: 8px; color: #aaa; }
+      /* Starting-city description panel — same border/background treatment as
+         #lg-create-panel, bounded + scrollable since `desc` can run long. */
+      #lg-city-info { display: none; padding: 8px 9px; border: 1px solid #28333f; border-radius: 6px;
+        background: rgba(20,28,36,.55); max-height: 130px; overflow-y: auto;
+        font-size: 11px; line-height: 1.45; color: #8a929c; }
+      #lg-city-info.on { display: block; }
+      .city-loc { color: #6b7280; font-size: 10px; margin-bottom: 4px; }
       #wiz-review { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: #b9c7d8; }
       .wiz-review-row { display: flex; justify-content: space-between; gap: 8px; }
       .wiz-review-chip { display: inline-block; width: 11px; height: 11px; border-radius: 2px;
@@ -898,8 +905,19 @@
 
           <div class="wiz-step" data-wiz-step="5">
             <label>Starting city
-              <select id="lg-city"><option value="3">Britain</option><option value="0">New Haven</option></select>
+              <!-- Populated at runtime from the server's `scene.cities` (main.js
+                   populateCityOptions()) — `city_index` is an index into THAT
+                   list, and shards order it differently (e.g. a T2A shard's
+                   index 0 is Magincia, not New Haven), so it can't be hardcoded. -->
+              <select id="lg-city"></select>
             </label>
+            <!-- Server's own city blurb (main.js renderCityInfo()) — the same
+                 cliloc text + facet/x/y/z the real client shows when picking a
+                 starting city. Filled in as plain text, never HTML. Hidden
+                 entirely (no ".on" class) when the selected city carries no
+                 desc/coords, e.g. a legacy server or the DEFAULT_CITIES
+                 fallback. -->
+            <div id="lg-city-info"></div>
             <div id="wiz-review"></div>
           </div>
 

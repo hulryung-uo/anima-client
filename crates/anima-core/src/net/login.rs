@@ -399,6 +399,35 @@ pub struct CharSlot {
     pub name: String,
 }
 
+/// One starting city the server offers in the 0xA9 city list. `index` is what
+/// CreateCharacter 0xF8 must echo back in `city_index` — it is a position in
+/// THIS list, and shards/expansions order it differently, so it can never be
+/// hardcoded client-side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartingCity {
+    pub index: u8,
+    pub name: String,
+    pub building: String,
+    /// Starting coordinates + facet, and the cliloc id of the city blurb the
+    /// real client shows at character creation. `None` on legacy (63-byte)
+    /// records, which carry only the names.
+    pub location: Option<CityLocation>,
+}
+
+/// The trailing fields of a modern (89-byte) 0xA9 city record: where the
+/// character lands, and which cliloc holds the descriptive blurb ServUO's
+/// own client displays when picking a starting city (e.g. 1075074 for
+/// Britain: "<h2>Britain</h2><br>The City of Bards<br><br> ..."). Verified
+/// against ServUO `Server/Network/Packets.cs` `CharacterList`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CityLocation {
+    pub x: u32,
+    pub y: u32,
+    pub z: i32,   // written as i32 by the server
+    pub map: u32, // facet id: 0 Felucca, 1 Trammel, 2 Ilshenar, 3 Malas, 4 Tokuno, 5 TerMur
+    pub description: u32, // cliloc id, 0 when unset
+}
+
 /// Parse CharacterList `0xA9` / `0x86`. Layout after the 3-byte `[id][len:u16]`
 /// header: `[count:u8]` then `count × ([name:ascii30][password/pad:30])`.
 /// Returns only the *named* (non-empty) slots.
@@ -411,6 +440,8 @@ pub fn parse_character_list(frame: &[u8]) -> Result<Vec<CharSlot>, LoginError> {
 pub struct CharacterList {
     pub slots: Vec<CharSlot>,
     pub slot_count: u8,
+    /// Starting cities from the 0xA9 tail. Empty for a 0x86 update (no tail).
+    pub cities: Vec<StartingCity>,
     pub flags: u32,
 }
 
@@ -426,28 +457,106 @@ fn parse_character_list_with_capacity(frame: &[u8]) -> Result<CharacterList, Log
             slots.push(CharSlot { index: i, name });
         }
     }
-    let flags = parse_character_list_flags(r.rest());
+    let (cities, flags) = parse_character_list_tail(r.rest());
     Ok(CharacterList {
         slots,
         slot_count: count,
+        cities,
         flags,
     })
 }
 
-/// Parse the 0xA9 tail after the character slots. City records are 89 bytes in
-/// the modern packet and 63 in the legacy packet; both are followed by the
-/// big-endian CharacterListFlags u32. A 0x86 list update has no tail.
-fn parse_character_list_flags(tail: &[u8]) -> u32 {
+/// Parse the 0xA9 tail after the character slots: `[city_count:u8]` then that
+/// many city records, then the big-endian `CharacterListFlags` u32. A 0x86
+/// list update has no tail at all (empty `tail` yields no cities and flags 0).
+///
+/// City records are 89 bytes on modern clients (`index`, 32-byte City, 32-byte
+/// Building, then X/Y/Z/MapID/Description(cliloc)/reserved u32s, captured in
+/// `StartingCity::location`) or 63 bytes on legacy ones (`index`, 31-byte
+/// City, 31-byte Building only — `location` stays `None`). We don't know up
+/// front which shape a given server sent, so we try both
+/// strides: an **exact fit** — `1 + count * stride + 4 == tail.len()` — is
+/// unambiguous and preferred; if neither stride accounts for every tail byte
+/// (some modern frames carry a couple of extra bytes after the flags), fall
+/// back to the first stride whose flags offset is still readable, matching
+/// the previous (flags-only) parser's behaviour so nothing regresses.
+fn parse_character_list_tail(tail: &[u8]) -> (Vec<StartingCity>, u32) {
     let Some(&city_count) = tail.first() else {
-        return 0;
+        return (Vec::new(), 0);
     };
-    for stride in [89usize, 63] {
-        let offset = 1usize.saturating_add(usize::from(city_count).saturating_mul(stride));
-        if let Some(flags) = tail.get(offset..offset + 4) {
-            return u32::from_be_bytes([flags[0], flags[1], flags[2], flags[3]]);
-        }
+    let count = usize::from(city_count);
+
+    let exact_fit = |stride: usize| 1 + count * stride + 4 == tail.len();
+    let offset_readable = |stride: usize| {
+        let offset = 1usize.saturating_add(count.saturating_mul(stride));
+        tail.get(offset..offset + 4).is_some()
+    };
+    let Some(stride) = [89usize, 63]
+        .into_iter()
+        .find(|&stride| exact_fit(stride))
+        .or_else(|| {
+            [89usize, 63]
+                .into_iter()
+                .find(|&stride| offset_readable(stride))
+        })
+    else {
+        return (Vec::new(), 0);
+    };
+
+    // Modern (89-byte) records give City/Building 32 bytes each; legacy
+    // (63-byte) records give them 31. Either way the layout starts
+    // `[index:u8][City][Building]`.
+    let name_width = if stride == 89 { 32 } else { 31 };
+
+    let mut cities = Vec::with_capacity(count);
+    let mut offset = 1usize;
+    for _ in 0..count {
+        let Some(record) = tail.get(offset..offset + stride) else {
+            break;
+        };
+        // Modern records carry six more big-endian u32s after the two names:
+        // X, Y, Z, MapID, Description(cliloc), reserved. Legacy (63-byte)
+        // records end right after Building, so `location` stays `None`.
+        let location = (stride == 89).then(|| {
+            let fields = &record[1 + 2 * name_width..];
+            let u32_at = |i: usize| u32::from_be_bytes([fields[i], fields[i + 1], fields[i + 2], fields[i + 3]]);
+            CityLocation {
+                x: u32_at(0),
+                y: u32_at(4),
+                z: u32_at(8) as i32,
+                map: u32_at(12),
+                description: u32_at(16),
+                // fields[20..24] is `reserved` — unused.
+            }
+        });
+        cities.push(StartingCity {
+            index: record[0],
+            name: trim_fixed_ascii(&record[1..1 + name_width]),
+            building: trim_fixed_ascii(&record[1 + name_width..1 + 2 * name_width]),
+            location,
+        });
+        offset += stride;
     }
-    0
+
+    let flags = tail
+        .get(offset..offset + 4)
+        .map(|f| u32::from_be_bytes([f[0], f[1], f[2], f[3]]))
+        .unwrap_or(0);
+    (cities, flags)
+}
+
+/// Trim a fixed-width ASCII field at the first NUL (like
+/// `PacketReader::fixed_ascii`) and then trim trailing whitespace, so a
+/// zero-filled (unused) city record and a NUL-padded name both come out as
+/// clean strings — `""` for the former.
+fn trim_fixed_ascii(raw: &[u8]) -> String {
+    let end = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
+    raw[..end]
+        .iter()
+        .map(|&c| c as char)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
 }
 
 /// Parse LoginConfirm `0x1B` (37 bytes).
@@ -1105,6 +1214,144 @@ mod tests {
         }
     }
 
+    /// Builds one modern (89-byte) city record: `[index][City:32][Building:32]`
+    /// then the location fields `parse_character_list_tail` decodes into
+    /// `StartingCity::location` (X/Y/Z/MapID/Description-cliloc), plus 4
+    /// bytes of unused `reserved`.
+    #[allow(clippy::too_many_arguments)]
+    fn modern_city_record(
+        index: u8,
+        city: &str,
+        building: &str,
+        x: u32,
+        y: u32,
+        z: i32,
+        map: u32,
+        description: u32,
+    ) -> Vec<u8> {
+        let mut w = PacketWriter::new();
+        w.u8(index)
+            .fixed_ascii(city, 32)
+            .fixed_ascii(building, 32)
+            .u32(x)
+            .u32(y)
+            .u32(z as u32)
+            .u32(map)
+            .u32(description)
+            .zeros(4); // reserved
+        let record = w.into_vec();
+        assert_eq!(record.len(), 89);
+        record
+    }
+
+    /// Builds one legacy (63-byte) city record: `[index][City:31][Building:31]`.
+    fn legacy_city_record(index: u8, city: &str, building: &str) -> Vec<u8> {
+        let mut w = PacketWriter::new();
+        w.u8(index).fixed_ascii(city, 31).fixed_ascii(building, 31);
+        let record = w.into_vec();
+        assert_eq!(record.len(), 63);
+        record
+    }
+
+    #[test]
+    fn character_list_parses_modern_named_cities() {
+        // Three named cities, indices out of order (as a real shard's list is),
+        // proving `index` is read from the record and not assumed to be its
+        // position — that index is what CreateCharacter 0xF8 must echo back.
+        let mut frame = build_character_list_frame(0xA9, &["Anima"]);
+        frame.push(3);
+        // Real-ish coordinates/facet/cliloc so the round-trip assertion below
+        // is meaningful — 1075074 is the actual Britain city-blurb cliloc
+        // ("<h2>Britain</h2><br>The City of Bards<br><br> ...").
+        frame.extend(modern_city_record(
+            0, "New Haven", "New Haven Bank", 3494, 2559, 30, 1, 1075072,
+        ));
+        frame.extend(modern_city_record(
+            3, "Britain", "Britain Bank", 3734, 2222, 20, 0, 1075074,
+        ));
+        frame.extend(modern_city_record(
+            4, "Moonglow", "Moonglow Bank", 4408, 1173, 0, 0, 1075076,
+        ));
+        frame.extend_from_slice(&CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE.to_be_bytes());
+        let total = frame.len() as u16;
+        frame[1..3].copy_from_slice(&total.to_be_bytes());
+
+        let parsed = parse_character_list_with_capacity(&frame).unwrap();
+        assert_eq!(parsed.flags, CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE);
+        assert_eq!(
+            parsed.cities,
+            vec![
+                StartingCity {
+                    index: 0,
+                    name: "New Haven".into(),
+                    building: "New Haven Bank".into(),
+                    location: Some(CityLocation {
+                        x: 3494,
+                        y: 2559,
+                        z: 30,
+                        map: 1,
+                        description: 1075072,
+                    }),
+                },
+                StartingCity {
+                    index: 3,
+                    name: "Britain".into(),
+                    building: "Britain Bank".into(),
+                    location: Some(CityLocation {
+                        x: 3734,
+                        y: 2222,
+                        z: 20,
+                        map: 0,
+                        description: 1075074,
+                    }),
+                },
+                StartingCity {
+                    index: 4,
+                    name: "Moonglow".into(),
+                    building: "Moonglow Bank".into(),
+                    location: Some(CityLocation {
+                        x: 4408,
+                        y: 1173,
+                        z: 0,
+                        map: 0,
+                        description: 1075076,
+                    }),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn character_list_parses_legacy_named_cities() {
+        let mut frame = build_character_list_frame(0xA9, &["Anima"]);
+        frame.push(2);
+        frame.extend(legacy_city_record(0, "Yew", "Yew Abbey"));
+        frame.extend(legacy_city_record(1, "Minoc", "Minoc Bank"));
+        frame.extend_from_slice(&0u32.to_be_bytes());
+        let total = frame.len() as u16;
+        frame[1..3].copy_from_slice(&total.to_be_bytes());
+
+        let parsed = parse_character_list_with_capacity(&frame).unwrap();
+        assert_eq!(parsed.flags, 0);
+        assert_eq!(
+            parsed.cities,
+            vec![
+                StartingCity {
+                    index: 0,
+                    name: "Yew".into(),
+                    building: "Yew Abbey".into(),
+                    location: None, // legacy (63-byte) record: no location fields
+                },
+                StartingCity {
+                    index: 1,
+                    name: "Minoc".into(),
+                    building: "Minoc Bank".into(),
+                    location: None,
+                },
+            ]
+        );
+    }
+
     #[test]
     fn delete_existing_sends_delete_then_awaits_refresh() {
         let cfg = LoginConfig {
@@ -1296,6 +1543,7 @@ mod tests {
                     },
                 ],
                 slot_count: 5,
+                cities: vec![],
                 flags: 0,
             })]
         );
@@ -1363,6 +1611,7 @@ mod tests {
                     name: "First".into(),
                 }],
                 slot_count: 5,
+                cities: vec![],
                 flags: CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE,
             })]
         );

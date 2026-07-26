@@ -516,6 +516,65 @@ fn parse_character_choice(body: &str) -> Result<CharacterDecision, &'static str>
     }
 }
 
+/// Convert a cliloc city blurb (e.g. 1075074 for Britain:
+/// `"<h2>Britain</h2><br>The City of Bards<br><br> The thriving city..."`)
+/// into plain text for the browser's character-creation city picker — this is
+/// the same blurb the real UO client shows there, but ClilocLoader entries
+/// carry light HTML-ish markup that must never be shipped to the page as-is.
+///
+/// Rules: `<br>`/`<br/>` (any case) and `</h2>` become newlines, every other
+/// `<...>` tag is dropped, 3+ consecutive newlines collapse to 2, and the
+/// result is trimmed (leading/trailing whitespace, and trailing spaces on
+/// each line).
+fn cliloc_markup_to_plain_text(markup: &str) -> String {
+    // Pass 1: turn the couple of tags that carry layout meaning into
+    // newlines, drop every other tag outright. Hand-rolled (no regex — core
+    // stays near-zero-dep) over the byte stream since cliloc text is ASCII/
+    // Latin-1-ish markup.
+    let mut out = String::with_capacity(markup.len());
+    let bytes = markup.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            let Some(end) = markup[i..].find('>') else {
+                break; // unterminated tag: stop rather than emit a partial one
+            };
+            let tag = markup[i + 1..i + end].to_ascii_lowercase();
+            if matches!(tag.as_str(), "br" | "br/" | "br /" | "/h2") {
+                out.push('\n');
+            }
+            // Any other tag (e.g. `<h2>`) is simply dropped.
+            i += end + 1;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    // Pass 2: collapse 3+ consecutive newlines to 2, then trim trailing
+    // spaces on each line and leading/trailing whitespace overall.
+    let mut collapsed = String::with_capacity(out.len());
+    let mut newline_run = 0u32;
+    for ch in out.chars() {
+        if ch == '\n' {
+            newline_run += 1;
+            if newline_run <= 2 {
+                collapsed.push(ch);
+            }
+        } else {
+            newline_run = 0;
+            collapsed.push(ch);
+        }
+    }
+    collapsed
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 /// Load assets, bind the HTTP server (workers included), and return a
 /// [`PlayServer`] with the real bound port available via
 /// [`PlayServer::port`] — before any game-server connection is attempted, so
@@ -773,16 +832,57 @@ impl PlayServer {
                         .iter()
                         .map(|slot| serde_json::json!({"index": slot.index, "name": slot.name}))
                         .collect();
+                    // `city.index` is a position in THIS server's list, not a
+                    // fixed id — CreateCharacter 0xF8 must echo it back
+                    // verbatim, so the browser needs the real list rather than
+                    // a hardcoded guess (shards/expansions order it differently).
+                    let cities: Vec<serde_json::Value> = list
+                        .cities
+                        .iter()
+                        .map(|city| {
+                            let mut value = serde_json::json!({
+                                "index": city.index,
+                                "name": city.name,
+                                "building": city.building,
+                            });
+                            // Legacy (63-byte) records carry no `location` at
+                            // all — omit x/y/z/map/desc rather than send zeros
+                            // that would look like a real Felucca (0,0,0).
+                            if let Some(location) = &city.location {
+                                value["x"] = serde_json::json!(location.x);
+                                value["y"] = serde_json::json!(location.y);
+                                value["z"] = serde_json::json!(location.z);
+                                value["map"] = serde_json::json!(location.map);
+                                // `desc` is the same city blurb the real UO
+                                // client shows at character creation — resolve
+                                // the cliloc and strip its markup to plain
+                                // text; omit it entirely if we can't produce
+                                // anything useful.
+                                let desc = (location.description != 0)
+                                    .then_some(cliloc.as_deref())
+                                    .flatten()
+                                    .and_then(|c| c.get(location.description))
+                                    .map(cliloc_markup_to_plain_text)
+                                    .filter(|text| !text.is_empty());
+                                if let Some(desc) = desc {
+                                    value["desc"] = serde_json::json!(desc);
+                                }
+                            }
+                            value
+                        })
+                        .collect();
                     *scene.lock().unwrap() = serde_json::json!({
                         "auth": "characters",
                         "slots": slots,
                         "capacity": list.slot_count.max(1),
+                        "cities": cities,
                     })
                     .to_string();
                     println!(
-                        "play: character list ready ({} occupied / {} slots)",
+                        "play: character list ready ({} occupied / {} slots, {} starting cities)",
                         list.slots.len(),
-                        list.slot_count
+                        list.slot_count,
+                        list.cities.len()
                     );
                     match character_rx
                         .recv()
@@ -2997,8 +3097,8 @@ mod resource_limit_tests {
 #[cfg(test)]
 mod login_request_tests {
     use super::{
-        login_attempt_expected, parse_character_choice, parse_login_attempt, starting_skills,
-        CharacterDecision,
+        cliloc_markup_to_plain_text, login_attempt_expected, parse_character_choice,
+        parse_login_attempt, starting_skills, CharacterDecision,
     };
     use anima_core::net::CharacterChoice;
 
@@ -3134,6 +3234,30 @@ mod login_request_tests {
             result,
             Err("strength, dexterity, and intelligence must each be 10-60 and total 90")
         );
+    }
+
+    #[test]
+    fn cliloc_markup_becomes_readable_plain_text() {
+        // Real ServUO/ClilocLoader shape for cliloc 1075074 (Britain's
+        // character-creation city blurb): `<h2>` opens with no newline of its
+        // own, `</h2>` immediately followed by `<br>` yields a blank line
+        // (2 newlines — the *pair* deliberately survives collapsing, since
+        // only a run of 3+ gets folded down to 2), and a run of three
+        // consecutive `<br>`s also folds down to that same single blank line.
+        let markup = "<h2>Britain</h2><br>The City of Bards<br><br><br>The thriving city of Britain is the capital.  ";
+        assert_eq!(
+            cliloc_markup_to_plain_text(markup),
+            "Britain\n\nThe City of Bards\n\nThe thriving city of Britain is the capital."
+        );
+
+        // Case-insensitive tags, self-closing `<br/>`, and stray unknown tags
+        // are all handled: unknown tags vanish, `<BR/>` still breaks a line.
+        assert_eq!(
+            cliloc_markup_to_plain_text("Line one<BR/>Line two<unknown>tag</unknown>"),
+            "Line one\nLine twotag"
+        );
+
+        assert_eq!(cliloc_markup_to_plain_text(""), "");
     }
 }
 

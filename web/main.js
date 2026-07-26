@@ -1346,6 +1346,20 @@ const WIZ_CLOTH_HUES = Array.from({ length: 120 }, (_, i) => 2 + i * 8); // clot
 // ClipHairHue — verified in ../servuo Scripts/Misc/CharacterCreation.cs), so
 // exotic dyes survive server-side exactly as previewed.
 const WIZ_EXT_HUES = [...WIZ_CLOTH_HUES, ...wizHueRange(1150, 1175)];
+// Fallback starting-city list for a server that hasn't been updated to send
+// `scene.cities` yet (or sends an empty array) — the same two options this
+// dropdown used to hardcode, so behavior against an old server is unchanged.
+const DEFAULT_CITIES = [
+  { index: 3, name: "Britain", building: "" },
+  { index: 0, name: "New Haven", building: "" },
+];
+// The resolved city list currently backing #lg-city (server's `scene.cities`,
+// or DEFAULT_CITIES when absent/empty) — kept around so renderCityInfo() can
+// look a city up by index without re-deriving the fallback logic.
+let wizCityList = DEFAULT_CITIES;
+// Facet names, indexed by the server's `map` id (0–5); anything else falls
+// back to "Map <n>" rather than guessing.
+const FACET_NAMES = ["Felucca", "Trammel", "Ilshenar", "Malas", "Tokuno", "Ter Mur"];
 
 function wireLogin() {
   if (loginWired) return; loginWired = true;
@@ -1384,6 +1398,7 @@ function wireLogin() {
   const accountSummary = document.getElementById("lg-account-summary");
   const statInputs = ["lg-str", "lg-dex", "lg-int"].map(id => document.getElementById(id));
   const genderSelect = document.getElementById("lg-gender");
+  const citySelect = document.getElementById("lg-city");
   const wizMsg = document.getElementById("wiz-msg");
   const wizStepInd = document.getElementById("wiz-stepind");
   const wizBackBtn = document.getElementById("wiz-back");
@@ -1402,6 +1417,68 @@ function wireLogin() {
       new Option("— unused —", ""),
       ...SKILL_NAMES.map((name, id) => new Option(name, String(id))),
     );
+  }
+
+  // `city_index` (sent in the `create` payload) is an index into the SERVER's
+  // city list, not a fixed enum — shards order it differently (e.g. index 0 is
+  // Magincia on a T2A shard, New Haven here), so the dropdown must come from
+  // `scene.cities` and can never be hardcoded. Called only when
+  // `updateCharacterLoginStage`'s key detects the list actually changed, so an
+  // unchanged poll leaves the select (and the user's pick) untouched.
+  function populateCityOptions(cities) {
+    const list = (cities && cities.length) ? cities : DEFAULT_CITIES;
+    wizCityList = list; // remember it so renderCityInfo() can look up the selection
+    const previous = citySelect.value;
+    citySelect.replaceChildren(...list.map((city) => {
+      const label = city.building ? `${city.name} — ${city.building}` : city.name;
+      return new Option(label, String(city.index));
+    }));
+    // Keep the user's existing pick if it's still in the new list; otherwise
+    // prefer an entry named "Britain" (a friendlier default than index 0), else
+    // just the first entry.
+    if (list.some((city) => String(city.index) === previous)) {
+      citySelect.value = previous;
+    } else {
+      const britain = list.find((city) => city.name === "Britain");
+      citySelect.value = String((britain || list[0]).index);
+    }
+    renderCityInfo();
+  }
+
+  // Fill #lg-city-info with the selected city's location + description, the
+  // same info the real UO client shows on its city-selection gump. `desc` is
+  // the server's own cliloc blurb (already stripped to plain text server-side)
+  // — it is inserted as TEXT via textContent, NEVER innerHTML, since it's
+  // server-controlled data. Hidden entirely for legacy servers / the
+  // DEFAULT_CITIES fallback, which carry no coords or desc.
+  function renderCityInfo() {
+    const info = document.getElementById("lg-city-info");
+    const city = wizCityList.find((c) => String(c.index) === citySelect.value);
+    const hasLoc = city && city.x !== undefined && city.y !== undefined;
+    const hasDesc = city && !!city.desc;
+    if (!city || (!hasLoc && !hasDesc)) {
+      info.classList.remove("on");
+      info.replaceChildren();
+      return;
+    }
+    const parts = [];
+    if (hasLoc) {
+      const facet = FACET_NAMES[city.map] ?? `Map ${city.map}`;
+      const loc = document.createElement("div");
+      loc.className = "city-loc";
+      loc.textContent = `${facet} · ${city.x}, ${city.y}, ${city.z}`;
+      parts.push(loc);
+    }
+    if (hasDesc) {
+      // Blank lines become paragraph spacing; every other line is its own div.
+      for (const line of city.desc.split("\n")) {
+        const div = document.createElement("div");
+        div.textContent = line || " "; // NBSP keeps a blank line's height as a spacer
+        parts.push(div);
+      }
+    }
+    info.replaceChildren(...parts);
+    info.classList.add("on");
   }
 
   let createPanelWasOn = false;
@@ -1438,6 +1515,7 @@ function wireLogin() {
     beardGroup.style.display = genderSelect.value === "female" ? "none" : "flex";
     if (wizStep === 4) { rebuildWizDoll(); rebuildStyleStrips(); } // hair gumps are gender-offset
   });
+  citySelect.addEventListener("change", renderCityInfo);
 
   // ---- step 3: custom skill picker ----
   const readSkillRows = () => skillRows.map(row => {
@@ -1689,10 +1767,14 @@ function wireLogin() {
     const female = genderSelect.value === "female";
     const [strength, dexterity, intelligence] = statInputs.map(input => Number(input.value));
     const skills = readSkillRows().filter(Boolean);
+    // Show the option's LABEL ("Britain — The Wayfarer's Inn"), not the raw
+    // index value that's actually submitted as `city_index`.
+    const cityLabel = citySelect.options[citySelect.selectedIndex]?.text || "—";
     const chip = (hue) => `<span class="wiz-review-chip" style="background:${hueHex(hue) || "#777"}"></span>`;
     const rows = [
       `<div class="wiz-review-row"><span>Name</span><span>${name || "—"}</span></div>`,
       `<div class="wiz-review-row"><span>Gender</span><span>${female ? "Female" : "Male"}</span></div>`,
+      `<div class="wiz-review-row"><span>City</span><span>${cityLabel}</span></div>`,
       `<div class="wiz-review-row"><span>STR / DEX / INT</span><span>${strength} / ${dexterity} / ${intelligence}</span></div>`,
       `<div class="wiz-review-row"><span>Skills</span><span>${
         skills.length ? skills.map(s => `${skillName(s.id)} ${s.value}`).join(", ") : "none"
@@ -1876,7 +1958,7 @@ function wireLogin() {
       else submit();
     });
 
-  window.updateCharacterLoginStage = (active, slots = [], capacity = 0) => {
+  window.updateCharacterLoginStage = (active, slots = [], capacity = 0, cities = []) => {
     characterStage = active;
     // The server/account you already logged into is no longer relevant once
     // you're picking/creating a character — hide those fields (rather than
@@ -1900,7 +1982,7 @@ function wireLogin() {
       updateCreation(); // also hides #lg-slot-row (characterStage is false)
       return;
     }
-    const key = JSON.stringify([slots, capacity]);
+    const key = JSON.stringify([slots, capacity, cities]);
     if (key !== characterListKey) {
       characterListKey = key;
       charSlots = slots;
@@ -1909,6 +1991,7 @@ function wireLogin() {
         selectedSlot = charSlots.length ? charSlots[0].index : null;
       }
       renderCharList();
+      populateCityOptions(cities);
       const full = slots.length >= capacity;
       createToggle.disabled = full;
       createToggle.checked = slots.length === 0 && !full;
@@ -1924,14 +2007,14 @@ function isTypingTarget(el) {
   const t = el.tagName;
   return t === "INPUT" || t === "TEXTAREA" || t === "SELECT" || el.isContentEditable;
 }
-function showLogin(auth, msg, slots, capacity) {
+function showLogin(auth, msg, slots, capacity, cities) {
   wireLogin();
   const el = document.getElementById("login");
   if (el) el.classList.add("on");
   const m = document.getElementById("lg-msg");
   const go = document.getElementById("lg-go");
   if (auth === "characters") {
-    window.updateCharacterLoginStage(true, slots || [], capacity || 0);
+    window.updateCharacterLoginStage(true, slots || [], capacity || 0, cities || []);
     if (m) m.textContent = "Choose a character or create one in an empty slot.";
     if (go) go.disabled = false;
   } else if (auth === "connecting") {
@@ -2010,7 +2093,7 @@ async function poll() {
       // leaks into the next character; the new page sees auth immediately and
       // therefore does not loop.
       if (wasInWorld) { window.location.reload(); return; }
-      showLogin(scene.auth, scene.msg, scene.slots, scene.capacity);
+      showLogin(scene.auth, scene.msg, scene.slots, scene.capacity, scene.cities);
       return;
     }
     wasInWorld = true;
