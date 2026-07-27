@@ -64,6 +64,8 @@ fn main() {
         data_dir,
         login_page,
         bind_addr,
+        // The `play` bin is the human-controlled client: full input, never a spectator.
+        read_only: false,
     };
 
     let server = match play_server::bind(cfg) {

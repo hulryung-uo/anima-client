@@ -151,6 +151,8 @@ fn main() {
                     // the desktop shell must never honor an env var that could
                     // expose this process to the network.
                     bind_addr: "127.0.0.1".to_string(),
+                    // The desktop shell drives its own session — full input.
+                    read_only: false,
                 };
                 let server = match play_server::bind(cfg) {
                     Ok(s) => s,

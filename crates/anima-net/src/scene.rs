@@ -229,6 +229,57 @@ fn multi_blocker_at(
         })
 }
 
+/// The **blocker** half of [`explain_tile_walkable`]: does an impassable
+/// dynamic item (crate, closed door — ghost exception applies) or multi
+/// component (hull/house wall) deny a body at `current_z` from occupying
+/// `(x, y)`? Split out so [`build_scene`]'s per-tile `w` flag can reuse these
+/// EXACT rules (never re-derive/duplicate them) while pairing them with the
+/// authoritative `sz_chain` answer instead of [`MapData::walkable_z_explain`]'s
+/// simpler scorer.
+///
+/// Why that pairing is needed — a real bug, diagnosed live: standing on a
+/// house foundation's stairs, a body sits on a **bridge** (`0x0751`, height
+/// 5, z 0 — a bridge's stand Z is `z + height/2`, giving stand z=2). The next
+/// tile north carries an **impassable** riser (`0x0063`, z 0..5, the
+/// foundation's edge) topped by the empty plot's own **surface**
+/// (`0x31F4`, z 7). Stepping there is a +5 climb — exactly what a bridge is
+/// for — and [`calculate_new_z`] (ClassicUO's `Pathfinder.CalculateNewZ`,
+/// which its `CanWalk` uses directly) resolves it correctly to `sz=7`. But
+/// `walkable_z_explain`'s scorer doesn't model the bridge-widened max Z,
+/// so on its own it wrongly reports `w=0` — stranding the player on the
+/// stairs, unable to step onto their own foundation. `sz_chain` already
+/// carries the correct (`calculate_new_z`-derived) answer; this fn supplies
+/// the other half a walkable decision still needs: did anything actually
+/// block the step. `dyn_items` is passed in rather than re-fetched so a
+/// caller that already ran [`dynamic_statics_at`] (as
+/// [`explain_tile_walkable`] does, for its surface fold) never scans
+/// `World::items` twice for the same tile.
+fn blocking_item_at(
+    world: &World,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    x: i64,
+    y: i64,
+    current_z: i32,
+    dyn_items: &[StaticTile],
+    ghost: bool,
+) -> Option<StepDeny> {
+    if let Some(it) = dyn_items.iter().find(|st| {
+        map.item_blocks(st.graphic, st.z as i32, current_z) && !(ghost && map.item_is_door(st.graphic))
+    }) {
+        return Some(StepDeny::DynamicItem {
+            graphic: it.graphic,
+            item_z: it.z as i32,
+        });
+    }
+    if let Some(multis) = multis {
+        if let Some((graphic, item_z)) = multi_blocker_at(world, multis, map, x, y, current_z, ghost) {
+            return Some(StepDeny::DynamicItem { graphic, item_z });
+        }
+    }
+    None
+}
+
 /// Is tile (x, y) walkable for a body at `current_z`, and if so what Z would it
 /// stand at? Combines the static map (land + statics, via
 /// [`MapData::walkable_z_explain`]) — widened, when `multis` is given, with
@@ -283,20 +334,8 @@ pub fn explain_tile_walkable(
     let z = map
         .walkable_z_explain(x as u32, y as u32, current_z, &extra)
         .map_err(StepDeny::Terrain)?;
-    if let Some(it) = dyn_items.iter().find(|st| {
-        map.item_blocks(st.graphic, st.z as i32, current_z) && !(ghost && map.item_is_door(st.graphic))
-    }) {
-        return Err(StepDeny::DynamicItem {
-            graphic: it.graphic,
-            item_z: it.z as i32,
-        });
-    }
-    if let Some(multis) = multis {
-        if let Some((graphic, item_z)) =
-            multi_blocker_at(world, multis, map, x, y, current_z, ghost)
-        {
-            return Err(StepDeny::DynamicItem { graphic, item_z });
-        }
+    if let Some(deny) = blocking_item_at(world, map, multis, x, y, current_z, &dyn_items, ghost) {
+        return Err(deny);
     }
     Ok(z)
 }
@@ -339,8 +378,31 @@ pub fn tile_walkable_for_planning(
     y: i64,
     current_z: i32,
 ) -> Option<i32> {
+    explain_tile_walkable_for_planning(world, map, multis, x, y, current_z).0
+}
+
+/// [`tile_walkable_for_planning`]'s full answer: the resolved standing Z, PLUS
+/// — when the tile is walkable-for-planning only BECAUSE every impassable
+/// dynamic item on it is an openable closed door — that door's serial. Split
+/// out the same way [`explain_tile_walkable`]/[`tile_walkable`] already are,
+/// so a caller that needs to actually ACT on the door (not just know the tile
+/// is plannable) — [`build_scene`]'s `dr` field, which names it for the
+/// browser to auto-open before a manual step, mirroring ClassicUO's
+/// `PlayerMobile.TryOpenDoors` — gets the serial from this EXACT "every
+/// blocker is a door" walk instead of a second, possibly-diverging copy of
+/// it. A `Some` serial only ever comes back alongside a `Some` Z; a tile
+/// that's walkable outright (no door involved, e.g. an already-open doorway)
+/// reports a Z with no serial.
+fn explain_tile_walkable_for_planning(
+    world: &World,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    x: i64,
+    y: i64,
+    current_z: i32,
+) -> (Option<i32>, Option<u32>) {
     match explain_tile_walkable(world, map, multis, x, y, current_z) {
-        Ok(z) => Some(z),
+        Ok(z) => (Some(z), None),
         Err(StepDeny::DynamicItem { .. }) => {
             // `explain_tile_walkable`'s `.find()` only reports the FIRST
             // blocking dynamic item it happens to hit (`World::items` is a
@@ -353,14 +415,24 @@ pub fn tile_walkable_for_planning(
             // multi blocker on this tile always fails the "every blocker is a
             // door" test — a wall/hull never becomes plannable-through.
             let ghost = player_is_ghost(world);
+            // Remembered in passing as the `.all()` below walks every item
+            // anyway — if every blocker turns out to be a door, this is one
+            // of them (any one will do: see this fn's doc and the `dr`
+            // field's doc for why a double-leaf doorway doesn't need a
+            // specific leaf named).
+            let mut a_door = None;
             let all_blockers_are_doors = world.items.values().all(|it| {
+                let is_door = map.item_is_door(it.graphic);
                 let blocks = !it.is_multi
                     && it.container.is_none()
                     && it.pos.x as i64 == x
                     && it.pos.y as i64 == y
                     && map.item_blocks(it.graphic, it.pos.z as i32, current_z)
-                    && !(ghost && map.item_is_door(it.graphic));
-                !blocks || map.item_is_door(it.graphic)
+                    && !(ghost && is_door);
+                if blocks && is_door {
+                    a_door = Some(it.serial);
+                }
+                !blocks || is_door
             }) && multis
                 .is_none_or(|m| multi_blocker_at(world, m, map, x, y, current_z, ghost).is_none());
             if all_blockers_are_doors {
@@ -370,13 +442,18 @@ pub fn tile_walkable_for_planning(
                 let extra = multis
                     .map(|m| multi_statics_at(world, m, map, x, y))
                     .unwrap_or_default();
-                map.walkable_z_explain(x as u32, y as u32, current_z, &extra)
-                    .ok()
+                let z = map
+                    .walkable_z_explain(x as u32, y as u32, current_z, &extra)
+                    .ok();
+                // Only pair the door with a Z that actually resolved — a
+                // `None` Z here (rare: the static base itself denies once the
+                // dynamic items are dropped) must report no door either.
+                (z, z.and(a_door))
             } else {
-                None
+                (None, None)
             }
         }
-        Err(_) => None,
+        Err(_) => (None, None),
     }
 }
 
@@ -780,6 +857,27 @@ fn path_suffix(in_radius: bool, height: u8, flags: u64) -> String {
         let _ = write!(s, ",\"pf\":{pf}");
     }
     s
+}
+
+/// Optional `,"dr":<serial>` land-tile suffix naming the closed door sealing
+/// it — present only when the tile FAILS strict [`tile_walkable`] but PASSES
+/// [`tile_walkable_for_planning`] because every impassable dynamic item on it
+/// is that one openable door (the serial comes from
+/// [`explain_tile_walkable_for_planning`], reusing its exact "every blocker
+/// is a door" rule rather than re-deriving it here). `None` (empty string)
+/// for every other tile — an ordinary wall, an already-open doorway, or a
+/// doorway also blocked by something else (e.g. a dropped crate) — so a tile
+/// without this serializes byte-identically to before this field existed.
+/// ClassicUO walks a player INTO a closed door and opens it for them
+/// (`PlayerMobile.TryOpenDoors`); without this, the browser's manual
+/// (keyboard) walking has no way to learn a doorway is openable — the strict
+/// `w` flag alone just reads as a wall, so a player could build a house and
+/// then be unable to walk into it (see this field's origin bug).
+fn door_suffix(door: Option<u32>) -> String {
+    match door {
+        Some(serial) => format!(",\"dr\":{serial}"),
+        None => String::new(),
+    }
 }
 
 /// Real statics at `(x, y)` PLUS, when `multis` is given, any in-view multi
@@ -2671,6 +2769,9 @@ pub fn build_scene(
                 }
             }
         }
+        // Computed once (doesn't vary per tile) for the `walk` chain-radius
+        // fast path below — see `blocking_item_at`'s doc.
+        let ghost = player_is_ghost(&s.world);
         for dy in -LAND_RADIUS..=LAND_RADIUS {
             for dx in -LAND_RADIUS..=LAND_RADIUS {
                 let (x, y) = (px + dx, py + dy);
@@ -2684,7 +2785,28 @@ pub fn build_scene(
                 // grayed-out ring the client renders) — no static fetch, no static
                 // emission, no multi components. Cheaper AND land-only by
                 // construction.
-                let walk = tile_walkable(&s.world, map, multis, x, y, pz);
+                //
+                // Inside `CHAIN_RADIUS`, `w` must agree with `sz` instead of
+                // asking `tile_walkable` (`walkable_z_explain`'s scorer) again:
+                // the two calculators disagree on a bridge-widened climb (a
+                // house foundation's stairs is a live, verified case — see
+                // `blocking_item_at`'s doc), and ClassicUO has no such split —
+                // `Pathfinder.CanWalk` *is* `CalculateNewZ`. `sz_chain` already
+                // holds that authoritative answer (`Some` iff `calculate_new_z`
+                // found a standing surface); blockers (crates, closed doors,
+                // hull/house walls) still deny exactly as `tile_walkable` would,
+                // via the SAME rules `explain_tile_walkable` uses (factored out
+                // as `blocking_item_at` so they can't drift apart). Outside the
+                // chain radius there's no authoritative answer to defer to, so
+                // this keeps exactly today's `tile_walkable` result.
+                let walk = if dx.abs() <= CHAIN_RADIUS && dy.abs() <= CHAIN_RADIUS {
+                    let dyn_items = dynamic_statics_at(&s.world, map, x, y);
+                    sz_chain[chain_idx(dx, dy)].is_some()
+                        && blocking_item_at(&s.world, map, multis, x, y, pz, &dyn_items, ghost)
+                            .is_none()
+                } else {
+                    tile_walkable(&s.world, map, multis, x, y, pz)
+                };
                 let land = map.land(x as u32, y as u32);
                 let c = art
                     .as_mut()
@@ -2759,9 +2881,26 @@ pub fn build_scene(
                 } else {
                     ""
                 };
+                // `dr` (door to open): PATH_RADIUS-gated like `li` above, and
+                // only even worth computing for a tile that ISN'T strictly
+                // walkable (`walk == false` — a walkable tile has no door to
+                // open). Reuses `tile_walkable_for_planning`'s exact "every
+                // blocker is a door" rule (via
+                // `explain_tile_walkable_for_planning`) instead of
+                // re-deriving it, so this can never disagree with what the
+                // click-to-walk route planner already treats as passable.
+                // See `door_suffix`'s doc for why this field exists:
+                // ClassicUO opens a door you walk INTO (`TryOpenDoors`) — the
+                // browser's manual (keyboard) walking needs this serial to do
+                // the same, instead of just stopping at the strict `w=0`.
+                let door_to_open = if !walk && dx.abs() <= PATH_RADIUS && dy.abs() <= PATH_RADIUS {
+                    explain_tile_walkable_for_planning(&s.world, map, multis, x, y, pz).1
+                } else {
+                    None
+                };
                 let _ = write!(
                     tiles,
-                    "{{\"w\":{},\"z\":{},\"g\":{},\"tx\":{},\"c\":[{},{},{}],\"h\":{},\"sz\":{}{}}},",
+                    "{{\"w\":{},\"z\":{},\"g\":{},\"tx\":{},\"c\":[{},{},{}],\"h\":{},\"sz\":{}{}{}}},",
                     walk as u8,
                     land.z,
                     land.graphic,
@@ -2771,7 +2910,8 @@ pub fn build_scene(
                     c[2],
                     hidden as u8,
                     sz,
-                    land_impassable
+                    land_impassable,
+                    door_suffix(door_to_open)
                 );
                 // Static objects on this tile (walls/trees/deco). Skip anything at
                 // or above max_z so a roof/upper floor over the player vanishes.
@@ -4189,6 +4329,105 @@ mod tests {
         }
     }
 
+    /// The `dr` land-tile field's source of truth: `explain_tile_walkable_for_planning`
+    /// must name a door's serial exactly when the tile is walkable-for-planning ONLY
+    /// because of that door — never when the tile is either strictly walkable outright
+    /// (no door involved) or, per the FIX 4 rule, blocked by something a door can't
+    /// excuse (e.g. a crate sharing the doorway). Exercises the fn directly rather than
+    /// `build_scene`'s JSON output, since assembling a full `Session`/scene just to read
+    /// one optional field would be needless overhead — and this is the exact function
+    /// `build_scene`'s `dr` suffix calls.
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn explain_tile_walkable_for_planning_names_the_door_only_when_it_alone_blocks() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let mut map = MapData::open(&dir).expect("open map data");
+        assert!(
+            map.item_is_door(0x06A5),
+            "0x06A5 should be a real door graphic"
+        );
+        assert!(
+            !map.item_is_door(0x0E3D),
+            "0x0E3D (crate) should not be a door"
+        );
+
+        let door_serial = 1_073_751_127;
+        let mut world = anima_core::World::new();
+        world.items.insert(
+            door_serial,
+            anima_core::world::Item {
+                serial: door_serial,
+                graphic: 0x06A5,
+                amount: 1,
+                pos: anima_core::types::Position {
+                    x: 1611,
+                    y: 1591,
+                    z: 0,
+                },
+                container: None,
+                layer: 0,
+                hue: 0,
+                name: String::new(),
+                direction: 0,
+                is_multi: false,
+            },
+        );
+
+        // A tile with ONLY a closed door: walkable-for-planning, and the door's
+        // own serial comes back with it.
+        let (z, door) = explain_tile_walkable_for_planning(&world, &mut map, None, 1611, 1591, 5);
+        assert!(z.is_some(), "a door-only tile must be walkable for planning");
+        assert_eq!(
+            door,
+            Some(door_serial),
+            "must name the door blocking this tile"
+        );
+
+        // The SAME tile, plus a non-door impassable crate: no longer plannable at
+        // all (FIX 4 — every blocker must be a door, not just one of them), so no
+        // door serial either.
+        let crate_serial = 2u32;
+        world.items.insert(
+            crate_serial,
+            anima_core::world::Item {
+                serial: crate_serial,
+                graphic: 0x0E3D,
+                amount: 1,
+                pos: anima_core::types::Position {
+                    x: 1611,
+                    y: 1591,
+                    z: 5,
+                },
+                container: None,
+                layer: 0,
+                hue: 0,
+                name: String::new(),
+                direction: 0,
+                is_multi: false,
+            },
+        );
+        let (z, door) = explain_tile_walkable_for_planning(&world, &mut map, None, 1611, 1591, 5);
+        assert!(
+            z.is_none(),
+            "a crate alongside the door must still deny planning"
+        );
+        assert_eq!(
+            door, None,
+            "no door serial when the tile isn't even plannable"
+        );
+
+        // An ordinary walkable tile with no items at all: walkable outright, and
+        // (since no door was ever involved) no door serial.
+        let empty_world = anima_core::World::new();
+        let (z, door) =
+            explain_tile_walkable_for_planning(&empty_world, &mut map, None, 1611, 1591, 5);
+        assert!(z.is_some(), "an ordinary tile with no items must be walkable");
+        assert_eq!(
+            door, None,
+            "an ordinary walkable tile must not get a door serial"
+        );
+    }
+
     // ---- FIX 1/2/6/7: multi-component walkability + rendering -----------------
 
     fn synth_item(
@@ -4828,5 +5067,25 @@ mod tests {
         assert_eq!(anim_suffix(&map, Some(&animdata), 0x0001), "");
         // No animdata table at all → nothing, even for an animated graphic.
         assert_eq!(anim_suffix(&map, None, 0x03AE), "");
+    }
+
+    #[test]
+    #[ignore]
+    fn scratch_dump_foundation_tiledata() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let map = MapData::open(&dir).expect("open map data");
+        for g in [0x0751u16, 0x0063, 0x31F4] {
+            let f = map.item_flags(g);
+            println!(
+                "g={:#06x} flags={:#x} impass={} surface={} bridge={} height={}",
+                g,
+                f,
+                f & FLAG_IMPASSABLE != 0,
+                f & FLAG_SURFACE != 0,
+                f & FLAG_BRIDGE != 0,
+                map.item_height(g)
+            );
+        }
+        assert!(false, "scratch");
     }
 }

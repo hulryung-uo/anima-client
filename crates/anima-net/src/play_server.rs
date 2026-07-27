@@ -1,3 +1,8 @@
+//! All human-readable logging here goes to **stderr**, never stdout. The agent
+//! bridge (`bin/agent.rs`) embeds this module to serve a read-only spectator view
+//! while owning stdout as an NDJSON protocol stream — a single stray `println!`
+//! corrupts that stream and the brain drops the body with "malformed NDJSON".
+//!
 //! Library form of the `play` bin: a human-controlled UO client served over
 //! HTTP. Holds one live [`Session`], serves the web renderer + `/scene.json`,
 //! and accepts `POST /input` commands (walk/say/use/attack/pickup/war) which
@@ -261,6 +266,16 @@ pub struct PlayConfig {
     /// `"127.0.0.1"` regardless of environment, since it must never expose
     /// this process to the network.
     pub bind_addr: String,
+    /// Serve the renderer as a READ-ONLY spectator view: every request that would
+    /// change the world or the session (`POST /input`, `/login`, `/character`) is
+    /// refused with 403 instead of reaching the session at all.
+    ///
+    /// This is what makes watching an agent possible. A UO shard allows exactly one
+    /// session per character — ServUO's character-select handler disposes the previous
+    /// `NetState` — so a spectator canNOT be a second login of the same character
+    /// without kicking the agent off. Instead the agent keeps its one session and
+    /// publishes frames from it (see [`PlayServer::into_monitor`]).
+    pub read_only: bool,
 }
 
 /// A bound-but-not-yet-running play server: the HTTP side (and its worker
@@ -288,6 +303,8 @@ pub struct PlayServer {
     /// loop so the `/regions.json` HTTP thread can filter guard-zone rects to
     /// the facet the player is actually on without touching `scene`'s JSON.
     facet: Arc<AtomicU8>,
+    /// Epoch-millis of the last `/scene.json` fetch — see [`Monitor::watching`].
+    watch: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -589,7 +606,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     // dataset regardless of facet, so loaded once here (unlike `map`, which
     // reloads per facet in the game loop).
     let multis: Option<Multis> = Multis::open(&data_dir).ok();
-    println!(
+    eprintln!(
         "play: multis {}",
         if multis.is_some() {
             "loaded"
@@ -612,7 +629,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     // Cliloc table (Cliloc.enu): localized text for context-menu labels (and reusable
     // for gump/system-message clilocs). Resolved into the scene when present.
     let cliloc: Option<Arc<Cliloc>> = Cliloc::open(&data_dir).ok().map(Arc::new);
-    println!(
+    eprintln!(
         "play: cliloc {}",
         cliloc.as_ref().map_or("not loaded".into(), |c| format!(
             "loaded ({} entries)",
@@ -623,7 +640,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     // frame interval (used by build_scene to bake `effects[].frames`/`interval`).
     // Read in the game-loop thread only, so a plain Option (no Arc) is enough.
     let animdata: Option<AnimData> = AnimData::open(&data_dir).ok();
-    println!(
+    eprintln!(
         "play: animdata {}",
         if animdata.is_some() {
             "loaded"
@@ -634,7 +651,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     // Sound effects (soundLegacyMUL.uop → WAV) and the music id → mp3 path map.
     let sounds: Option<Arc<Sounds>> = Sounds::open(&data_dir).ok().map(Arc::new);
     let music: Arc<HashMap<u16, PathBuf>> = Arc::new(load_music_map(&data_dir));
-    println!(
+    eprintln!(
         "play: {} sound assets, {} music tracks",
         if sounds.is_some() { "loaded" } else { "no" },
         music.len()
@@ -650,13 +667,13 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
         let cache = std::env::temp_dir().join(format!("anima-worldmap0-s{WORLDMAP_STEP}.png"));
         thread::spawn(move || {
             if let Ok(bytes) = std::fs::read(&cache) {
-                println!("play: worldmap from cache ({} KB)", bytes.len() / 1024);
+                eprintln!("play: worldmap from cache ({} KB)", bytes.len() / 1024);
                 *slot.lock().unwrap() = Some(bytes);
                 return;
             }
             if let (Ok(mut m), Ok(rc)) = (MapData::open(&ddir), RadarCol::open(&ddir)) {
                 let png = render_worldmap(&mut m, &rc, WORLDMAP_STEP);
-                println!("play: worldmap ready ({} KB)", png.len() / 1024);
+                eprintln!("play: worldmap ready ({} KB)", png.len() / 1024);
                 let _ = std::fs::write(&cache, &png);
                 *slot.lock().unwrap() = Some(png);
             }
@@ -665,6 +682,9 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
 
     // Shared scene JSON (HTTP thread reads, game loop writes) + input channel.
     let scene = Arc::new(Mutex::new(String::from("{}")));
+    // Last `/scene.json` fetch, epoch-millis. Only consulted by spectators (see
+    // `Monitor::watching`); the human `play` path builds every frame as before.
+    let watch = Arc::new(AtomicU64::new(0));
     // `Some(action)` = do it; `None` = stop walking now (key released). The
     // explicit stop clears `desired` immediately so the server doesn't keep pacing
     // for the desired_until window and overshoot past where the player stopped
@@ -684,7 +704,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     let guard_rects: Arc<Vec<GuardRect>> = Arc::new(match std::fs::read_to_string(&regions_path) {
         Ok(xml) => {
             let rects = crate::regions::parse(&xml);
-            println!(
+            eprintln!(
                 "play: regions loaded ({} guarded rects from {})",
                 rects.len(),
                 regions_path.display()
@@ -692,7 +712,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
             rects
         }
         Err(_) => {
-            println!("regions: not loaded");
+            eprintln!("regions: not loaded");
             Vec::new()
         }
     });
@@ -742,6 +762,8 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
             pois,
             guard_rects,
             facet: facet.clone(),
+            read_only: cfg.read_only,
+            watch: watch.clone(),
         },
     );
 
@@ -761,10 +783,187 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
         character_rx,
         sse_hub,
         facet,
+        watch,
     })
 }
 
+/// Milliseconds since the unix epoch (monotonic enough for "is anyone watching").
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// A read-only spectator view of a session somebody ELSE owns.
+///
+/// [`PlayServer::run`] owns its session: it logs in and drives the game loop. That is
+/// the wrong shape for watching an agent, because the agent already holds the only
+/// session that character is allowed to have — a second login would disconnect it
+/// (ServUO's character-select handler disposes the previous `NetState`). So the serving
+/// half is split off here: the HTTP renderer, its assets, and the shared scene buffer,
+/// with the session left to its real owner. The owner calls [`publish`](Monitor::publish)
+/// whenever it wants the viewer to see a new frame.
+///
+/// The viewer is a spectator, not a second pair of hands: `PlayConfig::read_only`
+/// refuses `/input`, `/login` and `/character` in the HTTP layer itself.
+pub struct Monitor {
+    port: u16,
+    scene: Arc<Mutex<String>>,
+    watch: Arc<AtomicU64>,
+    multis: Option<Multis>,
+    art: Option<Arc<Mutex<Art>>>,
+    anim: Option<Arc<Anim>>,
+    cliloc: Option<Arc<Cliloc>>,
+    animdata: Option<AnimData>,
+    facet: Arc<AtomicU8>,
+    /// Our OWN cursor into `World::journal`. Deliberately not `Session::observation()`,
+    /// which advances the session's single shared journal cursor — reading frames for a
+    /// spectator must never consume journal lines the session's real owner has not seen.
+    journal_cursor: usize,
+    journal: Vec<serde_json::Value>,
+    journal_seq: u64,
+    last_build: Option<Instant>,
+    build_count: u64,
+    build_sum: Duration,
+    build_max: Duration,
+}
+
+/// How long after a `/scene.json` fetch we keep considering someone to be watching.
+const WATCH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Floor on time between published frames (the human loop uses the same 250ms).
+const MIN_PUBLISH_GAP: Duration = Duration::from_millis(250);
+/// Journal lines kept for the renderer (same cap as the human game loop).
+const JOURNAL_KEEP: usize = 50;
+
+impl Monitor {
+    /// The HTTP port actually bound (resolves `PlayConfig.http_port == 0`).
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Is a browser actually looking right now?
+    ///
+    /// Building a frame is real work (the human loop logs a warning past 30ms), and an
+    /// agent bridge may be one of several sharing a single-threaded shard, so a session
+    /// owner should skip publishing while nobody is watching. Also rate-limits to
+    /// `MIN_PUBLISH_GAP`, so a fast tick loop cannot spend all its time rendering.
+    pub fn watching(&self) -> bool {
+        if self
+            .last_build
+            .is_some_and(|t| t.elapsed() < MIN_PUBLISH_GAP)
+        {
+            return false;
+        }
+        now_millis().saturating_sub(self.watch.load(Ordering::Relaxed))
+            < WATCH_TIMEOUT.as_millis() as u64
+    }
+
+    /// Render `session`'s current world into the buffer the viewer polls.
+    ///
+    /// `map` is the caller's own terrain reader (the agent bridge already keeps one for
+    /// pathfinding) so a monitored process never loads a second copy.
+    pub fn publish(&mut self, session: &mut Session, map: Option<&mut MapData>) {
+        let t0 = Instant::now();
+        self.drain_journal(session);
+        self.facet
+            .store(session.world.map_index, Ordering::Relaxed);
+        let mut art_guard = self.art.as_ref().map(|a| a.lock().unwrap());
+        let json = build_scene(
+            session,
+            map,
+            art_guard.as_deref_mut(),
+            self.cliloc.as_deref(),
+            self.animdata.as_ref(),
+            self.anim.as_deref(),
+            self.multis.as_ref(),
+            &self.journal,
+        );
+        drop(art_guard);
+        *self.scene.lock().unwrap() = json;
+        let t = t0.elapsed();
+        self.build_count += 1;
+        self.build_sum += t;
+        if t > self.build_max {
+            self.build_max = t;
+        }
+        // Same threshold the human game loop warns at. This runs on the bridge's own
+        // thread, i.e. IN the brain's critical path, so a slow frame directly costs the
+        // agent playing time — say so rather than leaving it to be inferred from a
+        // sluggish run.
+        // Periodic cost report, so "being watched is cheap" is a measured claim rather
+        // than an assumption — this work sits in the brain's critical path.
+        if self.build_count % 50 == 0 {
+            eprintln!(
+                "[anima-agent] monitor frames n={} avg={:.1}ms max={:.1}ms",
+                self.build_count,
+                self.build_sum.as_secs_f64() * 1000.0 / self.build_count as f64,
+                self.build_max.as_secs_f64() * 1000.0,
+            );
+        }
+        if t > Duration::from_millis(30) {
+            eprintln!(
+                "[anima-agent] slow monitor frame: {:.1}ms (n={} avg={:.1}ms max={:.1}ms)",
+                t.as_secs_f64() * 1000.0,
+                self.build_count,
+                self.build_sum.as_secs_f64() * 1000.0 / self.build_count as f64,
+                self.build_max.as_secs_f64() * 1000.0,
+            );
+        }
+        self.last_build = Some(Instant::now());
+    }
+
+    /// Frames built, and what they cost — for a caller that wants to report the price
+    /// of being watched.
+    pub fn build_stats(&self) -> (u64, Duration, Duration) {
+        (self.build_count, self.build_sum, self.build_max)
+    }
+
+    /// Copy any new journal lines out of the world with our own cursor, mirroring the
+    /// human game loop's own formatting and cap.
+    fn drain_journal(&mut self, session: &mut Session) {
+        let all = &session.world.journal;
+        if self.journal_cursor > all.len() {
+            self.journal_cursor = 0; // journal was reset (relog/map change)
+        }
+        for j in &all[self.journal_cursor..] {
+            self.journal_seq += 1;
+            self.journal.push(serde_json::json!({
+                "seq": self.journal_seq, "serial": j.serial, "name": j.name,
+                "text": j.text, "type": j.msg_type, "hue": j.hue, "cliloc": j.cliloc,
+            }));
+        }
+        self.journal_cursor = all.len();
+        while self.journal.len() > JOURNAL_KEEP {
+            self.journal.remove(0);
+        }
+    }
+}
+
 impl PlayServer {
+    /// Give up the login/game loop and keep only the serving half, for a caller that
+    /// already owns a live [`Session`] and wants it watched (see [`Monitor`]).
+    pub fn into_monitor(self) -> Monitor {
+        Monitor {
+            port: self.port,
+            scene: self.scene,
+            watch: self.watch,
+            multis: self.multis,
+            art: self.art,
+            anim: self.anim,
+            cliloc: self.cliloc,
+            animdata: self.animdata,
+            facet: self.facet,
+            journal_cursor: 0,
+            journal: Vec::new(),
+            journal_seq: 0,
+            last_build: None,
+            build_count: 0,
+            build_sum: Duration::ZERO,
+            build_max: Duration::ZERO,
+        }
+    }
+
     /// The HTTP port actually bound (resolves `PlayConfig.http_port == 0`).
     pub fn port(&self) -> u16 {
         self.port
@@ -789,6 +988,7 @@ impl PlayServer {
             character_rx,
             sse_hub,
             facet,
+            watch: _watch,
         } = self;
 
         // Starting city for a newly-created character (ServUO honors the selection):
@@ -889,7 +1089,7 @@ impl PlayServer {
                         scene_value["error"] = serde_json::json!(rejection.text);
                     }
                     *scene.lock().unwrap() = scene_value.to_string();
-                    println!(
+                    eprintln!(
                         "play: character list ready ({} occupied / {} slots, {} starting cities)",
                         list.slots.len(),
                         list.slot_count,
@@ -899,7 +1099,7 @@ impl PlayServer {
                         // Recoverable, not a login failure: the delete simply
                         // didn't go through (ClassicUO parity) — the session
                         // stays up and the driver just re-shows the list above.
-                        println!(
+                        eprintln!(
                             "play: character delete rejected (reason {}): {} -- staying on character selection",
                             rejection.reason, rejection.text
                         );
@@ -918,7 +1118,7 @@ impl PlayServer {
         };
         'connections: loop {
             let mut session = if !cfg.login_page {
-                println!(
+                eprintln!(
                     "play: connecting to {}:{} as {} ...",
                     cfg.host, cfg.port, cfg.user
                 );
@@ -942,7 +1142,7 @@ impl PlayServer {
                 }
             } else {
                 *scene.lock().unwrap() = r#"{"auth":"login"}"#.into();
-                println!("play: login page at http://127.0.0.1:{port}/  (enter server + account)");
+                eprintln!("play: login page at http://127.0.0.1:{port}/  (enter server + account)");
                 loop {
                     let attempt = match login_rx.recv() {
                         Ok(v) => v,
@@ -954,11 +1154,11 @@ impl PlayServer {
                     let (lh, lp, lu) =
                         (attempt.host.clone(), attempt.port, attempt.username.clone());
                     *scene.lock().unwrap() = r#"{"auth":"connecting"}"#.into();
-                    println!("play: connecting to {lh}:{lp} as {lu} ...");
+                    eprintln!("play: connecting to {lh}:{lp} as {lu} ...");
                     match connect(attempt) {
                         Ok(s) => break s,
                         Err(DriverError::CharacterChoiceCancelled) => {
-                            println!("play: character selection cancelled");
+                            eprintln!("play: character selection cancelled");
                             *scene.lock().unwrap() = r#"{"auth":"login"}"#.into();
                         }
                         Err(e) => {
@@ -969,7 +1169,7 @@ impl PlayServer {
                     }
                 }
             };
-            println!(
+            eprintln!(
                 "play: in world. open http://127.0.0.1:{port}/  (WASD/arrows move, T to talk)"
             );
 
@@ -1128,7 +1328,7 @@ impl PlayServer {
                 }
                 if let Some(allowed) = session.take_logout_ack() {
                     if allowed {
-                        println!("play: server authorized logout");
+                        eprintln!("play: server authorized logout");
                         session_end = GameSessionEnd::LoggedOut;
                         break;
                     }
@@ -1550,7 +1750,7 @@ impl PlayServer {
                 "msg": msg,
             })
             .to_string();
-            println!("play: {msg} waiting for a new login");
+            eprintln!("play: {msg} waiting for a new login");
         }
         Ok(())
     }
@@ -1645,6 +1845,10 @@ struct SpawnHttp {
     pois: Arc<String>,
     guard_rects: Arc<Vec<GuardRect>>,
     facet: Arc<AtomicU8>,
+    /// Refuse everything that would touch the world/session (spectator mode).
+    read_only: bool,
+    /// Epoch-millis of the last `/scene.json` fetch.
+    watch: Arc<AtomicU64>,
 }
 
 /// Spawn the worker-thread pool serving `server` (already bound by [`bind`]).
@@ -1668,6 +1872,8 @@ fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         pois,
         guard_rects,
         facet,
+        read_only,
+        watch,
     } = args;
     let tile_cache: TileCache = Arc::new(Mutex::new(ByteCache::new(TILE_CACHE_BYTES)));
     let anim_cache: AnimCache = Arc::new(Mutex::new(ByteCache::new(ANIM_CACHE_BYTES)));
@@ -1698,6 +1904,7 @@ fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         let sse_hub = sse_hub.clone();
         let pois = pois.clone();
         let guard_rects = guard_rects.clone();
+        let watch = watch.clone();
         let facet = facet.clone();
         thread::spawn(move || {
             while let Ok(req) = server.recv() {
@@ -1725,6 +1932,8 @@ fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
                     pois: &pois,
                     guard_rects: &guard_rects,
                     facet: &facet,
+                    read_only,
+                    watch: &watch,
                 });
             }
         });
@@ -1756,6 +1965,8 @@ struct Ctx<'a> {
     pois: &'a Arc<String>,
     guard_rects: &'a Arc<Vec<GuardRect>>,
     facet: &'a Arc<AtomicU8>,
+    read_only: bool,
+    watch: &'a Arc<AtomicU64>,
 }
 
 fn handle_request(ctx: Ctx) {
@@ -1764,6 +1975,8 @@ fn handle_request(ctx: Ctx) {
         mut req,
         web_dir,
         scene,
+        read_only,
+        watch,
         tx,
         login,
         character,
@@ -1818,6 +2031,13 @@ fn handle_request(ctx: Ctx) {
             eprintln!("[cli] {}", body.trim());
         }
         let _ = req.respond(Response::from_string("ok"));
+    } else if read_only && is_post && matches!(url.as_str(), "/input" | "/login" | "/character") {
+        // Spectator mode. Refused here, before the body is even read, so a request can
+        // never reach the action/login channels — the guarantee is structural, not a
+        // promise made by the renderer's UI.
+        let _ = req.respond(
+            Response::from_string("read-only monitor: input is disabled").with_status_code(403),
+        );
     } else if is_post && url == "/input" {
         let body = match read_request_body(&mut req) {
             Ok(body) => body,
@@ -1928,6 +2148,8 @@ fn handle_request(ctx: Ctx) {
             }
         }
     } else if url == "/scene.json" {
+        // Somebody is looking — let a session owner skip building frames nobody wants.
+        watch.store(now_millis(), Ordering::Relaxed);
         let body = scene.lock().unwrap().clone();
         let mut r = Response::from_string(body);
         r.add_header(ctype("application/json"));

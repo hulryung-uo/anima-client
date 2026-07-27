@@ -4,6 +4,14 @@
 //! (NDJSON) over stdin/stdout so an out-of-process brain (anima2, Python) can
 //! drive this character. stderr carries human logs only.
 //!
+//! Set `ANIMA_MONITOR_PORT` to also serve a READ-ONLY spectator view of this
+//! character on that HTTP port (`0` = pick a free one; the chosen port is printed
+//! to stderr as `[anima-agent] monitor on http://.../`). It renders the same web
+//! client `play` serves, but refuses every input — the brain stays the only thing
+//! driving this body. A spectator cannot be a second login of the same character:
+//! ServUO's character-select disposes the previous session, which would kick the
+//! agent off, so the bridge publishes frames from the session it already owns.
+//!
 //! Usage: `anima-agent [host] [port] [username] [password] [data_dir]`
 //! (defaults: 127.0.0.1 2594 animatest animatest — ServUO auto-creates accounts;
 //! `data_dir` defaults to `$HOME/dev/uo/uo-resource`, like `play.rs`/`anima-agent`'s
@@ -32,6 +40,7 @@ use anima_assets::MapData;
 use anima_core::agent::Action;
 use anima_core::net::LoginConfig;
 use anima_net::json::{action_from_json, observation_to_json, SCHEMA_VERSION};
+use anima_net::play_server::{self, PlayConfig};
 use anima_net::{Endpoint, Session};
 use serde_json::{json, Value};
 
@@ -74,6 +83,46 @@ fn main() {
             format!("not loaded at {data_dir} (WalkTo actions will be accepted but won't path)")
         }
     );
+    // Optional read-only spectator view. Bound BEFORE the NDJSON loop starts so the
+    // port is printed while a human is still reading stderr; frames are only built
+    // when somebody is actually watching (see `Monitor::watching`), so an unwatched
+    // monitor costs nothing per tick beyond one clock read.
+    let mut monitor = match std::env::var("ANIMA_MONITOR_PORT") {
+        Ok(v) => match v.parse::<u16>() {
+            Ok(http_port) => match play_server::bind(PlayConfig {
+                host: String::new(),
+                port: 0,
+                user: String::new(),
+                pass: String::new(),
+                http_port,
+                web_dir: None, // the copy embedded in anima-net at compile time
+                data_dir: data_dir.clone().into(),
+                login_page: false,
+                bind_addr: "127.0.0.1".to_string(),
+                read_only: true,
+            }) {
+                Ok(server) => {
+                    let m = server.into_monitor();
+                    eprintln!(
+                        "[anima-agent] monitor on http://127.0.0.1:{}/ (read-only)",
+                        m.port()
+                    );
+                    Some(m)
+                }
+                // A monitor is a convenience; never take the brain down with it.
+                Err(e) => {
+                    eprintln!("[anima-agent] monitor failed to bind: {e}");
+                    None
+                }
+            },
+            Err(_) => {
+                eprintln!("[anima-agent] ANIMA_MONITOR_PORT={v:?} is not a port; monitor off");
+                None
+            }
+        },
+        Err(_) => None,
+    };
+
     // Drain the initial burst so the first observe is meaningful.
     let _ = session.observe(Duration::from_millis(500));
 
@@ -90,7 +139,16 @@ fn main() {
         if line.trim().is_empty() {
             continue;
         }
-        match handle(&mut session, map.as_mut(), &line) {
+        let result = handle(&mut session, map.as_mut(), &line);
+        // Refresh the spectator's view off the session the brain just advanced. Done
+        // here, on the bridge's own thread, so the monitor never touches `Session`
+        // concurrently with the brain and needs no lock around it.
+        if let Some(m) = monitor.as_mut() {
+            if m.watching() {
+                m.publish(&mut session, map.as_mut());
+            }
+        }
+        match result {
             Ok(Some(reply)) => emit(&reply),
             Ok(None) => {
                 emit(&json!({ "ok": true, "bye": true }));

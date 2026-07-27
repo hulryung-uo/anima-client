@@ -242,6 +242,7 @@ const SETTINGS_DEFAULTS = {
   abilities: true,               // weapon special-ability bar (also needs server AOS)
   guardZones: false,             // guard-zone (guard line) boundary overlay — off by default
   debugMove: false,               // movement/Z debug HUD (WalkTo rejects, predicted vs server pos)
+  autoOpenDoors: true,            // walking into a closed door opens it (ClassicUO TryOpenDoors) — on by default
 };
 let settings = Object.assign({}, SETTINGS_DEFAULTS);
 try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}")); } catch (e) {}
@@ -267,6 +268,7 @@ function renderOptions() {
     + cb("abilities", "Weapon abilities")
     + cb("guardZones", "Guard-zone lines (R)")
     + cb("debugMove", "Movement debug")
+    + cb("autoOpenDoors", "Auto-open doors")
     + '<div class="opt-sect">Session</div>'
     + `<button type="button" class="dlg-btn opt-logout"${logoutPending ? " disabled" : ""}>`
     + (logoutPending ? "LOGGING OUT…" : "LOG OUT") + "</button>";
@@ -2830,6 +2832,22 @@ function tileSZ(x, y) {
   return t.sz !== undefined ? (t.sz | 0) : (t.z | 0);
 }
 
+// Serial of the closed door blocking (x,y), if any — the optional `dr` field the
+// server attaches to a land tile ONLY when it's blocked SOLELY by an openable
+// closed door (a tile blocked by a door AND e.g. a crate does not get it). null
+// when there's no door, (x,y) is outside the client's map window, or the server
+// predates this field — all three cases are indistinguishable and all correctly
+// mean "nothing to auto-open here". Feeds tryAutoOpenDoor() near canWalk().
+function tileDoor(x, y) {
+  const m = scene && scene.map;
+  if (!m) return null;
+  const span = 2 * m.radius + 1;
+  const col = x - m.cx + m.radius, row = y - m.cy + m.radius;
+  if (col < 0 || col >= span || row < 0 || row >= span) return null;
+  const t = m.tiles[row * span + col];
+  return t && t.dr !== undefined ? (t.dr >>> 0) : null;
+}
+
 // ----------------------------------------------------------------------------
 // Step-Z resolution — a faithful port of ClassicUO `Pathfinder.CalculateNewZ`
 // (+ `CalculateMinMaxZ`, `CreateItemList`), mirroring the Rust port at
@@ -3151,6 +3169,29 @@ function calculateNewZ(x, y, currentZ, direction) {
   return resolveStandingZ(list, bounds[0], bounds[1], currentZ);
 }
 
+// ---- auto-open doors on a blocked walk (ClassicUO PlayerMobile.TryOpenDoors) ----
+// Real UO lets you walk INTO a closed door: it opens instead of just stopping you.
+// We have no equivalent, so a closed door (tileWalkable → w=0) reads as a solid
+// wall and manual (keyboard) walking could never enter a house through one. This
+// asks the server to open it, but deliberately does NOT predict the step through
+// the still-closed door — canWalk still returns null this same frame, so the step
+// stays refused. Only once the server actually opens it does the NEXT poll's tile
+// report w=1 and the ordinary walk proceed on its own; since the key is usually
+// still held, that reads as "bump the door, it opens, you walk through". Throttled
+// per-door so a step refused every frame (while the key is held) doesn't spam a
+// `use:` packet each time.
+const DOOR_REOPEN_MS = 700;
+let lastDoorOpen = { serial: 0, t: 0 };
+function tryAutoOpenDoor(x, y) {
+  if (!settings.autoOpenDoors) return;
+  const serial = tileDoor(x, y);
+  if (serial == null) return;
+  const now = performance.now();
+  if (serial === lastDoorOpen.serial && now - lastDoorOpen.t < DOOR_REOPEN_MS) return;
+  lastDoorOpen = { serial, t: now };
+  sendInput("use:" + serial);
+}
+
 // ClassicUO Pathfinder.CanWalk: resolve a step from (x,y) facing `dir`. Returns
 // {dir,x,y} (possibly redirected) or null if blocked. A diagonal forbids corner-
 // cutting (both flanking cardinals must be open) and, if blocked, redirects to the
@@ -3158,6 +3199,7 @@ function calculateNewZ(x, y, currentZ, direction) {
 function canWalk(x, y, dir) {
   let nx = x + DIR_DELTA[dir][0], ny = y + DIR_DELTA[dir][1], ndir = dir;
   let passed = tileWalkable(nx, ny);
+  const destX = nx, destY = ny; // tile actually being asked for — the only one eligible to auto-open
   if (dir % 2 === 1) {
     if (passed) {
       for (const off of [1, -1]) {
@@ -3174,6 +3216,11 @@ function canWalk(x, y, dir) {
       }
     }
   }
+  // Still refused after any diagonal redirect attempt → ask the server to open a
+  // door here, if that's the only reason (redirected slides don't need it; a
+  // flanking cardinal that merely denied corner-cutting is a different tile and
+  // is intentionally left alone).
+  if (!passed) tryAutoOpenDoor(destX, destY);
   return passed ? { dir: ndir, x: nx, y: ny } : null;
 }
 
@@ -8623,7 +8670,13 @@ function updatePlacementPreview() {
   placementTiles = [];
   const originX = placementHoverX - (p.xOff | 0), originY = placementHoverY - (p.yOff | 0);
   const fallbackZ = (tileSZ(placementHoverX, placementHoverY) ?? (scene.player ? scene.player.z | 0 : 0)) + (p.zOff | 0);
-  const tiles = (p.tiles || []).slice(0, 4096); // match the server's footprint cap
+  // Ground footprint diamonds are only a FALLBACK now: once the translucent
+  // house itself is drawn (below) the grid under the cursor is just noise, so
+  // it appears solely when there is no art to draw — an older server that sends
+  // no `parts`, or a multi we couldn't resolve components for.
+  const tiles = (p.parts && p.parts.length)
+    ? []
+    : (p.tiles || []).slice(0, 4096); // match the server's footprint cap
   for (const [dx, dy] of tiles) {
     const tx = originX + dx, ty = originY + dy;
     const z = tileSZ(tx, ty);
