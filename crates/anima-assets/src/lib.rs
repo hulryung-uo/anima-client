@@ -9,6 +9,7 @@ pub mod anim;
 pub mod animdata;
 pub mod art;
 pub mod cliloc;
+pub mod customhouse;
 pub mod gump;
 pub mod hues;
 pub mod map;
@@ -24,6 +25,10 @@ pub use anim::{Anim, EquipConv};
 pub use animdata::AnimData;
 pub use art::{Art, Image};
 pub use cliloc::Cliloc;
+pub use customhouse::{
+    CustomHouseCatalog, CustomHouseCategory, CustomHouseDoor, CustomHouseFloor, CustomHouseMisc,
+    CustomHouseRoof, CustomHouseStair, CustomHouseTeleport, CustomHouseWall, SupportInfo,
+};
 pub use gump::Gumps;
 pub use hues::{apply_hue, Hues};
 pub use map::{LandTile, MapData, StaticTile, ZReason, MAP_HEIGHT, MAP_WIDTH};

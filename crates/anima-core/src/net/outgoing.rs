@@ -490,6 +490,138 @@ pub fn build_use_ability(player_serial: u32, ability_id: u8) -> Vec<u8> {
     data
 }
 
+/// Shared framing for CustomHouse design-editor commands: `0xD7` GenericAOS
+/// (same packet id as [`build_use_ability`] above, just a different
+/// sub-command space) carrying zero or more encoded `Int32` arguments.
+///
+/// ServUO's `EncodedReader::ReadInt32` (used by every `HouseFoundation`
+/// designer handler) requires a type byte of `0` before the 4-byte
+/// big-endian value; the other encoded types it defines (`2` = string, `3` =
+/// `Point3D`) are never used by the house designer, so this only needs to
+/// emit the `Int32` shape. Layout:
+/// `[0xD7][len:u16][playerSerial:u32][subcmd:u16]([0x00][arg:u32])*[0x0A]`.
+fn build_house_design(player_serial: u32, subcmd: u16, args: &[u32]) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xD7).u16(0); // id + length placeholder
+    w.u32(player_serial).u16(subcmd);
+    for &arg in args {
+        w.u8(0x00).u32(arg); // encoded Int32: type byte 0, then value BE
+    }
+    w.u8(0x0A);
+    let mut data = w.into_vec();
+    let len = data.len() as u16;
+    data[1] = (len >> 8) as u8;
+    data[2] = (len & 0xFF) as u8;
+    data
+}
+
+/// CustomHouse designer: Backup the in-progress design. Sub-command `0x02`
+/// of ServUO's `HouseFoundation.RegisterEncoded` table; no arguments. Ports
+/// ClassicUO `Send_CustomHouseBackup`.
+pub fn build_house_design_backup(player_serial: u32) -> Vec<u8> {
+    build_house_design(player_serial, 0x02, &[])
+}
+
+/// CustomHouse designer: Restore the last backed-up design. Sub-command
+/// `0x03`; no arguments. Ports ClassicUO `Send_CustomHouseRestore`.
+pub fn build_house_design_restore(player_serial: u32) -> Vec<u8> {
+    build_house_design(player_serial, 0x03, &[])
+}
+
+/// CustomHouse designer: Commit the design (finalize and leave edit mode).
+/// Sub-command `0x04`; no arguments. Ports ClassicUO `Send_CustomHouseCommit`.
+pub fn build_house_design_commit(player_serial: u32) -> Vec<u8> {
+    build_house_design(player_serial, 0x04, &[])
+}
+
+/// CustomHouse designer: delete a placed component at `(x, y, z)`. Sub-command
+/// `0x05`, args `[graphic, x, y, z]`. Ports ClassicUO `Send_CustomHouseDeleteItem`
+/// (`ServUO Designer_Delete` reads the same four `Int32`s in this order).
+pub fn build_house_design_delete_item(player_serial: u32, graphic: u16, x: i32, y: i32, z: i32) -> Vec<u8> {
+    build_house_design(
+        player_serial,
+        0x05,
+        &[graphic as u32, x as u32, y as u32, z as u32],
+    )
+}
+
+/// CustomHouse designer: add (build) a component at `(x, y)`. Sub-command
+/// `0x06`, args `[graphic, x, y]`. Ports ClassicUO `Send_CustomHouseAddItem`
+/// (`ServUO Designer_Build`) — the canonical 0xD7 example this file's
+/// house-designer builders are modeled on.
+pub fn build_house_design_add_item(player_serial: u32, graphic: u16, x: i32, y: i32) -> Vec<u8> {
+    build_house_design(player_serial, 0x06, &[graphic as u32, x as u32, y as u32])
+}
+
+/// CustomHouse designer: response/acknowledge. Sub-command `0x0A`; no
+/// arguments. Ports ClassicUO `Send_CustomHouseResponse`; ServUO registers it
+/// as `Designer_Action` with the comment "WTF does this do?" — included here
+/// for completeness since it is part of the same designer flow.
+pub fn build_house_design_response(player_serial: u32) -> Vec<u8> {
+    build_house_design(player_serial, 0x0A, &[])
+}
+
+/// CustomHouse designer: close the designer / exit the building. Sub-command
+/// `0x0C`; no arguments. Ports ClassicUO `Send_CustomHouseBuildingExit`.
+pub fn build_house_design_close(player_serial: u32) -> Vec<u8> {
+    build_house_design(player_serial, 0x0C, &[])
+}
+
+/// CustomHouse designer: add a stair component at `(x, y)`. Sub-command
+/// `0x0D`, args `[graphic, x, y]`. Ports ClassicUO `Send_CustomHouseAddStair`
+/// (`ServUO Designer_Stairs`).
+pub fn build_house_design_add_stair(player_serial: u32, graphic: u16, x: i32, y: i32) -> Vec<u8> {
+    build_house_design(player_serial, 0x0D, &[graphic as u32, x as u32, y as u32])
+}
+
+/// CustomHouse designer: request a full state re-sync. Sub-command `0x0E`;
+/// no arguments. Ports ClassicUO `Send_CustomHouseSync`.
+pub fn build_house_design_sync(player_serial: u32) -> Vec<u8> {
+    build_house_design(player_serial, 0x0E, &[])
+}
+
+/// CustomHouse designer: clear the entire design back to the foundation.
+/// Sub-command `0x10`; no arguments. Ports ClassicUO `Send_CustomHouseClear`.
+pub fn build_house_design_clear(player_serial: u32) -> Vec<u8> {
+    build_house_design(player_serial, 0x10, &[])
+}
+
+/// CustomHouse designer: switch the editor's active floor. Sub-command
+/// `0x12`, arg `[floor]`. Ports ClassicUO `Send_CustomHouseGoToFloor`
+/// (`ServUO Designer_Level`, which clamps `newLevel` to `1..=MaxLevels`).
+pub fn build_house_design_go_to_floor(player_serial: u32, floor: u8) -> Vec<u8> {
+    build_house_design(player_serial, 0x12, &[floor as u32])
+}
+
+/// CustomHouse designer: add a roof component at `(x, y, z)` (Samurai Empire
+/// roofs). Sub-command `0x13`, args `[graphic, x, y, z]`. Ports ClassicUO
+/// `Send_CustomHouseAddRoof` (`ServUO Designer_Roof`).
+pub fn build_house_design_add_roof(player_serial: u32, graphic: u16, x: i32, y: i32, z: i32) -> Vec<u8> {
+    build_house_design(
+        player_serial,
+        0x13,
+        &[graphic as u32, x as u32, y as u32, z as u32],
+    )
+}
+
+/// CustomHouse designer: delete a roof component at `(x, y, z)`. Sub-command
+/// `0x14`, args `[graphic, x, y, z]`. Ports ClassicUO `Send_CustomHouseDeleteRoof`
+/// (`ServUO Designer_RoofDelete`).
+pub fn build_house_design_delete_roof(player_serial: u32, graphic: u16, x: i32, y: i32, z: i32) -> Vec<u8> {
+    build_house_design(
+        player_serial,
+        0x14,
+        &[graphic as u32, x as u32, y as u32, z as u32],
+    )
+}
+
+/// CustomHouse designer: revert the whole design (undo back to the last
+/// commit). Sub-command `0x1A`; no arguments. Ports ClassicUO
+/// `Send_CustomHouseRevert`.
+pub fn build_house_design_revert(player_serial: u32) -> Vec<u8> {
+    build_house_design(player_serial, 0x1A, &[])
+}
+
 /// SkillLock `0x3A` (variable) — change a skill's lock state (up/down/locked).
 ///
 /// Ports ClassicUO `Send_SkillStatusChangeRequest` (OutgoingPackets.cs): after the
@@ -1069,6 +1201,77 @@ mod tests {
         assert_eq!(
             d,
             vec![0xD7, 0x00, 0x0F, 0, 0, 0, 1, 0x00, 0x19, 0, 0, 0, 0, 0, 0x0A]
+        );
+    }
+
+    #[test]
+    fn house_design_commit_layout() {
+        // No-arg command: [0xD7][len][serial][subcmd][0x0A] = 10 bytes.
+        let p = build_house_design_commit(0xDEAD_BEEF);
+        assert_eq!(p[0], 0xD7);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(
+            p,
+            vec![0xD7, 0x00, 0x0A, 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x04, 0x0A]
+        );
+    }
+
+    #[test]
+    fn house_design_add_item_layout() {
+        // AddItem (build): subcmd 0x06, 3 encoded Int32 args (graphic, x, y).
+        let p = build_house_design_add_item(0xDEAD_BEEF, 0x0064, 5, -3);
+        assert_eq!(p[0], 0xD7);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(
+            p,
+            vec![
+                0xD7, 0x00, 0x19, // id + len (25)
+                0xDE, 0xAD, 0xBE, 0xEF, // player serial
+                0x00, 0x06, // subcmd: AddItem
+                0x00, 0x00, 0x00, 0x00, 0x64, // graphic 0x0064
+                0x00, 0x00, 0x00, 0x00, 0x05, // x = 5
+                0x00, 0xFF, 0xFF, 0xFF, 0xFD, // y = -3 (two's complement)
+                0x0A,
+            ]
+        );
+    }
+
+    #[test]
+    fn house_design_delete_item_layout() {
+        // DeleteItem: subcmd 0x05, 4 encoded Int32 args (graphic, x, y, z).
+        let p = build_house_design_delete_item(0x01, 0x0064, 1, 2, 3);
+        assert_eq!(p[0], 0xD7);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(
+            p,
+            vec![
+                0xD7, 0x00, 0x1E, // id + len (30)
+                0x00, 0x00, 0x00, 0x01, // player serial
+                0x00, 0x05, // subcmd: DeleteItem
+                0x00, 0x00, 0x00, 0x00, 0x64, // graphic
+                0x00, 0x00, 0x00, 0x00, 0x01, // x
+                0x00, 0x00, 0x00, 0x00, 0x02, // y
+                0x00, 0x00, 0x00, 0x00, 0x03, // z
+                0x0A,
+            ]
+        );
+    }
+
+    #[test]
+    fn house_design_go_to_floor_layout() {
+        // GoToFloor: subcmd 0x12, 1 encoded Int32 arg (floor).
+        let p = build_house_design_go_to_floor(0x1234_5678, 2);
+        assert_eq!(p[0], 0xD7);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(
+            p,
+            vec![
+                0xD7, 0x00, 0x0F, // id + len (15)
+                0x12, 0x34, 0x56, 0x78, // player serial
+                0x00, 0x12, // subcmd: GoToFloor
+                0x00, 0x00, 0x00, 0x00, 0x02, // floor = 2
+                0x0A,
+            ]
         );
     }
 
