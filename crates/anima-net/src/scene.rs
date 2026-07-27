@@ -1987,6 +1987,73 @@ fn maps_json(world: &World) -> Value {
     Value::Array(maps)
 }
 
+/// Cap on the deduped `(dx, dy)` footprint tiles emitted for a pending 0x99
+/// placement preview — a house's raw component list runs into the hundreds,
+/// but the outline only needs each distinct offset once, so this keeps the
+/// field a few KB instead of dumping every component/graphic/z.
+const PLACEMENT_TILE_CAP: usize = 4096;
+
+/// Cap on the raw (non-deduped) `parts` component list emitted alongside
+/// `tiles` (see [`placement_json`]) — unlike `tiles`, every component is kept
+/// (walls/roof/floors all stack on the same footprint tile), so a castle's
+/// full multi.mul list is the realistic worst case rather than the tile
+/// count. 2000 comfortably covers that while still bounding the payload.
+const PLACEMENT_PART_CAP: usize = 2000;
+
+/// The pending 0x99 house/multi placement footprint
+/// (`World::pending_multi_placement`), as a `(dx, dy)`-deduped outline the
+/// browser draws under the cursor while it's waiting for the click that
+/// places the multi (the real client shows this; clicking blind is the bug
+/// this exists to fix). `None` when there's nothing pending, `multis` wasn't
+/// loaded (no `multi.mul` on disk), or the packet's multi id has no
+/// component list — the caller omits the field entirely in that case, so an
+/// idle/multis-less scene stays byte-identical to before this field existed.
+///
+/// Also carries `parts`: the SAME component list `tiles` is deduped from, but
+/// left raw — `(dx, dy, dz, graphic)` per component, in multi.mul order — so
+/// the browser can draw the actual house (walls/roof/doors), not just a flat
+/// footprint outline, while the player is choosing where to place it. This
+/// only ever runs while a placement target is pending (see the gating below),
+/// so shipping every component (a house is typically 150-400 of them) is not
+/// a steady-state cost — it never touches the normal per-tick scene build.
+///
+/// Gated on `pending_target` too, not just `pending_multi_placement`:
+/// answering or cancelling the target cursor (`respond_target`/
+/// `cancel_target` in `lib.rs`) clears `pending_target` the moment the reply
+/// is sent, but that driver-side code can't also reach into
+/// `pending_multi_placement` (a `net::game` concept). Requiring both here is
+/// what keeps a stale footprint from lingering after the target it belonged
+/// to is gone, without needing a third crate to touch `net::game::game.rs`.
+fn placement_json(world: &World, multis: Option<&Multis>) -> Option<Value> {
+    world.pending_target?;
+    let mp = world.pending_multi_placement?;
+    let comps = multis?.components(mp.multi_id as u32)?;
+    let mut seen: HashSet<(i16, i16)> = HashSet::new();
+    let mut tiles: Vec<Value> = Vec::new();
+    for c in comps {
+        if tiles.len() >= PLACEMENT_TILE_CAP {
+            break;
+        }
+        if seen.insert((c.dx, c.dy)) {
+            tiles.push(json!([c.dx, c.dy]));
+        }
+    }
+    // Same `comps`, same order (multi.mul's own listing — NOT sorted), just
+    // without the (dx, dy) dedup: one entry per real component so the
+    // browser can draw each one's actual art instead of a blank outline.
+    let parts: Vec<Value> = comps
+        .iter()
+        .take(PLACEMENT_PART_CAP)
+        .map(|c| json!([c.dx, c.dy, c.dz, c.graphic]))
+        .collect();
+    Some(json!({
+        "multiId": mp.multi_id, "hue": mp.hue,
+        "xOff": mp.x_off, "yOff": mp.y_off, "zOff": mp.z_off,
+        "tiles": tiles,
+        "parts": parts,
+    }))
+}
+
 /// Decode any pending custom-house designs (0xD8) whose foundation item is
 /// already in `world` and whose bounds we can now resolve. `anima-core` can't
 /// do this itself — mode-2 grid planes need the foundation multi's `multi.mul`
@@ -2479,6 +2546,11 @@ pub fn build_scene(
         Some(tc) => json!({ "active": 1, "kind": tc.target_type }),
         None => json!({ "active": 0, "kind": 0 }),
     };
+    // Pending 0x99 house/multi placement footprint, if any — see
+    // `placement_json`'s doc. Formatted below into an optional (possibly
+    // empty) fragment so an idle scene keeps serializing byte-identical to
+    // before this field existed.
+    let placement = placement_json(&s.world, multis);
 
     // tiles/statics are the bulk (≈1225 + hundreds): serialize them straight into
     // String buffers instead of building serde_json::Value trees + re-walking them
@@ -3091,6 +3163,16 @@ pub fn build_scene(
     let trades = serde_json::to_string(&trades_json(&s.world)).unwrap_or_else(|_| "[]".into());
     // Open treasure/decoration map windows (0x90/0xF5 + 0x56), or []. See `maps_json`'s doc.
     let maps = serde_json::to_string(&maps_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    // Purely additive: omit the key entirely when nothing is pending (see
+    // `placement_json`'s doc), rather than a `"placement":null`, so an idle
+    // scene's JSON is unchanged from before this field existed.
+    let placement_field = match placement {
+        Some(v) => format!(
+            ",\"placement\":{}",
+            serde_json::to_string(&v).unwrap_or_else(|_| "null".into())
+        ),
+        None => String::new(),
+    };
     format!(
         "{{\"player\":{player},\
          \"map\":{{\"cx\":{px},\"cy\":{py},\"radius\":{LAND_RADIUS},\"viewRange\":{RADIUS},\"tiles\":[{tiles}],\"maxZ\":{max_z},\"dbg\":{dbg}}},\
@@ -3100,7 +3182,7 @@ pub fn build_scene(
          \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"logoutAck\":{logout_ack},\"boatMoves\":{boat_moves},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
-         \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps},\
+         \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps}{placement_field},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",
         s.confirms, s.denies
     )
@@ -3241,8 +3323,8 @@ mod tests {
     use anima_assets::MultiComponent;
     use anima_core::types::{Position, Serial};
     use anima_core::world::{
-        Book, HuePicker, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, PopupEntry, PopupMenu,
-        PromptKind, PromptState, TipKind, TradeState,
+        Book, HuePicker, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, MultiPlacement, PopupEntry,
+        PopupMenu, PromptKind, PromptState, TargetCursor, TipKind, TradeState,
     };
 
     #[test]
@@ -4208,6 +4290,254 @@ mod tests {
         assert!(
             multi_components_at(&world, &multis, 50_000, 50_000).is_empty(),
             "way outside any multi's footprint must return nothing"
+        );
+    }
+
+    #[test]
+    fn placement_json_none_when_nothing_pending() {
+        let world = anima_core::World::new();
+        let multis = Multis::from_components(std::collections::HashMap::new());
+        assert!(placement_json(&world, Some(&multis)).is_none());
+    }
+
+    #[test]
+    fn placement_json_none_without_multis_even_if_pending() {
+        let mut world = anima_core::World::new();
+        world.pending_target = Some(TargetCursor {
+            target_type: 1,
+            cursor_id: 1,
+            cursor_flag: 0,
+        });
+        world.pending_multi_placement = Some(MultiPlacement {
+            multi_id: 0x64,
+            x_off: 0,
+            y_off: 0,
+            z_off: 0,
+            hue: 0,
+        });
+        assert!(
+            placement_json(&world, None).is_none(),
+            "no Multis loaded -> omit rather than error"
+        );
+    }
+
+    #[test]
+    fn placement_json_none_for_unknown_multi_id() {
+        let mut world = anima_core::World::new();
+        world.pending_target = Some(TargetCursor {
+            target_type: 1,
+            cursor_id: 1,
+            cursor_flag: 0,
+        });
+        world.pending_multi_placement = Some(MultiPlacement {
+            multi_id: 0xFFFF, // no entry in `multis` below
+            x_off: 0,
+            y_off: 0,
+            z_off: 0,
+            hue: 0,
+        });
+        let multis = Multis::from_components(std::collections::HashMap::new());
+        assert!(placement_json(&world, Some(&multis)).is_none());
+    }
+
+    /// A stale `pending_multi_placement` (the browser task's real bug target)
+    /// must not render once the target cursor it belonged to is gone —
+    /// `respond_target`/`cancel_target` (`lib.rs`, outside this crate's game
+    /// packet handlers) clear `pending_target` the instant the reply is sent
+    /// but can't also reach `pending_multi_placement`, so `placement_json`
+    /// gates on BOTH (see its doc).
+    #[test]
+    fn placement_json_none_once_target_answered_or_cancelled() {
+        let mut world = anima_core::World::new();
+        world.pending_target = None; // already answered/cancelled
+        world.pending_multi_placement = Some(MultiPlacement {
+            multi_id: 0x64,
+            x_off: 0,
+            y_off: 0,
+            z_off: 0,
+            hue: 0,
+        });
+        let multis = Multis::from_components(std::collections::HashMap::from([(
+            0x64,
+            vec![MultiComponent {
+                graphic: 0x1,
+                dx: 0,
+                dy: 0,
+                dz: 0,
+                visible: true,
+                is_origin: true,
+            }],
+        )]));
+        assert!(placement_json(&world, Some(&multis)).is_none());
+    }
+
+    #[test]
+    fn placement_json_dedupes_footprint_and_carries_offsets_hue() {
+        let mut world = anima_core::World::new();
+        world.pending_target = Some(TargetCursor {
+            target_type: 1,
+            cursor_id: 0xBEEF,
+            cursor_flag: 0,
+        });
+        world.pending_multi_placement = Some(MultiPlacement {
+            multi_id: 0x64,
+            x_off: 3,
+            y_off: 4,
+            z_off: 1,
+            hue: 0x21,
+        });
+        let multis = Multis::from_components(std::collections::HashMap::from([(
+            0x64,
+            vec![
+                MultiComponent {
+                    graphic: 0x1,
+                    dx: 0,
+                    dy: 0,
+                    dz: 0,
+                    visible: true,
+                    is_origin: true,
+                },
+                // A second-floor component stacked on the SAME (dx, dy) as the
+                // origin — the outline only needs the tile once.
+                MultiComponent {
+                    graphic: 0x2,
+                    dx: 0,
+                    dy: 0,
+                    dz: 4,
+                    visible: true,
+                    is_origin: false,
+                },
+                MultiComponent {
+                    graphic: 0x3,
+                    dx: 1,
+                    dy: 0,
+                    dz: 0,
+                    visible: true,
+                    is_origin: false,
+                },
+                MultiComponent {
+                    graphic: 0x4,
+                    dx: 0,
+                    dy: 1,
+                    dz: 0,
+                    visible: false,
+                    is_origin: false,
+                },
+            ],
+        )]));
+
+        let v = placement_json(&world, Some(&multis)).expect("placement pending");
+        assert_eq!(v["multiId"], 0x64);
+        assert_eq!(v["hue"], 0x21);
+        assert_eq!(v["xOff"], 3);
+        assert_eq!(v["yOff"], 4);
+        assert_eq!(v["zOff"], 1);
+        let mut tiles: Vec<(i64, i64)> = v["tiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| (t[0].as_i64().unwrap(), t[1].as_i64().unwrap()))
+            .collect();
+        tiles.sort();
+        assert_eq!(
+            tiles,
+            vec![(0, 0), (0, 1), (1, 0)],
+            "deduped by (dx, dy): {tiles:?}"
+        );
+    }
+
+    /// End-to-end against REAL `SmallOldHouse` (multi id `0x64`, ServUO
+    /// `Multis/Houses.cs`) component data — confirms `placement_json` resolves
+    /// a genuine multi (not just the synthetic lists the tests above use) and
+    /// actually dedupes: the module doc records ~148 raw components for this
+    /// id, most of them floors/roof stacked over a much smaller set of
+    /// distinct `(dx, dy)` footprint tiles.
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn placement_json_real_house_multi_produces_deduped_footprint() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let multis = Multis::open(&dir).expect("open multi data");
+
+        let mut world = anima_core::World::new();
+        world.pending_target = Some(TargetCursor {
+            target_type: 1,
+            cursor_id: 1,
+            cursor_flag: 0,
+        });
+        world.pending_multi_placement = Some(MultiPlacement {
+            multi_id: 0x64,
+            x_off: 0,
+            y_off: 0,
+            z_off: 0,
+            hue: 0,
+        });
+
+        let v = placement_json(&world, Some(&multis)).expect("SmallOldHouse must resolve");
+        let raw_len = multis.components(0x64).expect("id 0x64 must exist").len();
+        let tiles = v["tiles"].as_array().unwrap();
+        assert!(!tiles.is_empty());
+        assert!(
+            tiles.len() < raw_len,
+            "deduped outline ({}) must be smaller than the raw component list ({raw_len})",
+            tiles.len()
+        );
+        // (0, 0) is always the origin tile — every multi's index-0 component
+        // sits at its own origin.
+        assert!(
+            tiles.iter().any(|t| t[0] == 0 && t[1] == 0),
+            "origin tile (0,0) must be part of the footprint: {v}"
+        );
+        // `parts` carries the real (non-deduped) component list — the browser
+        // draws the actual house shape from these, not just the footprint.
+        let parts = v["parts"].as_array().unwrap();
+        assert!(!parts.is_empty(), "parts must be non-empty: {v}");
+        assert!(
+            parts.len() >= tiles.len(),
+            "raw component list ({}) must be at least as long as the deduped footprint ({})",
+            parts.len(),
+            tiles.len()
+        );
+        for p in parts {
+            let entry = p.as_array().expect("each part is a 4-element array");
+            assert_eq!(entry.len(), 4, "each part is [dx, dy, dz, graphic]: {p}");
+        }
+    }
+
+    #[test]
+    fn placement_json_caps_tile_count() {
+        let mut world = anima_core::World::new();
+        world.pending_target = Some(TargetCursor {
+            target_type: 1,
+            cursor_id: 1,
+            cursor_flag: 0,
+        });
+        world.pending_multi_placement = Some(MultiPlacement {
+            multi_id: 1,
+            x_off: 0,
+            y_off: 0,
+            z_off: 0,
+            hue: 0,
+        });
+        // 100 * 50 = 5000 distinct (dx, dy) offsets, comfortably over the cap.
+        let mut comps = Vec::new();
+        for dx in 0..100i16 {
+            for dy in 0..50i16 {
+                comps.push(MultiComponent {
+                    graphic: 1,
+                    dx,
+                    dy,
+                    dz: 0,
+                    visible: true,
+                    is_origin: dx == 0 && dy == 0,
+                });
+            }
+        }
+        let multis = Multis::from_components(std::collections::HashMap::from([(1, comps)]));
+        let v = placement_json(&world, Some(&multis)).unwrap();
+        assert_eq!(
+            v["tiles"].as_array().unwrap().len(),
+            PLACEMENT_TILE_CAP,
+            "must cap rather than dump every distinct offset"
         );
     }
 

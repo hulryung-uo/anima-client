@@ -597,6 +597,19 @@ pub struct TargetCursor {
     pub cursor_flag: u8,
 }
 
+/// The multi (house/boat) the server is currently asking us to place, from
+/// 0x99. The browser draws its footprint under the cursor; the offsets shift
+/// the multi's ORIGIN relative to the hovered tile (ClassicUO GameScene:
+/// `x - XOff`, `y - YOff`, `groundZ - ZOff`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MultiPlacement {
+    pub multi_id: u16,
+    pub x_off: u16,
+    pub y_off: u16,
+    pub z_off: u16,
+    pub hue: u16,
+}
+
 /// A server-initiated paperdoll open/refresh (0x88 DisplayPaperdoll) — sent
 /// whenever we double-click a mobile, ours or another's (ServUO
 /// `Scripts/Misc/Paperdoll.cs`, off `Mobile.OnDoubleClick`). `title` is the
@@ -1050,6 +1063,11 @@ pub struct World {
     pub fast_walk: Vec<u32>,
     /// An outstanding target cursor (0x6C), if the server is waiting on one.
     pub pending_target: Option<TargetCursor>,
+    /// The multi (house/boat) footprint a 0x99 asked us to place, if any —
+    /// kept in lock-step with `pending_target` (see [`MultiPlacement`]'s doc
+    /// and `multi_target_cursor`) so the renderer never shows a footprint for
+    /// a target that's no longer outstanding.
+    pub pending_multi_placement: Option<MultiPlacement>,
     /// Our skills by id (0x3A), values in tenths. See [`Skill`].
     pub skills: HashMap<u16, Skill>,
     /// Recent sound-effect events (0x54), each `(seq, sound_id)`, newest last,

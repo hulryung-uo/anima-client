@@ -12,8 +12,8 @@ use super::packet::{PacketError, PacketReader, Result as PResult};
 use crate::world::{
     BoatMovedEntity, BoatMovement, BulletinBoard, BulletinMessage, BulletinSummary, ChatChannel,
     ChatStatus, DragAnimation, Effect, GameTime, Gump, HouseDesign, HousePlane, HuePicker,
-    JournalEntry, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, PopupEntry, PopupMenu, PromptKind,
-    PromptState, Skill, TargetCursor, TipKind, TradeState, Waypoint, World,
+    JournalEntry, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, MultiPlacement, PopupEntry,
+    PopupMenu, PromptKind, PromptState, Skill, TargetCursor, TipKind, TradeState, Waypoint, World,
 };
 
 /// Decode one framed game packet (id byte included) into `world`.
@@ -261,19 +261,24 @@ fn target_cursor(world: &mut World, frame: &[u8]) -> PResult<()> {
             cursor_flag,
         })
     };
+    // A plain 0x6C is never a multi placement — whether it withdraws the
+    // cursor or opens an unrelated one, any footprint an earlier 0x99 left
+    // pending is now stale (only `multi_target_cursor` below ever sets it).
+    world.pending_multi_placement = None;
     Ok(())
 }
 
 /// 0x99 TargetMultiPlacement — the cursor ServUO sends while a multi
 /// placement tool (e.g. the house placement tool) is waiting for a spot,
 /// fixed 30 bytes (`lengths.rs`): `[id][allowGround:u8][cursorId:u32]` then a
-/// multi-id/offset/hue preview tail we don't need for viewing — the
-/// resulting 0xF3 + 0xD8 carry everything we actually store.
-/// We store it identically to a plain ground target (`target_type: 1`) so
-/// the brain answers with an ordinary 0x6C ground target reply
-/// (`Action::TargetGround` in `agent.rs`) — ServUO doesn't care that the
-/// request arrived as 0x99, only that the reply matches `cursor_id` with
-/// cursor-type ground.
+/// multi-id/offset/hue preview tail — the resulting 0xF3 + 0xD8 carry
+/// everything we need to actually PLACE the multi, but the real client also
+/// uses that tail to draw the footprint FOLLOWING the cursor before the
+/// click lands, so the user isn't placing blind. We store it identically to
+/// a plain ground target (`target_type: 1`) so the brain answers with an
+/// ordinary 0x6C ground target reply (`Action::TargetGround` in
+/// `agent.rs`) — ServUO doesn't care that the request arrived as 0x99, only
+/// that the reply matches `cursor_id` with cursor-type ground.
 fn multi_target_cursor(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]); // skip id
     let _allow_ground = r.u8()?;
@@ -283,7 +288,29 @@ fn multi_target_cursor(world: &mut World, frame: &[u8]) -> PResult<()> {
         cursor_id,
         cursor_flag: 0,
     });
+    world.pending_multi_placement = multi_placement_tail(frame);
     Ok(())
+}
+
+/// The multi-id/offset/hue tail of a 0x99 (see `multi_target_cursor`'s doc),
+/// for the browser's placement-preview outline. ClassicUO's
+/// `PacketHandlers.MultiPlacement` reads this by seeking to ABSOLUTE offset
+/// 18 in the full frame: `multiId:u16` at 18, `xOff/yOff/zOff/hue:u16` at
+/// 20/22/24/26. `None` if the frame is shorter than that — a real ServUO
+/// always sends the fixed 30-byte packet, but this must never turn a short
+/// frame into an error (the plain ground target above still has to be
+/// stored either way).
+fn multi_placement_tail(frame: &[u8]) -> Option<MultiPlacement> {
+    if frame.len() < 28 {
+        return None;
+    }
+    Some(MultiPlacement {
+        multi_id: u16::from_be_bytes([frame[18], frame[19]]),
+        x_off: u16::from_be_bytes([frame[20], frame[21]]),
+        y_off: u16::from_be_bytes([frame[22], frame[23]]),
+        z_off: u16::from_be_bytes([frame[24], frame[25]]),
+        hue: u16::from_be_bytes([frame[26], frame[27]]),
+    })
 }
 
 /// One container record `[serial:u32][graphic:u16][inc:u8][amount:u16][x:u16][y:u16][grid:u8][container:u32][hue:u16]`
@@ -4152,6 +4179,79 @@ mod tests {
         // flag == 3 is a withdrawal: it clears any pending cursor.
         apply_packet(&mut w, &target_packet(1, 0xDEAD_BEEF, 3));
         assert!(w.pending_target.is_none());
+    }
+
+    /// Fixed 30-byte 0x99 TargetMultiPlacement: `[id][allowGround][cursorId:u32]
+    /// [flags:u8]` then 11 unused bytes up to absolute offset 18, then
+    /// `[multiId][xOff][yOff][zOff][hue]` (all u16), then 2 trailing pad bytes
+    /// — see `multi_placement_tail`'s doc for why those offsets are absolute.
+    fn multi_placement_packet(
+        cursor_id: u32,
+        multi_id: u16,
+        x_off: u16,
+        y_off: u16,
+        z_off: u16,
+        hue: u16,
+    ) -> Vec<u8> {
+        let mut p = PacketWriter::new();
+        p.u8(0x99).u8(1).u32(cursor_id).u8(0);
+        p.zeros(11); // bytes 7..18, unused here
+        p.u16(multi_id).u16(x_off).u16(y_off).u16(z_off).u16(hue);
+        p.zeros(2); // pad to the fixed 30-byte packet
+        p.into_vec()
+    }
+
+    #[test]
+    fn multi_target_cursor_stores_ground_target_and_placement_footprint() {
+        let mut w = World::new();
+        apply_packet(
+            &mut w,
+            &multi_placement_packet(0xCAFE_BABE, 0x64, 1, 2, 3, 0x0044),
+        );
+        // Same reply path as always: a plain ground target so the brain
+        // answers with an ordinary `Action::TargetGround`.
+        let t = w.pending_target.expect("ground cursor stored");
+        assert_eq!((t.target_type, t.cursor_id, t.cursor_flag), (1, 0xCAFE_BABE, 0));
+        let mp = w
+            .pending_multi_placement
+            .expect("placement footprint stored");
+        assert_eq!(
+            (mp.multi_id, mp.x_off, mp.y_off, mp.z_off, mp.hue),
+            (0x64, 1, 2, 3, 0x0044)
+        );
+
+        // A fresh plain 0x6C is not a multi placement — any earlier footprint
+        // must not linger past it.
+        apply_packet(&mut w, &target_packet(0, 0x1234, 0));
+        assert!(w.pending_multi_placement.is_none());
+    }
+
+    #[test]
+    fn multi_target_cursor_short_frame_skips_placement_not_target() {
+        let mut w = World::new();
+        // Only the header ServUO always sends (id+allowGround+cursorId+flags),
+        // truncated well before the multi-id/offset/hue tail: must still store
+        // the plain ground target (the reply path must not change) but leave
+        // the footprint absent rather than erroring.
+        let mut p = PacketWriter::new();
+        p.u8(0x99).u8(1).u32(0xFEED).u8(0);
+        apply_packet(&mut w, &p.into_vec());
+        let t = w.pending_target.expect("ground cursor stored");
+        assert_eq!((t.target_type, t.cursor_id), (1, 0xFEED));
+        assert!(w.pending_multi_placement.is_none());
+    }
+
+    #[test]
+    fn multi_target_cursor_withdrawal_clears_placement() {
+        let mut w = World::new();
+        apply_packet(&mut w, &multi_placement_packet(0xAAAA, 0x64, 0, 0, 0, 0));
+        assert!(w.pending_multi_placement.is_some());
+
+        // flag == 3 on a plain 0x6C withdraws the cursor the multi placement
+        // also set — the footprint must disappear with it.
+        apply_packet(&mut w, &target_packet(1, 0xAAAA, 3));
+        assert!(w.pending_target.is_none());
+        assert!(w.pending_multi_placement.is_none());
     }
 
     #[test]

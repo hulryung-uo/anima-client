@@ -559,6 +559,110 @@ function sweepTexCache() {
     PIXI.Assets.unload(url).catch(() => {});
   }
 }
+
+// ---- per-pixel hit-testing for interactive world sprites ----
+// PIXI hit-tests a sprite by its rectangular bounds by default. UO art is mostly
+// transparent (isometric tiles, thin signposts/hangers, foreshortened mobile
+// frames), so a fully-transparent part of one sprite can steal a click from
+// whatever is actually visible underneath it — measured live, a house sign
+// (graphic 0x0BD2) sits UNDER its own hanger (graphic 0x0B98) at the identical
+// zIndex, and the hanger's rectangular bounds fully CONTAIN the sign's;
+// double-clicking the visible sign body hit the hanger instead (which has no
+// double-click behaviour, so nothing happened). ClassicUO hit-tests per PIXEL
+// (the art's actual opaque pixels), which is why this works there — so we do
+// the same, via a custom `hitArea` per sprite.
+//
+// The mask is built once per texture URL — not per sprite, not per frame — and
+// shared by every sprite currently showing that art. `null` marks a URL that
+// failed to rasterize (CORS/404/tainted canvas) so it's never retried; those
+// sprites simply fall back to plain bounds-based hit-testing, exactly like
+// today, so this can never make clicking WORSE than before.
+const alphaMaskCache = new Map();   // url -> {w, h, bits:Uint8Array} | null
+const alphaMaskPending = new Set(); // urls currently being rasterized (dedupe)
+function requestAlphaMask(url) {
+  if (alphaMaskCache.has(url) || alphaMaskPending.has(url)) return;
+  alphaMaskPending.add(url);
+  // Prefer the image PIXI's own loader already decoded for this exact texture
+  // (texture.source.resource — an HTMLImageElement or ImageBitmap depending on
+  // which loader parser handled it) over fetching it again: this url is almost
+  // always already in texCache by the time a sprite using it is clickable, so
+  // this skips a redundant network round trip entirely. Only falls back to a
+  // fresh Image() when that resource isn't reachable (texture not cached yet,
+  // or a resource type drawImage() can't use) — the art is served same-origin
+  // by our own play server, and PIXI.Assets.load(url) likely already fetched
+  // this exact URL, so the browser's HTTP cache makes even that nearly free.
+  const cachedTex = texCache.get(url);
+  const resource = cachedTex && cachedTex.source && cachedTex.source.resource;
+  const reusable = resource && (
+    (typeof HTMLImageElement !== "undefined" && resource instanceof HTMLImageElement) ||
+    (typeof ImageBitmap !== "undefined" && resource instanceof ImageBitmap) ||
+    (typeof HTMLCanvasElement !== "undefined" && resource instanceof HTMLCanvasElement)
+  );
+  if (reusable) { rasterizeAlphaMask(url, resource); return; }
+  const img = new Image();
+  img.onload = () => rasterizeAlphaMask(url, img);
+  img.onerror = () => { alphaMaskCache.set(url, null); alphaMaskPending.delete(url); };
+  img.src = url;
+}
+// Shared by both sources above (a reused texture resource, or a freshly loaded
+// Image): draw into an offscreen canvas, read back alpha, store one byte per
+// pixel (>8 alpha ~= opaque enough to count as "hit"). Cache null on failure
+// (CORS/tainted canvas/zero-size) so a bad url is never retried in a loop.
+function rasterizeAlphaMask(url, img) {
+  try {
+    const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+    if (!w || !h) throw new Error("empty image");
+    const cv = document.createElement("canvas");
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    const data = ctx.getImageData(0, 0, w, h).data; // same-origin → never taints the canvas
+    const bits = new Uint8Array(w * h);
+    for (let p = 0, i = 3; p < bits.length; p++, i += 4) bits[p] = data[i] > 8 ? 1 : 0;
+    alphaMaskCache.set(url, { w, h, bits });
+  } catch { alphaMaskCache.set(url, null); } // degrade to bounds-based, never retry
+  alphaMaskPending.delete(url);
+}
+// Plain-rectangle test — PIXI's own default Sprite.containsPoint formula —
+// used as the fallback whenever a mask isn't ready (still loading) or isn't
+// available (failed to load): identical to today's bounds-based hit-testing.
+function boundsContains(sp, x, y) {
+  const w = sp.width, h = sp.height;
+  const x0 = -w * sp.anchor.x, y0 = -h * sp.anchor.y;
+  return x >= x0 && x <= x0 + w && y >= y0 && y <= y0 + h;
+}
+// A custom hitArea object — PIXI calls `.contains(x, y)` with LOCAL coordinates
+// (already anchor-relative, the same space Sprite.containsPoint uses), so a
+// point is converted to texture-pixel space via the sprite's own anchor before
+// consulting the mask. `getUrl()` is read at CLICK time, not baked in at
+// attach time: mobile part sprites are persistent and swap textures frame to
+// frame (see drawMobs' `part()`/st.partTex), so the mask must track whatever
+// art is currently shown, not whatever was showing when the hitArea was set.
+function pixelHitArea(sp, getUrl) {
+  // Warm the mask NOW, at attach time, instead of waiting for the first click to
+  // discover it's missing: a mask that isn't ready falls back to bounds, so
+  // without this the FIRST click on any sprite is still the old rectangle
+  // behaviour (measured: the first click on the house sign went to a different
+  // overlapping item; the second, once the mask had loaded, hit the sign).
+  const first = getUrl();
+  if (first) requestAlphaMask(first);
+  return {
+    contains(x, y) {
+      const url = getUrl();
+      if (!url) return boundsContains(sp, x, y);
+      const mask = alphaMaskCache.get(url);
+      if (mask === undefined) { requestAlphaMask(url); return boundsContains(sp, x, y); }
+      if (mask === null) return boundsContains(sp, x, y);
+      const w = sp.width, h = sp.height;
+      if (!w || !h) return false;
+      const px = Math.floor((x + sp.anchor.x * w) / w * mask.w);
+      const py = Math.floor((y + sp.anchor.y * h) / h * mask.h);
+      if (px < 0 || px >= mask.w || py < 0 || py >= mask.h) return false; // outside the texture rect
+      return mask.bits[py * mask.w + px] !== 0;
+    },
+  };
+}
+
 const frameCount = new Map();
 function framesFor(body, group, dir) {
   const k = `${body}/${group}/${dir}`;
@@ -2149,6 +2253,7 @@ async function poll() {
     refreshPrompt(scene); // server text-prompt dialog (0x9A ASCII / 0xC2 Unicode)
     refreshTrade(scene);  // secure trade window(s) (0x6F), one per session, auto-open/close
     updateTargetUI(); // reflect the server's target-cursor state (crosshair + banner)
+    updatePlacementPreview(); // rebuild/clear the house-footprint preview if scene.placement changed
     updateDeathUI(scene); // grayscale + "You are dead" banner while the player is a ghost
     playSounds(scene);   // play new sound effects (0x54)
     updateMusic(scene);  // sync background music (0x6D)
@@ -2543,8 +2648,14 @@ function syncWorld(s) {
       }
     }
     const e = itemPool.get(key);
-    if (e && e.g === it.g && e.x === it.x && e.y === it.y && e.z === iz && e.corpseUrl === corpseUrl) continue; // unchanged; see the blanket LRU-touch note above
-    const itemTexUrl = corpseUrl || `art/static/${it.g}.png`;
+    // A stack on the GROUND has to pick its amount-tiered art too, exactly like the
+    // container/paperdoll icons do — otherwise 60,000 gold lying at your feet draws
+    // as a single coin (the OPL correctly said 60,000, but the sprite didn't).
+    // Comparing the RESOLVED graphic below is what makes a growing/shrinking pile
+    // re-texture: `it.g` never changes when only the amount does.
+    const stackG = corpseUrl ? (it.g | 0) : stackGraphic(it.g, it.amount | 0);
+    if (e && e.g === stackG && e.x === it.x && e.y === it.y && e.z === iz && e.corpseUrl === corpseUrl) continue; // unchanged; see the blanket LRU-touch note above
+    const itemTexUrl = corpseUrl || `art/static/${stackG}.png`;
     const tex = corpseTex || texFor(itemTexUrl);
     if (!tex) continue; // await art, retry next poll
     if (e) { world.removeChild(e.sp); e.sp.destroy(); }
@@ -2569,12 +2680,16 @@ function syncWorld(s) {
     // Tile + foliage flag for the transparency pass (circle-of-transparency / foliage fade).
     sp._tx = it.x; sp._ty = it.y; sp._foliage = !!it.f;
     sp.eventMode = "static"; sp.cursor = "pointer";
+    // Per-pixel hit-testing (see pixelHitArea above) — this sprite/texture pair
+    // is fixed for `sp`'s lifetime (recreated, not mutated, when the item's
+    // graphic/position/corpse-pose changes), so the URL closure is constant.
+    sp.hitArea = pixelHitArea(sp, () => itemTexUrl);
     const serial = it.serial;
     sp.on("pointerdown", (ev) => onEntityPointerDown(serial, ev, true)); // world item → loot on dbl-click
     sp.on("pointerover", () => { hoverEntity(serial); targetHighlightOn(sp); });
     sp.on("pointerout", () => { hoverOut(serial); targetHighlightOff(sp); });
     world.addChild(sp);
-    itemPool.set(key, { sp, g: it.g, x: it.x, y: it.y, z: iz, corpseUrl, url: itemTexUrl });
+    itemPool.set(key, { sp, g: stackG, x: it.x, y: it.y, z: iz, corpseUrl, url: itemTexUrl });
     markDirty();
   }
   for (const [k, e] of itemPool) {
@@ -3771,6 +3886,14 @@ function drawMobs() {
           if (clickSerial != null) {
             sp.eventMode = "static";
             sp.cursor = "pointer";
+            // Per-pixel hit-testing (see pixelHitArea above): a big transparent
+            // mount/robe frame must not steal clicks from whatever's actually
+            // drawn behind it. Unlike world items this sprite is persistent and
+            // its texture swaps every animation frame, so the URL is looked up
+            // live from st.partTex (kept current by part() above) rather than
+            // captured once here.
+            const partKey = e.key;
+            sp.hitArea = pixelHitArea(sp, () => { const p = st.partTex.get(partKey); return p ? p.url : null; });
             sp.on("pointerdown", (ev) => onEntityPointerDown(clickSerial, ev));
             // OPL tooltip on hover (same flow as world items) + target highlight.
             sp.on("pointerover", () => { hoverEntity(clickSerial); targetHighlightOn(sp); });
@@ -8447,6 +8570,105 @@ function showWalkMarker(x, y, z) {
   };
   requestAnimationFrame(tick);
 }
+// Multi placement preview: draws the house/boat footprint under the cursor
+// while the server has a pending placement target (`scene.placement` — absent
+// otherwise, so this is a no-op against an older server that never sends it).
+// Placing a large building blind, with only a plain target cursor, is the
+// problem this solves. ClassicUO's GameScene derives the multi's origin from
+// the hovered world tile (hx,hy) as originX = hx - xOff, originY = hy - yOff,
+// then draws each footprint offset at (originX+dx, originY+dy) — mirrored
+// below. Each footprint tile is its own diamond, a direct child of `world`
+// (not one shared container) so its own zIndex sorts against terrain/statics
+// individually — exactly like showWalkMarker's single diamond, just tiled.
+// On top of the outline we also draw the actual house art (walls/roof/doors)
+// from `scene.placement.parts` — the flat footprint alone tells you WHERE a
+// house will sit but not what it looks like or how tall it is, which matters
+// a lot when you're choosing a spot for a specific building. `parts`/`tiles`
+// share one lifecycle (one list, one clear, one rebuild guard) since they're
+// really the same preview, just two layers of it.
+let placementHoverX = null, placementHoverY = null; // world tile under the cursor
+let placementTiles = [];  // footprint diamonds + house-art sprites currently in `world`
+let placementKey = null;  // last (placement, hovered tile) drawn — dedups rebuilds
+let placementPartsPending = false; // true if the last rebuild skipped a part still awaiting its texture
+function clearPlacementPreview() {
+  for (const g of placementTiles) { world.removeChild(g); g.destroy(); }
+  placementTiles = [];
+  placementKey = null;
+  placementPartsPending = false;
+}
+// Rebuilds the footprint only when the placement or the hovered TILE actually
+// changed (mousemove fires far more often than the tile does, and a house
+// footprint can be a few hundred tiles — see the mousemove handler in
+// setupInput that maintains placementHoverX/Y). Called both from poll() (to
+// pick up a fresh/cleared scene.placement) and from that mousemove handler.
+function updatePlacementPreview() {
+  const p = scene && scene.placement;
+  if (!p || placementHoverX == null) {
+    if (placementTiles.length) { clearPlacementPreview(); markDirty(); }
+    return;
+  }
+  const key = p.multiId + "/" + p.xOff + "/" + p.yOff + "/" + p.zOff + "/" +
+              (p.tiles ? p.tiles.length : 0) + "/" + (p.parts ? p.parts.length : 0) +
+              "@" + placementHoverX + "," + placementHoverY;
+  // Same (placement, hovered tile) normally means nothing changed — EXCEPT
+  // when the previous pass skipped a house-art part because texFor() hadn't
+  // loaded its texture yet. That load resolves in the background and calls
+  // markDirty() when it does, but markDirty() alone just repaints the current
+  // (incomplete) sprite list; without also busting the key here, the next
+  // poll()'s call would see an unchanged key and bail before ever drawing the
+  // now-ready part, silently losing it instead of catching up on a later pass.
+  if (key === placementKey && !placementPartsPending) return;
+  placementKey = key;
+  for (const g of placementTiles) { world.removeChild(g); g.destroy(); }
+  placementTiles = [];
+  const originX = placementHoverX - (p.xOff | 0), originY = placementHoverY - (p.yOff | 0);
+  const fallbackZ = (tileSZ(placementHoverX, placementHoverY) ?? (scene.player ? scene.player.z | 0 : 0)) + (p.zOff | 0);
+  const tiles = (p.tiles || []).slice(0, 4096); // match the server's footprint cap
+  for (const [dx, dy] of tiles) {
+    const tx = originX + dx, ty = originY + dy;
+    const z = tileSZ(tx, ty);
+    const gz = z != null ? z : fallbackZ;
+    const g = new PIXI.Graphics();
+    g.moveTo(0, -HALF / 2).lineTo(HALF, 0).lineTo(0, HALF / 2).lineTo(-HALF, 0).closePath();
+    g.fill({ color: 0x66ddff, alpha: 0.25 });
+    g.stroke({ color: 0xaaf0ff, width: 2, alpha: 0.9 });
+    g.x = isoX(tx, ty); g.y = isoY(tx, ty, gz); g.zIndex = depthZ(tx, ty, gz, 9);
+    world.addChild(g);
+    placementTiles.push(g);
+  }
+  // House art itself, drawn ABOVE the outline: one sprite per multi COMPONENT
+  // (not deduped — a multi-story wall stack needs every floor drawn), offset
+  // from the same origin as the tiles above. Every part shares one ground
+  // Z (`baseZ`) rather than each looking up its own tileSZ, so the building
+  // stays a rigid shape instead of shearing across sloped/uneven terrain —
+  // ClassicUO's own multi-preview (GameScene) computes the same way:
+  // z = groundZ - ZOff, then each component sits at baseZ + its own dz.
+  const groundZ = tileSZ(placementHoverX, placementHoverY) ?? (scene.player ? scene.player.z | 0 : 0);
+  const baseZ = groundZ - (p.zOff | 0);
+  // Hued art is requested by appending ?hue=<hue> to the art URL (see e.g. the
+  // container/paperdoll icons elsewhere in this file) — same convention here.
+  const hueQ = (p.hue | 0) ? ("?hue=" + (p.hue | 0)) : "";
+  const parts = (p.parts || []).slice(0, 2000); // cap, matching the server's own part cap
+  placementPartsPending = false;
+  for (const [dx, dy, dz, gph] of parts) {
+    const tex = texFor(`art/static/${gph}.png${hueQ}`);
+    // Not loaded yet: texFor() already kicked off the load and will markDirty()
+    // when it resolves — skip this part for now rather than block, and flag
+    // the rebuild-guard override above so a later poll() picks it up instead
+    // of it being lost until the placement/hovered tile happens to change.
+    if (!tex) { placementPartsPending = true; continue; }
+    const tx = originX + dx, ty = originY + dy, tz = baseZ + dz;
+    const sp = new PIXI.Sprite(tex);
+    sp.anchor.set(0.5, 1.0); // foot-anchored, exactly like the static pool in syncWorld
+    sp.x = isoX(tx, ty);
+    sp.y = isoY(tx, ty, tz) + HALF;
+    sp.zIndex = depthZ(tx, ty, tz, 4); // same bias as real statics — interleaves with terrain naturally
+    sp.alpha = 0.6; // preview, not a real building
+    world.addChild(sp);
+    placementTiles.push(sp);
+  }
+  markDirty();
+}
 // CSS/client pixels → renderer (global) pixels: the canvas is CSS-stretched from a
 // capped internal buffer, so screen px ≠ renderer px (PIXI events use renderer px).
 function clientToGlobal(clientX, clientY) {
@@ -8895,6 +9117,19 @@ function setupInput() {
   // (Click-to-walk removed per user request — left-click on empty ground no longer
   // pathfinds/auto-walks. The server-side `walkto` route + pathfinder remain.)
   window.addEventListener("mousemove", track);
+  // Multi placement preview: recompute the hovered tile while a placement
+  // target is pending (scene.placement) — a plain target cursor gives no sense
+  // of where a house will land or how big it is, so we track the tile here and
+  // let updatePlacementPreview draw the footprint under it. Cheap early-out
+  // when no placement is pending, which is every ordinary mousemove.
+  canvas.addEventListener("mousemove", (e) => {
+    if (!(scene && scene.placement)) return;
+    const g = clientToGlobal(e.clientX, e.clientY);
+    const t = groundTileAt(g.x, g.y);
+    if (t.x === placementHoverX && t.y === placementHoverY) return; // same tile → no rebuild
+    placementHoverX = t.x; placementHoverY = t.y;
+    updatePlacementPreview();
+  });
   window.addEventListener("mouseup", (e) => {
     if (e.button !== 2) return;
     rightDown = false;
