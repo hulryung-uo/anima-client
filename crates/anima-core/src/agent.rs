@@ -489,6 +489,57 @@ pub enum Action {
         gold: u32,
         platinum: u32,
     },
+    /// A custom-house designer edit (0xD7). Coordinates are FOUNDATION-RELATIVE —
+    /// see anima_core::net::outgoing's house-design builders. A dedicated nested
+    /// enum rather than 13 flat variants here, kept on the ordinary `Action`
+    /// contract (not a play-server-local side channel) for contract
+    /// completeness: an AI player must be able to build a house too.
+    HouseDesign(HouseDesignAction),
+}
+
+/// One custom-house designer edit (UO 0xD7 `HouseFoundation` designer
+/// sub-commands). Coordinates are FOUNDATION-RELATIVE, not absolute world
+/// tiles — see `anima_core::net::outgoing`'s `build_house_design_*` builders,
+/// which each variant here maps onto 1:1 (the driver fills in the player's
+/// own serial, same as [`Action::PartyLeave`]/[`Action::Logout`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HouseDesignAction {
+    AddItem {
+        graphic: u16,
+        x: i32,
+        y: i32,
+    },
+    DeleteItem {
+        graphic: u16,
+        x: i32,
+        y: i32,
+        z: i32,
+    },
+    AddStair {
+        graphic: u16,
+        x: i32,
+        y: i32,
+    },
+    AddRoof {
+        graphic: u16,
+        x: i32,
+        y: i32,
+        z: i32,
+    },
+    DeleteRoof {
+        graphic: u16,
+        x: i32,
+        y: i32,
+        z: i32,
+    },
+    GoToFloor(u8),
+    Commit,
+    Close,
+    Clear,
+    Revert,
+    Backup,
+    Restore,
+    Sync,
 }
 
 fn chebyshev(a: Position, b: Position) -> u32 {

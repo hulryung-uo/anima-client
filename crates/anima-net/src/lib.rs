@@ -18,19 +18,22 @@ pub mod scene;
 pub mod uo_dir;
 
 use anima_assets::MapData;
-use anima_core::agent::{Action, Observation};
+use anima_core::agent::{Action, HouseDesignAction, Observation};
 use anima_core::net::outgoing::{
     build_ascii_prompt_response, build_attack, build_book_page_request, build_buy,
     build_cast_spell, build_client_view_range, build_double_click, build_drop, build_equip,
-    build_gump_response, build_ping,
-    build_house_design_request, build_hue_picker_response, build_legacy_menu_response,
-    build_logout_request, build_opl_request, build_party_accept, build_party_decline,
-    build_party_invite, build_party_leave, build_party_message, build_pick_up, build_popup_request,
-    build_popup_select, build_profile_request, build_profile_update, build_prompt_response,
-    build_say, build_sell, build_single_click, build_skill_lock, build_status_request,
-    build_target_response, build_text_entry_dialog_response, build_tip_request, build_trade_accept,
-    build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability, build_use_skill,
-    build_war_mode,
+    build_gump_response, build_house_design_add_item, build_house_design_add_roof,
+    build_house_design_add_stair, build_house_design_backup, build_house_design_clear,
+    build_house_design_close, build_house_design_commit, build_house_design_delete_item,
+    build_house_design_delete_roof, build_house_design_go_to_floor, build_house_design_request,
+    build_house_design_restore, build_house_design_revert, build_house_design_sync,
+    build_hue_picker_response, build_legacy_menu_response, build_logout_request, build_opl_request,
+    build_party_accept, build_party_decline, build_party_invite, build_party_leave,
+    build_party_message, build_pick_up, build_ping, build_popup_request, build_popup_select,
+    build_profile_request, build_profile_update, build_prompt_response, build_say, build_sell,
+    build_single_click, build_skill_lock, build_status_request, build_target_response,
+    build_text_entry_dialog_response, build_tip_request, build_trade_accept, build_trade_cancel,
+    build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
 };
 use anima_core::net::{
     apply_packet, build_client_version, CharacterChoice, CharacterPrompt, FramingError, LoginConfig,
@@ -763,6 +766,41 @@ impl Session {
             // paces its own equivalent `auto_goal`.
             Action::WalkTo { x, y } => {
                 self.route = Some(Route::new(*x as u32, *y as u32));
+            }
+            // Custom-house designer edit (0xD7). Every one of ServUO's
+            // `Designer_*` handlers keys the whole session off the mobile that
+            // sent the packet, so — like `PartyLeave`/`Logout` above — the
+            // driver fills in our own serial rather than trusting the brain.
+            Action::HouseDesign(cmd) => {
+                let player = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                let bytes = match *cmd {
+                    HouseDesignAction::AddItem { graphic, x, y } => {
+                        build_house_design_add_item(player, graphic, x, y)
+                    }
+                    HouseDesignAction::DeleteItem { graphic, x, y, z } => {
+                        build_house_design_delete_item(player, graphic, x, y, z)
+                    }
+                    HouseDesignAction::AddStair { graphic, x, y } => {
+                        build_house_design_add_stair(player, graphic, x, y)
+                    }
+                    HouseDesignAction::AddRoof { graphic, x, y, z } => {
+                        build_house_design_add_roof(player, graphic, x, y, z)
+                    }
+                    HouseDesignAction::DeleteRoof { graphic, x, y, z } => {
+                        build_house_design_delete_roof(player, graphic, x, y, z)
+                    }
+                    HouseDesignAction::GoToFloor(floor) => {
+                        build_house_design_go_to_floor(player, floor)
+                    }
+                    HouseDesignAction::Commit => build_house_design_commit(player),
+                    HouseDesignAction::Close => build_house_design_close(player),
+                    HouseDesignAction::Clear => build_house_design_clear(player),
+                    HouseDesignAction::Revert => build_house_design_revert(player),
+                    HouseDesignAction::Backup => build_house_design_backup(player),
+                    HouseDesignAction::Restore => build_house_design_restore(player),
+                    HouseDesignAction::Sync => build_house_design_sync(player),
+                };
+                self.send(&bytes)?;
             }
         }
         Ok(())

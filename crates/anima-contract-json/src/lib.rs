@@ -78,7 +78,8 @@
 pub const SCHEMA_VERSION: u32 = 16;
 
 use anima_core::agent::{
-    Action, GumpView, ItemView, MobileView, Observation, PlayerView, SkillView, WaypointView,
+    Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
+    WaypointView,
 };
 use anima_core::gump_layout::{GumpElement, HtmlText};
 use anima_core::types::Position;
@@ -711,6 +712,60 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
             gold: u32f("gold").unwrap_or(0),
             platinum: u32f("platinum").unwrap_or(0),
         }),
+        // A custom-house designer edit (0xD7). `cmd` names the
+        // [`HouseDesignAction`] variant; `graphic`/`x`/`y`/`z`/`floor` sit
+        // alongside it flat, like `TargetGround`'s coordinate fields, rather
+        // than nested in their own sub-object.
+        "HouseDesign" => {
+            let cmd = v
+                .get("cmd")
+                .and_then(Value::as_str)
+                .ok_or("HouseDesign missing 'cmd'")?;
+            let graphic = || v.get("graphic").and_then(Value::as_u64).unwrap_or(0) as u16;
+            let coord = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0) as i32;
+            let action = match cmd {
+                "AddItem" => HouseDesignAction::AddItem {
+                    graphic: graphic(),
+                    x: coord("x"),
+                    y: coord("y"),
+                },
+                "DeleteItem" => HouseDesignAction::DeleteItem {
+                    graphic: graphic(),
+                    x: coord("x"),
+                    y: coord("y"),
+                    z: coord("z"),
+                },
+                "AddStair" => HouseDesignAction::AddStair {
+                    graphic: graphic(),
+                    x: coord("x"),
+                    y: coord("y"),
+                },
+                "AddRoof" => HouseDesignAction::AddRoof {
+                    graphic: graphic(),
+                    x: coord("x"),
+                    y: coord("y"),
+                    z: coord("z"),
+                },
+                "DeleteRoof" => HouseDesignAction::DeleteRoof {
+                    graphic: graphic(),
+                    x: coord("x"),
+                    y: coord("y"),
+                    z: coord("z"),
+                },
+                "GoToFloor" => HouseDesignAction::GoToFloor(
+                    v.get("floor").and_then(Value::as_u64).unwrap_or(0) as u8,
+                ),
+                "Commit" => HouseDesignAction::Commit,
+                "Close" => HouseDesignAction::Close,
+                "Clear" => HouseDesignAction::Clear,
+                "Revert" => HouseDesignAction::Revert,
+                "Backup" => HouseDesignAction::Backup,
+                "Restore" => HouseDesignAction::Restore,
+                "Sync" => HouseDesignAction::Sync,
+                other => return Err(format!("unknown house design cmd: {other}")),
+            };
+            Ok(Action::HouseDesign(action))
+        }
         other => Err(format!("unknown action type: {other}")),
     }
 }
@@ -947,6 +1002,81 @@ mod tests {
                     platinum: 1,
                 },
             ),
+            (
+                json!({"type": "HouseDesign", "cmd": "AddItem", "graphic": 1234, "x": 5, "y": -6}),
+                Action::HouseDesign(HouseDesignAction::AddItem {
+                    graphic: 1234,
+                    x: 5,
+                    y: -6,
+                }),
+            ),
+            (
+                json!({"type": "HouseDesign", "cmd": "DeleteItem", "graphic": 1234, "x": 5, "y": -6, "z": 2}),
+                Action::HouseDesign(HouseDesignAction::DeleteItem {
+                    graphic: 1234,
+                    x: 5,
+                    y: -6,
+                    z: 2,
+                }),
+            ),
+            (
+                json!({"type": "HouseDesign", "cmd": "AddStair", "graphic": 5150, "x": 1, "y": 2}),
+                Action::HouseDesign(HouseDesignAction::AddStair {
+                    graphic: 5150,
+                    x: 1,
+                    y: 2,
+                }),
+            ),
+            (
+                json!({"type": "HouseDesign", "cmd": "AddRoof", "graphic": 6001, "x": 3, "y": 4, "z": 20}),
+                Action::HouseDesign(HouseDesignAction::AddRoof {
+                    graphic: 6001,
+                    x: 3,
+                    y: 4,
+                    z: 20,
+                }),
+            ),
+            (
+                json!({"type": "HouseDesign", "cmd": "DeleteRoof", "graphic": 6001, "x": 3, "y": 4, "z": 20}),
+                Action::HouseDesign(HouseDesignAction::DeleteRoof {
+                    graphic: 6001,
+                    x: 3,
+                    y: 4,
+                    z: 20,
+                }),
+            ),
+            (
+                json!({"type": "HouseDesign", "cmd": "GoToFloor", "floor": 3}),
+                Action::HouseDesign(HouseDesignAction::GoToFloor(3)),
+            ),
+            (
+                json!({"type": "HouseDesign", "cmd": "Commit"}),
+                Action::HouseDesign(HouseDesignAction::Commit),
+            ),
+            (
+                json!({"type": "HouseDesign", "cmd": "Close"}),
+                Action::HouseDesign(HouseDesignAction::Close),
+            ),
+            (
+                json!({"type": "HouseDesign", "cmd": "Clear"}),
+                Action::HouseDesign(HouseDesignAction::Clear),
+            ),
+            (
+                json!({"type": "HouseDesign", "cmd": "Revert"}),
+                Action::HouseDesign(HouseDesignAction::Revert),
+            ),
+            (
+                json!({"type": "HouseDesign", "cmd": "Backup"}),
+                Action::HouseDesign(HouseDesignAction::Backup),
+            ),
+            (
+                json!({"type": "HouseDesign", "cmd": "Restore"}),
+                Action::HouseDesign(HouseDesignAction::Restore),
+            ),
+            (
+                json!({"type": "HouseDesign", "cmd": "Sync"}),
+                Action::HouseDesign(HouseDesignAction::Sync),
+            ),
         ];
         for (json, expected) in cases {
             let got = action_from_json(&json).unwrap_or_else(|e| panic!("{json} -> err {e}"));
@@ -964,6 +1094,17 @@ mod tests {
         assert!(
             action_from_json(&json!({"type": "WalkTo", "x": 12.5, "y": 800})).is_err(),
             "WalkTo with a non-integer x must error"
+        );
+
+        // An unrecognized or missing house-design `cmd` must error rather
+        // than silently drop the edit.
+        assert!(
+            action_from_json(&json!({"type": "HouseDesign", "cmd": "Bogus"})).is_err(),
+            "HouseDesign with an unknown cmd must error"
+        );
+        assert!(
+            action_from_json(&json!({"type": "HouseDesign"})).is_err(),
+            "HouseDesign missing cmd must error"
         );
     }
 

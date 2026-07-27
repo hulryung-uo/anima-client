@@ -158,6 +158,7 @@ fn main() {
                 } => {
                     format!("tradegold(0x{container:08X},{gold},{platinum})")
                 }
+                Action::HouseDesign(cmd) => format!("hdesign({cmd:?})"),
             })
             .collect();
         println!(
