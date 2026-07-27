@@ -162,6 +162,52 @@ fn multi_statics_at(
         .collect()
 }
 
+/// `multi_statics_at`'s counterpart for **ordinary dynamic items**: on this
+/// shard a boat's deck arrives as perfectly ordinary [`World::items`]
+/// entries, not as a multi at all — live-verified graphics
+/// 0x3EA1/0x3EAC/0x3EB0 sitting at `z=-5` with tiledata `height` 3 and
+/// `SURFACE` (not `Impassable`), giving a standing Z of `-5 + 3 = -2`, with
+/// the hull/mast (0x3E9F/0x3EB1) as plain `Impassable` items right alongside,
+/// and the gangplank (0x3EC0/0x3ED4) as `SURFACE|BRIDGE`. Before this existed,
+/// `explain_tile_walkable`'s scoring only ever folded in **multi** components
+/// (via [`multi_statics_at`]) — an ordinary item was only ever consulted as a
+/// *blocker* (`MapData::item_blocks`), never as a surface contributor — so a
+/// deck shaped like this was entirely invisible to `walkable_z_explain`, and
+/// every step onto it read as unwalkable with `sz` falling back to the water
+/// underneath. ClassicUO's own `Pathfinder.CreateItemList` has an explicit
+/// `case Item item2:` arm alongside Land/Static/Multi for exactly this
+/// reason.
+///
+/// Same shape as [`multi_statics_at`] — every matching item, unfiltered (a
+/// hull piece becomes a synthetic `StaticTile` here too, same as a real
+/// static would) — so a single call collects everything
+/// [`explain_tile_walkable`] needs from `World::items`: it derives BOTH the
+/// standing-surface fold AND the blocker check from this ONE scan instead of
+/// two (see that function's doc for why the surface fold still has to filter
+/// what it takes from here). Excludes multis (`is_multi` — `multi_statics_at`'s
+/// job) and contained items (inventory, not standing on the tile). `z` is
+/// copied straight from `Item::pos.z`, which is already the wire's `i8` —
+/// unlike a multi component's synthesized `(origin_z + dz)` sum, there's no
+/// offset arithmetic here that could overflow, so no clamp is needed.
+fn dynamic_statics_at(world: &World, map: &MapData, x: i64, y: i64) -> Vec<StaticTile> {
+    world
+        .items
+        .values()
+        .filter(|it| {
+            !it.is_multi
+                && it.container.is_none()
+                && it.pos.x as i64 == x
+                && it.pos.y as i64 == y
+        })
+        .map(|it| StaticTile {
+            graphic: it.graphic,
+            z: it.pos.z,
+            height: map.item_height(it.graphic),
+            flags: map.item_flags(it.graphic),
+        })
+        .collect()
+}
+
 /// Does a **multi component** block a body at `current_z` stepping onto `(x,
 /// y)`? A real interactive door is never baked into a multi's component list
 /// (ServUO places it as its own separate door `Item`, e.g.
@@ -189,10 +235,29 @@ fn multi_blocker_at(
 /// any **in-view multi component** (boat deck/hull, house floor/wall) folded
 /// in via [`multi_statics_at`] so a component can CONTRIBUTE a standing
 /// surface (a boat deck) exactly like a real static, not just block one —
-/// with **dynamic world items** on top — an impassable placed object (e.g. a
-/// crate) blocks too — and then, same as [`can_walk`]/[`step_ok`]'s own
-/// two-layer shape, a final [`multi_blocker_at`] pass for a multi component
-/// occupying this exact body span.
+/// and widened again with any **ordinary dynamic item** that is itself a
+/// genuine surface (see [`dynamic_statics_at`] — the real shape of a boat
+/// deck on this shard) — with **dynamic world items** on top — an impassable
+/// placed object (e.g. a crate) blocks too — and then, same as
+/// [`can_walk`]/[`step_ok`]'s own two-layer shape, a final
+/// [`multi_blocker_at`] pass for a multi component occupying this exact body
+/// span.
+///
+/// The surface fold and the blocker check both come from ONE call to
+/// [`dynamic_statics_at`] (a single `World::items` scan) instead of two
+/// separate passes — this runs per tile of the ~49×49 scene window on every
+/// build, so a second full scan here is real, measurable cost. Only a
+/// synthetic tile that is a genuine surface/bridge and NOT impassable is
+/// folded into the scoring `extra`: `walkable_z_explain`'s own
+/// candidate-blocking loop tests every `extra` entry, impassable ones
+/// included, so folding in an impassable item too (a closed door, a crate)
+/// would let it silently reclassify an otherwise-fine land candidate as
+/// `ZReason::Blocked` — stealing the denial from the dedicated
+/// `StepDeny::DynamicItem` path below (with its ghost/door exception), which
+/// already denies it correctly and which click-to-walk planning depends on
+/// to tell "wall" from "door" apart. The blocker check itself still walks
+/// every item [`dynamic_statics_at`] returned (unfiltered), so an impassable
+/// item denies exactly as before.
 pub fn explain_tile_walkable(
     world: &World,
     map: &mut MapData,
@@ -204,24 +269,26 @@ pub fn explain_tile_walkable(
     if x < 0 || y < 0 {
         return Err(StepDeny::OffMap);
     }
-    let extra = multis
+    let ghost = player_is_ghost(world);
+    let dyn_items = dynamic_statics_at(world, map, x, y);
+    let mut extra = multis
         .map(|m| multi_statics_at(world, m, map, x, y))
         .unwrap_or_default();
+    extra.extend(
+        dyn_items
+            .iter()
+            .filter(|st| st.surface() && !st.impassable())
+            .copied(),
+    );
     let z = map
         .walkable_z_explain(x as u32, y as u32, current_z, &extra)
         .map_err(StepDeny::Terrain)?;
-    let ghost = player_is_ghost(world);
-    if let Some(it) = world.items.values().find(|it| {
-        !it.is_multi
-            && it.container.is_none()
-            && it.pos.x as i64 == x
-            && it.pos.y as i64 == y
-            && map.item_blocks(it.graphic, it.pos.z as i32, current_z)
-            && !(ghost && map.item_is_door(it.graphic))
+    if let Some(it) = dyn_items.iter().find(|st| {
+        map.item_blocks(st.graphic, st.z as i32, current_z) && !(ghost && map.item_is_door(st.graphic))
     }) {
         return Err(StepDeny::DynamicItem {
             graphic: it.graphic,
-            item_z: it.pos.z as i32,
+            item_z: it.z as i32,
         });
     }
     if let Some(multis) = multis {
@@ -672,21 +739,19 @@ fn anim_suffix(map: &MapData, animdata: Option<&AnimData>, graphic: u16) -> Stri
     anim
 }
 
-/// Optional `h`/`pf` suffix a static's JSON entry gets when it's within
-/// [`PATH_RADIUS`] of the player: `h` is the tiledata HEIGHT, `pf` packs the
-/// three flag bits the browser's `calculate_new_z` port needs (bit 0
-/// impassable, bit 1 surface, bit 2 bridge). Each field is omitted when zero,
-/// so out-of-radius (or flag/height-less) statics serialize identically to
-/// before this existed. Shared by the real-statics loop and
-/// `emit_multi_component` so the two paths can't drift.
-fn path_suffix(in_radius: bool, height: u8, flags: u64) -> String {
-    let mut s = String::new();
+/// The `h`/`pf` VALUES a graphic within [`PATH_RADIUS`] of the player would
+/// carry: `h` is the tiledata HEIGHT, `pf` packs the three flag bits the
+/// browser's `calculate_new_z` port needs (bit 0 impassable, bit 1 surface,
+/// bit 2 bridge). Each is `None` when out-of-radius or zero. Split out from
+/// [`path_suffix`] (which formats these straight into a hand-written JSON
+/// string, for the real-statics/multi-component loops) so the dynamic-items
+/// loop in [`build_scene`] — which builds a `serde_json::Value`, not a raw
+/// string — can share the exact same bits instead of re-deriving them.
+fn path_bits(in_radius: bool, height: u8, flags: u64) -> (Option<u8>, Option<u8>) {
     if !in_radius {
-        return s;
+        return (None, None);
     }
-    if height != 0 {
-        let _ = write!(s, ",\"h\":{}", height as i32);
-    }
+    let h = (height != 0).then_some(height);
     let mut bits = 0u8;
     if flags & FLAG_IMPASSABLE != 0 {
         bits |= 1;
@@ -697,8 +762,22 @@ fn path_suffix(in_radius: bool, height: u8, flags: u64) -> String {
     if flags & FLAG_BRIDGE != 0 {
         bits |= 4;
     }
-    if bits != 0 {
-        let _ = write!(s, ",\"pf\":{bits}");
+    (h, (bits != 0).then_some(bits))
+}
+
+/// Optional `h`/`pf` suffix a static's JSON entry gets when it's within
+/// [`PATH_RADIUS`] of the player (see [`path_bits`] for the values). Each
+/// field is omitted when zero, so out-of-radius (or flag/height-less) statics
+/// serialize identically to before this existed. Shared by the real-statics
+/// loop and `emit_multi_component` so the two paths can't drift.
+fn path_suffix(in_radius: bool, height: u8, flags: u64) -> String {
+    let mut s = String::new();
+    let (h, pf) = path_bits(in_radius, height, flags);
+    if let Some(h) = h {
+        let _ = write!(s, ",\"h\":{}", h as i32);
+    }
+    if let Some(pf) = pf {
+        let _ = write!(s, ",\"pf\":{pf}");
     }
     s
 }
@@ -936,14 +1015,21 @@ fn tiledata_path_obj(z: i32, height: i32, tile_flags: u64) -> Option<PathObj> {
     })
 }
 
-/// ClassicUO `Pathfinder.CreateItemList`: land + statics **and, when `multis`
-/// is given, in-view multi components** (a boat deck/hull, house floor/wall) on
-/// a tile, as `PathObj`s (mobiles are not modelled here — they rarely change
-/// the standing Z). Multi components matter here for the SAME reason they
+/// ClassicUO `Pathfinder.CreateItemList`: land + statics + **ordinary dynamic
+/// items** (see [`dynamic_statics_at`]'s doc — a boat deck on this shard is
+/// exactly this shape) **and, when `multis` is given, in-view multi
+/// components** (a boat deck/hull, house floor/wall) on a tile, as `PathObj`s
+/// (mobiles are not modelled here — they rarely change the standing Z).
+/// Dynamic items and multi components matter here for the SAME reason they
 /// matter for blocking (see `multi_blocker_at`'s doc): without them, stepping
 /// onto/around a boat whose deck sits at a Z the static map alone knows
 /// nothing about would resolve the wrong standing Z (or none at all) and every
-/// step would look like a deny.
+/// step would look like a deny. Every dynamic item is folded in through
+/// [`tiledata_path_obj`] exactly like a real static or multi component — this
+/// list-building loop, unlike [`explain_tile_walkable`]'s scoring, has no
+/// impassable/surface split to worry about (its only caller, [`step_ok`], has
+/// its own separate `blocked_by_item` check regardless of what
+/// `calculate_new_z` decides).
 fn create_item_list(
     world: &World,
     map: &mut MapData,
@@ -974,6 +1060,11 @@ fn create_item_list(
     }
     for s in map.statics(x as u32, y as u32) {
         if let Some(obj) = tiledata_path_obj(s.z as i32, s.height as i32, s.flags) {
+            list.push(obj);
+        }
+    }
+    for it in dynamic_statics_at(world, map, x, y) {
+        if let Some(obj) = tiledata_path_obj(it.z as i32, it.height as i32, it.flags) {
             list.push(obj);
         }
     }
@@ -2138,6 +2229,18 @@ pub fn build_scene(
             pz
         })
     };
+    // `h`/`pf` for a dynamic item within `PATH_RADIUS` of the player: now that
+    // a dynamic item can contribute a standing surface (a boat deck — see
+    // `dynamic_statics_at`'s doc), the browser's own `calculateNewZ` port
+    // needs the SAME tiledata bits a nearby static already carries (see
+    // `path_suffix`'s doc), or it keeps resolving the water's Z under a deck
+    // instead of the deck's own. Shares `path_bits` with `path_suffix` so the
+    // two can never derive different bits for the same graphic.
+    let item_path_bits = |g: u16, ix: i64, iy: i64| -> (Option<u8>, Option<u8>) {
+        let in_radius = (ix - px).abs() <= PATH_RADIUS && (iy - py).abs() <= PATH_RADIUS;
+        map.as_deref()
+            .map_or((None, None), |m| path_bits(in_radius, m.item_height(g), m.item_flags(g)))
+    };
 
     let mobiles: Vec<Value> = s
         .world
@@ -2217,6 +2320,16 @@ pub fn build_scene(
             // Mark containers so double-click opens a loot window (doors don't).
             if item_is_cont(it.graphic) {
                 v["c"] = json!(1);
+            }
+            // `h`/`pf` (PATH_RADIUS-gated, see `item_path_bits`'s doc): omitted
+            // whenever out of radius or zero, so this is purely additive —
+            // an item outside PATH_RADIUS serializes exactly as before.
+            let (h, pf) = item_path_bits(it.graphic, it.pos.x as i64, it.pos.y as i64);
+            if let Some(h) = h {
+                v["h"] = json!(h);
+            }
+            if let Some(pf) = pf {
+                v["pf"] = json!(pf);
             }
             // Stack count, so the renderer's pointer-drag can offer a stack-split
             // dialog when lifting amount > 1 (ClassicUO SplitMenuGump). Omitted for
@@ -4247,6 +4360,58 @@ mod tests {
             hull_y,
             boat_z
         ));
+    }
+
+    /// Real-bug regression (the actual root cause this fix addresses, distinct
+    /// from FIX 1's boat-as-multi case above): on THIS shard, a boat's deck
+    /// arrives as an ORDINARY DYNAMIC WORLD ITEM, not as a multi component at
+    /// all — live-verified graphics 0x3EA1/0x3EAC/0x3EB0 at `z=-5`, tiledata
+    /// `height` 3, `SURFACE` (not `Impassable`), giving a standing Z of
+    /// `-5 + 3 = -2`. Before `dynamic_statics_at` existed,
+    /// `explain_tile_walkable` only ever folded MULTI components into its
+    /// scoring — an ordinary item was consulted ONLY as a blocker — so this
+    /// exact tile shape denied every step, with `sz` falling back to the water
+    /// underneath. Reuses the same known-clear open-water box (no real
+    /// statics, all impassable deep water) `fix1_smallboat_...` verified above,
+    /// so the standing surface is provably coming from the synthetic dynamic
+    /// item, not some coincidental real static.
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn dynamic_item_deck_over_water_contributes_a_standing_surface() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let mut map = MapData::open(&dir).expect("open map data");
+        for (tx, ty) in [(1459u32, 1765u32), (1460u32, 1765u32)] {
+            assert!(map.land(tx, ty).impassable(), "({tx},{ty}) should be deep water");
+            assert!(map.statics(tx, ty).is_empty(), "({tx},{ty}) should have no real statics");
+        }
+
+        // Deck alone, as a plain (non-multi) dynamic item: must contribute a
+        // standing surface exactly like a real static would.
+        let mut world = anima_core::World::new();
+        world
+            .items
+            .insert(1, synth_item(1, 0x3EAC, 1459, 1765, -5, false));
+        assert_eq!(
+            explain_tile_walkable(&world, &mut map, None, 1459, 1765, -5),
+            Ok(-2),
+            "a dynamic deck item must contribute a standing surface over open water"
+        );
+        assert!(tile_walkable(&world, &mut map, None, 1459, 1765, -5));
+
+        // Without it, the SAME tile is unwalkable open water.
+        world.items.remove(&1);
+        assert!(!tile_walkable(&world, &mut map, None, 1459, 1765, -5));
+
+        // Companion check: a hull piece (impassable, no surface) as a plain
+        // dynamic item on a DIFFERENT clear-water tile must still fully deny —
+        // it must never itself become a standing candidate (see
+        // `dynamic_statics_at`'s doc: impassable items are excluded from the
+        // surface fold, so this keeps denying through the unchanged
+        // `StepDeny::DynamicItem`/blocker path, not by accident).
+        world
+            .items
+            .insert(2, synth_item(2, 0x3EB1, 1460, 1765, -5, false));
+        assert!(!tile_walkable(&world, &mut map, None, 1460, 1765, -5));
     }
 
     /// FIX 2: a multi's own roof component must lift `max_draw_z`'s ceiling

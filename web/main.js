@@ -2360,6 +2360,7 @@ function syncWorld(s) {
   // Keep the calculateNewZ static index in step with the scene the rest of
   // this function is about to render (once per poll — see its own doc).
   rebuildStaticIndex(s.statics);
+  rebuildItemIndex(s.items);
   const m = s.map || { radius: 14, tiles: [], cx: 0, cy: 0 };
   const span = 2 * m.radius + 1;
   // Beyond this Chebyshev distance from the player, `m.tiles` is the grayed-out
@@ -2775,6 +2776,32 @@ function staticsAt(x, y) {
   return staticIndex.get(x + "," + y) || null;
 }
 
+// Same treatment for `scene.items` (dynamic world items). Most shards' items
+// carry no path data at all (loot, decor) and are irrelevant here, but some
+// shards — this one included — send a boat deck as ordinary dynamic items
+// (graphics 0x3EA1/0x3EAC/0x3EB0, z=-5, tiledata height 3, SURFACE flag) with
+// no map statics and no multi backing them. Without indexing `scene.items`
+// too, createItemList only ever sees the water tile underneath and the player
+// freezes on deck. Built/rebuilt on the same once-per-poll cadence as
+// staticIndex, keyed on `scene.items` array identity.
+let itemIndex = new Map();
+let itemIndexSrc = null;
+function rebuildItemIndex(items) {
+  if (items === itemIndexSrc) return;
+  itemIndexSrc = items;
+  itemIndex = new Map();
+  for (const it of items || []) {
+    const key = it.x + "," + it.y;
+    let arr = itemIndex.get(key);
+    if (!arr) { arr = []; itemIndex.set(key, arr); }
+    arr.push(it);
+  }
+}
+// The dynamic items on world tile (x,y) this poll, or null if there are none indexed.
+function itemsAt(x, y) {
+  return itemIndex.get(x + "," + y) || null;
+}
+
 // Raw tile object from the current scene.map window at (x,y), or null when
 // (x,y) falls outside the window (mirrors tileSZ's indexing exactly).
 function tileAt(x, y) {
@@ -2860,10 +2887,14 @@ function tiledataPathObj(z, height, pf) {
   return { flags, z, avgZ: avg, height, landStretched: false };
 }
 
-// ClassicUO `Pathfinder.CreateItemList`: land + statics on tile (x,y) as
-// PathObjs (mobiles and multi components are not modelled — the latter
-// already arrive inside scene.statics with an `ms` field and are covered by
-// the static loop below, same as the Rust port's multi-component pass).
+// ClassicUO `Pathfinder.CreateItemList`: land + statics + dynamic items on
+// tile (x,y) as PathObjs (mobiles are not modelled; multi components arrive
+// inside scene.statics with an `ms` field and are covered by the static loop
+// below, same as the Rust port's multi-component pass). Dynamic world items
+// need their own pass here: on this shard a boat deck is sent as ordinary
+// items (graphics 0x3EA1/0x3EAC/0x3EB0, z=-5, tiledata height 3, SURFACE
+// flag) rather than as a static or a multi, so without this loop the deck
+// tile would resolve to the water underneath and freeze the player on deck.
 // Returns `[]` for the off-world sentinel (x<0||y<0, a valid empty list, like
 // Rust's early return), or `null` when (x,y) or a corner it needs is outside
 // the client's window — the JS-only "no data" case, which the caller must
@@ -2887,6 +2918,17 @@ function createItemList(x, y) {
   if (statics) {
     for (const s of statics) {
       const obj = tiledataPathObj(s.z | 0, s.h | 0, s.pf | 0); // absent h/pf -> 0/0
+      if (obj) list.push(obj);
+    }
+  }
+  const items = itemsAt(x, y);
+  if (items) {
+    for (const it of items) {
+      // Same helper the statics loop uses, so impassable/surface/bridge
+      // derivation can never drift between the two. Absent h/pf (older
+      // server, or ordinary loot/decor with no tiledata path flags) ->
+      // tiledataPathObj returns null and the item contributes nothing.
+      const obj = tiledataPathObj(it.z, it.h ?? 0, it.pf ?? 0);
       if (obj) list.push(obj);
     }
   }
