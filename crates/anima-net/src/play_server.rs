@@ -30,7 +30,6 @@ use std::time::{Duration, Instant};
 
 use anima_assets::{
     Anim, AnimData, Art, Cliloc, Gumps, Hues, MapData, Multis, RadarCol, Sounds, Texmaps, TileData,
-    ZReason,
 };
 use anima_core::net::{CharacterAppearance, CharacterChoice, CharacterPrompt, LoginConfig};
 use anima_core::path::{find_path, find_path_near};
@@ -40,9 +39,8 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::regions::GuardRect;
 use crate::scene::{
-    build_scene, calculate_new_z, can_walk, decide_blocked_step, door_blocking_at,
-    explain_tile_walkable, render_worldmap, BlockedStepAction, DoorUseAttempt, MapTerrain,
-    StepDeny, WORLDMAP_STEP,
+    build_scene, calculate_new_z, can_step_to, can_walk, decide_blocked_step, door_blocking_at,
+    render_worldmap, BlockedStepAction, DoorUseAttempt, MapTerrain, StepDeny, WORLDMAP_STEP,
 };
 use crate::{DriverError, Endpoint, Session};
 
@@ -92,12 +90,16 @@ const WALKTO_GOAL_SLOP: u32 = 2;
 
 /// ANIMA_DEBUG-only: probe the player's 8 neighbor tiles and print one compact
 /// ALLOW/DENY line per direction, explaining exactly why a denied tile is
-/// denied (out-of-climb-range, blocked by an overlapping static, no surface at
-/// all, blocked by a placed world item, or already blacklisted by a previous
-/// auto-walk deny — `blocked` is play_server-local state, not part of the
-/// terrain check itself). Called from the WalkTo arm's no-path rejection so a
-/// silent "no path" has something to look at. Reuses [`explain_tile_walkable`]
-/// so this can never drift from the real walkability check.
+/// denied (no landing Z at all, blocked by a static/dynamic item/multi
+/// component, or already blacklisted by a previous auto-walk deny —
+/// `blocked` is play_server-local state, not part of the terrain check
+/// itself). Called from the WalkTo arm's no-path rejection so a silent "no
+/// path" has something to look at. Reuses [`can_step_to`] — the SAME gate
+/// `can_walk`/`step_ok` use to decide a real committed step — so this can
+/// never drift from, or explain a different question than, what actually
+/// decided the walk (it used to reuse `explain_tile_walkable` instead, which
+/// is a genuinely different — coarser, `walkable_z_explain`-scored —
+/// question; see `can_step_to`'s doc).
 fn debug_probe_neighbors(
     world: &anima_core::World,
     map: &mut MapData,
@@ -119,25 +121,19 @@ fn debug_probe_neighbors(
             eprintln!("[pathdbg] dir={dir} ({ux},{uy}): DENY blacklisted");
             continue;
         }
-        match explain_tile_walkable(world, map, multis, nx, ny, pz) {
+        match can_step_to(world, map, multis, px as i64, py as i64, pz, dir) {
             Ok(z) => eprintln!("[pathdbg] dir={dir} ({ux},{uy}): ALLOW z {pz}->{z}"),
             Err(StepDeny::OffMap) => eprintln!("[pathdbg] dir={dir} ({ux},{uy}): DENY off-map"),
-            Err(StepDeny::Terrain(ZReason::NoSurface)) => {
-                eprintln!("[pathdbg] dir={dir} ({ux},{uy}): DENY no-surface");
-            }
-            Err(StepDeny::Terrain(ZReason::OutOfReach { nearest_z })) => {
+            Err(StepDeny::NoLanding) => {
                 eprintln!(
-                    "[pathdbg] dir={dir} ({ux},{uy}): DENY z-delta player_z={pz} cand_z={nearest_z} (Δ{})",
-                    (nearest_z - pz).abs()
+                    "[pathdbg] dir={dir} ({ux},{uy}): DENY no-landing-z (no surface within climb range of z={pz})"
                 );
             }
-            Err(StepDeny::Terrain(ZReason::Blocked {
-                candidate_z,
-                blocking_graphic,
-            })) => {
-                eprintln!(
-                    "[pathdbg] dir={dir} ({ux},{uy}): DENY static g=0x{blocking_graphic:04X} cand_z={candidate_z} (player z={pz})"
-                );
+            Err(StepDeny::Terrain(reason)) => {
+                // `can_step_to` never actually produces this variant — that's
+                // `explain_tile_walkable`'s (see `StepDeny`'s doc) — kept only
+                // so this match stays exhaustive if that ever changes.
+                eprintln!("[pathdbg] dir={dir} ({ux},{uy}): DENY terrain {reason:?}");
             }
             Err(StepDeny::DynamicItem { graphic, item_z }) => {
                 eprintln!("[pathdbg] dir={dir} ({ux},{uy}): DENY dynamic g=0x{graphic:04X} item_z={item_z}");

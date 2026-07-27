@@ -62,15 +62,28 @@ fn equip_conv_gump(wearer_body: u16, gump: u16) -> u16 {
     (base + offset) as u16
 }
 
-/// Why [`explain_tile_walkable`] would allow/deny a step onto `(x, y)` from
-/// `current_z` — the exact same checks, decomposed for `[pathdbg]`
-/// diagnostics. [`tile_walkable`] is now a thin wrapper over this
-/// (`.is_ok()`), so the two can never disagree.
+/// Why [`explain_tile_walkable`] (or [`can_step_to`] — the movement-gate
+/// twin, scored via [`calculate_new_z`] instead of `walkable_z_explain`)
+/// would allow/deny a step onto `(x, y)` from `current_z` — the exact same
+/// checks, decomposed for `[pathdbg]` diagnostics. [`tile_walkable`] is now a
+/// thin wrapper over `explain_tile_walkable` (`.is_ok()`), and [`step_ok`]/
+/// [`can_walk`] are now a thin wrapper over `can_step_to` the same way, so
+/// none of the four can ever disagree about what this enum names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepDeny {
     OffMap,
     Terrain(ZReason),
     DynamicItem { graphic: u16, item_z: i32 },
+    /// [`can_step_to`]'s equivalent of "nothing to land on at all":
+    /// [`calculate_new_z`] returned `None` — no candidate surface/bridge
+    /// within the StepHeight climb limit, or the nearest one lacked
+    /// headroom. Unlike [`StepDeny::Terrain`] (`explain_tile_walkable`'s
+    /// `walkable_z_explain` scorer, which tells NoSurface/OutOfReach/Blocked
+    /// apart), `calculate_new_z`'s single `None` doesn't discriminate those
+    /// cases — this is deliberately its own flat variant rather than reusing
+    /// (and thereby misreporting) a [`ZReason`] that implies detail
+    /// `can_step_to` doesn't actually have.
+    NoLanding,
 }
 
 /// Every multi component (boat hull/deck, house wall/floor — never the
@@ -231,11 +244,11 @@ fn multi_blocker_at(
 
 /// The **blocker** half of [`explain_tile_walkable`]: does an impassable
 /// dynamic item (crate, closed door — ghost exception applies) or multi
-/// component (hull/house wall) deny a body at `current_z` from occupying
-/// `(x, y)`? Split out so [`build_scene`]'s per-tile `w` flag can reuse these
-/// EXACT rules (never re-derive/duplicate them) while pairing them with the
-/// authoritative `sz_chain` answer instead of [`MapData::walkable_z_explain`]'s
-/// simpler scorer.
+/// component (hull/house wall) deny a body from occupying `(x, y)` while
+/// standing at `current_z`? Split out so [`build_scene`]'s per-tile `w` flag
+/// can reuse these EXACT rules (never re-derive/duplicate them) while pairing
+/// them with the authoritative `sz_chain` answer instead of
+/// [`MapData::walkable_z_explain`]'s simpler scorer.
 ///
 /// Why that pairing is needed — a real bug, diagnosed live: standing on a
 /// house foundation's stairs, a body sits on a **bridge** (`0x0751`, height
@@ -245,15 +258,24 @@ fn multi_blocker_at(
 /// (`0x31F4`, z 7). Stepping there is a +5 climb — exactly what a bridge is
 /// for — and [`calculate_new_z`] (ClassicUO's `Pathfinder.CalculateNewZ`,
 /// which its `CanWalk` uses directly) resolves it correctly to `sz=7`. But
-/// `walkable_z_explain`'s scorer doesn't model the bridge-widened max Z,
-/// so on its own it wrongly reports `w=0` — stranding the player on the
-/// stairs, unable to step onto their own foundation. `sz_chain` already
-/// carries the correct (`calculate_new_z`-derived) answer; this fn supplies
-/// the other half a walkable decision still needs: did anything actually
-/// block the step. `dyn_items` is passed in rather than re-fetched so a
-/// caller that already ran [`dynamic_statics_at`] (as
-/// [`explain_tile_walkable`] does, for its surface fold) never scans
-/// `World::items` twice for the same tile.
+/// `tile_walkable`, checked at the OLD `w=0`: `walkable_z_explain`'s scorer
+/// doesn't model the bridge-widened max Z, AND (verified directly against
+/// this exact riser/floor pair) THIS fn's own blocker rules deny it too —
+/// `item_blocks`'s span test (`item_z < current_z + CHAR_HEIGHT`) genuinely
+/// overlaps the riser's `0..5` span against a body still down at `current_z=2`
+/// (the pre-step Z `tile_walkable` always checks against, matching ClassicUO
+/// `CanWalk`/our own [`step_ok`]) — even though that exact riser is well clear
+/// of a body actually AT the resolved z=7. So the fix is two-part: `sz_chain`
+/// already carries the authoritative (`calculate_new_z`-derived) landing Z;
+/// [`build_scene`] passes THAT resolved Z as `current_z` here instead of the
+/// player's pre-step `pz` — asking "does this blocker overlap the body once
+/// the step actually lands" instead of "…while it's still down where it
+/// started" — which is what turns this exact case walkable without weakening
+/// a single blocker rule (a closed door, judged at its OWN — usually
+/// unchanged — tile, still denies; see the tests). `dyn_items` is passed in
+/// rather than re-fetched so a caller that already ran
+/// [`dynamic_statics_at`] (as [`explain_tile_walkable`] does, for its surface
+/// fold) never scans `World::items` twice for the same tile.
 fn blocking_item_at(
     world: &World,
     map: &mut MapData,
@@ -367,9 +389,13 @@ pub fn tile_walkable(
 /// planned *through* a closed door; the executor then really opens it (see
 /// `play_server`'s auto-walk loop) before stepping onto its tile — so what
 /// gets planned and what gets walked never disagree about the real world.
-/// Manual walking (`can_walk`/`step_ok`) and the debug minimap overlay keep
-/// [`tile_walkable`]'s strict semantics: a closed door genuinely blocks a
-/// single committed step until something has actually opened it.
+/// Manual walking (`can_walk`/`step_ok`, via [`can_step_to`]) and the debug
+/// minimap overlay (`tile_walkable`, beyond `build_scene`'s `CHAIN_RADIUS`)
+/// both keep this same strict door semantics: a closed door genuinely blocks
+/// a single committed step until something has actually opened it. (Only the
+/// SURFACE half of that strictness now differs between the two — `can_walk`/
+/// `step_ok` score it via `calculate_new_z`, `tile_walkable` via
+/// `walkable_z_explain` — see [`can_step_to`]'s doc for why.)
 pub fn tile_walkable_for_planning(
     world: &World,
     map: &mut MapData,
@@ -647,13 +673,51 @@ fn dir_from_delta(dx: i64, dy: i64) -> Option<u8> {
     }
 }
 
-/// Can a body at (fx, fy, fz) step in direction `dir`? Faithful to ClassicUO
-/// `CanWalk`'s per-tile test: the destination must resolve a standing Z via
-/// [`calculate_new_z`] (the full CalculateNewZ — surfaces/bridges/headroom and
-/// the StepHeight climb limit), AND no impassable **dynamic world item** (nor,
-/// when `multis` is given, multi component — boat hull/house wall) may sit on
-/// it. This is stricter (and ServUO-accurate) than the coarse direction-less
-/// `walkable_z` hint we still emit per-tile for the renderer.
+/// The server's real movement gate: can a body at `(px, py, pz)` step in
+/// direction `dir`, and if so what Z would it land at? Faithful to ClassicUO
+/// `CanWalk`'s per-tile test — `CanWalk` IS `CalculateNewZ`, there is no
+/// separate scoring pass in the client — so, unlike [`explain_tile_walkable`]
+/// (which scores via the coarser `MapData::walkable_z_explain`), this
+/// resolves the landing Z with the full [`calculate_new_z`] (surfaces,
+/// bridges, headroom, the StepHeight climb limit) and then judges
+/// [`blocking_item_at`]'s SAME dynamic-item/multi-component blocker rules
+/// against THAT resolved landing Z, not the pre-step one — exactly the
+/// pairing `build_scene`'s per-tile `w` already uses inside `CHAIN_RADIUS`
+/// (see `blocking_item_at`'s doc for the live foundation-stairs bug this
+/// fixes: bridge `0x0751` h=5 at z=0 → stand z=2; impassable riser `0x0063`
+/// z=0..5; plot surface `0x31F4` at z=7 → landing z=7 — the riser is well
+/// clear of a body actually AT z=7, even though it overlaps one still down at
+/// z=2). Before this existed, [`step_ok`] re-derived its own blocker check
+/// inline, checked at `fz` (the pre-step Z) — the same bug `blocking_item_at`
+/// was split out to fix for `build_scene`, just not yet applied to the real
+/// movement gate; this is that fix, applied once, for every caller that asks
+/// "can this body take this step" (see [`step_ok`]/[`can_walk`], now thin
+/// wrappers over this).
+pub fn can_step_to(
+    world: &World,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    px: i64,
+    py: i64,
+    pz: i32,
+    dir: u8,
+) -> Result<i32, StepDeny> {
+    let (dx, dy) = delta(dir);
+    let (nx, ny) = (px + dx, py + dy);
+    if nx < 0 || ny < 0 {
+        return Err(StepDeny::OffMap);
+    }
+    let z = calculate_new_z(world, map, multis, nx, ny, pz, dir).ok_or(StepDeny::NoLanding)?;
+    let ghost = player_is_ghost(world);
+    let dyn_items = dynamic_statics_at(world, map, nx, ny);
+    match blocking_item_at(world, map, multis, nx, ny, z, &dyn_items, ghost) {
+        Some(deny) => Err(deny),
+        None => Ok(z),
+    }
+}
+
+/// Can a body at (fx, fy, fz) step in direction `dir`? Thin wrapper over
+/// [`can_step_to`] (`.is_ok()`) — see its doc for what changed and why.
 fn step_ok(
     world: &World,
     map: &mut MapData,
@@ -663,30 +727,7 @@ fn step_ok(
     fz: i32,
     dir: u8,
 ) -> bool {
-    let (dx, dy) = delta(dir);
-    let (tx, ty) = (fx + dx, fy + dy);
-    if tx < 0 || ty < 0 {
-        return false;
-    }
-    if calculate_new_z(world, map, multis, tx, ty, fz, dir).is_none() {
-        return false;
-    }
-    let ghost = player_is_ghost(world);
-    let blocked_by_item = world.items.values().any(|it| {
-        !it.is_multi
-            && it.container.is_none()
-            && it.pos.x as i64 == tx
-            && it.pos.y as i64 == ty
-            && map.item_blocks(it.graphic, it.pos.z as i32, fz)
-            && !(ghost && map.item_is_door(it.graphic))
-    });
-    if blocked_by_item {
-        return false;
-    }
-    match multis {
-        Some(m) => multi_blocker_at(world, m, map, tx, ty, fz, ghost).is_none(),
-        None => true,
-    }
+    can_step_to(world, map, multis, fx, fy, fz, dir).is_ok()
 }
 
 /// ClassicUO `Pathfinder.CanWalk`: resolve a requested step from (x, y, z).
@@ -2796,14 +2837,31 @@ pub fn build_scene(
                 // found a standing surface); blockers (crates, closed doors,
                 // hull/house walls) still deny exactly as `tile_walkable` would,
                 // via the SAME rules `explain_tile_walkable` uses (factored out
-                // as `blocking_item_at` so they can't drift apart). Outside the
-                // chain radius there's no authoritative answer to defer to, so
-                // this keeps exactly today's `tile_walkable` result.
+                // as `blocking_item_at` so they can't drift apart) — but checked
+                // against the tile's OWN resolved `sz_chain` Z, not `pz`: a
+                // dynamic/multi blocker's span is judged against the body's
+                // ACTUAL height once the step completes, exactly the height
+                // `calculate_new_z` just resolved, not the height it's leaving
+                // behind. This matters for the very climb this fix is about — a
+                // foundation's stairs at `pz=2` (a Bridge) stepping onto the
+                // plot at `sz=7`: the plot's own impassable riser (`0x0063`, z
+                // 0..5) genuinely overlaps a body still down at z=2 (verified:
+                // `item_blocks` says so), which is exactly why the OLD `w=0`
+                // check (using `pz`) also denied through `multi_blocker_at`, not
+                // just `walkable_z_explain`'s scoring — but that same riser is
+                // well clear of a body actually standing at z=7, matching the
+                // real, live-confirmed outcome. Outside the chain radius there's
+                // no authoritative answer to defer to, so this keeps exactly
+                // today's `tile_walkable` result.
                 let walk = if dx.abs() <= CHAIN_RADIUS && dy.abs() <= CHAIN_RADIUS {
-                    let dyn_items = dynamic_statics_at(&s.world, map, x, y);
-                    sz_chain[chain_idx(dx, dy)].is_some()
-                        && blocking_item_at(&s.world, map, multis, x, y, pz, &dyn_items, ghost)
-                            .is_none()
+                    match sz_chain[chain_idx(dx, dy)] {
+                        Some(z) => {
+                            let dyn_items = dynamic_statics_at(&s.world, map, x, y);
+                            blocking_item_at(&s.world, map, multis, x, y, z, &dyn_items, ghost)
+                                .is_none()
+                        }
+                        None => false,
+                    }
                 } else {
                     tile_walkable(&s.world, map, multis, x, y, pz)
                 };
@@ -3444,11 +3502,12 @@ mod tests {
     // `build_scene` itself takes `&mut Session`, and `Session` can only be built
     // via `connect_and_login` (a live `TcpStream`) — per this crate's testing
     // convention (see `route_tests`'s doc in `lib.rs`), unit tests don't spin up
-    // a live Session/socket. `tile_walkable`/`can_walk` similarly need a real
-    // `anima_assets::MapData`, which only opens actual UO data files (no in-memory
-    // constructor) — adding coverage for THOSE two would need either a `MapData`
+    // a live Session/socket. `tile_walkable`/`can_walk`/`can_step_to` similarly
+    // need a real `anima_assets::MapData`, which only opens actual UO data files
+    // (no in-memory constructor) — coverage for these needs either a `MapData`
     // test constructor (a real seam, not attempted here) or an `#[ignore]`d test
-    // gated on a local UO install, so they currently have no automated coverage.
+    // gated on a local UO install; `can_step_to` (which `can_walk`/`step_ok` now
+    // wrap) has exactly that below (`can_step_to_allows_the_stairs_climb_...`).
     // `calculate_new_z` avoids this by testing its `bound_min_max_z`/
     // `resolve_standing_z` pure cores directly with synthetic `PathObj` literals
     // (see the staircase tests below), plus one `#[ignore]`d real-data test
@@ -5069,23 +5128,373 @@ mod tests {
         assert_eq!(anim_suffix(&map, None, 0x03AE), "");
     }
 
+    /// Real bug regression (see `blocking_item_at`'s doc for the full live
+    /// diagnosis): a house foundation's stairs put a body on a **bridge**
+    /// (`0x0751`, height 5, z 0 → half-height stand z=2), and the tile one
+    /// step further carries the foundation's own **impassable** riser
+    /// (`0x0063`, z 0..5) topped by the empty plot's own **surface**
+    /// (`0x31F4`, z 7) — a +5 climb exactly like a bridge is for.
+    /// `calculate_new_z` resolves this correctly to z=7 (verified below), but
+    /// checked against a body still down at the pre-step z=2 — exactly what
+    /// `tile_walkable` always checks against — the SAME riser genuinely
+    /// overlaps that lower body (`item_blocks`'s span test), which is why
+    /// `tile_walkable` denies the climb outright (also verified below): the
+    /// two calculators don't just differ in their surface scoring, the
+    /// blocker check disagrees too depending on WHICH Z it's asked about.
+    /// `build_scene`'s fix is to trust `calculate_new_z`'s landing Z and ask
+    /// `blocking_item_at` about THAT Z, not the pre-step one. Reuses the
+    /// known-clear open-deep-water box around (1459,1767) (see
+    /// `fix1_smallboat_...`'s doc) so every candidate below is provably the
+    /// synthetic multi, not real terrain/statics.
     #[test]
-    #[ignore]
-    fn scratch_dump_foundation_tiledata() {
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn foundation_stairs_bridge_climb_walkable_via_chain_and_resolved_z_blocker_check() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
-        let map = MapData::open(&dir).expect("open map data");
-        for g in [0x0751u16, 0x0063, 0x31F4] {
-            let f = map.item_flags(g);
-            println!(
-                "g={:#06x} flags={:#x} impass={} surface={} bridge={} height={}",
-                g,
-                f,
-                f & FLAG_IMPASSABLE != 0,
-                f & FLAG_SURFACE != 0,
-                f & FLAG_BRIDGE != 0,
-                map.item_height(g)
+        let mut map = MapData::open(&dir).expect("open map data");
+
+        // Confirm the live-diagnosed tiledata facts this fix leans on.
+        assert_eq!(
+            map.item_flags(0x0751) & (FLAG_SURFACE | FLAG_BRIDGE),
+            FLAG_SURFACE | FLAG_BRIDGE,
+            "0x0751 must be a surface+bridge"
+        );
+        assert_eq!(map.item_height(0x0751), 5);
+        assert_eq!(
+            map.item_flags(0x0063) & (FLAG_IMPASSABLE | FLAG_SURFACE),
+            FLAG_IMPASSABLE,
+            "0x0063 must be impassable and NOT itself a surface"
+        );
+        assert_eq!(map.item_height(0x0063), 5);
+        assert_ne!(map.item_flags(0x31F4) & FLAG_SURFACE, 0, "0x31F4 must be a surface");
+
+        let (bridge_x, bridge_y) = (1459i64, 1766i64);
+        let (plot_x, plot_y) = (bridge_x, bridge_y - 1);
+        for (tx, ty) in [(bridge_x, bridge_y), (plot_x, plot_y)] {
+            assert!(
+                map.land(tx as u32, ty as u32).impassable(),
+                "({tx},{ty}) should be deep water"
+            );
+            assert!(
+                map.statics(tx as u32, ty as u32).is_empty(),
+                "({tx},{ty}) should have no real statics"
             );
         }
-        assert!(false, "scratch");
+
+        let mut world = anima_core::World::new();
+        world.items.insert(
+            1,
+            synth_item(1, 0, bridge_x as u16, bridge_y as u16, 0, true), // multi id 0, origin = the bridge tile
+        );
+        let multis = Multis::from_components(std::collections::HashMap::from([(
+            0u32,
+            vec![
+                MultiComponent {
+                    graphic: 0x0751,
+                    dx: 0,
+                    dy: 0,
+                    dz: 0,
+                    visible: true,
+                    is_origin: true,
+                },
+                MultiComponent {
+                    graphic: 0x0063,
+                    dx: 0,
+                    dy: -1,
+                    dz: 0,
+                    visible: true,
+                    is_origin: false,
+                },
+                MultiComponent {
+                    graphic: 0x31F4,
+                    dx: 0,
+                    dy: -1,
+                    dz: 7,
+                    visible: true,
+                    is_origin: false,
+                },
+            ],
+        )]));
+
+        // `sz_chain`'s authoritative half: stepping north from the bridge
+        // (stand z=2) resolves the climb to z=7.
+        let landing_z =
+            calculate_new_z(&world, &mut map, Some(&multis), plot_x, plot_y, 2, 0 /* north */)
+                .expect("the bridge-widened climb must resolve a landing Z");
+        assert_eq!(landing_z, 7);
+
+        // `blocking_item_at`'s other half, checked against the body's ACTUAL
+        // landing height: the riser does NOT block.
+        let dyn_items = dynamic_statics_at(&world, &map, plot_x, plot_y);
+        assert!(
+            blocking_item_at(
+                &world,
+                &mut map,
+                Some(&multis),
+                plot_x,
+                plot_y,
+                landing_z,
+                &dyn_items,
+                false
+            )
+            .is_none(),
+            "the riser must not block a body actually standing at the resolved landing Z"
+        );
+
+        // Combined: this is EXACTLY `build_scene`'s new per-tile `w` derivation.
+        let walk = calculate_new_z(&world, &mut map, Some(&multis), plot_x, plot_y, 2, 0).is_some()
+            && blocking_item_at(
+                &world,
+                &mut map,
+                Some(&multis),
+                plot_x,
+                plot_y,
+                landing_z,
+                &dyn_items,
+                false,
+            )
+            .is_none();
+        assert!(walk, "the foundation's stairs must be walkable onto the plot");
+
+        // The SAME riser, checked against the OLD pre-step Z (2) instead,
+        // DOES block — proving why `build_scene` must pass the RESOLVED z,
+        // not `pz`, into `blocking_item_at`.
+        assert!(
+            blocking_item_at(&world, &mut map, Some(&multis), plot_x, plot_y, 2, &dyn_items, false)
+                .is_some(),
+            "checked against the pre-step Z the riser genuinely overlaps the body"
+        );
+
+        // And the OLD/unchanged `tile_walkable` (which always checks against
+        // the pre-step Z, matching `step_ok`) still disagrees with the chain
+        // answer — the exact split `build_scene`'s per-tile `w` now resolves
+        // in favor of the chain, inside `CHAIN_RADIUS`.
+        assert!(
+            !tile_walkable(&world, &mut map, Some(&multis), plot_x, plot_y, 2),
+            "tile_walkable's own (unchanged, pre-step-Z) semantics must still deny this climb"
+        );
+    }
+
+    /// Companion to the above: with NO surface at all over the impassable
+    /// riser (the plot's own floor removed), the climb must genuinely stay
+    /// unwalkable — `calculate_new_z` must return `None` (nothing to land
+    /// on) — proving the fix isn't "the riser never blocks", it depends on
+    /// there being a real destination surface to land on.
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn foundation_riser_with_no_surface_above_is_genuinely_unwalkable() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let mut map = MapData::open(&dir).expect("open map data");
+
+        let (bridge_x, bridge_y) = (1459i64, 1766i64);
+        let (plot_x, plot_y) = (bridge_x, bridge_y - 1);
+        for (tx, ty) in [(bridge_x, bridge_y), (plot_x, plot_y)] {
+            assert!(
+                map.land(tx as u32, ty as u32).impassable(),
+                "({tx},{ty}) should be deep water"
+            );
+            assert!(
+                map.statics(tx as u32, ty as u32).is_empty(),
+                "({tx},{ty}) should have no real statics"
+            );
+        }
+
+        let mut world = anima_core::World::new();
+        world.items.insert(
+            1,
+            synth_item(1, 0, bridge_x as u16, bridge_y as u16, 0, true),
+        );
+        let multis = Multis::from_components(std::collections::HashMap::from([(
+            0u32,
+            vec![
+                MultiComponent {
+                    graphic: 0x0751,
+                    dx: 0,
+                    dy: 0,
+                    dz: 0,
+                    visible: true,
+                    is_origin: true,
+                },
+                MultiComponent {
+                    graphic: 0x0063,
+                    dx: 0,
+                    dy: -1,
+                    dz: 0,
+                    visible: true,
+                    is_origin: false,
+                },
+                // no floor component this time — nothing to stand on.
+            ],
+        )]));
+
+        assert_eq!(
+            calculate_new_z(&world, &mut map, Some(&multis), plot_x, plot_y, 2, 0),
+            None,
+            "an impassable riser with nothing to stand on above it must not resolve a landing Z"
+        );
+        assert!(
+            !tile_walkable(&world, &mut map, Some(&multis), plot_x, plot_y, 2),
+            "and must still be unwalkable through the ordinary (unchanged) check too"
+        );
+    }
+
+    /// Root-cause regression for the SERVER'S OWN movement gate (`can_walk`/
+    /// `step_ok`, now [`can_step_to`]): before this fix, a real committed step
+    /// — the browser's keyboard walk, resolved server-side to decide which
+    /// direction to actually send — used the same pre-step-Z blocker bug
+    /// `blocking_item_at` was split out to fix for `build_scene`'s `w`, just
+    /// never applied here. Live-reproduced: a character climbed the ground →
+    /// stairs (landing on the bridge at z=2) and then could not step onto the
+    /// foundation, even though `build_scene` already reported that tile
+    /// `w=1`. Exercises the exact same bridge/riser/plot geometry as
+    /// `foundation_stairs_bridge_climb_walkable_via_chain_and_resolved_z_blocker_check`
+    /// above, but through `can_step_to` itself (the real gate), and proves
+    /// the fix didn't weaken anything a real step must still refuse: a
+    /// closed door and a genuinely unclimbable wall — both still deny (as
+    /// `StepDeny::NoLanding`; see the door assertion's own doc for the
+    /// honest reason they share that variant).
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn can_step_to_allows_the_stairs_climb_and_still_blocks_a_door_and_a_wall() {
+        let dir_path = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let mut map = MapData::open(&dir_path).expect("open map data");
+
+        // --- 1. the foundation's stairs must now be ALLOWED, landing at z=7,
+        // through the REAL gate — not just `calculate_new_z` + `blocking_item_at`
+        // called by hand (already proven above).
+        let (bridge_x, bridge_y) = (1459i64, 1766i64);
+        let (plot_x, plot_y) = (bridge_x, bridge_y - 1);
+        let mut climb_world = anima_core::World::new();
+        climb_world.items.insert(
+            1,
+            synth_item(1, 0, bridge_x as u16, bridge_y as u16, 0, true),
+        );
+        let climb_multis = Multis::from_components(std::collections::HashMap::from([(
+            0u32,
+            vec![
+                MultiComponent {
+                    graphic: 0x0751,
+                    dx: 0,
+                    dy: 0,
+                    dz: 0,
+                    visible: true,
+                    is_origin: true,
+                },
+                MultiComponent {
+                    graphic: 0x0063,
+                    dx: 0,
+                    dy: -1,
+                    dz: 0,
+                    visible: true,
+                    is_origin: false,
+                },
+                MultiComponent {
+                    graphic: 0x31F4,
+                    dx: 0,
+                    dy: -1,
+                    dz: 7,
+                    visible: true,
+                    is_origin: false,
+                },
+            ],
+        )]));
+        match can_step_to(
+            &climb_world,
+            &mut map,
+            Some(&climb_multis),
+            bridge_x,
+            bridge_y,
+            2,
+            0, /* north: bridge -> plot */
+        ) {
+            Ok(z) => assert_eq!(z, 7, "must resolve the same landing Z calculate_new_z does"),
+            other => panic!("expected the foundation stairs climb to be allowed, got {other:?}"),
+        }
+        // Sanity: (plot_x, plot_y) really is the tile the step above landed on.
+        assert_eq!((plot_x, plot_y), (bridge_x, bridge_y - 1));
+
+        // --- 2. a closed door must STILL refuse — same door/geometry as
+        // `closed_door_blocks_strictly_but_not_for_planning`, walked through
+        // `can_step_to` instead of `explain_tile_walkable` directly.
+        //
+        // HONEST finding (same spirit as `fix1_smallboat_..._using_real_boat_data`'s
+        // hull-tile note above): the deny comes back as `NoLanding`, not
+        // `DynamicItem`. ClassicUO's `CreateItemList` (`Pathfinder.cs`) only
+        // drops a door's own Impassable flag from Z-scoring when the
+        // `SmoothDoors` profile option is on — off by default (a plain `bool`
+        // field, so `false` unless a player opts in) — so by default a closed
+        // door's tiledata (Impassable, height ~20) poisons `calculate_new_z`'s
+        // scoring the same way an actual wall would, and it returns `None`
+        // before `blocking_item_at` is ever consulted. This is faithful, not a
+        // regression: the OLD (pre-fix) `step_ok` ALSO called
+        // `calculate_new_z(..).is_none()` as its very first check, before its
+        // own inline blocker logic — so a closed door already denied a real
+        // step this exact way before this fix, and still does; this fix only
+        // changed how the tile SURFACE is scored and at which Z the blocker
+        // rules apply, not this early exit.
+        assert!(
+            map.item_is_door(0x06A5),
+            "0x06A5 should be a real door graphic"
+        );
+        let mut door_world = anima_core::World::new();
+        let door_serial = 1_073_751_127;
+        door_world.items.insert(
+            door_serial,
+            anima_core::world::Item {
+                serial: door_serial,
+                graphic: 0x06A5,
+                amount: 1,
+                pos: anima_core::types::Position {
+                    x: 1611,
+                    y: 1591,
+                    z: 0,
+                },
+                container: None,
+                layer: 0,
+                hue: 0,
+                name: String::new(),
+                direction: 0,
+                is_multi: false,
+            },
+        );
+        match can_step_to(&door_world, &mut map, None, 1611, 1592, 5, 0 /* north, into the door */) {
+            Err(StepDeny::NoLanding) => {}
+            other => panic!("expected the closed door to still deny the step, got {other:?}"),
+        }
+
+        // --- 3. a plain (unclimbable) wall must still refuse: the SAME
+        // impassable riser as the stairs climb above, but with no surface
+        // above it at all this time — nothing for `calculate_new_z` to land
+        // on, matching `foundation_riser_with_no_surface_above_is_genuinely_unwalkable`.
+        let mut wall_world = anima_core::World::new();
+        wall_world.items.insert(
+            1,
+            synth_item(1, 0, bridge_x as u16, bridge_y as u16, 0, true),
+        );
+        let wall_multis = Multis::from_components(std::collections::HashMap::from([(
+            0u32,
+            vec![
+                MultiComponent {
+                    graphic: 0x0751,
+                    dx: 0,
+                    dy: 0,
+                    dz: 0,
+                    visible: true,
+                    is_origin: true,
+                },
+                MultiComponent {
+                    graphic: 0x0063,
+                    dx: 0,
+                    dy: -1,
+                    dz: 0,
+                    visible: true,
+                    is_origin: false,
+                },
+                // no floor component this time — nothing to stand on.
+            ],
+        )]));
+        match can_step_to(&wall_world, &mut map, Some(&wall_multis), bridge_x, bridge_y, 2, 0) {
+            Err(StepDeny::NoLanding) => {}
+            other => panic!("expected the unclimbable riser to refuse with NoLanding, got {other:?}"),
+        }
     }
 }
