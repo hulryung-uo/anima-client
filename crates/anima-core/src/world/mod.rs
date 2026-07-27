@@ -1351,6 +1351,15 @@ pub struct World {
     /// [`crate::net::outgoing::build_house_design_request`] for each. Deduped
     /// on push by the 0xBF/0x1D handler in [`crate::net::game`].
     pub pending_house_design_requests: Vec<u32>,
+    /// The foundation item's serial while we're actively in the house
+    /// designer, `None` otherwise. Set by the 0xBF/0x20 BeginHouseCustomization
+    /// / EndHouseCustomization handler in [`crate::net::game::general_info`]
+    /// (ServUO `Server/Multis/HouseFoundation.cs`):
+    /// `[serial:u32][state:u8][0x0000][0xFFFF][0xFFFF][0xFF]`, state `0x04`
+    /// enter, `0x05` leave. This is the editor's whole "are we customizing,
+    /// and which house" state — the design content itself still lives in
+    /// [`World::house_designs`], reached the normal 0x1D/0xD8 way.
+    pub customizing_house: Option<u32>,
     /// The currently open bulletin board window (0x71 sub `0`/`1`). `None`
     /// until a board is opened; replaced wholesale by each fresh sub `0`.
     pub bulletin_board: Option<BulletinBoard>,

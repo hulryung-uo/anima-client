@@ -2193,6 +2193,77 @@ fn placement_json(world: &World, multis: Option<&Multis>) -> Option<Value> {
     }))
 }
 
+/// The story count a customizable foundation supports (ServUO
+/// `HouseFoundation.MaxLevels`, `Scripts/Multis/HouseFoundation.cs`): 3
+/// normally, 4 when the plot is 14+ tiles in either dimension. Folded from the
+/// SAME `multi.mul` component bounds [`ensure_house_tiles`] uses to decode
+/// design planes — just also tracking `max_x`, which decoding itself never
+/// needs (only `min_x`/`min_y`/`max_y` feed [`crate::world::decode_house_planes`]).
+/// Defaults to the conservative 3-story baseline when `multis` isn't loaded or
+/// the foundation's component list can't be found.
+fn house_design_max_levels(multis: Option<&Multis>, multi_id: u32) -> u8 {
+    let Some(comps) = multis.and_then(|m| m.components(multi_id)) else {
+        return 3;
+    };
+    if comps.is_empty() {
+        return 3;
+    }
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (0i16, 0i16, 0i16, 0i16);
+    for c in comps {
+        min_x = min_x.min(c.dx);
+        max_x = max_x.max(c.dx);
+        min_y = min_y.min(c.dy);
+        max_y = max_y.max(c.dy);
+    }
+    let plot = (max_x - min_x + 1).max(max_y - min_y + 1);
+    if plot >= 14 {
+        4
+    } else {
+        3
+    }
+}
+
+/// The house-designer editor snapshot (`houseDesign` scene key), present only
+/// while [`World::customizing_house`] is `Some` — omitted entirely otherwise
+/// (same "no key, not a null" convention as [`placement_json`]) so an ordinary
+/// scene stays byte-identical to before this field existed. Carries what a
+/// browser editor needs to place pieces:
+/// - `serial`/`revision`: the foundation and the design's revision counter
+///   (from [`World::house_designs`]; `0` if the 0xD8 itself hasn't arrived
+///   yet — 0x20 can beat that round-trip).
+/// - `floors`: see [`house_design_max_levels`].
+/// - `x`/`y`/`z`: the foundation's WORLD position. Every outgoing 0xD7
+///   designer command (`build_house_design_add_item` etc.) takes coordinates
+///   relative to the foundation's own multi center (ServUO
+///   `HouseFoundation.Designer_Build`: `mcl.Add(itemID, x, y, z)` where `x`/`y`
+///   are read straight off the wire), but the browser only knows which WORLD
+///   tile got clicked — it needs this to compute `dx = worldX - x`,
+///   `dy = worldY - y` itself.
+///
+/// Requires the foundation to already be a known [`World::items`] entry (the
+/// only place its world position lives) — omits the whole field rather than
+/// guessing a position if it isn't, which can only happen for a moment right
+/// after entering design mode before the foundation's own item state has
+/// arrived.
+fn house_design_json(world: &World, multis: Option<&Multis>) -> Option<Value> {
+    let serial = world.customizing_house?;
+    let item = world.items.get(&serial)?;
+    let revision = world
+        .house_designs
+        .get(&serial)
+        .map(|d| d.revision)
+        .unwrap_or(0);
+    let floors = house_design_max_levels(multis, item.graphic as u32);
+    Some(json!({
+        "serial": serial,
+        "revision": revision,
+        "floors": floors,
+        "x": item.pos.x,
+        "y": item.pos.y,
+        "z": item.pos.z,
+    }))
+}
+
 /// Decode any pending custom-house designs (0xD8) whose foundation item is
 /// already in `world` and whose bounds we can now resolve. `anima-core` can't
 /// do this itself — mode-2 grid planes need the foundation multi's `multi.mul`
@@ -2690,6 +2761,10 @@ pub fn build_scene(
     // empty) fragment so an idle scene keeps serializing byte-identical to
     // before this field existed.
     let placement = placement_json(&s.world, multis);
+    // House-designer editor snapshot, if we're currently customizing a house —
+    // see `house_design_json`'s doc. Same "omit, don't null" convention as
+    // `placement` right above.
+    let house_design = house_design_json(&s.world, multis);
 
     // tiles/statics are the bulk (≈1225 + hundreds): serialize them straight into
     // String buffers instead of building serde_json::Value trees + re-walking them
@@ -3371,6 +3446,15 @@ pub fn build_scene(
         ),
         None => String::new(),
     };
+    // Purely additive, same convention as `placement_field` right above: omit
+    // the key entirely when nobody is customizing a house.
+    let house_design_field = match house_design {
+        Some(v) => format!(
+            ",\"houseDesign\":{}",
+            serde_json::to_string(&v).unwrap_or_else(|_| "null".into())
+        ),
+        None => String::new(),
+    };
     format!(
         "{{\"player\":{player},\
          \"map\":{{\"cx\":{px},\"cy\":{py},\"radius\":{LAND_RADIUS},\"viewRange\":{RADIUS},\"tiles\":[{tiles}],\"maxZ\":{max_z},\"dbg\":{dbg}}},\
@@ -3380,7 +3464,7 @@ pub fn build_scene(
          \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"logoutAck\":{logout_ack},\"boatMoves\":{boat_moves},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
-         \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps}{placement_field},\
+         \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps}{placement_field}{house_design_field},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",
         s.confirms, s.denies
     )
@@ -4836,6 +4920,111 @@ mod tests {
             v["tiles"].as_array().unwrap().len(),
             PLACEMENT_TILE_CAP,
             "must cap rather than dump every distinct offset"
+        );
+    }
+
+    #[test]
+    fn house_design_json_none_when_not_customizing() {
+        let world = anima_core::World::new();
+        assert!(house_design_json(&world, None).is_none());
+    }
+
+    #[test]
+    fn house_design_json_none_without_a_known_foundation_item() {
+        let mut world = anima_core::World::new();
+        // The 0xBF/0x20 notice arrived, but the foundation's own item state hasn't (yet).
+        world.customizing_house = Some(0x4003_0001);
+        assert!(
+            house_design_json(&world, None).is_none(),
+            "no known world position -> omit rather than guess"
+        );
+    }
+
+    #[test]
+    fn house_design_json_carries_serial_revision_and_world_position() {
+        let mut world = anima_core::World::new();
+        let serial = 0x4003_0002u32;
+        world.customizing_house = Some(serial);
+        world.item_mut(serial).graphic = 0x64; // arbitrary multi id, unknown to `multis` below
+        world.item_mut(serial).pos = Position {
+            x: 100,
+            y: 200,
+            z: 5,
+        };
+
+        // No 0xD8 design details have arrived yet -> revision defaults to 0.
+        let v = house_design_json(&world, None).expect("customizing a known foundation");
+        assert_eq!(v["serial"], serial);
+        assert_eq!(v["revision"], 0);
+        assert_eq!(v["floors"], 3, "no multis loaded -> conservative default");
+        assert_eq!(v["x"], 100);
+        assert_eq!(v["y"], 200);
+        assert_eq!(v["z"], 5);
+
+        let mut design = anima_core::world::HouseDesign::default();
+        design.revision = 7;
+        world.house_designs.insert(serial, design);
+        let v = house_design_json(&world, None).unwrap();
+        assert_eq!(v["revision"], 7, "once the 0xD8 arrives, its revision wins");
+    }
+
+    #[test]
+    fn house_design_max_levels_uses_the_14_tile_rule() {
+        let mut comps = std::collections::HashMap::new();
+        comps.insert(
+            1,
+            vec![
+                MultiComponent {
+                    graphic: 1,
+                    dx: -3,
+                    dy: -3,
+                    dz: 0,
+                    visible: true,
+                    is_origin: true,
+                },
+                MultiComponent {
+                    graphic: 1,
+                    dx: 3,
+                    dy: 3,
+                    dz: 0,
+                    visible: true,
+                    is_origin: false,
+                },
+            ], // 7x7 footprint -> below the 14-tile threshold
+        );
+        comps.insert(
+            2,
+            vec![
+                MultiComponent {
+                    graphic: 1,
+                    dx: -7,
+                    dy: -7,
+                    dz: 0,
+                    visible: true,
+                    is_origin: true,
+                },
+                MultiComponent {
+                    graphic: 1,
+                    dx: 6,
+                    dy: 6,
+                    dz: 0,
+                    visible: true,
+                    is_origin: false,
+                },
+            ], // exactly 14x14 -> at the threshold
+        );
+        let multis = Multis::from_components(comps);
+        assert_eq!(house_design_max_levels(Some(&multis), 1), 3);
+        assert_eq!(house_design_max_levels(Some(&multis), 2), 4);
+        assert_eq!(
+            house_design_max_levels(Some(&multis), 999),
+            3,
+            "unknown multi id -> conservative default"
+        );
+        assert_eq!(
+            house_design_max_levels(None, 1),
+            3,
+            "no multis loaded -> conservative default"
         );
     }
 

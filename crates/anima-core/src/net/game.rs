@@ -3007,8 +3007,8 @@ fn chat_message(world: &mut World, frame: &[u8]) -> PResult<()> {
 /// close-gump-by-type (sub 0x04), party (sub 0x06), the facet switch (sub
 /// 0x08), the popup menu (sub 0x14), extended stats (sub 0x19: bonded-pet
 /// death / stat-training locks), spellbook content (sub 0x1B), the custom
-/// house notification (sub 0x1D), New Damage (sub 0x22), and speed mode (sub
-/// 0x26).
+/// house notification (sub 0x1D), house-designer enter/leave (sub 0x20), New
+/// Damage (sub 0x22), and speed mode (sub 0x26).
 ///
 /// Deliberately NOT wired: sub 0x16 CloseUserInterfaceWindows. ClassicUO does
 /// handle it client-side (`ExtendedCommand` case 0x16: paperdoll/statusbar/
@@ -3081,6 +3081,26 @@ fn general_info(world: &mut World, frame: &[u8]) -> PResult<()> {
             let current = world.house_designs.get(&serial).map(|d| d.revision);
             if current != Some(revision) && !world.pending_house_design_requests.contains(&serial) {
                 world.pending_house_design_requests.push(serial);
+            }
+        }
+        // 0x20 BeginHouseCustomization / EndHouseCustomization — ServUO
+        // `Server/Multis/HouseFoundation.cs`:
+        // `[serial:u32][state:u8][0x0000][0xFFFF][0xFFFF][0xFF]`. The trailing
+        // four fields are a fixed, always-identical tail (no real content —
+        // ClassicUO's `EnterHouseCustomization`/`GetInHouseCustomization`
+        // handlers read past them too), so only `serial`/`state` are worth
+        // reading here. `0x04` = entering the designer for `serial`'s
+        // foundation, `0x05` = leaving it; any other state byte is reserved/
+        // unknown and ignored, matching this function's general "unrecognized
+        // sub-thing, no-op" stance (see e.g. the default arm below) rather
+        // than erroring on it.
+        0x20 => {
+            let serial = r.u32()?;
+            let state = r.u8()?;
+            match state {
+                0x04 => world.customizing_house = Some(serial),
+                0x05 => world.customizing_house = None,
+                _ => {}
             }
         }
         // 0x22 New Damage — the AOS-era twin of 0x0B Damage (see [`damage`]'s
@@ -3779,6 +3799,57 @@ mod tests {
         assert_eq!(
             crate::net::outgoing::build_house_design_request(0x4001_0001),
             vec![0xBF, 0, 9, 0, 0x1E, 0x40, 0x01, 0x00, 0x01]
+        );
+    }
+
+    /// Builds a 0xBF/0x20 BeginHouseCustomization/EndHouseCustomization frame
+    /// with the full wire tail (`[0x0000][0xFFFF][0xFFFF][0xFF]`) even though
+    /// the handler only reads `serial`/`state` — so the test frame is the real
+    /// packet shape, not just the prefix the parser happens to consume.
+    fn house_customization_frame(serial: u32, state: u8) -> Vec<u8> {
+        let mut p = PacketWriter::new();
+        p.u8(0xBF).u16(0).u16(0x0020);
+        p.u32(serial).u8(state);
+        p.u16(0x0000).u16(0xFFFF).u16(0xFFFF).u8(0xFF);
+        let mut frame = p.into_vec();
+        let len = frame.len() as u16;
+        frame[1] = (len >> 8) as u8;
+        frame[2] = (len & 0xFF) as u8;
+        frame
+    }
+
+    #[test]
+    fn general_info_house_customization_enters_and_leaves() {
+        let mut w = World::new();
+        let serial = 0x4002_0001u32;
+
+        assert!(w.customizing_house.is_none());
+        assert!(apply_packet(
+            &mut w,
+            &house_customization_frame(serial, 0x04)
+        ));
+        assert_eq!(w.customizing_house, Some(serial));
+
+        assert!(apply_packet(
+            &mut w,
+            &house_customization_frame(serial, 0x05)
+        ));
+        assert!(w.customizing_house.is_none());
+    }
+
+    #[test]
+    fn general_info_house_customization_ignores_unknown_state() {
+        let mut w = World::new();
+        w.customizing_house = Some(0x4002_0002); // already customizing some other foundation
+
+        assert!(apply_packet(
+            &mut w,
+            &house_customization_frame(0x4002_0003, 0x99) // reserved/unknown state byte
+        ));
+        assert_eq!(
+            w.customizing_house,
+            Some(0x4002_0002),
+            "an unrecognized state byte must be a no-op, not clear or overwrite existing state"
         );
     }
 

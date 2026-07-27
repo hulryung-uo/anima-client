@@ -2228,6 +2228,7 @@ async function poll() {
     ingestSwings(scene); // briefly face the attacker toward the defender (0x2F Swing)
     ingestPaperdoll(scene); // open/refresh a paperdoll the server told us to show (0x88)
     refreshMapWindows(scene); // treasure/decoration map windows (0x90/0xF5 + 0x56)
+    refreshHouseDesign(scene); // custom house design editor panel (scene.houseDesign; server 0xBF/0x20-driven)
     refreshTip(); // update the hover tooltip if its OPL just arrived/changed
     drawMinimap(scene);
     updateGuardZones(scene); // guard-zone overlay: refetch on facet change, redraw clipped to view
@@ -6440,6 +6441,252 @@ function refreshMapWindows(scene) {
   }
 }
 
+// ---- custom house design editor (server-driven "design mode" — scene.houseDesign
+// is present ONLY while the player has a foundation open for customization; the
+// server (0xBF/0x20 + friends) decides when that starts and ends, this panel only
+// REFLECTS scene.houseDesign and never asks to enter/leave design mode on its own).
+// The design itself already renders through the ordinary world pipeline (0xD8
+// viewing swaps the foundation's components for the current design tiles right in
+// the scene — see DESIGN.md), so this panel is purely picker/action chrome; it
+// never draws the house. Built dynamically — one window total, like .trade-win/
+// .map-win — created when a session starts and torn down when it ends, not rebuilt
+// every poll (see refreshHouseDesign's early-out below). ----
+const HDESIGN_MODES = ["wall", "door", "floor", "stair", "roof", "misc"];
+const HDESIGN_LABELS = { wall: "Wall", door: "Door", floor: "Floor", stair: "Stair", roof: "Roof", misc: "Misc" };
+// Catalog JSON key per mode (GET /housecatalog — see loadHouseCatalog).
+const HDESIGN_CATALOG_KEY = { wall: "walls", door: "doors", floor: "floors", stair: "stairs", roof: "roofs", misc: "misc" };
+// wall/roof/misc are CATEGORISED (an array of {category, items:[{comment,graphics}]}
+// style groups); floor/door/stair are already a flat [{comment,graphics}] list — see
+// hdesignStyles() below, which reduces both shapes to one for the picker.
+const HDESIGN_GROUPED = new Set(["wall", "roof", "misc"]);
+let hdesignWin = null;     // the single panel, once built ({ el, styleSel, grid, eraserCb, floorRow, floors })
+let hdesignSerial = null;  // houseDesign.serial the panel is currently built for
+let hdesignCatalog = null; // GET /housecatalog response — static, fetched once (see loadHouseCatalog)
+let hdesignCatalogPromise = null;
+let hdesignMode = "wall";  // active tab
+const hdesignStyleIdx = { wall: 0, door: 0, floor: 0, stair: 0, roof: 0, misc: 0 }; // remembered <select> pick per mode
+let hdesignPiece = null;   // { mode, graphic } currently selected to place, or null (nothing to place yet)
+let hdesignEraser = false; // eraser toggle: a ground click deletes instead of placing
+let hdesignFloor = 1;      // active floor (1..houseDesign.floors), client-tracked — the server has no
+                            // "current floor" readback, it just acts on whichever hdesign:floor:<n> came last
+
+// Static per-server catalog (same shape for every foundation) — fetch once and cache
+// forever, same pattern as loadDyedPalette() above; re-entering design mode later
+// (even for a different house) reuses it rather than refetching.
+function loadHouseCatalog() {
+  if (!hdesignCatalogPromise) {
+    hdesignCatalogPromise = fetch("/housecatalog")
+      .then((r) => { if (!r.ok) throw new Error("housecatalog HTTP " + r.status); return r.json(); })
+      .then((data) => { hdesignCatalog = data; if (hdesignWin) renderHouseDesignPicker(); return data; })
+      .catch((error) => {
+        console.warn("house catalog unavailable", error);
+        hdesignCatalogPromise = null; // allow a later attempt (e.g. reopening the editor) to retry
+        return null;
+      });
+  }
+  return hdesignCatalogPromise;
+}
+
+// Reduce either catalog shape (grouped wall/roof/misc vs flat floor/door/stair) to
+// one list of {comment, graphics, group} "styles" for the active mode's picker.
+// `group` carries the server's numeric category (grouped modes only) as an optgroup
+// label — it's purely cosmetic, nothing gates on it.
+function hdesignStyles(mode) {
+  const key = HDESIGN_CATALOG_KEY[mode];
+  const list = (hdesignCatalog && hdesignCatalog[key]) || [];
+  if (!HDESIGN_GROUPED.has(mode)) return list.map((it) => ({ comment: it.comment, graphics: it.graphics || [], group: null }));
+  const out = [];
+  for (const cat of list) {
+    for (const it of (cat.items || [])) {
+      out.push({ comment: it.comment, graphics: it.graphics || [], group: "Category " + (cat.category | 0) });
+    }
+  }
+  return out;
+}
+
+// Rebuild the grid of clickable piece art for one style (or clear it if none is
+// selected yet / the mode has no styles). Graphic `0` means "no piece in this slot"
+// (a style's list is padded to a fixed width) — skipped, per the catalog contract.
+function renderHouseDesignGrid(style) {
+  if (!hdesignWin) return;
+  const grid = hdesignWin.grid;
+  grid.innerHTML = "";
+  if (!style) return;
+  for (const raw of style.graphics || []) {
+    const gph = raw | 0;
+    if (!gph) continue;
+    const cell = document.createElement("div");
+    cell.className = "hdesign-piece";
+    if (hdesignPiece && hdesignPiece.mode === hdesignMode && hdesignPiece.graphic === gph) cell.classList.add("selected");
+    const img = document.createElement("img");
+    img.className = "hdesign-piece-icon";
+    img.src = `art/static/${gph}.png`;
+    img.onerror = () => { img.style.visibility = "hidden"; };
+    cell.appendChild(img);
+    cell.addEventListener("click", () => {
+      hdesignPiece = { mode: hdesignMode, graphic: gph };
+      grid.querySelectorAll(".hdesign-piece.selected").forEach((c) => c.classList.remove("selected"));
+      cell.classList.add("selected");
+    });
+    grid.appendChild(cell);
+  }
+}
+// Rebuild the style <select> for the active mode (labelled by each style's own
+// `comment`, grouped into <optgroup>s for wall/roof/misc) and its piece grid below
+// it. Called on every tab switch and once the catalog finishes loading.
+function renderHouseDesignPicker() {
+  if (!hdesignWin) return;
+  const sel = hdesignWin.styleSel;
+  if (!hdesignCatalog) { sel.replaceChildren(new Option("loading…", "")); renderHouseDesignGrid(null); return; }
+  const styles = hdesignStyles(hdesignMode);
+  const grouped = HDESIGN_GROUPED.has(hdesignMode);
+  const kids = [];
+  let group = null;
+  styles.forEach((st, i) => {
+    const opt = new Option(st.comment || ("Style " + i), String(i));
+    if (grouped) {
+      if (!group || group.label !== st.group) { group = document.createElement("optgroup"); group.label = st.group; kids.push(group); }
+      group.appendChild(opt);
+    } else {
+      kids.push(opt);
+    }
+  });
+  sel.replaceChildren(...(kids.length ? kids : [new Option("(none)", "")]));
+  const idx = Math.min(hdesignStyleIdx[hdesignMode] || 0, Math.max(0, styles.length - 1));
+  sel.value = String(idx);
+  renderHouseDesignGrid(styles[idx] || null);
+}
+// Rebuild the 1..floors button row (only called when the panel is first built or
+// `floors` actually changes — see refreshHouseDesign).
+function renderHouseDesignFloors() {
+  if (!hdesignWin) return;
+  const row = hdesignWin.floorRow;
+  row.innerHTML = "";
+  for (let n = 1; n <= hdesignWin.floors; n++) {
+    const b = document.createElement("button");
+    b.className = "dlg-btn hdesign-floor-btn" + (n === hdesignFloor ? " active" : "");
+    b.textContent = String(n);
+    b.addEventListener("click", () => {
+      hdesignFloor = n;
+      row.querySelectorAll(".hdesign-floor-btn").forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+      sendInput("hdesign:floor:" + n);
+    });
+    row.appendChild(b);
+  }
+}
+function closeHouseDesignWindow() {
+  if (hdesignWin) { hdesignWin.el.remove(); hdesignWin = null; }
+  hdesignSerial = null;
+}
+function buildHouseDesignWindow(hd) {
+  const el = document.createElement("div");
+  el.className = "gump-win hdesign-win";
+  el.style.left = "260px"; el.style.top = "70px";
+  el.innerHTML =
+    '<div class="gump-title"><span>House Design</span><span class="gump-close">✕</span></div>'
+    + '<div class="gump-body">'
+    + '<div class="hdesign-tabs">' + HDESIGN_MODES.map((m) =>
+        `<button class="hdesign-tab${m === hdesignMode ? " active" : ""}" data-mode="${m}">${HDESIGN_LABELS[m]}</button>`).join("")
+    + '</div>'
+    + '<select class="hdesign-style"></select>'
+    + '<div class="hdesign-grid"></div>'
+    + '<label class="hdesign-eraser"><input type="checkbox" class="hdesign-eraser-cb"> Eraser (click deletes)</label>'
+    + '<div class="hdesign-floor-row"></div>'
+    + '<div class="hdesign-actions">'
+    + '<button class="dlg-btn" data-cmd="commit">Commit</button>'
+    + '<button class="dlg-btn" data-cmd="revert">Revert</button>'
+    + '<button class="dlg-btn" data-cmd="backup">Backup</button>'
+    + '<button class="dlg-btn" data-cmd="restore">Restore</button>'
+    + '<button class="dlg-btn" data-cmd="clear">Clear</button>'
+    + '<button class="dlg-btn" data-cmd="close">Exit</button>'
+    + '</div>'
+    + '</div>';
+  document.body.appendChild(el);
+  hdesignWin = {
+    el,
+    styleSel: el.querySelector(".hdesign-style"),
+    grid: el.querySelector(".hdesign-grid"),
+    eraserCb: el.querySelector(".hdesign-eraser-cb"),
+    floorRow: el.querySelector(".hdesign-floor-row"),
+    floors: hd.floors | 0,
+  };
+  // The ✕ and the Exit action both just ASK the server to leave design mode — the
+  // panel itself only disappears once scene.houseDesign actually goes away (see
+  // refreshHouseDesign), matching "the panel never decides it".
+  el.querySelector(".gump-close").addEventListener("click", () => sendInput("hdesign:close"));
+  el.querySelectorAll(".hdesign-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      hdesignMode = btn.dataset.mode;
+      el.querySelectorAll(".hdesign-tab").forEach((b) => b.classList.toggle("active", b === btn));
+      renderHouseDesignPicker();
+    });
+  });
+  hdesignWin.styleSel.addEventListener("change", () => {
+    hdesignStyleIdx[hdesignMode] = parseInt(hdesignWin.styleSel.value, 10) || 0;
+    renderHouseDesignGrid(hdesignStyles(hdesignMode)[hdesignStyleIdx[hdesignMode]] || null);
+  });
+  hdesignWin.eraserCb.addEventListener("change", () => { hdesignEraser = hdesignWin.eraserCb.checked; });
+  el.querySelectorAll(".hdesign-actions [data-cmd]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const cmd = btn.dataset.cmd;
+      // Commit and Clear are destructive (finalizes the layout / wipes it back to an
+      // empty foundation) — confirm first, matching the character-delete confirm.
+      if (cmd === "commit" && !window.confirm("Commit this house design? This finalizes the layout.")) return;
+      if (cmd === "clear" && !window.confirm("Clear the entire design back to an empty foundation? This cannot be undone.")) return;
+      sendInput("hdesign:" + cmd);
+    });
+  });
+  makeDraggable(el, el.querySelector(".gump-title"));
+  renderHouseDesignFloors();
+  renderHouseDesignPicker();
+}
+// Show/hide the panel to match scene.houseDesign (absent outside design mode — see
+// this section's opening comment) and keep its floor-count in sync. Cheap early-out:
+// once the panel exists for the current house, an ordinary poll (only `revision`
+// ticking as pieces are added) has nothing here to react to — the design itself
+// renders through the normal world/tile pipeline, not this panel.
+function refreshHouseDesign(scene) {
+  const hd = scene && scene.houseDesign;
+  if (!hd) { if (hdesignWin) closeHouseDesignWindow(); return; }
+  const serial = hd.serial >>> 0;
+  if (hdesignWin && hdesignSerial === serial) {
+    if (hdesignWin.floors !== (hd.floors | 0)) { hdesignWin.floors = hd.floors | 0; renderHouseDesignFloors(); }
+    return;
+  }
+  if (hdesignWin) closeHouseDesignWindow(); // a different foundation opened without ours ever closing — start clean
+  hdesignSerial = serial;
+  hdesignFloor = 1; hdesignPiece = null; hdesignEraser = false; // fresh session, fresh picker state
+  buildHouseDesignWindow(hd);
+  loadHouseCatalog();
+}
+// Left-click handler for design mode, called from the canvas mousedown below BEFORE
+// the target-cursor branch so it takes priority whenever a session is open — returns
+// true to tell the caller the click is consumed (even when nothing is actually sent,
+// e.g. no piece picked yet), false when there's no session at all so every existing
+// path (target cursor, steering) runs exactly as before scene.houseDesign existed.
+// Coordinates are FOUNDATION-relative: ServUO `Designer_Build` does
+// `mcl.Add(itemID, x, y, z)` with x/y already relative to the multi's center and
+// derives z from the CURRENT floor server-side — so add/stair send no z at all.
+// Roof pieces are the one exception the wire format itself calls out (both
+// hdesign:roof and hdesign:roofdel take a z): a roof can sit at more than one height
+// on the same tile, so we pass the clicked tile's z (from groundTileAt) there —
+// erasing anything else needs that same z to disambiguate which item on the tile.
+function handleHouseDesignClick(e) {
+  const hd = scene && scene.houseDesign;
+  if (!hd) return false;
+  if (!hdesignPiece || hd.x == null) return true; // nothing selected, or foundation position not known yet
+  const g = clientToGlobal(e.clientX, e.clientY);
+  const t = groundTileAt(g.x, g.y);
+  const dx = t.x - (hd.x | 0), dy = t.y - (hd.y | 0);
+  const { mode, graphic } = hdesignPiece;
+  if (hdesignEraser) sendInput(`hdesign:${mode === "roof" ? "roofdel" : "del"}:${graphic}:${dx}:${dy}:${t.z}`);
+  else if (mode === "stair") sendInput(`hdesign:stair:${graphic}:${dx}:${dy}`);
+  else if (mode === "roof") sendInput(`hdesign:roof:${graphic}:${dx}:${dy}:${t.z}`);
+  else sendInput(`hdesign:add:${graphic}:${dx}:${dy}`);
+  return true;
+}
+
 // The worn backpack is the equip entry on layer 21 (0x15).
 function backpackSerial() {
   const p = scene && scene.player;
@@ -9145,6 +9392,12 @@ function setupInput() {
   // targetConsumedAt, so we skip those here to avoid a double-resolve.
   canvas.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
+    // Custom house design takes priority over everything below while a session is
+    // open (scene.houseDesign) — see handleHouseDesignClick's doc comment above. It
+    // returns false whenever there's no session, so ordinary target-cursor/steering
+    // clicks are completely unaffected — this is a pure no-op against an older
+    // server that never sends scene.houseDesign.
+    if (handleHouseDesignClick(e)) return;
     if (!(scene && scene.target && scene.target.active === 1) || targetUIHidden) return;
     if (performance.now() - targetConsumedAt < 200) return; // a mob/item already answered
     // Our own avatar is always at the canvas centre but isn't a click target (so it

@@ -24,12 +24,20 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anima_assets::{
-    Anim, AnimData, Art, Cliloc, Gumps, Hues, MapData, Multis, RadarCol, Sounds, Texmaps, TileData,
+    Anim, AnimData, Art, Cliloc, CustomHouseCatalog, Gumps, Hues, MapData, Multis, RadarCol,
+    Sounds, Texmaps, TileData,
+};
+use anima_core::net::outgoing::{
+    build_house_design_add_item, build_house_design_add_roof, build_house_design_add_stair,
+    build_house_design_backup, build_house_design_clear, build_house_design_close,
+    build_house_design_commit, build_house_design_delete_item, build_house_design_delete_roof,
+    build_house_design_go_to_floor, build_house_design_restore, build_house_design_revert,
+    build_house_design_sync,
 };
 use anima_core::net::{CharacterAppearance, CharacterChoice, CharacterPrompt, LoginConfig};
 use anima_core::path::{find_path, find_path_near};
@@ -292,6 +300,9 @@ pub struct PlayServer {
     tiledata: Option<Arc<TileData>>,
     scene: Arc<Mutex<String>>,
     rx: mpsc::Receiver<Option<Action>>,
+    /// House-designer editor commands (`hdesign:*`), kept off the `Action`
+    /// channel above — see [`HouseDesignCmd`]'s doc for why.
+    hdesign_rx: mpsc::Receiver<HouseDesignCmd>,
     login_rx: mpsc::Receiver<LoginAttempt>,
     character_rx: mpsc::Receiver<CharacterDecision>,
     sse_hub: SseHub,
@@ -686,11 +697,20 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     // for the desired_until window and overshoot past where the player stopped
     // (which made the prediction snap forward → "jump" on stop).
     let (tx, rx) = mpsc::channel::<Option<Action>>();
+    // House-designer editor commands (`hdesign:*`) — see `HouseDesignCmd`'s doc
+    // for why these ride their own channel instead of the `Action` one above.
+    let (hdesign_tx, hdesign_rx) = mpsc::channel::<HouseDesignCmd>();
 
     // Connected sound-SSE clients; the game loop pushes sound frames to these.
     let sse_hub: SseHub = Arc::new(Mutex::new(Vec::new()));
     // World-map POIs (towns/shops/dungeons/…), parsed once from the embedded data.
     let pois: Arc<String> = Arc::new(parse_pois());
+    // Custom-house building catalog (walls/floors/doors/misc/stairs/roofs/
+    // teleporters), served at `GET /housecatalog`. Unlike `pois` above, the
+    // house designer is opt-in and rare, so this is read+parsed lazily on the
+    // first request rather than blocking every startup — see
+    // `HouseCatalogCache`'s doc.
+    let house_catalog: Arc<HouseCatalogCache> = Arc::new(HouseCatalogCache::new(data_dir.clone()));
     // Guard-zone rectangles: parsed once from a local ServUO `Regions.xml` if one
     // is reachable (`$ANIMA_REGIONS` or `$HOME/dev/uo/servuo/Data/Regions.xml` —
     // see `regions::resolve_path`). This is server-local data with no packet
@@ -743,6 +763,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
             web_dir: cfg.web_dir.clone(),
             scene: scene.clone(),
             tx,
+            hdesign: hdesign_tx,
             login: login_tx,
             character: character_tx,
             art: art.clone(),
@@ -757,6 +778,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
             sse_hub: sse_hub.clone(),
             pois,
             guard_rects,
+            house_catalog,
             facet: facet.clone(),
             read_only: cfg.read_only,
             watch: watch.clone(),
@@ -775,6 +797,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
         tiledata,
         scene,
         rx,
+        hdesign_rx,
         login_rx,
         character_rx,
         sse_hub,
@@ -980,6 +1003,7 @@ impl PlayServer {
             tiledata,
             scene,
             rx,
+            hdesign_rx,
             login_rx,
             character_rx,
             sse_hub,
@@ -1309,6 +1333,46 @@ impl PlayServer {
                             let _ = session.apply_action(&other);
                         }
                     }
+                }
+                // House-designer editor commands (`hdesign:*`) — see
+                // `HouseDesignCmd`'s doc for why these ride their own channel
+                // instead of the `Action` one drained just above. Every one of
+                // ServUO's `Designer_*` handlers keys the whole session off
+                // the mobile that sent the packet, so a command with no known
+                // player serial yet (not fully in the world) is dropped rather
+                // than sent with a bogus one.
+                while let Ok(cmd) = hdesign_rx.try_recv() {
+                    let Some(player) = session.world.player.map(|s| s.0) else {
+                        continue;
+                    };
+                    let bytes = match cmd {
+                        HouseDesignCmd::AddItem { graphic, x, y } => {
+                            build_house_design_add_item(player, graphic, x, y)
+                        }
+                        HouseDesignCmd::DeleteItem { graphic, x, y, z } => {
+                            build_house_design_delete_item(player, graphic, x, y, z)
+                        }
+                        HouseDesignCmd::AddStair { graphic, x, y } => {
+                            build_house_design_add_stair(player, graphic, x, y)
+                        }
+                        HouseDesignCmd::AddRoof { graphic, x, y, z } => {
+                            build_house_design_add_roof(player, graphic, x, y, z)
+                        }
+                        HouseDesignCmd::DeleteRoof { graphic, x, y, z } => {
+                            build_house_design_delete_roof(player, graphic, x, y, z)
+                        }
+                        HouseDesignCmd::GoToFloor { floor } => {
+                            build_house_design_go_to_floor(player, floor)
+                        }
+                        HouseDesignCmd::Commit => build_house_design_commit(player),
+                        HouseDesignCmd::Close => build_house_design_close(player),
+                        HouseDesignCmd::Clear => build_house_design_clear(player),
+                        HouseDesignCmd::Revert => build_house_design_revert(player),
+                        HouseDesignCmd::Backup => build_house_design_backup(player),
+                        HouseDesignCmd::Restore => build_house_design_restore(player),
+                        HouseDesignCmd::Sync => build_house_design_sync(player),
+                    };
+                    let _ = session.send(&bytes);
                 }
                 if last_ping.elapsed().as_secs() >= 15 {
                     let _ = session.send(&[0x73, 0x00]);
@@ -1826,6 +1890,7 @@ struct SpawnHttp {
     web_dir: Option<PathBuf>,
     scene: Arc<Mutex<String>>,
     tx: mpsc::Sender<Option<Action>>,
+    hdesign: mpsc::Sender<HouseDesignCmd>,
     login: mpsc::Sender<LoginAttempt>,
     character: mpsc::Sender<CharacterDecision>,
     art: Option<Arc<Mutex<Art>>>,
@@ -1840,6 +1905,7 @@ struct SpawnHttp {
     sse_hub: SseHub,
     pois: Arc<String>,
     guard_rects: Arc<Vec<GuardRect>>,
+    house_catalog: Arc<HouseCatalogCache>,
     facet: Arc<AtomicU8>,
     /// Refuse everything that would touch the world/session (spectator mode).
     read_only: bool,
@@ -1853,6 +1919,7 @@ fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         web_dir,
         scene,
         tx,
+        hdesign,
         login,
         character,
         art,
@@ -1867,6 +1934,7 @@ fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         sse_hub,
         pois,
         guard_rects,
+        house_catalog,
         facet,
         read_only,
         watch,
@@ -1882,6 +1950,7 @@ fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         let web_dir = web_dir.clone();
         let scene = scene.clone();
         let tx = tx.clone();
+        let hdesign = hdesign.clone();
         let login = login.clone();
         let character = character.clone();
         let art = art.clone();
@@ -1900,6 +1969,7 @@ fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         let sse_hub = sse_hub.clone();
         let pois = pois.clone();
         let guard_rects = guard_rects.clone();
+        let house_catalog = house_catalog.clone();
         let watch = watch.clone();
         let facet = facet.clone();
         thread::spawn(move || {
@@ -1909,6 +1979,7 @@ fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
                     web_dir: &web_dir,
                     scene: &scene,
                     tx: &tx,
+                    hdesign: &hdesign,
                     login: &login,
                     character: &character,
                     art: &art,
@@ -1927,6 +1998,7 @@ fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
                     sse_hub: &sse_hub,
                     pois: &pois,
                     guard_rects: &guard_rects,
+                    house_catalog: &house_catalog,
                     facet: &facet,
                     read_only,
                     watch: &watch,
@@ -1942,6 +2014,7 @@ struct Ctx<'a> {
     web_dir: &'a Option<PathBuf>,
     scene: &'a Arc<Mutex<String>>,
     tx: &'a mpsc::Sender<Option<Action>>,
+    hdesign: &'a mpsc::Sender<HouseDesignCmd>,
     login: &'a mpsc::Sender<LoginAttempt>,
     character: &'a mpsc::Sender<CharacterDecision>,
     art: &'a Option<Arc<Mutex<Art>>>,
@@ -1960,6 +2033,7 @@ struct Ctx<'a> {
     sse_hub: &'a SseHub,
     pois: &'a Arc<String>,
     guard_rects: &'a Arc<Vec<GuardRect>>,
+    house_catalog: &'a Arc<HouseCatalogCache>,
     facet: &'a Arc<AtomicU8>,
     read_only: bool,
     watch: &'a Arc<AtomicU64>,
@@ -1974,6 +2048,7 @@ fn handle_request(ctx: Ctx) {
         read_only,
         watch,
         tx,
+        hdesign,
         login,
         character,
         art,
@@ -1992,6 +2067,7 @@ fn handle_request(ctx: Ctx) {
         sse_hub,
         pois,
         guard_rects,
+        house_catalog,
         facet,
     } = ctx;
     let raw_url = req.url().to_string();
@@ -2044,6 +2120,8 @@ fn handle_request(ctx: Ctx) {
         };
         if body.trim() == "stop" {
             let _ = tx.send(None); // key released → stop pacing now
+        } else if let Some(cmd) = parse_house_design_command(&body) {
+            let _ = hdesign.send(cmd);
         } else if let Some(action) = parse_command(&body) {
             let _ = tx.send(Some(action));
         }
@@ -2204,6 +2282,14 @@ fn handle_request(ctx: Ctx) {
         let body = regions_json(guard_rects, cur);
         let mut r = Response::from_string(body);
         r.add_header(ctype("application/json"));
+        let _ = req.respond(r);
+    } else if url == "/housecatalog" {
+        // Custom-house building catalog (walls/floors/doors/misc/stairs/roofs/
+        // teleporters). Static per-process data, parsed once on the FIRST
+        // request and cached from then on — see `HouseCatalogCache`'s doc.
+        let mut r = Response::from_string((*house_catalog.get()).clone());
+        r.add_header(ctype("application/json"));
+        r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=3600"[..]).unwrap());
         let _ = req.respond(r);
     } else if let Some(id) = parse_sound_url(&url) {
         serve_sound(sounds, id, req);
@@ -2721,6 +2807,92 @@ fn regions_json(rects: &[GuardRect], cur: u8) -> String {
     out
 }
 
+/// Cached `GET /housecatalog` body. `pois`/`guard_rects` above are read
+/// eagerly at `bind()` because every session wants a world map; the house
+/// designer is opt-in and comparatively rare, so this only reads+parses the
+/// eight `customhouse` catalog files ([`CustomHouseCatalog`]'s doc) on the
+/// FIRST request — `OnceLock` makes every worker thread after that (and every
+/// later request) just clone the cached `Arc<String>` instead of re-parsing.
+struct HouseCatalogCache {
+    data_dir: PathBuf,
+    once: OnceLock<Arc<String>>,
+}
+
+impl HouseCatalogCache {
+    fn new(data_dir: PathBuf) -> Self {
+        HouseCatalogCache {
+            data_dir,
+            once: OnceLock::new(),
+        }
+    }
+
+    fn get(&self) -> Arc<String> {
+        self.once
+            .get_or_init(|| Arc::new(house_catalog_json(&self.data_dir)))
+            .clone()
+    }
+}
+
+/// Shape [`CustomHouseCatalog`] into the flat JSON `GET /housecatalog` serves.
+/// Only `comment` (the style's display name) and `graphics` (its placeable
+/// tile ids) survive per entry — every other column (feature masks, per-side
+/// piece ids, …) only matters to how `graphics` was already assembled by
+/// `anima_assets::customhouse`'s parser, so the UI never needs them. Walls,
+/// misc fixtures, and roofs keep their real "category, several styles per
+/// category" grouping (mirrors the in-game designer's flip-page-of-styles
+/// gump); floors, doors, stairs, and teleporters are flat lists, matching
+/// `CustomHouseCatalog`'s own shape (see that module's doc). A missing/
+/// unreadable data directory degrades to an empty catalog (logged, not
+/// fatal) — same soft-failure stance `CustomHouseCatalog::open` itself takes
+/// for any one missing file.
+fn house_catalog_json(data_dir: &Path) -> String {
+    let catalog = CustomHouseCatalog::open(data_dir).unwrap_or_else(|e| {
+        eprintln!("play: house catalog not loaded ({e})");
+        CustomHouseCatalog::default()
+    });
+    fn categories_json<T>(
+        cats: &[anima_assets::CustomHouseCategory<T>],
+        f: impl Fn(&T) -> (&str, &[u16]),
+    ) -> serde_json::Value {
+        let arr: Vec<serde_json::Value> = cats
+            .iter()
+            .map(|c| {
+                let items: Vec<serde_json::Value> = c
+                    .items
+                    .iter()
+                    .map(|it| {
+                        let (comment, graphics) = f(it);
+                        serde_json::json!({ "comment": comment, "graphics": graphics })
+                    })
+                    .collect();
+                serde_json::json!({ "category": c.category, "items": items })
+            })
+            .collect();
+        serde_json::Value::Array(arr)
+    }
+    fn flat_json<T>(items: &[T], f: impl Fn(&T) -> (&str, &[u16])) -> serde_json::Value {
+        serde_json::Value::Array(
+            items
+                .iter()
+                .map(|it| {
+                    let (comment, graphics) = f(it);
+                    serde_json::json!({ "comment": comment, "graphics": graphics })
+                })
+                .collect(),
+        )
+    }
+    let body = serde_json::json!({
+        "walls": categories_json(&catalog.walls, |w| (w.comment.as_str(), w.graphics.as_slice())),
+        "floors": flat_json(&catalog.floors, |x| (x.comment.as_str(), x.graphics.as_slice())),
+        "doors": flat_json(&catalog.doors, |x| (x.comment.as_str(), x.graphics.as_slice())),
+        "misc": categories_json(&catalog.misc, |m| (m.comment.as_str(), m.graphics.as_slice())),
+        "stairs": flat_json(&catalog.stairs, |x| (x.comment.as_str(), x.graphics.as_slice())),
+        "teleporters": flat_json(&catalog.teleporters, |x| (x.comment.as_str(), x.graphics.as_slice())),
+        "roofs": categories_json(&catalog.roofs, |r| (r.comment.as_str(), r.graphics.as_slice())),
+    });
+    serde_json::to_string(&body).unwrap_or_else(|_| "{}".into())
+}
+
 /// Serve a `web/` static asset. A configured `web_dir` on disk wins when it has
 /// the file; otherwise (or with `web_dir: None`) fall back to the copy embedded
 /// in the binary at compile time ([`EMBEDDED_WEB`]) — this is what lets
@@ -2788,6 +2960,108 @@ fn content_type(path: &str) -> &'static str {
     }
 }
 
+/// One `hdesign:*` house-designer editor command (wire syntax: see
+/// [`parse_house_design_command`]'s doc). Kept as its own small enum/parser
+/// pair — NOT folded into [`Action`]/[`parse_command`] below — because every
+/// one of these packets is a `0xD7` `HouseFoundation` designer command
+/// (`anima_core::net::outgoing::build_house_design_*`) that needs only the
+/// driver's OWN player serial (ServUO keys the whole session off the mobile
+/// that sent the packet) plus the parsed ints already in scope right here;
+/// unlike a real [`Action`], none of these need to consult or mutate session
+/// state ([`crate::Session::apply_action`] has nothing to add), so building
+/// the packet in the game loop directly off this enum is simpler than growing
+/// the shared `Action` enum + its exhaustive `apply_action` match by 13 more
+/// variants for a feature this self-contained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HouseDesignCmd {
+    AddItem { graphic: u16, x: i32, y: i32 },
+    DeleteItem { graphic: u16, x: i32, y: i32, z: i32 },
+    AddStair { graphic: u16, x: i32, y: i32 },
+    AddRoof { graphic: u16, x: i32, y: i32, z: i32 },
+    DeleteRoof { graphic: u16, x: i32, y: i32, z: i32 },
+    GoToFloor { floor: u8 },
+    Commit,
+    Close,
+    Clear,
+    Revert,
+    Backup,
+    Restore,
+    Sync,
+}
+
+/// Parse an `hdesign:*` house-designer command (`POST /input`, tried before
+/// [`parse_command`] — see the `/input` handler). `graphic` is a catalog piece
+/// id (`GET /housecatalog`); `x`/`y`/`z` are foundation-relative offsets, the
+/// same convention the outgoing `build_house_design_*` builders this maps 1:1
+/// onto expect. Supported:
+/// `hdesign:add:<graphic>:<x>:<y>` · `hdesign:del:<graphic>:<x>:<y>:<z>` ·
+/// `hdesign:stair:<graphic>:<x>:<y>` · `hdesign:roof:<graphic>:<x>:<y>:<z>` ·
+/// `hdesign:roofdel:<graphic>:<x>:<y>:<z>` · `hdesign:floor:<n>` ·
+/// `hdesign:commit` · `hdesign:close` · `hdesign:clear` · `hdesign:revert` ·
+/// `hdesign:backup` · `hdesign:restore` · `hdesign:sync` (the last seven take
+/// no argument; a trailing `:` after them is rejected like [`parse_command`]'s
+/// `logout` already does).
+fn parse_house_design_command(body: &str) -> Option<HouseDesignCmd> {
+    let rest = body.trim().strip_prefix("hdesign:")?;
+    let (cmd, arg) = rest.split_once(':').unwrap_or((rest, ""));
+    match cmd {
+        "add" => {
+            let mut p = arg.split(':');
+            Some(HouseDesignCmd::AddItem {
+                graphic: p.next()?.parse().ok()?,
+                x: p.next()?.parse().ok()?,
+                y: p.next()?.parse().ok()?,
+            })
+        }
+        "del" => {
+            let mut p = arg.split(':');
+            Some(HouseDesignCmd::DeleteItem {
+                graphic: p.next()?.parse().ok()?,
+                x: p.next()?.parse().ok()?,
+                y: p.next()?.parse().ok()?,
+                z: p.next()?.parse().ok()?,
+            })
+        }
+        "stair" => {
+            let mut p = arg.split(':');
+            Some(HouseDesignCmd::AddStair {
+                graphic: p.next()?.parse().ok()?,
+                x: p.next()?.parse().ok()?,
+                y: p.next()?.parse().ok()?,
+            })
+        }
+        "roof" => {
+            let mut p = arg.split(':');
+            Some(HouseDesignCmd::AddRoof {
+                graphic: p.next()?.parse().ok()?,
+                x: p.next()?.parse().ok()?,
+                y: p.next()?.parse().ok()?,
+                z: p.next()?.parse().ok()?,
+            })
+        }
+        "roofdel" => {
+            let mut p = arg.split(':');
+            Some(HouseDesignCmd::DeleteRoof {
+                graphic: p.next()?.parse().ok()?,
+                x: p.next()?.parse().ok()?,
+                y: p.next()?.parse().ok()?,
+                z: p.next()?.parse().ok()?,
+            })
+        }
+        "floor" => Some(HouseDesignCmd::GoToFloor {
+            floor: arg.parse().ok()?,
+        }),
+        "commit" => arg.is_empty().then_some(HouseDesignCmd::Commit),
+        "close" => arg.is_empty().then_some(HouseDesignCmd::Close),
+        "clear" => arg.is_empty().then_some(HouseDesignCmd::Clear),
+        "revert" => arg.is_empty().then_some(HouseDesignCmd::Revert),
+        "backup" => arg.is_empty().then_some(HouseDesignCmd::Backup),
+        "restore" => arg.is_empty().then_some(HouseDesignCmd::Restore),
+        "sync" => arg.is_empty().then_some(HouseDesignCmd::Sync),
+        _ => None,
+    }
+}
+
 /// Parse a `cmd:arg` input line into an [`Action`]. Supported:
 /// `walk:<dir>:<run>` · `run:<dir>` · `say:<text>` · `use:<serial>` ·
 /// `click:<serial>` · `attack:<serial>` · `pickup:<serial>[:<amount>]` ·
@@ -2812,6 +3086,9 @@ fn content_type(path: &str) -> &'static str {
 /// sessions with different opponents are addressed by their own `mycont`,
 /// from `scene.trades[].myCont`; items move via the normal `drop` command
 /// targeting that same container serial).
+///
+/// House-designer commands (`hdesign:*`) are a separate family — see
+/// [`parse_house_design_command`], tried first by the `/input` handler.
 fn parse_command(body: &str) -> Option<Action> {
     let raw_body = body;
     let body = body.trim();
@@ -3264,6 +3541,85 @@ mod hue_palette_tests {
     fn logout_command_is_exact_and_argument_free() {
         assert_eq!(parse_command("logout"), Some(Action::Logout));
         assert!(parse_command("logout:anything").is_none());
+    }
+
+    #[test]
+    fn house_design_add_command_parses_graphic_and_position() {
+        assert_eq!(
+            parse_house_design_command("hdesign:add:1234:5:-6"),
+            Some(HouseDesignCmd::AddItem {
+                graphic: 1234,
+                x: 5,
+                y: -6,
+            })
+        );
+        assert!(parse_house_design_command("hdesign:add:1234:5").is_none());
+        assert!(parse_house_design_command("hdesign:add:bad:5:6").is_none());
+    }
+
+    #[test]
+    fn house_design_delete_command_parses_graphic_position_and_z() {
+        assert_eq!(
+            parse_house_design_command("hdesign:del:1234:5:-6:2"),
+            Some(HouseDesignCmd::DeleteItem {
+                graphic: 1234,
+                x: 5,
+                y: -6,
+                z: 2,
+            })
+        );
+        assert!(parse_house_design_command("hdesign:del:1234:5:-6").is_none());
+    }
+
+    #[test]
+    fn house_design_floor_command_parses_level() {
+        assert_eq!(
+            parse_house_design_command("hdesign:floor:3"),
+            Some(HouseDesignCmd::GoToFloor { floor: 3 })
+        );
+        assert!(parse_house_design_command("hdesign:floor:bad").is_none());
+        assert!(parse_house_design_command("hdesign:floor:").is_none());
+    }
+
+    #[test]
+    fn house_design_no_arg_commands_reject_a_trailing_argument() {
+        assert_eq!(
+            parse_house_design_command("hdesign:commit"),
+            Some(HouseDesignCmd::Commit)
+        );
+        assert_eq!(
+            parse_house_design_command("hdesign:close"),
+            Some(HouseDesignCmd::Close)
+        );
+        assert_eq!(
+            parse_house_design_command("hdesign:clear"),
+            Some(HouseDesignCmd::Clear)
+        );
+        assert_eq!(
+            parse_house_design_command("hdesign:revert"),
+            Some(HouseDesignCmd::Revert)
+        );
+        assert_eq!(
+            parse_house_design_command("hdesign:backup"),
+            Some(HouseDesignCmd::Backup)
+        );
+        assert_eq!(
+            parse_house_design_command("hdesign:restore"),
+            Some(HouseDesignCmd::Restore)
+        );
+        assert_eq!(
+            parse_house_design_command("hdesign:sync"),
+            Some(HouseDesignCmd::Sync)
+        );
+        assert!(parse_house_design_command("hdesign:commit:anything").is_none());
+    }
+
+    #[test]
+    fn house_design_command_rejects_unknown_verb_and_missing_prefix() {
+        assert!(parse_house_design_command("hdesign:bogus").is_none());
+        assert!(parse_house_design_command("add:1234:5:6").is_none());
+        // Falls through to the ordinary command parser instead — never a match here.
+        assert!(parse_command("hdesign:commit").is_none());
     }
 
     #[test]
