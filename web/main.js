@@ -2257,6 +2257,7 @@ async function poll() {
     refreshTrade(scene);  // secure trade window(s) (0x6F), one per session, auto-open/close
     updateTargetUI(); // reflect the server's target-cursor state (crosshair + banner)
     updatePlacementPreview(); // rebuild/clear the house-footprint preview if scene.placement changed
+    updateHouseDesignGhost(); // rebuild/clear the design-piece ghost if the session/selection changed
     updateDeathUI(scene); // grayscale + "You are dead" banner while the player is a ghost
     playSounds(scene);   // play new sound effects (0x54)
     updateMusic(scene);  // sync background music (0x6D)
@@ -3575,7 +3576,17 @@ const fadedSprites = new Set();
 const OCC_RADIUS = 4;                    // tile pre-filter; nothing further can overlap
 const A_OCC = 0.35, A_OCC_FOLIAGE = 0.45; // faded alpha: solids / foliage
 const OCC_FADE = 0.18;                    // per-frame lerp toward the target alpha
-const OCC_PAD = 2;                        // px: also fade what merely clips the outline
+// A sprite has to genuinely COVER the avatar, not merely touch its box. The
+// floor tile of the tile in front sits directly under your feet and grazes the
+// avatar's bottom edge by a pixel or two — measured live at (847,2272): floor
+// tiles at rel (+1,0) and (0,+1) spanned y235..279 against an avatar of
+// y174..236, a 1px overlap (~1.6% of it), and both went translucent. That is
+// the "transparency under my feet" this fixes. Real occluders in the same
+// measurements covered 32-80%, so any modest floor separates them cleanly.
+// Requiring both a minimum band AND a minimum area keeps a thin tall sliver
+// (a post seen edge-on) working while rejecting an edge graze.
+const OCC_MIN_PX = 6;                     // px: overlap must be at least this wide AND tall
+const OCC_MIN_FRAC = 0.05;                // …and cover at least this much of the avatar
 function transparencyPass() {
   let ptx, pty, pz;
   if (sitting) { ptx = sitting.x; pty = sitting.y; pz = sitting.z; } // seated: use the chair, not the (unmoved) real tile
@@ -3588,8 +3599,9 @@ function transparencyPass() {
     // The avatar's real on-screen rectangle. Bounds are global, so they already
     // account for the camera and zoom — the same space the statics report in.
     const pb = body.getBounds();
-    const ax0 = pb.x - OCC_PAD, ay0 = pb.y - OCC_PAD;
-    const ax1 = pb.x + pb.width + OCC_PAD, ay1 = pb.y + pb.height + OCC_PAD;
+    const ax0 = pb.x, ay0 = pb.y;
+    const ax1 = pb.x + pb.width, ay1 = pb.y + pb.height;
+    const minArea = pb.width * pb.height * OCC_MIN_FRAC;
     // Same depth formula drawMobs uses for "self": anything sorting at or below
     // this draws behind us and cannot hide us, whatever its bounds.
     const playerZi = mobDepthZ(ptx, pty, pz | 0); // same key drawMobs sorts the avatar with
@@ -3598,7 +3610,11 @@ function transparencyPass() {
       if (Math.abs(sp._tx - ptx) > OCC_RADIUS || Math.abs(sp._ty - pty) > OCC_RADIUS) return;
       if (sp.zIndex <= playerZi) return;
       const b = sp.getBounds();
-      if (b.x + b.width <= ax0 || b.x >= ax1 || b.y + b.height <= ay0 || b.y >= ay1) return;
+      // Measure the actual overlap instead of just testing for one: a floor tile
+      // in front only ever grazes the avatar's bottom edge (see OCC_MIN_PX).
+      const ow = Math.min(ax1, b.x + b.width) - Math.max(ax0, b.x);
+      const oh = Math.min(ay1, b.y + b.height) - Math.max(ay0, b.y);
+      if (ow < OCC_MIN_PX || oh < OCC_MIN_PX || ow * oh < minArea) return;
       newFaded.add(sp);
     };
     for (const sp of staticPool.values()) consider(sp);
@@ -6459,6 +6475,18 @@ const HDESIGN_CATALOG_KEY = { wall: "walls", door: "doors", floor: "floors", sta
 // style groups); floor/door/stair are already a flat [{comment,graphics}] list — see
 // hdesignStyles() below, which reduces both shapes to one for the picker.
 const HDESIGN_GROUPED = new Set(["wall", "roof", "misc"]);
+// Some catalog rows (newer Gargish-era styles, e.g. floors.txt category 52
+// "Gargish Green Stone") legitimately list graphics at 0x4000+ — ClassicUO's
+// own CustomHouse*.Parse never filters this, it just reflects whatever the
+// data files say. But 0x4000 is the MULTI id range, not a placeable item/tile
+// id, and ServUO's Designer_Build (`ValidPiece`) masks/rejects anything
+// outside the item table it actually loaded — on an ordinary (non-Gargish)
+// tiledata install that's every one of these. The rejection is entirely
+// silent to the player: the server just drops the piece and appends one line
+// to its own comp_val.log ("Invalid ItemID 0x4092" etc.) with no client-
+// visible error at all, so a bad selection here is invisible without server
+// log access. Treat it exactly like graphic `0` — never offer it, never send it.
+const HDESIGN_MAX_GRAPHIC = 0x4000;
 let hdesignWin = null;     // the single panel, once built ({ el, styleSel, grid, eraserCb, floorRow, floors })
 let hdesignSerial = null;  // houseDesign.serial the panel is currently built for
 let hdesignCatalog = null; // GET /housecatalog response — static, fetched once (see loadHouseCatalog)
@@ -6506,7 +6534,9 @@ function hdesignStyles(mode) {
 
 // Rebuild the grid of clickable piece art for one style (or clear it if none is
 // selected yet / the mode has no styles). Graphic `0` means "no piece in this slot"
-// (a style's list is padded to a fixed width) — skipped, per the catalog contract.
+// (a style's list is padded to a fixed width), and graphic >= HDESIGN_MAX_GRAPHIC
+// means "the server will silently drop this" (see that constant's doc) — both
+// skipped, never rendered as a clickable cell and so never selectable/sendable.
 function renderHouseDesignGrid(style) {
   if (!hdesignWin) return;
   const grid = hdesignWin.grid;
@@ -6514,7 +6544,7 @@ function renderHouseDesignGrid(style) {
   if (!style) return;
   for (const raw of style.graphics || []) {
     const gph = raw | 0;
-    if (!gph) continue;
+    if (!gph || gph >= HDESIGN_MAX_GRAPHIC) continue;
     const cell = document.createElement("div");
     cell.className = "hdesign-piece";
     if (hdesignPiece && hdesignPiece.mode === hdesignMode && hdesignPiece.graphic === gph) cell.classList.add("selected");
@@ -6578,6 +6608,7 @@ function renderHouseDesignFloors() {
 function closeHouseDesignWindow() {
   if (hdesignWin) { hdesignWin.el.remove(); hdesignWin = null; }
   hdesignSerial = null;
+  clearHouseDesignGhost(); // don't leave a stale ghost sprite behind once the session/panel is gone
 }
 function buildHouseDesignWindow(hd) {
   const el = document.createElement("div");
@@ -6679,6 +6710,11 @@ function handleHouseDesignClick(e) {
   const g = clientToGlobal(e.clientX, e.clientY);
   const t = groundTileAt(g.x, g.y);
   const dx = t.x - (hd.x | 0), dy = t.y - (hd.y | 0);
+  // `graphic` is always a catalog id off hdesignPiece — never a scene/static/
+  // multi graphic — and renderHouseDesignGrid already dropped anything that
+  // couldn't legally be picked (0, or >= HDESIGN_MAX_GRAPHIC — see its doc:
+  // the server drops those silently, comp_val.log only, no client-visible
+  // error), so there's nothing further to validate here before sending.
   const { mode, graphic } = hdesignPiece;
   if (hdesignEraser) sendInput(`hdesign:${mode === "roof" ? "roofdel" : "del"}:${graphic}:${dx}:${dy}:${t.z}`);
   else if (mode === "stair") sendInput(`hdesign:stair:${graphic}:${dx}:${dy}`);
@@ -8969,6 +9005,54 @@ function updatePlacementPreview() {
   }
   markDirty();
 }
+// House-design placement ghost: the same idea as the multi-placement preview
+// just above, scaled down to one tile — while a design session is open
+// (scene.houseDesign) AND a catalog piece is selected (hdesignPiece), show
+// that piece translucent at the hovered tile so a click's result is never a
+// surprise (a design click is otherwise a plain target cursor with no sense
+// of where/what will land — the server also drops a bad placement silently,
+// see HDESIGN_MAX_GRAPHIC's doc, so a confident preview matters even more
+// here). No ghost while erasing (there's nothing being placed to preview) or
+// once nothing is selected. Single sprite, not a list — a design piece is one
+// tile, never a multi-tile footprint — but otherwise foot-anchored/depth-
+// sorted/alpha exactly like the footprint sprites above, and rebuilt only
+// when the (piece, hovered tile) pair actually changes, same guard shape.
+let hdesignHoverX = null, hdesignHoverY = null; // world tile under the cursor (design mode only)
+let hdesignGhost = null;     // the single translucent PIXI.Sprite currently shown, or null
+let hdesignGhostKey = null;  // last (piece, tile) drawn — dedups rebuilds
+let hdesignGhostPending = false; // true if the last attempt skipped for want of a loaded texture
+function clearHouseDesignGhost() {
+  if (hdesignGhost) { world.removeChild(hdesignGhost); hdesignGhost.destroy(); hdesignGhost = null; }
+  hdesignGhostKey = null;
+  hdesignGhostPending = false;
+}
+// Called from poll() (to react to a fresh session, a piece pick, or the
+// session/panel ending) and from the mousemove handler below (to react to the
+// hovered tile changing) — same split responsibility as updatePlacementPreview.
+function updateHouseDesignGhost() {
+  const hd = scene && scene.houseDesign;
+  if (!hd || !hdesignPiece || hdesignEraser || hdesignHoverX == null) {
+    if (hdesignGhost) clearHouseDesignGhost();
+    return;
+  }
+  const key = hdesignPiece.graphic + "@" + hdesignHoverX + "," + hdesignHoverY;
+  if (key === hdesignGhostKey && !hdesignGhostPending) return; // nothing changed
+  const tex = texFor(`art/static/${hdesignPiece.graphic}.png`);
+  if (!tex) { hdesignGhostPending = true; return; } // texFor() will markDirty() once it loads; caught on a later poll
+  hdesignGhostKey = key;
+  hdesignGhostPending = false;
+  if (hdesignGhost) { world.removeChild(hdesignGhost); hdesignGhost.destroy(); hdesignGhost = null; }
+  const z = tileSZ(hdesignHoverX, hdesignHoverY) ?? (scene.player ? scene.player.z | 0 : 0);
+  const sp = new PIXI.Sprite(tex);
+  sp.anchor.set(0.5, 1.0); // foot-anchored, exactly like the static pool / multi preview above
+  sp.x = isoX(hdesignHoverX, hdesignHoverY);
+  sp.y = isoY(hdesignHoverX, hdesignHoverY, z) + HALF;
+  sp.zIndex = depthZ(hdesignHoverX, hdesignHoverY, z, 4);
+  sp.alpha = 0.6; // preview, not a placed piece
+  world.addChild(sp);
+  hdesignGhost = sp;
+  markDirty();
+}
 // CSS/client pixels → renderer (global) pixels: the canvas is CSS-stretched from a
 // capped internal buffer, so screen px ≠ renderer px (PIXI events use renderer px).
 function clientToGlobal(clientX, clientY) {
@@ -9435,6 +9519,18 @@ function setupInput() {
     if (t.x === placementHoverX && t.y === placementHoverY) return; // same tile → no rebuild
     placementHoverX = t.x; placementHoverY = t.y;
     updatePlacementPreview();
+  });
+  // House-design ghost: same idea, while a design session is open — track the
+  // hovered tile so updateHouseDesignGhost can show the selected piece there.
+  // Cheap early-out when there's no session, which is every ordinary mousemove
+  // against an older server (or outside design mode entirely).
+  canvas.addEventListener("mousemove", (e) => {
+    if (!(scene && scene.houseDesign)) return;
+    const g = clientToGlobal(e.clientX, e.clientY);
+    const t = groundTileAt(g.x, g.y);
+    if (t.x === hdesignHoverX && t.y === hdesignHoverY) return; // same tile → no rebuild
+    hdesignHoverX = t.x; hdesignHoverY = t.y;
+    updateHouseDesignGhost();
   });
   window.addEventListener("mouseup", (e) => {
     if (e.button !== 2) return;
