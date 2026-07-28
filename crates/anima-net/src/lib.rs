@@ -801,6 +801,31 @@ impl Session {
                     HouseDesignAction::Sync => build_house_design_sync(player),
                 };
                 self.send(&bytes)?;
+                // The five MUTATING edits are the only `Designer_*` handlers that
+                // leave the client stale: each ends in `mcl.Add/Remove(...);
+                // design.OnRevised();` and stops — no `SendDetailedInfoTo`, and not
+                // even the `DesignStateGeneral` revision notice `Designer_Level`
+                // sends. (Their lone `SendDetailedInfoTo` calls are error paths:
+                // `!ValidPiece` in `Designer_Build`, the undeletable-tile bail in
+                // `Designer_Delete`.) So the wall lands server-side and the player
+                // never sees it appear. Clear/Revert/Restore/Level DO answer and
+                // need nothing here. ClassicUO papers over the gap by mirroring the
+                // piece into its own local house copy (`HouseCustomizationManager`
+                // → `house.Add`), but `World` is our single source of truth, so we
+                // chase each edit with a Sync (0x0E) — the handler whose whole job
+                // is "resend full house state" — and render only what the server
+                // confirms. That also makes the error paths free: a rejected piece
+                // resyncs to the unchanged design instead of a bad optimistic add.
+                if matches!(
+                    *cmd,
+                    HouseDesignAction::AddItem { .. }
+                        | HouseDesignAction::DeleteItem { .. }
+                        | HouseDesignAction::AddStair { .. }
+                        | HouseDesignAction::AddRoof { .. }
+                        | HouseDesignAction::DeleteRoof { .. }
+                ) {
+                    self.send(&build_house_design_sync(player))?;
+                }
             }
         }
         Ok(())

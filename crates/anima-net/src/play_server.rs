@@ -1327,8 +1327,12 @@ impl PlayServer {
                 // Short pump so the loop ticks fast → the movement cadence gate fires near
                 // its exact UO step time (low jitter). Confirms are still processed every
                 // loop. (A long pump made the loop coarse → uneven step timing.)
-                if session.observe(Duration::from_millis(20)).is_err() {
-                    eprintln!("play: connection closed");
+                if let Err(e) = session.observe(Duration::from_millis(20)) {
+                    // Print the cause: a clean server-side close and a packet we
+                    // failed to decode both end the session here, and telling them
+                    // apart from the log is the difference between "the shard
+                    // dropped us" and "we have a parser bug" (see DriverError).
+                    eprintln!("play: connection closed: {e}");
                     break;
                 }
                 if let Some(allowed) = session.take_logout_ack() {
