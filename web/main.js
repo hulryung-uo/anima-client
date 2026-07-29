@@ -199,11 +199,7 @@ let openUrlWin = null;
 let lastTipNoticeSeq = 0;
 const tipNoticeWindows = new Map(); // seq -> live DOM window
 // ---- legacy modal text-entry dialogs (0xAB) ----
-const textEntryWindows = new Map(); // seq -> live DOM window
-const suppressedTextEntrySeqs = new Set(); // answered locally; wait for scene removal
 // ---- character profile windows (0xB8) ----
-const profileWindows = new Map(); // exact response seq -> live DOM window
-const suppressedProfileSeqs = new Set(); // closed/saved locally; wait for scene removal
 // ---- server-authorized logout (0xD1) ----
 let lastLogoutAckSeq = 0;
 let logoutPending = false;
@@ -218,7 +214,6 @@ let pdServerInfo = null;
 // MapCommand) — one window per serial (unlike the paperdoll's single slot),
 // so this is a per-serial seq gate, not one global counter. See
 // `refreshMapWindows`'s doc for the open-vs-refresh split.
-const lastMapOpenSeq = new Map(); // serial -> highest openSeq we've already opened for
 // ClassicUO ServerErrorMessages._pickUpErrors, indexed by the wire reason byte;
 // any reason >= 4 (including the "generic/Inspecific" 5) reads the same message
 // as 4 (ClassicUO clamps `code >= 5` to `code = 4`).
@@ -2186,8 +2181,8 @@ function primeSeqRings(s) {
   lastTipNoticeSeq = Math.max(lastTipNoticeSeq, maxSeq(s.tips));
   if (s.logoutAck) lastLogoutAckSeq = Math.max(lastLogoutAckSeq, s.logoutAck.seq | 0);
   lastBoatMoveSeq = Math.max(lastBoatMoveSeq, maxSeq(s.boatMoves));
-  // Per-serial, unlike the rings above — see `lastMapOpenSeq`'s doc.
-  if (s.maps) for (const m of s.maps) lastMapOpenSeq.set(m.serial >>> 0, m.openSeq | 0);
+  // Per-key open-counters live in the dialog families, not in a ring here.
+  primeDialogSeqs(s);
 }
 
 async function poll() {
@@ -2227,8 +2222,12 @@ async function poll() {
     ingestOpenUrls(scene); // ask before opening each validated external URL (0xA5)
     ingestSwings(scene); // briefly face the attacker toward the defender (0x2F Swing)
     ingestPaperdoll(scene); // open/refresh a paperdoll the server told us to show (0x88)
-    refreshMapWindows(scene); // treasure/decoration map windows (0x90/0xF5 + 0x56)
-    refreshHouseDesign(scene); // custom house design editor panel (scene.houseDesign; server 0xBF/0x20-driven)
+    // Every server-driven dialog window in one pass — generic gumps, legacy
+    // menus, hue pickers, trades, treasure maps, containers, the book reader,
+    // the vendor window, the context menu, text-entry, profiles, the text
+    // prompt and the house-design panel. See web/dialogs.js; each family is
+    // declared with registerDialog() next to the code that builds it.
+    syncDialogs(scene);
     refreshTip(); // update the hover tooltip if its OPL just arrived/changed
     drawMinimap(scene);
     updateGuardZones(scene); // guard-zone overlay: refetch on facet change, redraw clipped to view
@@ -2242,19 +2241,8 @@ async function poll() {
     if (skillsOn) refreshSkills();  // keep the skills window live (values/locks change)
     checkSkillGains(scene);  // announce skill base changes as journal system messages
     refreshParty();   // keep the party panel live + surface incoming invites (0xBF/0x06)
-    refreshContainers();  // keep open container windows live (items move/disappear)
-    refreshShop(scene);   // vendor buy/sell window (auto-opens on scene.shop)
-    refreshGumps(scene);  // server-sent generic gumps/dialogs (0xB0/0xDD)
-    refreshLegacyMenus(scene); // legacy icon/question menus (0x7C)
-    refreshHuePickers(scene); // server dye color pickers (0x95)
     refreshTipNotices(scene); // pageable tips / close-only notices (0xA6)
-    refreshTextEntryDialogs(scene); // legacy modal text-entry dialogs (0xAB)
-    refreshProfiles(scene); // editable self / read-only character profiles (0xB8)
     refreshLogoutAck(scene); // restore UI if the server denied a 0xD1 logout
-    refreshPopup(scene);  // right-click context menu (0xBF/0x14)
-    refreshBook(scene);   // open book reader (0x93/0xD4 + 0x66)
-    refreshPrompt(scene); // server text-prompt dialog (0x9A ASCII / 0xC2 Unicode)
-    refreshTrade(scene);  // secure trade window(s) (0x6F), one per session, auto-open/close
     updateTargetUI(); // reflect the server's target-cursor state (crosshair + banner)
     updatePlacementPreview(); // rebuild/clear the house-footprint preview if scene.placement changed
     updateHouseDesignGhost(); // rebuild/clear the design-piece ghost if the session/selection changed
@@ -6199,11 +6187,10 @@ function wireParty() {
 // consent required, so more than one stranger can have a session open with us
 // at once. One window per session, keyed by OUR OWN container serial
 // (`myCont`, the value every outgoing trade command addresses), built/torn
-// down the same way `containerWins`/`gumpWins` manage their multi-window
+// down the same way the container/gump dialog families manage their multi-window
 // lifecycle: build on first sight, refresh in place while the signature is
 // unchanged, remove once the session drops off scene.trades.
-const tradeWins = new Map(); // myCont -> { el, sig, myCont, goldIn, platIn, balanceGold, balancePlat }
-let tradeCascade = 0;
+const tradeCascade = { n: 0, left: 340, top: 90, wrap: 6, step: 24 };
 // Build one side's item grid from scene.contItems, reusing the exact `.cont-item`
 // markup/styling a normal container window uses. `readOnly` (the opponent's
 // side) skips the drag-arm data attribute so `setupItemDnD` won't let us lift
@@ -6250,27 +6237,16 @@ function sendTradeGold(win) {
   const plat = Math.max(0, Math.min(win.balancePlat, parseInt(win.platIn.value, 10) || 0));
   sendInput("tradegold:" + win.myCont + ":" + gold + ":" + plat);
 }
-function closeTradeWindow(myCont) {
-  const win = tradeWins.get(myCont);
-  if (win) { win.el.remove(); tradeWins.delete(myCont); }
-}
-// Sessions the player cancelled locally, waiting to drop off `scene.trades`. Same
-// stale-snapshot race as gumpDismissed, but suppressed by session rather than by
-// content: a cancel is terminal, while the trade's signature keeps changing (items
-// move, gold is offered) right up until the server tears the session down — so a
-// content-keyed guard would let one of those updates reopen the window.
-const tradeDismissed = new Set();
 function cancelTrade(myCont) {
   sendInput("tradecancel:" + myCont);
-  tradeDismissed.add(myCont);
-  closeTradeWindow(myCont); // close locally now — don't wait a poll for the server's echo
+  dismissDialog("trades", myCont); // close locally now — don't wait a poll for the server's echo
 }
 function buildTradeWindow(myCont) {
   const el = document.createElement("div");
   el.className = "gump-win trade-win";
-  const off = (tradeCascade++ % 6) * 24;
-  el.style.left = (340 + off) + "px";
-  el.style.top = (90 + off) + "px";
+  const off = (tradeCascade.n++ % tradeCascade.wrap) * tradeCascade.step;
+  el.style.left = (tradeCascade.left + off) + "px";
+  el.style.top = (tradeCascade.top + off) + "px";
   el.innerHTML =
     '<div class="gump-title"><span>TRADE · <span class="tr-name"></span></span><span class="gump-close">✕</span></div>'
     + '<div class="gump-body">'
@@ -6322,11 +6298,25 @@ function buildTradeWindow(myCont) {
     });
   }
   makeDraggable(el, el.querySelector(".gump-title"));
-  tradeWins.set(myCont, win);
   return win;
 }
 // Rebuild a session's window only when its data (or either side's items)
 // actually changed.
+// What "this trade changed" means: both sides' acceptance/offers plus every item
+// in either container. The goods live in scene.contItems, not on the trade item
+// itself, which is why this needs the snapshot as well as the session.
+function tradeSignature(t, scene) {
+  const myCont = t.myCont >>> 0, theirCont = t.theirCont >>> 0;
+  const items = ((scene && scene.contItems) || []).filter(
+    (it) => (it.cont >>> 0) === myCont || (it.cont >>> 0) === theirCont
+  );
+  return [
+    t.theirCont, t.opponent, t.myAccept, t.theirAccept,
+    t.myOfferGold, t.myOfferPlat, t.theirOfferGold, t.theirOfferPlat,
+    t.balanceGold, t.balancePlat,
+    items.map((it) => `${it.cont >>> 0}:${it.serial >>> 0}:${it.g}:${it.amount | 0}`).join(","),
+  ].join("|");
+}
 function renderTradeWindow(win, t) {
   win.el.querySelector(".tr-name").textContent = t.opponent || "someone";
   win.el.querySelector(".tr-their-name").textContent = t.opponent || "Them";
@@ -6353,58 +6343,36 @@ function renderTradeWindow(win, t) {
 // Auto-open a window for each session in scene.trades, refresh the ones whose
 // data changed, and auto-close any window whose session dropped off the list
 // (cancelled, completed, or the opponent walked away).
-function refreshTrade(scene) {
-  const list = (scene && scene.trades) || [];
-  const seen = new Set();
-  for (const t of list) {
-    const myCont = t.myCont >>> 0;
-    seen.add(myCont);
-    if (tradeDismissed.has(myCont)) continue; // cancelled locally — don't reopen from a pre-cancel snapshot
-    const items = (scene.contItems || []).filter(
-      (it) => (it.cont >>> 0) === myCont || (it.cont >>> 0) === (t.theirCont >>> 0)
-    );
-    const sig = [
-      t.theirCont, t.opponent, t.myAccept, t.theirAccept,
-      t.myOfferGold, t.myOfferPlat, t.theirOfferGold, t.theirOfferPlat,
-      t.balanceGold, t.balancePlat,
-      items.map((it) => `${it.cont >>> 0}:${it.serial >>> 0}:${it.g}:${it.amount | 0}`).join(","),
-    ].join("|");
-    const win = tradeWins.get(myCont) || buildTradeWindow(myCont);
-    if (win.sig === sig) continue;
-    win.sig = sig;
-    renderTradeWindow(win, t);
-  }
-  for (const myCont of [...tradeWins.keys()]) {
-    if (!seen.has(myCont)) closeTradeWindow(myCont);
-  }
-  for (const myCont of [...tradeDismissed]) {
-    if (!seen.has(myCont)) tradeDismissed.delete(myCont); // server tore it down — stop suppressing
-  }
-}
+registerDialog({
+  id: "trades",
+  source: (scene) => (scene && scene.trades) || [],
+  key: (t) => t.myCont >>> 0,
+  sig: tradeSignature,
+  // Suppressed by SESSION, not content: a cancel is terminal, but the trade's
+  // signature keeps changing (items move, gold is offered) right up until the
+  // server tears the session down — a content-keyed guard would let one of those
+  // updates reopen the window the player just closed.
+  dismiss: "session",
+  build: (t, { key }) => buildTradeWindow(key),
+  update: (win, t) => renderTradeWindow(win, t),
+});
 
 // ---- treasure/decoration map windows (0x90/0xF5 DisplayMap(New) + 0x56
 // MapCommand — ServUO `Scripts/Items/Tools/MapItem.cs`; one window per
 // serial, built dynamically like .trade-win/.container-win) ----
-const mapWins = new Map(); // serial -> { el, sig, canvas }
-let mapCascade = 0;
+const mapCascade = { n: 0, left: 260, top: 80 };
 function closeMapWindow(serial) {
-  const win = mapWins.get(serial);
-  if (win) { win.el.remove(); mapWins.delete(serial); }
+  // No dismiss guard: open:"seq" already means a lingering snapshot can't reopen
+  // this window — only a fresh 0x90/0xF5 (a higher openSeq) can.
+  closeDialog("maps", serial);
 }
 function buildMapWindow(serial) {
-  const el = document.createElement("div");
-  el.className = "gump-win map-win";
-  const off = (mapCascade++ % 8) * 22;
-  el.style.left = (260 + off) + "px";
-  el.style.top = (80 + off) + "px";
-  el.innerHTML = '<div class="gump-title"><span>Map</span><span class="gump-close">✕</span></div>'
-    + '<div class="gump-body"><div class="map-canvas"></div></div>';
-  document.body.appendChild(el);
-  el.querySelector(".gump-close").addEventListener("click", () => closeMapWindow(serial));
-  makeDraggable(el, el.querySelector(".gump-title"));
-  const win = { el, sig: null, canvas: el.querySelector(".map-canvas") };
-  mapWins.set(serial, win);
-  return win;
+  const { el, body } = makeWindowFrame({
+    cls: "map-win", title: "Map", cascade: mapCascade,
+    onClose: () => closeMapWindow(serial),
+  });
+  body.innerHTML = '<div class="map-canvas"></div>';
+  return { el, canvas: el.querySelector(".map-canvas") };
 }
 // Rebuild a map window's art/pins only when its content signature changed.
 // Bounds/size never change for a given serial in practice, but PINS do via
@@ -6418,10 +6386,10 @@ function buildMapWindow(serial) {
 // for why no client-side pin math is needed either way). Pin index 0 is the
 // treasure/chest pin (ServUO `MapItem.RemovePin` refuses to remove it) —
 // drawn with the `.chest` variant so it reads as the goal.
+function mapSignature(m) {
+  return JSON.stringify([m.gumpArt, m.w, m.h, m.pins, m.editable]);
+}
 function renderMapWindow(win, m) {
-  const sig = JSON.stringify([m.gumpArt, m.w, m.h, m.pins, m.editable]);
-  if (win.sig === sig) return;
-  win.sig = sig;
   const w = m.w | 0, h = m.h | 0;
   const c = win.canvas;
   c.style.width = w + "px";
@@ -6438,33 +6406,28 @@ function renderMapWindow(win, m) {
   });
 }
 // Open a NEW window only when a serial's `openSeq` (scene.maps[].openSeq)
-// advances past what we've already opened for — see `lastMapOpenSeq`'s doc:
+// advances past what we've already opened for (the open:"seq" policy):
 // this is what stops a user-closed map window from popping back open on
 // every poll just because World still carries the same MapView. Content of
 // any ALREADY-open window is still refreshed every poll regardless (a pin
 // can change via a bare 0x56 that doesn't bump `openSeq`). A window whose
 // map fell out of scene.maps entirely (the item was deleted, or a facet
 // switch purged it — see `World::on_map_change`) is closed to match.
-function refreshMapWindows(scene) {
-  const list = (scene && scene.maps) || [];
-  const seen = new Set();
-  for (const m of list) {
-    const serial = m.serial >>> 0;
-    seen.add(serial);
-    const seq = m.openSeq | 0;
-    const isNew = seq > (lastMapOpenSeq.get(serial) || 0);
-    let win = mapWins.get(serial);
-    if (isNew) {
-      lastMapOpenSeq.set(serial, seq);
-      if (win) bringToFront(win.el);
-      else win = buildMapWindow(serial);
-    }
-    if (win) renderMapWindow(win, m);
-  }
-  for (const serial of [...mapWins.keys()]) {
-    if (!seen.has(serial)) closeMapWindow(serial);
-  }
-}
+registerDialog({
+  id: "maps",
+  source: (scene) => (scene && scene.maps) || [],
+  key: (m) => m.serial >>> 0,
+  sig: mapSignature,
+  // The server re-sends the same map item on every content update, so presence
+  // in the snapshot can't mean "open me" — only a fresh 0x90/0xF5, which bumps
+  // openSeq, does. That's also what lets a closed map stay closed without a
+  // dismiss guard.
+  open: "seq",
+  seq: (m) => m.openSeq | 0,
+  build: (m, { key }) => buildMapWindow(key),
+  update: renderMapWindow,
+  reopen: (win) => bringToFront(win.el),
+});
 
 // ---- custom house design editor (server-driven "design mode" — scene.houseDesign
 // is present ONLY while the player has a foundation open for customization; the
@@ -6620,13 +6583,12 @@ function closeHouseDesignWindow() {
   clearHouseDesignGhost(); // don't leave a stale ghost sprite behind once the session/panel is gone
 }
 function buildHouseDesignWindow(hd) {
-  const el = document.createElement("div");
-  el.className = "gump-win hdesign-win";
-  el.style.left = "260px"; el.style.top = "70px";
-  el.innerHTML =
-    '<div class="gump-title"><span>House Design</span><span class="gump-close">✕</span></div>'
-    + '<div class="gump-body">'
-    + '<div class="hdesign-tabs">' + HDESIGN_MODES.map((m) =>
+  const { el, body } = makeWindowFrame({
+    cls: "hdesign-win", title: "House Design", pos: { left: 260, top: 70 },
+    onClose: () => sendInput("hdesign:close"),
+  });
+  body.innerHTML =
+    '<div class="hdesign-tabs">' + HDESIGN_MODES.map((m) =>
         `<button class="hdesign-tab${m === hdesignMode ? " active" : ""}" data-mode="${m}">${HDESIGN_LABELS[m]}</button>`).join("")
     + '</div>'
     + '<select class="hdesign-style"></select>'
@@ -6640,9 +6602,7 @@ function buildHouseDesignWindow(hd) {
     + '<button class="dlg-btn" data-cmd="restore">Restore</button>'
     + '<button class="dlg-btn" data-cmd="clear">Clear</button>'
     + '<button class="dlg-btn" data-cmd="close">Exit</button>'
-    + '</div>'
     + '</div>';
-  document.body.appendChild(el);
   hdesignWin = {
     el,
     styleSel: el.querySelector(".hdesign-style"),
@@ -6651,10 +6611,10 @@ function buildHouseDesignWindow(hd) {
     floorRow: el.querySelector(".hdesign-floor-row"),
     floors: hd.floors | 0,
   };
-  // The ✕ and the Exit action both just ASK the server to leave design mode — the
-  // panel itself only disappears once scene.houseDesign actually goes away (see
-  // refreshHouseDesign), matching "the panel never decides it".
-  el.querySelector(".gump-close").addEventListener("click", () => sendInput("hdesign:close"));
+  // (The ✕ is wired in makeWindowFrame above: like the Exit action it only ASKS
+  // the server to leave design mode. The panel disappears when scene.houseDesign
+  // actually goes away — dismiss:"none" on the family, because the panel never
+  // decides for itself that the session is over.)
   el.querySelectorAll(".hdesign-tab").forEach((btn) => {
     btn.addEventListener("click", () => {
       hdesignMode = btn.dataset.mode;
@@ -6677,7 +6637,6 @@ function buildHouseDesignWindow(hd) {
       sendInput("hdesign:" + cmd);
     });
   });
-  makeDraggable(el, el.querySelector(".gump-title"));
   renderHouseDesignFloors();
   renderHouseDesignPicker();
 }
@@ -6686,20 +6645,31 @@ function buildHouseDesignWindow(hd) {
 // once the panel exists for the current house, an ordinary poll (only `revision`
 // ticking as pieces are added) has nothing here to react to — the design itself
 // renders through the normal world/tile pipeline, not this panel.
-function refreshHouseDesign(scene) {
-  const hd = scene && scene.houseDesign;
-  if (!hd) { if (hdesignWin) closeHouseDesignWindow(); return; }
-  const serial = hd.serial >>> 0;
-  if (hdesignWin && hdesignSerial === serial) {
-    if (hdesignWin.floors !== (hd.floors | 0)) { hdesignWin.floors = hd.floors | 0; renderHouseDesignFloors(); }
-    return;
-  }
-  if (hdesignWin) closeHouseDesignWindow(); // a different foundation opened without ours ever closing — start clean
-  hdesignSerial = serial;
-  hdesignFloor = 1; hdesignPiece = null; hdesignEraser = false; // fresh session, fresh picker state
-  buildHouseDesignWindow(hd);
-  loadHouseCatalog();
-}
+registerDialog({
+  id: "houseDesign",
+  source: (scene) => (scene && scene.houseDesign ? [scene.houseDesign] : []),
+  key: (hd) => hd.serial >>> 0,
+  // Only the floor count can change under a live session; `revision` ticks on
+  // every placed piece and must NOT rebuild the panel (the design itself renders
+  // through the world/tile pipeline, not here).
+  sig: (hd) => String(hd.floors | 0),
+  // dismiss:"none" — the ✕ asks the SERVER to end the session (hdesign:close)
+  // and this panel waits for that to land, so there is never a locally-closed
+  // window for a stale snapshot to resurrect.
+  build: (hd, { key }) => {
+    hdesignSerial = key;
+    hdesignFloor = 1; hdesignPiece = null; hdesignEraser = false; // fresh session, fresh picker state
+    buildHouseDesignWindow(hd);
+    loadHouseCatalog();
+    return hdesignWin;
+  },
+  update: (win, hd) => {
+    if (win.floors === (hd.floors | 0)) return;
+    win.floors = hd.floors | 0;
+    renderHouseDesignFloors();
+  },
+  close: closeHouseDesignWindow,
+});
 // Left-click handler for design mode, called from the canvas mousedown below BEFORE
 // the target-cursor branch so it takes priority whenever a session is open — returns
 // true to tell the caller the click is consumed (even when nothing is actually sent,
@@ -6890,8 +6860,7 @@ function applyWizHueSwatches() {
 }
 
 // --- container windows (one per serial; openContainer focuses an existing one) ---
-const containerWins = new Map(); // serial -> { el, body, sig }
-let containerCascade = 0;
+const containerCascade = { n: 0, left: 220, top: 70, wrap: 9, step: 26 };
 // Item graphics that are spellbooks (double-click opens the spell-cast UI, not a
 // container). Magery 0x0EFA plus the AOS+ school books for completeness.
 const SPELLBOOK_GRAPHICS = new Set([0x0efa, 0x2252, 0x2253, 0x238c, 0x23a0, 0x2d50, 0x2d9d]);
@@ -6906,41 +6875,37 @@ function stackGraphic(g, amount) {
 
 function openContainer(serial) {
   serial = serial >>> 0;
-  const existing = containerWins.get(serial);
-  if (existing) { bringToFront(existing.el); existing.sig = null; refreshContainer(serial); return; }
-  const el = document.createElement("div");
-  el.className = "gump-win container-win";
-  const off = (containerCascade++ % 9) * 26;
-  el.style.left = (220 + off) + "px";
-  el.style.top = (70 + off) + "px";
-  el.innerHTML = '<div class="gump-title"><span>Container</span><span class="gump-close">✕</span></div>'
-    + '<div class="gump-body cont-grid"></div>';
-  document.body.appendChild(el);
-  const body = el.querySelector(".cont-grid");
-  el.querySelector(".gump-close").addEventListener("click", () => closeContainer(serial));
+  const existing = dialogWindow("containers", serial);
+  if (existing) { bringToFront(existing.el); existing._sig = null; refreshContainer(serial); return; }
+  const { el, body } = makeWindowFrame({
+    cls: "container-win", title: "Container", bodyCls: "cont-grid", cascade: containerCascade,
+    onClose: () => closeContainer(serial),
+  });
   // Leaving the window entirely clears any item OPL tooltip it was showing (there's
   // no PIXI pointerout for DOM cells to fall back on).
   el.addEventListener("mouseleave", () => { if (tipSerial != null) { tipSerial = null; hideTip(); } });
-  makeDraggable(el, el.querySelector(".gump-title"));
-  containerWins.set(serial, { el, body, sig: null });
+  dialogWindows("containers").set(serial, { el, body, _sig: null });
   refreshContainer(serial);
 }
 function closeContainer(serial) {
-  serial = serial >>> 0;
-  const win = containerWins.get(serial);
-  if (win) { win.el.remove(); containerWins.delete(serial); }
+  closeDialog("containers", serial >>> 0);
 }
 // Rebuild a container's grid only when its contents changed. Double-click an item →
 // use it; also openContainer(itemSerial) so nested bags pop open (a non-container
 // just opens an empty window the user can close — acceptable).
+function containerSignature(scene, serial) {
+  return ((scene && scene.contItems) || [])
+    .filter((it) => (it.cont >>> 0) === serial)
+    .map((it) => `${it.serial >>> 0}:${it.g}:${it.amount | 0}`).join(",");
+}
 function refreshContainer(serial) {
   serial = serial >>> 0;
-  const win = containerWins.get(serial);
+  const win = dialogWindow("containers", serial);
   if (!win) return;
   const items = (scene && scene.contItems || []).filter((it) => (it.cont >>> 0) === serial);
-  const sig = items.map((it) => `${it.serial >>> 0}:${it.g}:${it.amount | 0}`).join(",");
-  if (win.sig === sig) return;
-  win.sig = sig;
+  const sig = containerSignature(scene, serial);
+  if (win._sig === sig) return;
+  win._sig = sig;
   const body = win.body;
   body.innerHTML = "";
   if (!items.length) { body.innerHTML = '<div class="cont-empty">(empty)</div>'; return; }
@@ -6981,7 +6946,16 @@ function refreshContainer(serial) {
     body.appendChild(cell);
   }
 }
-function refreshContainers() { for (const serial of containerWins.keys()) refreshContainer(serial); }
+registerDialog({
+  id: "containers",
+  // open:"local" — a container window exists because the PLAYER opened it (a
+  // double-click, or the server's 0x24 container-open event), never because it
+  // appears in a snapshot list. The snapshot only supplies the contents, so
+  // there is nothing here to auto-open, auto-close, or guard against.
+  open: "local",
+  sig: containerSignature,
+  update: (win, scene, { key }) => refreshContainer(key),
+});
 
 // --- generic server gumps / dialogs (0xB0 / 0xDD) ------------------------
 // Each scene.gumps entry is a server dialog (quest/NPC menu/confirm box) parsed
@@ -6996,14 +6970,7 @@ function refreshContainers() { for (const serial of containerWins.keys()) refres
 // in the DOM, just hidden) and sends a `gump:` reply, then closes locally; the
 // ✕ sends button 0 (cancel). These are normal windows — they don't block the
 // rest of the game.
-const gumpWins = new Map(); // serial -> { el, sig, page, nodes, … }
-// Serial -> signature of a gump the player just answered/closed. `scene.json` is
-// polled, so a snapshot BUILT BEFORE our reply reached the server still lists the
-// gump; without this, refreshGumps would rebuild the window from that stale
-// snapshot and the dialog would visibly pop back for one poll before the next one
-// dropped it. Same guard legacyMenuDismissed/huePickerDismissed already carry.
-const gumpDismissed = new Map();
-let gumpCascade = 0;
+const gumpCascade = { n: 0, left: 160, top: 90, step: 24 };
 // Remembered screen position per gump KIND (gumpId), like ClassicUO's saved gump
 // locations. ServUO craft/menu gumps close and REOPEN with a fresh serial on every
 // selection, so keying position by serial (or cascading each build) walked the
@@ -7013,81 +6980,50 @@ const gumpPos = new Map();       // gumpId → { left, top }
 function gumpSignature(g) {
   return JSON.stringify([g.gumpId >>> 0, g.w | 0, g.h | 0, g.elements || []]);
 }
-function refreshGumps(scene) {
-  const list = (scene && scene.gumps) || [];
-  const seen = new Set();
-  for (const g of list) {
-    const serial = (g.serial >>> 0);
-    seen.add(serial);
-    const sig = gumpSignature(g);
-    // Answered/closed and not yet reflected in the snapshot — leave it closed.
-    // Keyed by CONTENT too, so a server that re-sends different content under the
-    // same serial (World::add_gump upserts by serial) still gets a real window.
-    if (gumpDismissed.get(serial) === sig) continue;
-    if (gumpDismissed.has(serial)) gumpDismissed.delete(serial);
-    const existing = gumpWins.get(serial);
-    if (existing && existing.sig === sig) continue; // unchanged
-    // Preserve the locally-selected page across a content refresh (the server
-    // resending the same gump shouldn't kick the player back to page 1) — but
-    // clamp it to the new layout's highest real page, in case the refreshed
-    // gump has fewer pages than before (else the window would show only the
-    // page-0 chrome, no page ever matching).
-    const maxPage = (g.elements || []).reduce((m, e) => Math.max(m, e.page | 0), 0);
-    const page = existing ? Math.min(existing.page, maxPage || 1) : 1;
-    if (existing) existing.el.remove();             // content changed → rebuild
-    buildGumpWindow(serial, g, sig, page);
-  }
-  // Drop windows whose gump the server closed.
-  for (const serial of [...gumpWins.keys()]) {
-    if (!seen.has(serial)) { gumpWins.get(serial).el.remove(); gumpWins.delete(serial); }
-  }
-  // The server has caught up on a dismissed gump — stop suppressing that serial so
-  // a later gump reusing it isn't swallowed (and the map can't grow unbounded).
-  for (const serial of [...gumpDismissed.keys()]) {
-    if (!seen.has(serial)) gumpDismissed.delete(serial);
-  }
-}
+registerDialog({
+  id: "gumps",
+  source: (scene) => (scene && scene.gumps) || [],
+  key: (g) => g.serial >>> 0,
+  sig: gumpSignature,
+  // No update(): a re-sent gump is a whole new server-authored layout, so the
+  // window is rebuilt — carrying the player's current page across (see build).
+  dismiss: "content",
+  build: buildGumpWindow,
+});
 
 // ── Legacy item/question menus (0x7C → 0x7D) ──────────────────────────────
 // Several may be open at once. Each window is keyed by the server menu serial;
 // answering removes it locally immediately and suppresses the same snapshot
 // until the server consumes the response (avoids one-poll flicker/reopening).
-const legacyMenuWins = new Map(); // serial -> { el, sig, selected }
-const legacyMenuDismissed = new Map(); // serial -> signature just answered/canceled
-let legacyMenuCascade = 0;
+const legacyMenuCascade = { n: 0, left: 220, top: 110 };
 
 function legacyMenuSignature(menu) {
   return JSON.stringify([menu.menuId | 0, menu.question || "", menu.kind || "question", menu.entries || []]);
 }
 
 function answerLegacyMenu(serial, index) {
-  const win = legacyMenuWins.get(serial);
-  if (!win) return;
-  legacyMenuDismissed.set(serial, win.sig);
-  win.el.remove();
-  legacyMenuWins.delete(serial);
+  if (!dialogWindow("legacyMenus", serial)) return;
+  dismissDialog("legacyMenus", serial);
   sendInput("menusel:" + serial + ":" + index);
 }
 
-function buildLegacyMenuWindow(menu, sig) {
+function buildLegacyMenuWindow(menu) {
   const serial = menu.serial >>> 0;
   const entries = menu.entries || [];
   const itemMenu = menu.kind === "items";
-  const el = document.createElement("div");
-  el.className = "gump-win legacy-menu-win";
-  const off = (legacyMenuCascade++ % 8) * 22;
-  el.style.left = (220 + off) + "px";
-  el.style.top = (110 + off) + "px";
-  el.innerHTML = '<div class="gump-title"><span>Menu</span><span class="gump-close">✕</span></div>'
-    + '<div class="gump-body legacy-menu-body"><div class="legacy-menu-question"></div>'
+  const { el, body } = makeWindowFrame({
+    cls: "legacy-menu-win", title: "Menu", bodyCls: "legacy-menu-body", cascade: legacyMenuCascade,
+    onClose: () => answerLegacyMenu(serial, 0),
+  });
+  body.innerHTML = '<div class="legacy-menu-question"></div>'
     + '<div class="legacy-menu-entries"></div><div class="legacy-menu-actions">'
     + '<button class="dlg-btn legacy-menu-continue">Continue</button>'
-    + '<button class="dlg-btn legacy-menu-cancel">Cancel</button></div></div>';
+    + '<button class="dlg-btn legacy-menu-cancel">Cancel</button></div>';
   el.querySelector(".legacy-menu-question").textContent = menu.question || "Choose an option";
   const list = el.querySelector(".legacy-menu-entries");
   if (itemMenu) list.classList.add("legacy-item-grid");
 
-  const state = { el, sig, selected: entries.length ? (entries[0].index | 0) : 0 };
+  const state = { el, selected: entries.length ? (entries[0].index | 0) : 0 };
   for (const entry of entries) {
     const index = entry.index | 0;
     const label = document.createElement("label");
@@ -7123,7 +7059,6 @@ function buildLegacyMenuWindow(menu, sig) {
     if (state.selected) answerLegacyMenu(serial, state.selected);
   });
   el.querySelector(".legacy-menu-cancel").addEventListener("click", () => answerLegacyMenu(serial, 0));
-  el.querySelector(".gump-close").addEventListener("click", () => answerLegacyMenu(serial, 0));
   el.addEventListener("keydown", (event) => {
     if (event.code === "Escape") {
       event.preventDefault(); event.stopPropagation(); answerLegacyMenu(serial, 0);
@@ -7132,43 +7067,23 @@ function buildLegacyMenuWindow(menu, sig) {
       if (state.selected) answerLegacyMenu(serial, state.selected);
     }
   });
-  document.body.appendChild(el);
-  makeDraggable(el, el.querySelector(".gump-title"));
-  legacyMenuWins.set(serial, state);
+  return state;
 }
 
-function refreshLegacyMenus(scene) {
-  const list = (scene && scene.legacyMenus) || [];
-  const seen = new Set();
-  for (const menu of list) {
-    const serial = menu.serial >>> 0;
-    const sig = legacyMenuSignature(menu);
-    seen.add(serial);
-    if (legacyMenuDismissed.get(serial) === sig) continue;
-    if (legacyMenuDismissed.has(serial)) legacyMenuDismissed.delete(serial); // changed menu, same serial
-    const existing = legacyMenuWins.get(serial);
-    if (existing && existing.sig === sig) continue;
-    if (existing) { existing.el.remove(); legacyMenuWins.delete(serial); }
-    buildLegacyMenuWindow(menu, sig);
-  }
-  for (const serial of [...legacyMenuWins.keys()]) {
-    if (!seen.has(serial)) {
-      legacyMenuWins.get(serial).el.remove();
-      legacyMenuWins.delete(serial);
-    }
-  }
-  for (const serial of [...legacyMenuDismissed.keys()]) {
-    if (!seen.has(serial)) legacyMenuDismissed.delete(serial);
-  }
-}
+registerDialog({
+  id: "legacyMenus",
+  source: (scene) => (scene && scene.legacyMenus) || [],
+  key: (menu) => menu.serial >>> 0,
+  sig: legacyMenuSignature,
+  dismiss: "content",
+  build: buildLegacyMenuWindow,
+});
 
 // ── Server dye hue pickers (0x95 request/response) ─────────────────────────
 // ClassicUO presents 1000 ordinary dyed hues as five 20×10 grids. Graduation
 // g contains hues `2 + g + cell*5`, covering exactly ServUO's clipped 2..1001
 // range. A server-owned picker has no cancel packet, so these windows have no X.
-const huePickerWins = new Map();       // serial -> picker window state
-const huePickerDismissed = new Map();  // serial -> signature just answered
-let huePickerCascade = 0;
+const huePickerCascade = { n: 0, left: 250, top: 90 };
 let dyedPalettePromise = null;
 
 function loadDyedPalette() {
@@ -7229,37 +7144,32 @@ function renderHuePickerGrid(state) {
 }
 
 function answerHuePicker(serial, hue) {
-  const state = huePickerWins.get(serial);
-  if (!state) return;
-  huePickerDismissed.set(serial, state.sig);
-  state.el.remove();
-  huePickerWins.delete(serial);
+  if (!dialogWindow("huePickers", serial)) return;
+  dismissDialog("huePickers", serial);
   sendInput("huepick:" + serial + ":" + hue);
 }
 
-function buildHuePickerWindow(picker, sig) {
+function buildHuePickerWindow(picker) {
   const serial = picker.serial >>> 0;
   const graphic = (picker.graphic | 0) || 0x0FAB;
-  const el = document.createElement("div");
-  el.className = "gump-win hue-picker-win";
-  const off = (huePickerCascade++ % 8) * 22;
-  el.style.left = (250 + off) + "px";
-  el.style.top = (90 + off) + "px";
-  el.innerHTML = '<div class="gump-title"><span>Dye color</span></div>'
-    + '<div class="gump-body hue-picker-body"><div class="hue-picker-toolbar">'
+  // A server-owned picker has no cancel packet, so this frame keeps no ✕ — the
+  // only ways out are Apply (answerHuePicker) and the server dropping it.
+  const { el, body, closer } = makeWindowFrame({
+    cls: "hue-picker-win", title: "Dye color", bodyCls: "hue-picker-body", cascade: huePickerCascade,
+  });
+  closer.remove();
+  body.innerHTML = '<div class="hue-picker-toolbar">'
     + '<div class="hue-picker-preview"><img alt="Dye preview" draggable="false"></div>'
     + '<div class="hue-picker-controls"><span class="hue-picker-label">Hue 3</span>'
     + '<label>Graduation <input class="hue-picker-slider" type="range" min="0" max="4" step="1" value="1"></label>'
     + '</div></div><div class="hue-picker-grid" aria-label="Dye colors"></div>'
-    + '<button class="dlg-btn hue-picker-apply">Apply color</button></div>';
-  document.body.appendChild(el);
+    + '<button class="dlg-btn hue-picker-apply">Apply color</button>';
   const state = {
-    el, sig, serial, graphic, graduation: 1, selectedCell: 0, selectedHue: 3, colors: null,
+    el, serial, graphic, graduation: 1, selectedCell: 0, selectedHue: 3, colors: null,
     grid: el.querySelector(".hue-picker-grid"),
     preview: el.querySelector(".hue-picker-preview img"),
     label: el.querySelector(".hue-picker-label"),
   };
-  huePickerWins.set(serial, state);
   updateHuePickerPreview(state);
   state.preview.addEventListener("error", () => { state.preview.style.visibility = "hidden"; });
   const slider = el.querySelector(".hue-picker-slider");
@@ -7281,62 +7191,41 @@ function buildHuePickerWindow(picker, sig) {
       event.preventDefault(); event.stopPropagation(); answerHuePicker(serial, state.selectedHue);
     }
   });
-  makeDraggable(el, el.querySelector(".gump-title"));
   state.grid.textContent = "Loading colors…";
   loadDyedPalette().then((colors) => {
-    if (huePickerWins.get(serial) !== state) return;
+    if (dialogWindow("huePickers", serial) !== state) return; // window went away mid-fetch
     state.colors = colors;
     renderHuePickerGrid(state);
   });
 }
 
-function refreshHuePickers(scene) {
-  const list = (scene && scene.huePickers) || [];
-  const seen = new Set();
-  for (const picker of list) {
-    const serial = picker.serial >>> 0;
-    const sig = huePickerSignature(picker);
-    seen.add(serial);
-    if (huePickerDismissed.get(serial) === sig) continue;
-    if (huePickerDismissed.has(serial)) huePickerDismissed.delete(serial);
-    const existing = huePickerWins.get(serial);
-    if (existing && existing.sig === sig) continue;
-    if (existing) { existing.el.remove(); huePickerWins.delete(serial); }
-    buildHuePickerWindow(picker, sig);
-  }
-  for (const serial of [...huePickerWins.keys()]) {
-    if (!seen.has(serial)) {
-      huePickerWins.get(serial).el.remove();
-      huePickerWins.delete(serial);
-    }
-  }
-  for (const serial of [...huePickerDismissed.keys()]) {
-    if (!seen.has(serial)) huePickerDismissed.delete(serial);
-  }
-}
+registerDialog({
+  id: "huePickers",
+  source: (scene) => (scene && scene.huePickers) || [],
+  key: (picker) => picker.serial >>> 0,
+  sig: huePickerSignature,
+  dismiss: "content",
+  build: buildHuePickerWindow,
+});
 // ── Right-click context (popup) menu (0xBF/0x14) ───────────────────────────
 // scene.popup = { serial, entries:[{ index, text }] } | null. We show a small
 // menu div at the last cursor position; a row click sends popupsel and hides it;
 // click-away / Esc / the popup clearing also hides it.
+// The menu is a singleton, so the family below holds at most one window; these
+// two mirror it for the click-away/Esc paths that don't know the serial.
 let popupEl = null;            // the live menu element (null = hidden)
 let popupSerial = 0;           // serial the menu was opened for
-let popupDismissed = 0;        // serial the user closed (Esc / click-away). The server keeps
-                               // its popup set until we select or its target is removed, so
-                               // without this refreshPopup would re-open the menu next poll.
-                               // Cleared on a fresh popupreq (below) or when the server drops it.
+// The server keeps its popup set until we select or its target is removed, so a
+// user-closed menu needs the family's session guard or it would reopen next poll.
 function hidePopup(dismissed) {
-  if (dismissed && popupSerial) popupDismissed = popupSerial;
-  if (popupEl) { popupEl.remove(); popupEl = null; popupSerial = 0; }
+  if (popupSerial) {
+    if (dismissed) dismissDialog("popup", popupSerial);
+    else closeDialog("popup", popupSerial);
+  }
+  popupEl = null; popupSerial = 0;
 }
-function refreshPopup(scene) {
-  const p = scene && scene.popup;
-  if (!p || !p.entries || !p.entries.length) { hidePopup(); popupDismissed = 0; return; }
-  const serial = p.serial >>> 0;
-  if (serial === popupDismissed) return;   // user closed this one — wait for a new/cleared popup
-  // Already showing this exact menu? Leave it where the user put it.
-  if (popupEl && popupSerial === serial) return;
-  hidePopup();
-  popupSerial = serial;
+function buildPopupMenu(p, { key }) {
+  const serial = key;
   const el = document.createElement("div");
   el.className = "popup-menu";
   // Anchor at the cursor, clamped to stay on-screen.
@@ -7358,40 +7247,45 @@ function refreshPopup(scene) {
   }
   document.body.appendChild(el);
   popupEl = el;
+  popupSerial = serial;
+  return { el };
 }
 
-function buildGumpWindow(serial, g, sig, page) {
+registerDialog({
+  id: "popup",
+  // A singleton is just a list of at most one — no special case needed.
+  source: (scene) => {
+    const p = scene && scene.popup;
+    return p && p.entries && p.entries.length ? [p] : [];
+  },
+  key: (p) => p.serial >>> 0,
+  // No sig: the menu is anchored at the cursor position it was opened with, so
+  // leave an open one exactly where the player put it.
+  dismiss: "session",
+  build: buildPopupMenu,
+  close: (win) => { win.el.remove(); if (popupEl === win.el) { popupEl = null; popupSerial = 0; } },
+});
+
+
+function buildGumpWindow(g, { previous } = {}) {
+  const serial = g.serial >>> 0;
   const gumpId = g.gumpId >>> 0;
-  const el = document.createElement("div");
-  el.className = "gump-win dialog-win";
   // Reopen at the remembered spot for this gump KIND; only a first-seen kind
   // cascades (so distinct dialogs don't stack exactly). This keeps a craft/menu
   // gump anchored across its close-and-reopen-with-a-new-serial cycle.
   const saved = gumpPos.get(gumpId);
-  if (saved) {
-    el.style.left = saved.left + "px";
-    el.style.top = saved.top + "px";
-  } else {
-    const off = (gumpCascade++ % 8) * 24;
-    el.style.left = (160 + off) + "px";
-    el.style.top = (90 + off) + "px";
-    gumpPos.set(gumpId, { left: 160 + off, top: 90 + off });
-  }
+  const { el, bar: title, body } = makeWindowFrame({
+    cls: "dialog-win", title: "Dialog", cascade: gumpCascade, pos: saved,
+    onClose: () => { sendInput(`gump:${serial}:${gumpId}:0`); closeGump(serial); },
+    draggable: false, // wired below so the drag can also update gumpPos
+  });
+  if (!saved) gumpPos.set(gumpId, { left: parseInt(el.style.left, 10), top: parseInt(el.style.top, 10) });
   const w = Math.max(80, g.w | 0), h = Math.max(48, g.h | 0);
-
-  const title = document.createElement("div");
-  title.className = "gump-title";
-  title.innerHTML = '<span>Dialog</span><span class="gump-close">✕</span>';
-  el.appendChild(title);
-
-  const body = document.createElement("div");
-  body.className = "gump-body";
   const canvas = document.createElement("div");
   canvas.className = "dialog-canvas";
   canvas.style.width = w + "px";
   canvas.style.height = h + "px";
   body.appendChild(canvas);
-  el.appendChild(body);
 
   // `page` is this window's *local* current page (the server never sees it —
   // UO pages are a pure client-side layout concept, ClassicUO's Gump.ActivePage).
@@ -7400,7 +7294,13 @@ function buildGumpWindow(serial, g, sig, page) {
   // applyGumpPage() just toggles which ones are visible. Elements with no
   // "page" token before them in the layout parsed to page 0 and are shown on
   // every page.
-  const win = { el, sig, serial, gumpId, canvas, page: page || 1, nodes: [] };
+  // Carry the player's page across a server-driven rebuild (the server resending
+  // the same gump shouldn't kick them back to page 1), clamped to the new
+  // layout's highest real page — a refreshed gump with FEWER pages would
+  // otherwise show only its page-0 chrome, with no page ever matching.
+  const maxPage = (g.elements || []).reduce((m, e) => Math.max(m, e.page | 0), 0);
+  const page = previous ? Math.min(previous.page, maxPage || 1) : 1;
+  const win = { el, serial, gumpId, canvas, page, nodes: [] };
   for (const e of (g.elements || [])) {
     const node = buildGumpElement(win, e);
     node.dataset.page = e.page | 0;
@@ -7408,17 +7308,10 @@ function buildGumpWindow(serial, g, sig, page) {
     canvas.appendChild(node);
   }
   applyGumpPage(win);
-
-  // ✕ → cancel (button 0).
-  title.querySelector(".gump-close").addEventListener("click", () => {
-    sendInput(`gump:${serial}:${gumpId}:0`);
-    closeGump(serial);
-  });
   // Remember where the user drags this window, keyed by kind, so the next reopen
   // (fresh serial) lands there too.
   makeDraggable(el, title, (x, y) => gumpPos.set(gumpId, { left: x, top: y }));
-  document.body.appendChild(el);
-  gumpWins.set(serial, win);
+  return win;
 }
 // Show/hide this window's elements for its current local page: page-0
 // elements are always visible; everything else only shows while it's the
@@ -7655,7 +7548,7 @@ function buildGumpElement(win, e) {
 }
 // Collect every checked switch + text-entry value in this gump and send the reply.
 function submitGump(serial, gumpId, button) {
-  const win = gumpWins.get(serial >>> 0);
+  const win = dialogWindow("gumps", serial >>> 0);
   let cmd = `gump:${serial}:${gumpId}:${button}`;
   if (win) {
     const switches = [...win.el.querySelectorAll("input[data-swid]")]
@@ -7670,9 +7563,7 @@ function submitGump(serial, gumpId, button) {
   closeGump(serial);
 }
 function closeGump(serial) {
-  serial = serial >>> 0;
-  const win = gumpWins.get(serial);
-  if (win) { gumpDismissed.set(serial, win.sig); win.el.remove(); gumpWins.delete(serial); }
+  dismissDialog("gumps", serial >>> 0);
 }
 
 // ── book reader (0x93/0xD4 header + 0x66 pages) ────────────────────────────
@@ -7684,32 +7575,36 @@ let bookWin = null;        // the live reader element (null = closed)
 let bookSerial = 0;        // serial of the book being shown
 let bookPage = 0;          // current page index (0-based)
 let bookRequested = 0;     // serial we've already sent a page request for
-let bookDismissed = 0;     // serial the user closed (stays closed until a new book)
 function closeBook() {
-  if (bookWin) { bookWin.remove(); bookWin = null; }
-  bookDismissed = bookSerial; // remember so refreshBook won't reopen this one
-  bookPage = 0;
+  if (bookSerial) dismissDialog("book", bookSerial); // stays closed until a NEW book
 }
-function refreshBook(scene) {
-  const b = scene && scene.book;
-  if (!b) { if (bookWin) { bookWin.remove(); bookWin = null; } bookSerial = 0; bookRequested = 0; bookDismissed = 0; return; }
-  const serial = b.serial >>> 0;
-  if (bookDismissed === serial) return; // user closed this one; leave it closed
-  // New book → (re)build the window and reset to page 1.
-  if (!bookWin || bookSerial !== serial) {
-    if (bookWin) { bookWin.remove(); bookWin = null; }
-    bookSerial = serial;
-    bookPage = 0;
-    buildBookWindow(b);
-  }
-  // Auto-request page content once if pages are still empty.
-  const empty = !b.pages || b.pages.every((p) => !p || p.length === 0);
-  if (empty && (b.pageCount | 0) > 0 && bookRequested !== serial) {
-    bookRequested = serial;
-    sendInput("bookreq:" + serial + ":" + (b.pageCount | 0));
-  }
-  renderBookPage(b);
-}
+registerDialog({
+  id: "book",
+  source: (scene) => (scene && scene.book ? [scene.book] : []),
+  key: (b) => b.serial >>> 0,
+  sig: (b) => JSON.stringify([b.title, b.author, b.writable, b.pageCount, b.pages]),
+  dismiss: "session",
+  build: (b, { key }) => {
+    bookSerial = key;
+    bookPage = 0;                       // a new book always starts at page 1
+    return { el: buildBookWindow(b) };
+  },
+  update: (win, b, { key }) => {
+    // Ask for the text once if the header arrived with empty pages.
+    const empty = !b.pages || b.pages.every((p) => !p || p.length === 0);
+    if (empty && (b.pageCount | 0) > 0 && bookRequested !== key) {
+      bookRequested = key;
+      sendInput("bookreq:" + key + ":" + (b.pageCount | 0));
+    }
+    renderBookPage(b);
+  },
+  close: (win) => {
+    win.el.remove();
+    bookWin = null; bookSerial = 0; bookRequested = 0; bookPage = 0;
+  },
+});
+
+
 function buildBookWindow(b) {
   const el = document.createElement("div");
   el.className = "gump-win book-win";
@@ -7751,6 +7646,7 @@ function buildBookWindow(b) {
   makeDraggable(el, title);
   document.body.appendChild(el);
   bookWin = el;
+  return el;
 }
 function renderBookPage(b) {
   if (!bookWin || !b) return;
@@ -7770,24 +7666,26 @@ function renderBookPage(b) {
 // qty + Sell button. ✕ closes (and suppresses reopen until the vendor window is
 // gone). Mirrors the dark gump chrome; only acts via sendInput().
 let shopWin = null;        // { el, body, sig }
-let shopDismissed = false; // user closed it; don't reopen until scene.shop clears
 let shopSort = { key: "name", dir: 1 }; // buy-list sort: key name|price|amount, dir 1/-1
-function refreshShop(scene) {
-  const shop = scene && scene.shop;
-  if (!shop) { shopDismissed = false; if (shopWin) closeShop(); return; }
-  if (shopDismissed) return;
-  if (!shopWin) openShop();
-  renderShop(shop);
-}
+// One vendor window at a time, keyed by the vendor whose stock it shows.
+const SHOP_KEY = "vendor";
+registerDialog({
+  id: "shop",
+  source: (scene) => (scene && scene.shop ? [scene.shop] : []),
+  key: () => SHOP_KEY,
+  // renderShop() does its own change detection off shopWin.sig, so this family
+  // only needs to know the window exists; it pushes every snapshot through.
+  dismiss: "session",
+  build: () => { openShop(); return { el: shopWin.el }; },
+  update: (win, shop) => renderShop(shop),
+  close: () => closeShop(),
+});
 function openShop() {
-  const el = document.createElement("div");
-  el.className = "gump-win";
+  const { el } = makeWindowFrame({
+    title: "Vendor", bodyCls: "shop-body",
+    onClose: () => dismissDialog("shop", SHOP_KEY),
+  });
   el.id = "shop-win";
-  el.innerHTML = '<div class="gump-title"><span>Vendor</span><span class="gump-close">✕</span></div>'
-    + '<div class="gump-body shop-body"></div>';
-  document.body.appendChild(el);
-  el.querySelector(".gump-close").addEventListener("click", () => { shopDismissed = true; closeShop(); });
-  makeDraggable(el, el.querySelector(".gump-title"));
   // One delegated click handler for all Buy/Sell buttons.
   const body = el.querySelector(".shop-body");
   body.addEventListener("click", (e) => {
@@ -7971,14 +7869,14 @@ function placeCursorItem(clientX, clientY) {
   // Our own side of an open secure trade (.tr-mine-grid) is a drop target too —
   // dropping there is a normal container drop targeting THAT WINDOW's own trade
   // container serial (multiple sessions can be open at once, one window each,
-  // so the target comes from the enclosing .trade-win via `tradeWins`, not a
+  // so the target comes from the enclosing .trade-win via its dialog family, not a
   // single global session). The opponent's side (.tr-theirs-grid) is
   // intentionally NOT a target here — we can't place items into their half.
   const tradeGrid = el && el.closest && el.closest(".tr-mine-grid");
   const tradeWinEl = tradeGrid && tradeGrid.closest(".trade-win");
   if (tradeWinEl) {
     let tgt = null;
-    for (const [s, w] of tradeWins) if (w.el === tradeWinEl) { tgt = s; break; }
+    for (const [s, w] of dialogWindows("trades")) if (w.el === tradeWinEl) { tgt = s; break; }
     if (tgt == null) return false;
     const r = tradeGrid.getBoundingClientRect();
     const gx = Math.max(0, Math.min(150, Math.round(clientX - r.left)));
@@ -7989,7 +7887,7 @@ function placeCursorItem(clientX, clientY) {
   const contWin = el && el.closest && el.closest(".container-win");
   if (contWin) {
     let tgt = null;
-    for (const [s, w] of containerWins) if (w.el === contWin) { tgt = s; break; }
+    for (const [s, w] of dialogWindows("containers")) if (w.el === contWin) { tgt = s; break; }
     if (tgt == null) return false;
     const r = contWin.getBoundingClientRect();
     const gx = Math.max(0, Math.min(150, Math.round(clientX - r.left)));
@@ -8275,32 +8173,28 @@ function refreshTipNotices(s) {
 }
 
 // ---- legacy modal text-entry dialogs (0xAB / response 0xAC) ---------------
-function removeTextEntryWindow(seq) {
-  const el = textEntryWindows.get(seq);
-  if (el) (el._modalLayer || el).remove();
-  textEntryWindows.delete(seq);
+function textEntryEl(seq) {
+  const win = dialogWindow("textEntry", seq);
+  return win ? win.el : null;
 }
 
 function respondTextEntry(seq, accepted) {
-  const el = textEntryWindows.get(seq);
+  const el = textEntryEl(seq);
   if (!el) return;
   const text = el._input ? el._input.value : "";
-  suppressedTextEntrySeqs.add(seq);
-  removeTextEntryWindow(seq);
+  dismissDialog("textEntry", seq);
   sendInput("textentry:" + seq + ":" + (accepted ? "1" : "0") + ":" + text);
 }
 
 function silentlyCloseTextEntry(seq) {
-  const el = textEntryWindows.get(seq);
+  const el = textEntryEl(seq);
   if (!el || !el._canClose) return;
-  suppressedTextEntrySeqs.add(seq);
-  removeTextEntryWindow(seq);
+  dismissDialog("textEntry", seq);
   sendInput("textentryclose:" + seq);
 }
 
-function openTextEntryWindow(dialog) {
+function buildTextEntryWindow(dialog) {
   const seq = Number(dialog.seq) || 0;
-  if (!seq || textEntryWindows.has(seq) || suppressedTextEntrySeqs.has(seq)) return;
 
   const layer = document.createElement("div");
   layer.className = "text-entry-modal-layer";
@@ -8354,7 +8248,7 @@ function openTextEntryWindow(dialog) {
   });
 
   // ClassicUO fixes these gumps at (143,172) and marks them non-movable.
-  const cascade = (textEntryWindows.size % 6) * 14;
+  const cascade = (dialogWindows("textEntry").size % 6) * 14;
   el.style.left = (143 + cascade) + "px";
   el.style.top = (172 + cascade) + "px";
   // IsModal=true in ClassicUO: intercept all pointer input before it can reach
@@ -8368,43 +8262,30 @@ function openTextEntryWindow(dialog) {
   }
   layer.appendChild(el);
   document.body.appendChild(layer);
-  textEntryWindows.set(seq, el);
   input.focus();
+  return { el };
 }
 
-function refreshTextEntryDialogs(s) {
-  const active = new Set();
-  for (const dialog of (s && s.textEntryDialogs) || []) {
-    const seq = Number(dialog.seq) || 0;
-    if (!seq) continue;
-    active.add(seq);
-    if (!suppressedTextEntrySeqs.has(seq) && !textEntryWindows.has(seq)) {
-      openTextEntryWindow(dialog);
-    }
-  }
-  for (const seq of [...textEntryWindows.keys()]) {
-    if (!active.has(seq)) removeTextEntryWindow(seq);
-  }
-  for (const seq of [...suppressedTextEntrySeqs]) {
-    if (!active.has(seq)) suppressedTextEntrySeqs.delete(seq);
-  }
-}
+registerDialog({
+  id: "textEntry",
+  source: (s) => ((s && s.textEntryDialogs) || []).filter((d) => Number(d.seq)),
+  key: (d) => Number(d.seq) || 0,
+  // No sig: the server never revises an OPEN text-entry dialog — it sends a new
+  // seq instead — so the window is built once and then left alone.
+  dismiss: "session",
+  build: buildTextEntryWindow,
+  close: (win) => (win.el._modalLayer || win.el).remove(), // the modal layer owns the window
+});
 
 // ---- character profiles (0xB8 request/display/update) ---------------------
-function removeProfileWindow(seq) {
-  const el = profileWindows.get(seq);
-  if (el) el.remove();
-  profileWindows.delete(seq);
-}
-
 // ClassicUO commits an editable profile when its gump is disposed. The native
 // driver compares against the exact response's original body, so this command
 // closes unchanged text without emitting a needless update packet.
 function closeProfileWindow(seq) {
-  const el = profileWindows.get(seq);
-  if (!el) return;
-  suppressedProfileSeqs.add(seq);
-  removeProfileWindow(seq);
+  const win = dialogWindow("profiles", seq);
+  if (!win) return;
+  const el = win.el;
+  dismissDialog("profiles", seq);
   if (el._canEdit) {
     sendInput("profileupdate:" + seq + ":" + el._body.value);
   } else {
@@ -8422,14 +8303,13 @@ function toggleProfileMinimized(el) {
   }
 }
 
-function openProfileWindow(profile) {
+function buildProfileWindow(profile) {
   const seq = Number(profile.seq) || 0;
-  if (!seq || profileWindows.has(seq) || suppressedProfileSeqs.has(seq)) return;
 
   const el = document.createElement("div");
   el.className = "gump-win profile-win";
   el.setAttribute("role", "dialog");
-  const offset = (profileWindows.size % 8) * 22;
+  const offset = (dialogWindows("profiles").size % 8) * 22;
   el.style.left = (245 + offset) + "px";
   el.style.top = (86 + offset) + "px";
   el.innerHTML = '<div class="gump-title profile-title"><span>CHARACTER PROFILE</span>'
@@ -8472,27 +8352,17 @@ function openProfileWindow(profile) {
   });
   document.body.appendChild(el);
   makeDraggable(el, title);
-  profileWindows.set(seq, el);
   if (canEdit) body.focus();
+  return { el };
 }
 
-function refreshProfiles(s) {
-  const active = new Set();
-  for (const profile of (s && s.profiles) || []) {
-    const seq = Number(profile.seq) || 0;
-    if (!seq) continue;
-    active.add(seq);
-    if (!suppressedProfileSeqs.has(seq) && !profileWindows.has(seq)) {
-      openProfileWindow(profile);
-    }
-  }
-  for (const seq of [...profileWindows.keys()]) {
-    if (!active.has(seq)) removeProfileWindow(seq);
-  }
-  for (const seq of [...suppressedProfileSeqs]) {
-    if (!active.has(seq)) suppressedProfileSeqs.delete(seq);
-  }
-}
+registerDialog({
+  id: "profiles",
+  source: (s) => ((s && s.profiles) || []).filter((p) => Number(p.seq)),
+  key: (p) => Number(p.seq) || 0,
+  dismiss: "session",
+  build: buildProfileWindow,
+});
 
 // Shared logout flow for both the Options-panel button (.opt-logout) and the
 // HUD's visible "log out" button (#logoutbtn): confirm, guard against a
@@ -8536,49 +8406,41 @@ function refreshLogoutAck(s) {
 // … (~38 flows).
 let promptWin = null;        // the live dialog element (null = hidden)
 let promptDialogKey = null;  // (kind,serial,promptId) identity this dialog was built for
-// Key we just answered/canceled locally: the server often takes a beat to
-// clear/replace its prompt, so a re-poll can still report the SAME key we just
-// submitted for — suppress reopening it until the key actually changes (either
-// to a different prompt, chained straight out of ServUO's OnResponse/OnCancel,
-// or to `null` once the server catches up and clears it).
-let promptSuppressKey = null;
+// The server often takes a beat to clear/replace its prompt, so a re-poll can
+// still report the SAME key we just submitted for — the family's session guard
+// keeps it closed until the key actually changes (either to a different prompt,
+// chained straight out of ServUO's OnResponse/OnCancel, or away entirely once
+// the server catches up).
 function keyOfPrompt(p) { return p ? (p.kind || "unicode") + ":" + p.serial + ":" + p.promptId : null; }
 function closePromptDialog() {
-  if (promptWin) { promptWin.remove(); promptWin = null; }
-  promptDialogKey = null;
+  if (promptDialogKey) closeDialog("prompt", promptDialogKey);
 }
 function submitPromptDialog() {
   if (!promptWin) return;
   const text = promptWin._input.value;
-  promptSuppressKey = promptDialogKey;
-  closePromptDialog();
+  dismissDialog("prompt", promptDialogKey);
   sendInput("prompt:" + text);
 }
 function cancelPromptDialog() {
   if (!promptWin) return;
-  promptSuppressKey = promptDialogKey;
-  closePromptDialog();
+  dismissDialog("prompt", promptDialogKey);
   sendInput("promptcancel");
 }
 function openPromptDialog(key, kind) {
-  closePromptDialog();
   promptDialogKey = key;
-  const el = document.createElement("div");
-  el.className = "gump-win prompt-win";
-  const title = kind === "ascii" ? "Enter ASCII response" : "Enter response";
-  el.innerHTML = '<div class="gump-title"><span>' + title + '</span><span class="gump-close">✕</span></div>'
-    + '<div class="gump-body prompt-body">'
-    + '<input type="text" class="prompt-input" maxlength="128">'
+  const { el, body } = makeWindowFrame({
+    cls: "prompt-win", bodyCls: "prompt-body",
+    title: kind === "ascii" ? "Enter ASCII response" : "Enter response",
+    onClose: cancelPromptDialog,
+  });
+  body.innerHTML = '<input type="text" class="prompt-input" maxlength="128">'
     + '<div class="prompt-actions"><button class="dlg-btn prompt-ok">OK</button>'
-    + '<button class="dlg-btn prompt-cancel">Cancel</button></div>'
-    + '</div>';
-  document.body.appendChild(el);
+    + '<button class="dlg-btn prompt-cancel">Cancel</button></div>';
   const input = el.querySelector(".prompt-input");
   promptWin = el;
   promptWin._input = input;
   el.querySelector(".prompt-ok").addEventListener("click", submitPromptDialog);
   el.querySelector(".prompt-cancel").addEventListener("click", cancelPromptDialog);
-  el.querySelector(".gump-close").addEventListener("click", cancelPromptDialog);
   // Keep Enter/Esc local to this window (stopPropagation, same pattern as the
   // split-stack dialog) so the global game-input handler never also sees them —
   // don't leak movement/hotkey keystrokes to the game while typing a reply.
@@ -8588,6 +8450,7 @@ function openPromptDialog(key, kind) {
     else if (e.code === "Escape") { e.preventDefault(); cancelPromptDialog(); }
   });
   input.focus();
+  return { el };
 }
 // Open/rebuild the dialog whenever the pending prompt's IDENTITY (serial +
 // kind + promptId) differs from the one the current dialog was built for — NOT on
@@ -8599,17 +8462,20 @@ function openPromptDialog(key, kind) {
 // Close it once the server reports no prompt pending (e.g. it timed out
 // server-side), and forget any suppressed key so a later, genuinely new
 // prompt reusing old ids isn't mistaken for the one we already answered.
-function refreshPrompt(s) {
-  const p = s && s.prompt && s.prompt.active === 1 ? s.prompt : null;
-  const key = keyOfPrompt(p);
-  if (key === null) {
-    closePromptDialog();
-    promptSuppressKey = null;
-    return;
-  }
-  if (key === promptSuppressKey) return; // we just answered/canceled this one — wait for the server to move on
-  if (key !== promptDialogKey) openPromptDialog(key, p.kind); // fresh or chained prompt — (re)build for it
-}
+registerDialog({
+  id: "prompt",
+  // Keyed by the prompt's IDENTITY, not by an active-flag edge: ServUO routinely
+  // CHAINS prompts (the next one is set right inside OnResponse/OnCancel — see
+  // GuildCharterPrompt.cs, AdminGump.cs), so it can go straight from prompt A to
+  // prompt B without ever dipping through active:0. A new key here is a new
+  // dialog; an edge-only check would never see the transition.
+  source: (s) => (s && s.prompt && s.prompt.active === 1 ? [s.prompt] : []),
+  key: keyOfPrompt,
+  dismiss: "session",
+  build: (p, { key }) => openPromptDialog(key, p.kind),
+  close: (win) => { win.el.remove(); promptWin = null; promptDialogKey = null; },
+});
+
 
 function setupItemDnD() {
   // Promote an armed press (world item / container icon / paperdoll icon / worn doll
@@ -9428,10 +9294,10 @@ function setupInput() {
     if (e.code === "Escape" && paperdollOn) { e.preventDefault(); closePaperdoll(); return; }
     if (e.code === "Escape" && spellbookOn) { e.preventDefault(); closeSpellbook(); return; }
     if (e.code === "Escape" && skillsOn) { e.preventDefault(); closeSkills(); return; }
-    if (e.code === "Escape" && shopWin) { e.preventDefault(); shopDismissed = true; closeShop(); return; }
-    if (e.code === "Escape" && legacyMenuWins.size) {
+    if (e.code === "Escape" && shopWin) { e.preventDefault(); dismissDialog("shop", SHOP_KEY); return; }
+    if (e.code === "Escape" && dialogWindows("legacyMenus").size) {
       e.preventDefault();
-      const serial = [...legacyMenuWins.keys()].pop();
+      const serial = [...dialogWindows("legacyMenus").keys()].pop();
       answerLegacyMenu(serial, 0);
       return;
     }
@@ -9565,7 +9431,7 @@ function setupInput() {
     // If it steered, the character moved and NO menu pops. Either way it's resolved.
     if (rmbEntity) {
       if (rmbEntity.timer) { clearTimeout(rmbEntity.timer); rmbEntity.timer = null; }
-      if (!rmbEntity.steering) { lastMenuX = e.clientX; lastMenuY = e.clientY; popupDismissed = 0; sendInput("popupreq:" + rmbEntity.serial); }
+      if (!rmbEntity.steering) { lastMenuX = e.clientX; lastMenuY = e.clientY; undismissDialog("popup", rmbEntity.serial >>> 0); sendInput("popupreq:" + rmbEntity.serial); }
       rmbEntity = null;
     }
   });
@@ -9724,8 +9590,8 @@ function setupInput() {
     const profile = e.target.closest(".pd-profile[data-profile]");
     if (profile) {
       const serial = (+profile.dataset.profile) >>> 0;
-      const existing = [...profileWindows.values()].find((win) => win._serial === serial);
-      if (existing) bringToFront(existing);
+      const existing = [...dialogWindows("profiles").values()].find((w) => w.el._serial === serial);
+      if (existing) bringToFront(existing.el);
       else sendInput("profile:" + serial);
       return;
     }

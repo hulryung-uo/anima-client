@@ -1122,6 +1122,9 @@
       </div>
     </div>
     <script src="vendor/pixi.min.js"></script>
+    <!-- Dialog window lifecycle (registerDialog/syncDialogs). Must load before
+         main.js, which declares its dialog families at evaluation time. -->
+    <script src="dialogs.js"></script>
     <script src="main.js"></script>
   </body>
 </html>
