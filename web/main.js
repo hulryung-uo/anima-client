@@ -6254,6 +6254,17 @@ function closeTradeWindow(myCont) {
   const win = tradeWins.get(myCont);
   if (win) { win.el.remove(); tradeWins.delete(myCont); }
 }
+// Sessions the player cancelled locally, waiting to drop off `scene.trades`. Same
+// stale-snapshot race as gumpDismissed, but suppressed by session rather than by
+// content: a cancel is terminal, while the trade's signature keeps changing (items
+// move, gold is offered) right up until the server tears the session down — so a
+// content-keyed guard would let one of those updates reopen the window.
+const tradeDismissed = new Set();
+function cancelTrade(myCont) {
+  sendInput("tradecancel:" + myCont);
+  tradeDismissed.add(myCont);
+  closeTradeWindow(myCont); // close locally now — don't wait a poll for the server's echo
+}
 function buildTradeWindow(myCont) {
   const el = document.createElement("div");
   el.className = "gump-win trade-win";
@@ -6289,15 +6300,9 @@ function buildTradeWindow(myCont) {
     goldIn: el.querySelector(".tr-gold"), platIn: el.querySelector(".tr-plat"),
     balanceGold: 0, balancePlat: 0,
   };
-  el.querySelector(".gump-close").addEventListener("click", () => {
-    sendInput("tradecancel:" + myCont);
-    closeTradeWindow(myCont); // close locally now — don't wait a poll for the server's echo
-  });
+  el.querySelector(".gump-close").addEventListener("click", () => cancelTrade(myCont));
   const cancelBtn = el.querySelector(".tr-cancel");
-  cancelBtn.addEventListener("click", () => {
-    sendInput("tradecancel:" + myCont);
-    closeTradeWindow(myCont);
-  });
+  cancelBtn.addEventListener("click", () => cancelTrade(myCont));
   el.querySelector(".tr-accept-cb").addEventListener("change", (e) => {
     sendInput("tradeaccept:" + myCont + ":" + (e.target.checked ? "1" : "0"));
     // A checkbox is an <input>, so isTypingTarget() treats it as a typing target
@@ -6354,6 +6359,7 @@ function refreshTrade(scene) {
   for (const t of list) {
     const myCont = t.myCont >>> 0;
     seen.add(myCont);
+    if (tradeDismissed.has(myCont)) continue; // cancelled locally — don't reopen from a pre-cancel snapshot
     const items = (scene.contItems || []).filter(
       (it) => (it.cont >>> 0) === myCont || (it.cont >>> 0) === (t.theirCont >>> 0)
     );
@@ -6370,6 +6376,9 @@ function refreshTrade(scene) {
   }
   for (const myCont of [...tradeWins.keys()]) {
     if (!seen.has(myCont)) closeTradeWindow(myCont);
+  }
+  for (const myCont of [...tradeDismissed]) {
+    if (!seen.has(myCont)) tradeDismissed.delete(myCont); // server tore it down — stop suppressing
   }
 }
 
@@ -6988,6 +6997,12 @@ function refreshContainers() { for (const serial of containerWins.keys()) refres
 // ✕ sends button 0 (cancel). These are normal windows — they don't block the
 // rest of the game.
 const gumpWins = new Map(); // serial -> { el, sig, page, nodes, … }
+// Serial -> signature of a gump the player just answered/closed. `scene.json` is
+// polled, so a snapshot BUILT BEFORE our reply reached the server still lists the
+// gump; without this, refreshGumps would rebuild the window from that stale
+// snapshot and the dialog would visibly pop back for one poll before the next one
+// dropped it. Same guard legacyMenuDismissed/huePickerDismissed already carry.
+const gumpDismissed = new Map();
 let gumpCascade = 0;
 // Remembered screen position per gump KIND (gumpId), like ClassicUO's saved gump
 // locations. ServUO craft/menu gumps close and REOPEN with a fresh serial on every
@@ -7005,6 +7020,11 @@ function refreshGumps(scene) {
     const serial = (g.serial >>> 0);
     seen.add(serial);
     const sig = gumpSignature(g);
+    // Answered/closed and not yet reflected in the snapshot — leave it closed.
+    // Keyed by CONTENT too, so a server that re-sends different content under the
+    // same serial (World::add_gump upserts by serial) still gets a real window.
+    if (gumpDismissed.get(serial) === sig) continue;
+    if (gumpDismissed.has(serial)) gumpDismissed.delete(serial);
     const existing = gumpWins.get(serial);
     if (existing && existing.sig === sig) continue; // unchanged
     // Preserve the locally-selected page across a content refresh (the server
@@ -7020,6 +7040,11 @@ function refreshGumps(scene) {
   // Drop windows whose gump the server closed.
   for (const serial of [...gumpWins.keys()]) {
     if (!seen.has(serial)) { gumpWins.get(serial).el.remove(); gumpWins.delete(serial); }
+  }
+  // The server has caught up on a dismissed gump — stop suppressing that serial so
+  // a later gump reusing it isn't swallowed (and the map can't grow unbounded).
+  for (const serial of [...gumpDismissed.keys()]) {
+    if (!seen.has(serial)) gumpDismissed.delete(serial);
   }
 }
 
@@ -7647,7 +7672,7 @@ function submitGump(serial, gumpId, button) {
 function closeGump(serial) {
   serial = serial >>> 0;
   const win = gumpWins.get(serial);
-  if (win) { win.el.remove(); gumpWins.delete(serial); }
+  if (win) { gumpDismissed.set(serial, win.sig); win.el.remove(); gumpWins.delete(serial); }
 }
 
 // ── book reader (0x93/0xD4 header + 0x66 pages) ────────────────────────────
