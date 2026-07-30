@@ -1,167 +1,251 @@
 # ClassicUO compatibility gap inventory
 
-This is the working inventory for bringing `anima-client` toward ClassicUO
-feature coverage. It is intentionally broader than the old phase roadmap: a
-feature is only marked complete when its packet/state, native driver contract,
-scene/agent exposure, and user-facing behavior (where applicable) are present.
+Working inventory for bringing `anima-client` toward ClassicUO feature coverage.
+A feature counts as complete only when its packet/state, native driver contract,
+scene/agent exposure, and user-facing behavior (where applicable) all exist.
 
 ## Audit baseline
 
-- Audited: 2026-07-22
-- ClassicUO source: local upstream checkout at commit `575f35040`
-- Authoritative handler registry:
-  `src/ClassicUO.Client/Network/PacketHandlers.cs`
-- anima source: `crates/anima-core/src/net/game.rs` plus login and movement
-  state machines
-- Current game decoder: ~90 packet IDs. Two waves closed the ClassicUO gap:
-  (1) the 13 previously-missing P1 gameplay handlers below (0x15/0x16/0x23/
-  0x5B/0x71/0x97/0x98/0xB2/0xC4/0xC8/0xD2/0xD3/0xDE); (2) 0xF7 PacketList plus
-  the *sub-command / field* gaps inside already-dispatched multiplexed handlers
-  (mobile war-mode/paralysis flags, 0xBF 0x22/0x19/0x26, and the full 0x11
-  CharacterStatus version tail). `0x21`/`0x22` movement stay in `Walker`. Every
-  change was validated live (a `play` session logged into ServUO, entered the
-  world, and processed the real packet stream with no panic) and passed
-  multi-agent adversarial audits against the ClassicUO/ServUO/Python sources.
+- Audited: **2026-07-30** (supersedes the 2026-07-22 pass; 60 commits landed between
+  them, including the whole custom-house **editing** vertical the old file listed as
+  missing)
+- ClassicUO source: local upstream checkout, `src/ClassicUO.Client` + `src/ClassicUO.Assets`
+- anima source: whole workspace — `crates/anima-{core,assets,net,agent,wasm,desktop}`
+  and `web/{main.js,dialogs.js,index.html}`
+- Method: 14 subsystem sweeps (packets in/out, gumps, managers, rendering, assets,
+  input/macros, audio, config, world/map/houses, text/journal/chat,
+  combat/targeting/spells, login/character, network robustness, plus a
+  "what did we miss" critic), each followed by an adversarial pass whose job was to
+  *refute* the sweep.
 
-The comparison is mechanical at the packet-ID level, followed by a semantic
-review of the corresponding ClassicUO handler. Login-only packets and handlers
-that are acknowledgements/no-ops are not counted as missing game UI features.
+### Reliability note — read this before trusting a row
 
-## Implemented vertical slices
+The first adversarial pass **rubber-stamped**: it confirmed essentially every claim.
+An independent re-test of 31 claims then found **12 outright wrong and 11
+overstated** (~39%). The false positives clustered in one place: surveyors read the
+Rust crates and never properly read `web/main.js`, which is where most player-facing
+UI actually lives. All remaining claims were then re-run through skeptics primed with
+that failure rate; that pass refuted 0 of 112 and downgraded 10, which is the reason
+the list below is worth acting on.
 
-- Login/server/character selection, creation, deletion, cancellation
-- World/mobile/item updates, equipment, containers, paperdolls, status/vitals
-- `0x2D MobileAttributes`: full HP/Mana/Stamina refresh
-- `0x28 EndDraggingItem` / `0x29 DropItemAccepted`: bounded acknowledgement
-  events and delayed-ack-safe held-cursor reconciliation
-- `0x2C DeathStatus`: ClassicUO-compatible weather reset, death music, timed
-  screen banner, peace-mode request, and body-derived death/resurrection
-  environment transitions
-- `0x38 Pathfinding`: seq-gated server WalkTo requests executed by both native
-  and web route drivers with ClassicUO-compatible blocked-goal fallback
-- `0x7C OpenMenu` / `0x7D MenuResponse`: concurrent legacy item/icon and gray
-  question menus across core state, brain/WASM/native response contracts, scene,
-  and browser dialogs
-- `0x95 DisplayHuePicker` / `0x95 HuePickerResponse`: concurrent server dye
-  pickers, ServUO-compatible `2..=1001` hue normalization, versioned brain/WASM/
-  native contracts, a real `hues.mul` palette API, and browser grid/preview UI
-- `0x9A ASCIIPrompt` / `0x9A ASCIIPromptResponse`: prompt-kind-aware core state,
-  ClassicUO-compatible CP1252/NUL response and cancel packets, versioned brain/
-  WASM/native contracts, and the shared browser response dialog
-- `0xA5 OpenUrl`: bounded HTTP(S)-only request events, credential/authority and
-  control-character validation, versioned brain/scene exposure, and a browser
-  consent dialog whose explicit link click uses `noopener`/`noreferrer`
-- `0xA6 TipWindow` / `0xA7 TipRequest`: concurrent pageable tips and close-only
-  notices, CP1252/CR-normalized text, versioned brain/native/WASM actions, and
-  browser windows with ClassicUO-compatible previous/next/close behavior
-- `0xAB TextEntryDialog` / `0xAC TextEntryDialogResponse`: concurrent modal
-  dialogs with exact callback identity, CP1252 labels/responses, numeric and
-  UTF-16 length constraints, explicit OK/Cancel replies, permission-gated silent
-  close, versioned brain/native/WASM actions, and browser UI
-- `0xB8 CharacterProfile`: CP1252 header plus UTF-16 footer/body decoding,
-  concurrent exact-response state, self-only editable profiles, ClassicUO-style
-  request and save-on-close behavior, ServUO's 511 UTF-16-unit update limit,
-  versioned brain/native/WASM actions, and Paperdoll/browser profile windows
-- `0xD1 LogoutRequest` / `0xD1 LogoutAck`: capability-negotiated,
-  server-authorized termination with stale/unsolicited-reply gating, explicit
-  allow/deny state, ClassicUO's immediate-disconnect fallback when the 0xA9
-  flag is absent, versioned brain/native/WASM contracts, Options logout
-  confirmation, and clean login-scene recovery after an accepted logout or
-  lost game connection
-- `0xF6 BoatMoving`: atomic High Seas boat/passenger/item relocation, bounded
-  monotonic movement events, exact ClassicUO speed intervals, and rigid-group
-  browser interpolation for the hull, onboard entities, and following camera
-- Speech, localized messages, OPL/tooltips, prompts, targeting
-- Movement confirmation/denial, pathfinding, doors, facet changes
-- Combat state, damage/effects, animations, death/corpse links
-- Skills, buffs, spellbooks, books, maps, waypoints
-- Vendors, secure trade, popup menus, gumps, custom-house viewing
-- Light, weather, season, sound, and music
-- `0x98 UpdateName`: existing-only mobile rename (no phantom, like ClassicUO)
-- `0x16`/`0x17 NewHealthbarUpdate`: unified poison (bool + level) and
-  yellow/blessed bar, existing-only, only the field the packet carried
-- `0xDE UpdateMobileStatus` / `0xC4 Semivisible`: parse-only, matching
-  ClassicUO's own no-op handlers (recognized, never a phantom)
-- `0x5B SetTime`: `World::game_time` clock (ported from anima's handler)
-- `0xC8 ClientViewRange`: `World::client_view_range`
-- `0x15 FollowR`: `World::follow_target`
-- `0x97 MovePlayer`: server-forced step recorded as `World::forced_walk`
-  (+seq), mirroring the 0x38 pathfinding request pattern
-- `0xD2 UpdateCharacter` / `0xD3 UpdateObject`: legacy full mobile updates
-  (self-guarded; 0xD3 also parses the worn-item list past its 6-byte padding)
-- `0x23 DragAnimation`: item-drag visual as a `World::recent_drag_anims`
-  event log, with ClassicUO's gold/gem graphic remap and live endpoint
-  position substitution
-- `0x71 BulletinBoardData`: board + summaries + full-message state model
-- `0xB2 ChatMessage`: chat channel/status state + capped message log
-- `0xF7 PacketList`: batch container — dispatches each 0xF3 world-item
-  sub-packet (defensive parity; framing would otherwise drop them)
-- Mobile status-flags byte (0x20/0x77/0x78/0xD2/0xD3): now also decodes
-  `war_mode` (0x40) and `paralyzed` (0x01), not just Hidden — the only wire
-  source for another mobile's war-mode/paralysis
-- `0xBF/0x22 New Damage` (AOS twin of 0x0B) → the damage log; `0xBF/0x19`
-  ExtendedStats (v0 bonded-pet death → `Mobile::is_dead`; v2 stat-training
-  locks → `PlayerStats::{str,dex,int}_lock`); `0xBF/0x26 SpeedMode` →
-  `PlayerStats::speed_mode` (server-forced walk)
-- `0x11 CharacterStatus` version-gated tail: weight_max (+ non-ML strength
-  fallback), race, stats_cap, followers, four resistances, luck, damage
-  range, tithing — the full character sheet (surfaced through `PlayerView`)
+**Wrongly reported as missing — these are implemented, do not re-do them:**
+user-definable macros + hotkeys (`web/index.html:1092-1120`, `web/main.js:9041-9210`,
+localStorage `anima.macros`); health bars over other mobiles and party
+(`web/main.js:5028-5140`); overhead name plates (`web/main.js:5087-5136`); world-map
+user markers (`web/main.js:4261-4264`, `:4475-4487`); spell definitions for all eight
+schools plus casting from the spellbook (`web/main.js:5422-5574`); the weapon
+special-ability bar (`web/main.js:5306-5416`); lightning/moving/fixed graphic effects
+(`crates/anima-core/src/net/game.rs:899-925`); animated statics
+(`crates/anima-assets/src/animdata.rs` + `crates/anima-net/src/scene.rs:839-857`);
+distance-based sound falloff (`web/main.js:333-364`); the music playlist config
+(`crates/anima-net/src/play_server.rs:2387-2441`); per-sound volume
+(`web/main.js:231-232`, `:376-381`). "Looping ambient sound" is not a ClassicUO
+feature at all (zero hits across its tree).
 
-## Missing gameplay handlers
+Rows marked **[verified]** were re-checked by hand against the code, not just by an
+agent.
 
-All P1 gameplay handlers previously listed here (`0x15`, `0x16`, `0x23`,
-`0x5B`, `0x71`, `0x97`, `0x98`, `0xB2`, `0xC4`, `0xC8`, `0xD2`, `0xD3`,
-`0xDE`) are now implemented (see the vertical slices above) and validated
-live + audited. No P1 gameplay packet handlers remain open.
+---
 
-## Protocol/session items to audit separately
+## Tier 0 — defects in shipped behavior
 
-These ClassicUO registrations were assessed (ClassicUO-vs-anima handler diff)
-and left unimplemented on purpose — they are login negotiation (handled by
-`LoginMachine`/session: `0x53`, `0x55`, `0xF1`, `0xFD`, `0xDB`, `0x32`),
-Enhanced-Client-only (`0xE3`), or ClassicUO's own empty no-ops whose return
-value anima's caller already ignores (`0xC6`, `0xCA`, `0xCB`, `0xD0`, `0xD7`,
-`0x73` ping, `0xB7` help, `0xBB` messenger). Recognizing them as parsed
-no-ops has no functional effect (the framing table already consumes each
-frame). `0xF7` was the one carrying real payload and is now handled (above).
+These are not missing features; they are things that are wrong today.
 
-Lower-priority open items (evidence-based, deferred): `0xF0 KrriosClientSpecial`
-(assist-tool party radar), `0xBF/0x21 ClearWeaponAbility` (needs the outgoing
-UseAbility path to also track the armed slot), `0xBF/0x10 DisplayEquipInfo`
-(pre-OPL, superseded by the implemented 0xD6/0xDC OPL), `0xBF/0x18` map-file
-patches (asset concern), and the `0x11 flag>=6` combat-bonus tail (shard-
-dependent; framing harmlessly drops it).
+### T0.1 Facets 1–5 load no terrain at all **[verified]**
 
-## Outgoing (client → server) parity
+`crates/anima-assets/src/uop.rs:286` hardcodes the UOP virtual path to
+`build/map0legacymul/{index:08}.dat` regardless of which facet the reader was opened
+for. `MapData::open_facet` (`crates/anima-assets/src/map.rs:198`) correctly opens
+`map{facet}LegacyMUL.uop`, so there is no error — and `load_land_block`
+(`map.rs:232-243`) silently fills 64 cells with `(0, 0)` on a miss.
 
-A diff of ClassicUO `OutgoingPackets.cs` vs anima `net/outgoing.rs` (~42
-builders): the client already sends everything the agent/renderer drives
-(move, attack, say, target, gump/context/prompt responses, buy/sell, trade,
-party, skills, OPL request, logout, house design, …). Two always-active
-session packets were missing and are now sent: `0x73 Ping` (keepalive) and
-`0xC8 ClientViewRange` (world-entry handshake). The rest of ClassicUO's
-outgoing set is login-phase (handled by `LoginMachine`), EC-only (`0xEC`), or
-**feature-completing builders that only matter once a UI/agent action drives
-them** — `0x98 NameRequest`, `0x75 RenameRequest`, the `0x71` bulletin-board
-post/read requests, the `0xB3/0xB5` chat commands, `0x93/0xD4` book-header
-edit, `0x2C` death-screen response, `0xF0` party/guild query. These pair with
-already-decoded incoming state; add each builder alongside the input/agent
-action that triggers it.
+Measured against the real data files:
 
-## Beyond packet parity
+```
+facet 0 (Felucca)  : terrain present 4/4 samples   g=0x0006 z=10 …
+facet 1 (Trammel)  : terrain present 0/4 samples   g=0x0000 z=0
+facet 2..5         : 0/4
+```
 
-Packet registration parity alone does not equal ClassicUO feature parity. Major
-systems that require their own audits include custom-house **editing** (viewing
-is implemented), complete boat controls, bulletin-board / chat compose+reply UI
-(the packet *state models* are now decoded; the renderer/brain surfaces for
-authoring are not built), remaining legacy prompts, assistant/plugin APIs,
-settings persistence, accessibility, and renderer polish. This file should stay
-evidence-based: add a ClassicUO source location and an end-to-end acceptance test
-when closing a row.
+The moment the server moves the player to Trammel (a normal ServUO destination),
+Ilshenar, Malas, Tokuno or Ter Mur, the ground vanishes and every land Z reads 0, so
+`CalculateNewZ`, walkability and step prediction all desync from the server.
+ClassicUO uses the per-index pattern (`src/ClassicUO.Assets/MapLoader.cs:149`).
+Fix: thread the facet into `by_map_chunk`. Effort: S. **Priority: highest.**
 
-Known minor divergence (low priority, tracked by the adversarial audit): the
-mobile-incoming family (`0x78`, and the new `0xD3`) does not yet clear a
-mobile's *stale* worn items before applying the incoming equipment list, so an
-unequipped item can linger in `World::items` until overwritten. ClassicUO
-removes non-backpack worn items first. `0x78` has always had this gap; fold the
-fix into both when the equipment list is next touched.
+### T0.2 An unrecognized opcode kills the session **[verified]**
+
+`crates/anima-core/src/net/lengths.rs` is a sparse 198-entry table; anything absent
+returns `PacketLength::Unknown` → `FramingError::UnknownPacket` →
+`DriverError::Framing` at `crates/anima-net/src/lib.rs:1095`, which ends the session.
+ClassicUO's `Network/PacketsTable.cs` is a complete 256-slot array (`-1` = read the
+u16 length), so it can frame and ignore anything.
+
+Diffing the two tables, **44 opcodes ClassicUO can frame and we cannot**:
+
+```
+0x3D 0x4A 0x4B 0x4C 0x4D 0x50 0x52 0x59 0x5A 0x5C 0x5E 0x5F 0x60 0x61 0x62 0x63
+0x64 0x67 0x68 0x69 0x6A 0x6B 0x79 0x7A 0x7E 0x7F 0x84 0x87 0x8A 0x8D 0x8E 0x8F
+0x92 0x94 0x96 0x9C 0x9D 0xAC 0xB3 0xB4 0xC5 0xCD 0xCE 0xD5
+```
+
+Any shard that sends one disconnects the client. ClassicUO also *version-gates*
+several entries (0x0B, 0x16, 0x31, 0xE1, 0xE3), which we would need too. Effort: S.
+
+### T0.3 The packaged desktop app forgets every preference **[verified]**
+
+`crates/anima-desktop/src/main.rs:145` binds the play server with `http_port: 0`
+(OS-assigned) and points the webview at `http://127.0.0.1:<random>/`. `localStorage`
+is keyed by origin *including the port*, so every launch of the shipped app gets a
+brand-new, empty store: settings, world-map markers, POI filters, macros, and all
+remembered panel positions are lost each time. The `play` dev binary defaults to
+8090, which is why this never showed up in development. Effort: S (persist a port,
+or move state server-side).
+
+### T0.4 Dyed items render in their default colour **[verified]**
+
+A ground item's scene entry (`crates/anima-net/src/scene.rs:2589`) carries
+`x,y,z,g,serial,pz` and **no hue** — `Item::hue` is only used for corpses
+(`scene.rs:2625`). The browser then requests art with no hue query in all three
+places items appear: world (`web/main.js:2650`), container/backpack grids
+(`:6922`) and the vendor window (`:7755`, `:7770`). Only worn equipment on the
+paperdoll is hued (`:6830`). Effort: S.
+
+### T0.5 Animated dynamic items never animate **[verified]**
+
+`anim_suffix` (`crates/anima-net/src/scene.rs:839`) is applied to map statics
+(`:3090`) and multi components (`:2370`) but not to the dynamic-item loop
+(`:2586`), so server-spawned animated items — spell fields, campfires, some
+braziers — render as a single frozen frame. Effort: S.
+
+### T0.6 Item tooltips (OPL) never refresh
+
+`opl_info` (`crates/anima-core/src/net/game.rs:1769`) records the 0xDC revision and
+does nothing with it; `World::opl_revision` is written in four places and compared
+nowhere. The only 0xD6 request path is `Action::OplRequest`, driven solely by a
+browser hover, and `web/main.js:726/769/6821` gate on `!oplReq.has(serial)` so a
+serial is fetched at most once. An item whose properties change keeps its stale
+tooltip forever. The identical staleness pattern *is* handled correctly for
+custom-house designs (`game.rs:3068-3085`), which is the model to copy. Effort: S.
+
+### T0.7 62 multi ids are invisible and non-solid
+
+`crates/anima-assets/src/multis.rs` reads only `multi.idx`/`multi.mul`;
+`MultiCollection.uop` is unread. 62 ids exist only in the UOP — `0x50-0x53`,
+`0x147C-0x14A1`, `0x177C`, `0x1DF4-0x1DFB`, `0x2120-0x212A` — which covers ServUO's
+pre-built castles. For those, `placement_json` (`scene.rs:2166`) bails and the
+walkability fold gets nothing, so both the placement preview and collision are
+silently absent. Effort: M.
+
+---
+
+## Tier 1 — capabilities the player/brain cannot express
+
+The receive side is generally complete; there is no way to *act*.
+
+| Gap | Where it stands | Effort |
+|---|---|---|
+| **Speech modes** (whisper / yell / emote / guild / alliance) | `build_say`/`build_unicode_say` already take `msg_type`, and the receive side styles all types — but the only caller (`anima-net/src/lib.rs:533`) hardcodes 0, and no Action/command/prefix parser exists | S |
+| **Stat locks** (0xBF/0x1A) | locks are *decoded* into `PlayerStats::{str,dex,int}_lock`; no builder, Action or UI. The skill-lock twin is complete end-to-end — copy it | S |
+| **Armed weapon ability state** (0xBF/0x21 clear, 0xBF/0x25 toggle) | send works, but the server's clear/toggle feedback is unhandled, so the bar's armed highlight goes stale after every use | S |
+| Pre-AOS stun / disarm (0xBF/0x09, 0x0A) | absent | S |
+| Targeted use (0xBF/0x2C) — bandage self/target in one packet | absent | S |
+| **Auto-walk always runs at unmounted-walk speed** | `movement.rs::step_delay_ms` has all four tiers (100/200/200/400); `ROUTE_STEP` (`anima-net/src/lib.rs:123`) is a hardcoded 400 ms and never consults it | S |
+| **Shard list** | 0xA8 is never parsed — only server index 0 can be selected; 0x8C's relay IP/port is discarded so the second connection returns to the login endpoint | M |
+| **Login/character rejection reasons** | 0x53 PopupMessage / 0x82 / 0xFD are framed then dropped, so a refusal is silent | S |
+| Book authoring (title/author + page text) | 0x93/0xD4 header edit and page write builders exist as round-trip stubs; no UI drives them | M |
+| Map pin editing (0x56) | read-only | S |
+| Boat helm control (0xBF/0x33) | absent | M |
+| Bulletin board post/read/reply | state model decoded (0x71); no authoring surface | M |
+| Chat channels (0xB2/0xB3/0xB5) | **core is complete** — create/destroy/join/leave/lines all decoded — with no Action, scene field or UI above it | M |
+| Guild / quest menus (0xD7 sub 0x28 / 0x32), help+GM page (0x9B), rename (0x75), quest-arrow click (0xBF/0x07) | absent | S each |
+| Party: loot flag, private message, leader kick | partial | S |
+| Request another entity's status (0x34 non-self) → party mana/stam bars | absent | S |
+
+---
+
+## Tier 2 — UI for state we already decode
+
+| Gap | Note | Effort |
+|---|---|---|
+| **Extended status sheet** | resistances, damage range, luck, followers, tithing, weight and stats-cap are all parsed into `World` but `scene.rs:3205-3216` never emits them, so `refreshStatus` can only show HP/mana/stam/str/dex/int/gold | M |
+| **0x11 `type >= 6` combat tail** | max resists, HCI/DCI/SSI/DI/LRC/SDI/FCR/FC/LMC are explicitly not parsed (`game.rs:2757`); no field of that family exists anywhere | M |
+| **Buff names** | 0xDF's title/description clilocs and their args are never read; names come from a hardcoded 35-entry English table against 189 icon graphics, so most buffs show as `#1234` and the buff/debuff tint is a regex over that name | M |
+| Journal | works, but one flat colour, no message-type filter, no tabs, no timestamps, not its own resizable window | M |
+| Grid loot | corpses already open as a grid; the one-click loot workflow is what's missing | M |
+| Info bar | a fixed HUD readout exists; ClassicUO's user-configurable field set does not | M |
+| Counter bar, ignore list, combat-book gump, racial-abilities book, network-stats and inspector windows | absent | S–M |
+| Container gumps ignore real container art and each item's stored (x,y) | contents render as a uniform grid rather than the authentic bag layout | M |
+| Window management | no resize, no anchoring/docking, no saved per-window layout | M |
+
+---
+
+## Tier 3 — rendering fidelity
+
+Shadows; corpse equipment layers (corpses render as a bare body); death animation
+(mobiles do not fall); `light.mul` light shapes/colours (a radius-only light system
+exists — `scene.rs:2631-2648`); directional lighting on stretched land; seasonal
+land/static graphic remap (the season *system* exists, the remap does not);
+`TileFlag.Translucent` statics drawn opaque; static hue from `statics.mul` discarded
+at decode; mount rider vertical offset; seated-character deformation; roof/ceiling
+fading; 0x23 DragEffect decoded but never drawn; GameEffect blend modes and
+projectile rotation; StaticFilters (tree→stumps, hide vegetation).
+
+---
+
+## Tier 4 — the AI contract
+
+This is the one that cuts against the project's own thesis.
+
+- **Brains have no terrain perception.** `Observation`
+  (`crates/anima-core/src/agent.rs:134`) carries player, mobiles, items, journal,
+  target, skills, gumps, prompt, trades, buffs, shops, popup, menus and hue pickers —
+  and no land, statics or walkability. The browser receives full per-tile terrain from
+  the same `World`. `WanderBrain` moves only because `Action::WalkTo` is pathfound by
+  the *driver* against a server-side `MapData`; the brain itself cannot tell a wall
+  from open ground, plan around water, or find a door. **[verified]** Effort: L.
+- Cliloc-localized messages reach brains as an unresolved id plus raw args, so a brain
+  cannot read most system messages.
+- 0xCC ClilocMessageAffix drops the affix-flags byte and concatenates the affix into
+  the cliloc *args* rather than the resolved text, so templates without a placeholder
+  discard it entirely (`game.rs:3310-3331`).
+- Server-gump layout grammar: `tilepic`/`tilepichue`, `gumppictiled`, `checkertrans`,
+  `tooltip`, `itemproperty`, `buttontileart`, `picinpic`, `textentrylimited`,
+  `noclose`/`nodispose`/`nomove` are silently dropped, and radio buttons are never
+  grouped — so complex shard gumps are mis-rendered for both the player and the brain.
+
+---
+
+## Tier 5 — assets (`crates/anima-assets`)
+
+Beyond T0.1 and T0.7 above: `verdata.mul` patching; `mapdif`/`stadif` map-diff files
+and 0xBF/0x18; `speech.mul` keyword encoding (so NPC keyword commands can never be
+sent); `Multimap.rle`/`facet0N.mul` (the map window shows only its gump frame and
+pins, no terrain raster); `fonts.mul` + `unifont*.mul`; `art.def`/`TexTerr.def` alias
+tables; `gump.def` alias table; `skills.mul` (skill names + HasAction);
+`Prof.txt`/`Professn.enu` professions (0xF8's profession byte is hardcoded 0);
+`tileart.uop`; `Anim1.def`/`Anim2.def` group-replacement tables **and** the missing
+`% AnimationCount` clamp for animals/monsters; `light.mul`; cliloc language selection
+and BWT-compressed clilocs; `Client.Version`-driven format selection; MUL fallback
+when a UOP is absent; and `hues.mul` ramp-index selection (we pick the ramp by pixel
+brightness where ClassicUO uses the red channel).
+
+---
+
+## Deliberately not doing
+
+Login/game-stream encryption (this client targets shards that accept unencrypted
+connections); ClassicUO's assist/plugin API; Enhanced-Client-only packets (0xE3,
+0xEC); ClassicUO's internal plumbing with no player- or agent-visible effect.
+
+## Keeping this file honest
+
+Add a ClassicUO source location and an end-to-end acceptance test when closing a row.
+When a row is closed, say so here rather than deleting it — the "wrongly reported as
+missing" list above exists because that history was not written down.
+
+Known minor divergence carried over from the previous audit: the mobile-incoming
+family (`0x78`, `0xD3`) does not clear a mobile's *stale* worn items before applying
+the incoming equipment list, so an unequipped item can linger in `World::items` until
+overwritten. ClassicUO removes non-backpack worn items first. Fold the fix into both
+when the equipment list is next touched.
