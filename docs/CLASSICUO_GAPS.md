@@ -51,7 +51,7 @@ agent.
 
 These are not missing features; they are things that are wrong today.
 
-### T0.1 Facets 1–5 load no terrain at all **[verified]**
+### T0.1 Facets 1–5 load no terrain at all — **CLOSED** (`d4cd6d0`)
 
 `crates/anima-assets/src/uop.rs:286` hardcodes the UOP virtual path to
 `build/map0legacymul/{index:08}.dat` regardless of which facet the reader was opened
@@ -71,9 +71,11 @@ The moment the server moves the player to Trammel (a normal ServUO destination),
 Ilshenar, Malas, Tokuno or Ter Mur, the ground vanishes and every land Z reads 0, so
 `CalculateNewZ`, walkability and step prediction all desync from the server.
 ClassicUO uses the per-index pattern (`src/ClassicUO.Assets/MapLoader.cs:149`).
-Fix: thread the facet into `by_map_chunk`. Effort: S. **Priority: highest.**
+Closed by threading the facet into `by_map_chunk` and making `open_facet` refuse
+a container whose chunk 0 is unreachable — a silent void is indistinguishable from
+real flat terrain. All six facets verified against the real data files.
 
-### T0.2 An unrecognized opcode kills the session **[verified]**
+### T0.2 An unrecognized opcode kills the session — **CLOSED** (`d4cd6d0`)
 
 `crates/anima-core/src/net/lengths.rs` is a sparse 198-entry table; anything absent
 returns `PacketLength::Unknown` → `FramingError::UnknownPacket` →
@@ -89,18 +91,25 @@ Diffing the two tables, **44 opcodes ClassicUO can frame and we cannot**:
 0x92 0x94 0x96 0x9C 0x9D 0xAC 0xB3 0xB4 0xC5 0xCD 0xCE 0xD5
 ```
 
-Any shard that sends one disconnects the client. ClassicUO also *version-gates*
-several entries (0x0B, 0x16, 0x31, 0xE1, 0xE3), which we would need too. Effort: S.
+Closed: the table now covers all 256 ids. Two values deliberately depart from
+ClassicUO — 0xD5 stays variable (its fixed 9 comes from the CV_7010400 / 7.0.104.0
+branch, above the 7.0.102.3 we advertise) and 0xCF keeps ClassicUO's 78 (ServUO's
+registration for it is client→server, the opposite of the direction this table
+frames). An unknown id stays fatal by design, since a packet whose length you do
+not know cannot be skipped.
 
-### T0.3 The packaged desktop app forgets every preference **[verified]**
+### T0.3 The packaged desktop app forgets every preference — **CLOSED** (`d4cd6d0`)
 
 `crates/anima-desktop/src/main.rs:145` binds the play server with `http_port: 0`
 (OS-assigned) and points the webview at `http://127.0.0.1:<random>/`. `localStorage`
 is keyed by origin *including the port*, so every launch of the shipped app gets a
 brand-new, empty store: settings, world-map markers, POI filters, macros, and all
 remembered panel positions are lost each time. The `play` dev binary defaults to
-8090, which is why this never showed up in development. Effort: S (persist a port,
-or move state server-side).
+8090, which is why this never showed up in development.
+
+Closed by serving from the first free port in `8190..=8199` and remembering the
+port actually bound, which keeps the original reason for an ephemeral port (never
+collide with the `play` bin, or with a second copy) while giving a stable origin.
 
 ### T0.4 Dyed items render in their default colour **[verified]**
 
