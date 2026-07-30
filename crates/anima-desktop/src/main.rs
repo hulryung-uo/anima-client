@@ -1,6 +1,6 @@
 //! Standalone desktop shell (Tauri v2): runs the `anima-net` play server
-//! in-process (direct TCP to the UO server, no relay) on an ephemeral
-//! loopback port, then opens a native webview at that URL. The web renderer
+//! in-process (direct TCP to the UO server, no relay) on a stable loopback
+//! port, then opens a native webview at that URL. The web renderer
 //! (`web/`, embedded — see `anima_net::play_server`) needs no changes: it
 //! already talks same-origin (relative `fetch`/`EventSource`) to whatever
 //! host served the page.
@@ -9,6 +9,7 @@
 //! `web/` copy, so `frontendDist` in `tauri.conf.json` just points at an
 //! empty placeholder directory that's never actually served.
 
+use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 
 use anima_net::play_server::{self, PlayConfig};
@@ -18,10 +19,55 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 /// Persisted at `<app_config_dir>/config.json` so a manually-picked data dir
-/// survives across runs (see [`resolve_data_dir`]).
+/// (see [`resolve_data_dir`]) and the webview's origin (see
+/// [`choose_http_port`]) survive across runs.
 #[derive(Serialize, Deserialize)]
 struct DesktopConfig {
     data_dir: PathBuf,
+    /// The loopback port last served to the webview. `serde(default)` keeps
+    /// config.json files written before this field existed loadable.
+    #[serde(default)]
+    http_port: Option<u16>,
+}
+
+/// Ports tried, in order, when nothing usable is remembered. Deliberately a
+/// fixed low range rather than an OS-assigned one: the webview's origin —
+/// and therefore every `localStorage`-backed preference the web layer keeps
+/// (`anima.settings`, `anima.macros`, the HUD positions, …) — is keyed by
+/// port, so an ephemeral port meant a brand-new, empty store every launch.
+/// A fixed range is also *stable*: the OS ephemeral range (49152+ on macOS
+/// and Windows) is exactly where outgoing sockets get their source ports, so
+/// a remembered ephemeral port is likely to be stolen between runs.
+/// 8190 rather than 8090 so a dev copy of the `play` bin (which defaults to
+/// 8090) and the shipped app don't fight over one port.
+const PORT_RANGE: std::ops::RangeInclusive<u16> = 8190..=8199;
+
+/// A remembered port below 1024 is privileged (we could never have bound it,
+/// so we never wrote it) and 0 means "OS-assigned" — treat either as if
+/// nothing was remembered rather than trusting a hand-edited config.
+fn usable_remembered(port: Option<u16>) -> Option<u16> {
+    port.filter(|p| *p >= 1024)
+}
+
+/// Pick the HTTP port to serve the renderer on: the remembered one if it's
+/// still free, else the first free port in [`PORT_RANGE`], else `None` for
+/// "let the OS assign one" (settings won't persist for that run — the caller
+/// logs it). `free` is the bind probe, injected so this is unit-testable.
+fn choose_http_port(remembered: Option<u16>, mut free: impl FnMut(u16) -> bool) -> Option<u16> {
+    let remembered = usable_remembered(remembered);
+    remembered
+        .into_iter()
+        .chain(PORT_RANGE.filter(|p| Some(*p) != remembered))
+        .find(|p| free(*p))
+}
+
+/// Can we bind `port` on loopback right now? Inherently racy (the listener is
+/// closed again immediately), so the caller must still handle a failing bind —
+/// but std sets `SO_REUSEADDR` on non-Windows exactly like `tiny_http`'s own
+/// listener, so a `TIME_WAIT` leftover from our previous run doesn't make an
+/// otherwise-free port look taken.
+fn port_is_free(port: u16) -> bool {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
 }
 
 /// Cheap sanity check that `dir` looks like an unpacked UO client install
@@ -47,23 +93,56 @@ fn config_path(app: &AppHandle) -> Option<PathBuf> {
         .map(|d| d.join("config.json"))
 }
 
-fn load_persisted_data_dir(app: &AppHandle) -> Option<PathBuf> {
+fn load_config(app: &AppHandle) -> Option<DesktopConfig> {
     let text = std::fs::read_to_string(config_path(app)?).ok()?;
-    serde_json::from_str::<DesktopConfig>(&text)
-        .ok()
-        .map(|c| c.data_dir)
+    serde_json::from_str::<DesktopConfig>(&text).ok()
 }
 
-fn persist_data_dir(app: &AppHandle, dir: &Path) {
+fn save_config(app: &AppHandle, cfg: &DesktopConfig) {
     let Some(path) = config_path(app) else { return };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(json) = serde_json::to_string_pretty(&DesktopConfig {
-        data_dir: dir.to_path_buf(),
-    }) {
+    if let Ok(json) = serde_json::to_string_pretty(cfg) {
         let _ = std::fs::write(path, json);
     }
+}
+
+/// Read-modify-write so the other fields survive: blindly rewriting the file
+/// with only `data_dir` would drop the remembered port, moving the webview's
+/// origin and wiping every stored preference.
+fn persist_data_dir(app: &AppHandle, dir: &Path) {
+    let mut cfg = load_config(app).unwrap_or(DesktopConfig {
+        data_dir: dir.to_path_buf(),
+        http_port: None,
+    });
+    cfg.data_dir = dir.to_path_buf();
+    save_config(app, &cfg);
+}
+
+fn persist_http_port(app: &AppHandle, data_dir: &Path, port: u16) {
+    let mut cfg = load_config(app).unwrap_or(DesktopConfig {
+        data_dir: data_dir.to_path_buf(),
+        http_port: None,
+    });
+    // Re-read decides, not the value we loaded at startup: on the very first run
+    // after upgrade two copies both start with no remembered port, and whichever
+    // finishes second would otherwise clobber the first one's claim — stranding
+    // every preference the user had just set under an origin nothing loads again.
+    // Re-reading here narrows that to the window between this load and the write;
+    // it is not atomic, but the alternative is a lock file for a case that needs
+    // two copies started within the same second of a first launch.
+    if let Some(claimed) = cfg.http_port {
+        if claimed != port {
+            eprintln!(
+                "anima-desktop: another copy already claimed port {claimed}; leaving it \
+                 and serving this session from {port} (its preferences are separate)"
+            );
+            return;
+        }
+    }
+    cfg.http_port = Some(port);
+    save_config(app, &cfg);
 }
 
 /// Resolve the UO client data directory: a previously-persisted pick, else
@@ -76,7 +155,9 @@ fn persist_data_dir(app: &AppHandle, dir: &Path) {
 /// that it deadlocks if called from it (the caller is our own spawned
 /// thread — see `main`).
 fn resolve_data_dir(app: &AppHandle) -> PathBuf {
-    let candidate = load_persisted_data_dir(app).unwrap_or_else(default_data_dir);
+    let candidate = load_config(app)
+        .map(|c| c.data_dir)
+        .unwrap_or_else(default_data_dir);
     if looks_like_uo_data(&candidate) {
         return candidate;
     }
@@ -133,18 +214,17 @@ fn main() {
                 let data_dir = resolve_data_dir(&app_handle);
 
                 // Standalone default: the served login page collects
-                // server/account (no baked-in credentials); http_port 0 =
-                // OS-assigned, so multiple copies (or a busy 8090) never
-                // collide; web_dir None = the copy embedded in anima-net at
-                // compile time (no `web/` directory exists outside the repo).
-                let cfg = PlayConfig {
+                // server/account (no baked-in credentials); web_dir None = the
+                // copy embedded in anima-net at compile time (no `web/`
+                // directory exists outside the repo).
+                let make_cfg = |http_port: u16| PlayConfig {
                     host: String::new(),
                     port: 0,
                     user: String::new(),
                     pass: String::new(),
-                    http_port: 0,
+                    http_port,
                     web_dir: None,
-                    data_dir,
+                    data_dir: data_dir.clone(),
                     login_page: true,
                     // Loopback only, unconditionally — unlike the `play` bin's
                     // `ANIMA_BIND` escape hatch (see `anima_net::play_server::PlayConfig`),
@@ -154,7 +234,48 @@ fn main() {
                     // The desktop shell drives its own session — full input.
                     read_only: false,
                 };
-                let server = match play_server::bind(cfg) {
+
+                // Serve from the same port as last run whenever we can: the
+                // renderer's preferences live in localStorage, which is keyed
+                // by origin (port included). Scanning a small fixed range keeps
+                // the original "multiple copies never collide" property — a
+                // second copy just lands on the next port (with its own store)
+                // instead of failing to start.
+                let remembered = load_config(&app_handle).and_then(|c| c.http_port);
+                let chosen = choose_http_port(remembered, port_is_free);
+                if let Some(want) = usable_remembered(remembered) {
+                    if chosen != Some(want) {
+                        eprintln!(
+                            "anima-desktop: port {want} is in use (another copy of Anima?); \
+                             falling back to {} — settings saved under the old port stay there \
+                             and come back once {want} is free again",
+                            chosen.map_or("an OS-assigned port".to_string(), |p| p.to_string())
+                        );
+                    }
+                } else if chosen.is_none() {
+                    eprintln!(
+                        "anima-desktop: every port in {}..={} is in use; using an OS-assigned one \
+                         — settings will not persist past this run",
+                        PORT_RANGE.start(),
+                        PORT_RANGE.end()
+                    );
+                }
+
+                // `port_is_free` closed its probe listener before we got here, so
+                // another process can still win the race; `play_server::bind` only
+                // fails on the HTTP bind, so retry once with an OS-assigned port
+                // rather than refusing to start over a lost race.
+                let server = match chosen {
+                    Some(p) => play_server::bind(make_cfg(p)).or_else(|e| {
+                        eprintln!(
+                            "anima-desktop: port {p} was taken after all ({e}); \
+                             retrying with an OS-assigned port"
+                        );
+                        play_server::bind(make_cfg(0))
+                    }),
+                    None => play_server::bind(make_cfg(0)),
+                };
+                let server = match server {
                     Ok(s) => s,
                     Err(e) => {
                         // No window exists yet here — without this dialog the app
@@ -165,8 +286,16 @@ fn main() {
                         return;
                     }
                 };
+                // The port actually bound, which is what the webview loads and
+                // what localStorage is keyed by (`chosen` may have lost the race).
                 let port = server.port();
                 println!("anima-desktop: play server bound on 127.0.0.1:{port}");
+                // Claim an origin only if we don't have one yet: overwriting a
+                // remembered port with a fallback would hand the user's stored
+                // preferences to whichever copy launched second.
+                if usable_remembered(remembered).is_none() && PORT_RANGE.contains(&port) {
+                    persist_http_port(&app_handle, &data_dir, port);
+                }
 
                 let handle_for_window = app_handle.clone();
                 if let Err(e) = app_handle.run_on_main_thread(move || {
@@ -224,4 +353,68 @@ fn fatal(app: &AppHandle, message: &str) {
         .kind(MessageDialogKind::Error)
         .blocking_show();
     app.exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Everything except `taken` is free.
+    fn probe(taken: &[u16]) -> impl FnMut(u16) -> bool + '_ {
+        |p| !taken.contains(&p)
+    }
+
+    #[test]
+    fn first_launch_takes_the_base_port() {
+        assert_eq!(choose_http_port(None, probe(&[])), Some(*PORT_RANGE.start()));
+    }
+
+    #[test]
+    fn a_remembered_port_wins_even_outside_the_range() {
+        assert_eq!(choose_http_port(Some(8190), probe(&[])), Some(8190));
+        assert_eq!(choose_http_port(Some(9999), probe(&[])), Some(9999));
+    }
+
+    #[test]
+    fn a_taken_remembered_port_falls_through_to_the_range() {
+        assert_eq!(choose_http_port(Some(9999), probe(&[9999])), Some(8190));
+        // The remembered port is skipped when the scan reaches it again.
+        assert_eq!(choose_http_port(Some(8190), probe(&[8190])), Some(8191));
+    }
+
+    #[test]
+    fn a_full_range_means_os_assigned() {
+        let all: Vec<u16> = PORT_RANGE.collect();
+        assert_eq!(choose_http_port(None, probe(&all)), None);
+        assert_eq!(choose_http_port(Some(8195), probe(&all)), None);
+    }
+
+    #[test]
+    fn unusable_remembered_ports_are_ignored() {
+        assert_eq!(usable_remembered(None), None);
+        assert_eq!(usable_remembered(Some(0)), None);
+        assert_eq!(usable_remembered(Some(80)), None);
+        assert_eq!(usable_remembered(Some(8190)), Some(8190));
+    }
+
+    /// The probe has to agree with a real listener in both directions, or we'd
+    /// either skip a free port (new origin, lost settings) or hand
+    /// `play_server::bind` a port it can't have.
+    #[test]
+    fn the_probe_matches_a_real_listener() {
+        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = held.local_addr().unwrap().port();
+        assert!(!port_is_free(port));
+        drop(held);
+        assert!(port_is_free(port));
+    }
+
+    /// A config.json written before `http_port` existed must still load (and
+    /// then read as "nothing remembered"), or the data-dir pick is lost too.
+    #[test]
+    fn config_without_http_port_still_loads() {
+        let cfg: DesktopConfig = serde_json::from_str(r#"{"data_dir":"/uo"}"#).unwrap();
+        assert_eq!(cfg.data_dir, PathBuf::from("/uo"));
+        assert_eq!(cfg.http_port, None);
+    }
 }

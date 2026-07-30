@@ -198,8 +198,39 @@ impl MapData {
     pub fn open_facet(resource_dir: impl AsRef<Path>, facet: u8) -> std::io::Result<MapData> {
         let dir: PathBuf = resource_dir.as_ref().to_path_buf();
         let (width, height) = facet_dims(facet);
+        let uop = UopReader::open(&dir.join(format!("map{facet}LegacyMUL.uop")))?;
+        // Probe chunk 0 before handing the reader out: `load_land_block` fills
+        // 64 flat `(0, 0)` cells on a chunk miss, so a container we can't hash
+        // a single path into is indistinguishable from genuinely empty terrain
+        // — that's how the facet-0-hardcoded chunk path silently zeroed every
+        // other facet's land Z and desynced CalculateNewZ from the server.
+        // Hard error rather than a warning: every real `map{N}LegacyMUL.uop`
+        // has chunk 0 (blocks 0..4095), so a miss means nothing this MapData
+        // says about terrain can be trusted, and `play_server`'s facet-switch
+        // reload already treats `Err` as "keep the previous facet's map" —
+        // better than voiding the ground under the player.
+        if uop.by_map_chunk(facet, 0).is_none() {
+            // Say WHICH failure it was: a missing entry means the container and
+            // the path pattern disagree (wrong facet, renamed build), while a
+            // listed-but-undecodable entry means the file itself is truncated or
+            // corrupt. Reporting only the first sends whoever reads this hunting
+            // for a hashing bug that isn't there.
+            let why = if uop.has_map_chunk(facet, 0) {
+                "chunk 0 is listed but did not decode (truncated file or bad zlib)".to_string()
+            } else {
+                format!("no entry for build/map{facet}legacymul/00000000.dat")
+            };
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "map{facet}LegacyMUL.uop: {why} ({} entries parsed) — refusing to \
+                     serve a facet of flat void terrain",
+                    uop.entry_count()
+                ),
+            ));
+        }
         Ok(MapData {
-            uop: UopReader::open(&dir.join(format!("map{facet}LegacyMUL.uop")))?,
+            uop,
             staidx: std::fs::read(dir.join(format!("staidx{facet}.mul")))?,
             statics: std::fs::read(dir.join(format!("statics{facet}.mul")))?,
             tiledata: TileData::open(&dir.join("tiledata.mul"))?,
@@ -229,7 +260,7 @@ impl MapData {
             let block_in_chunk = block_num % BLOCKS_PER_UOP_CHUNK;
 
             let mut cells = vec![(0u16, 0i8); 64];
-            if let Some(chunk) = self.uop.by_map_chunk(chunk_idx) {
+            if let Some(chunk) = self.uop.by_map_chunk(self.facet, chunk_idx) {
                 let base = block_in_chunk * MAP_BLOCK_BYTES + 4; // skip 4-byte header
                 for (i, cell) in cells.iter_mut().enumerate() {
                     let pos = base + i * 3;
@@ -462,14 +493,19 @@ mod tests {
         );
     }
 
-    /// Each facet opens with its ClassicUO dimensions and can read a land tile
-    /// inside its bounds (real data files; run with `--ignored`).
+    /// Each facet opens with its ClassicUO dimensions and reads REAL terrain
+    /// inside its bounds (real data files; run with `--ignored`). The
+    /// non-void assertion is the point: the UOP chunk path used to be
+    /// hardcoded to facet 0, so facets 1..5 missed every chunk lookup and
+    /// `load_land_block` handed back 64 flat `(0, 0)` cells — an all-void
+    /// facet that opened, read and pathed without a single error.
     #[test]
     #[ignore]
     fn open_facet_dimensions_and_readable() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         for (facet, w, h) in [
             (0u8, 7168u32, 4096u32),
+            (1, 7168, 4096),
             (2, 2304, 1600),
             (3, 2560, 2048),
             (4, 1448, 1448),
@@ -477,11 +513,46 @@ mod tests {
         ] {
             let mut map = MapData::open_facet(&dir, facet).expect("open facet");
             assert_eq!(map.facet(), facet);
-            // land() near the facet's far corner must be in-bounds (non-void graphic possible, but no panic).
-            let _ = map.land(w / 2, h / 2);
-            let _ = map.statics(w / 2, h / 2);
             assert!(w % 8 == 0 && h % 8 == 0);
+            // Sample across the facet's own bounds (fractions, so the small
+            // facets stay in range). Real data has all six non-void; require a
+            // clear majority so one legitimately empty tile can't fail this.
+            let present = [(1, 8), (1, 4), (1, 2), (5, 8), (3, 4), (7, 8)]
+                .iter()
+                .filter(|(n, d)| {
+                    let t = map.land(w * n / d, h * n / d);
+                    let _ = map.statics(w * n / d, h * n / d);
+                    t.graphic != 0 || t.z != 0
+                })
+                .count();
+            assert!(
+                present >= 4,
+                "facet {facet}: only {present}/6 sampled tiles have terrain — \
+                 a facet-wide void means its UOP chunks aren't being found"
+            );
         }
+    }
+
+    /// Facets 0 and 1 share dimensions and most of their geography, but they
+    /// are distinct files — if `by_map_chunk` ever reverts to a fixed facet in
+    /// the virtual path, Trammel would silently mirror Felucca (or go void).
+    /// This tile carries the same graphic on both but a different altitude, so
+    /// it tells "read the right file" apart from "read facet 0 twice".
+    #[test]
+    #[ignore]
+    fn felucca_and_trammel_are_not_the_same_terrain() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let mut fel = MapData::open_facet(&dir, 0).expect("open Felucca");
+        let mut tram = MapData::open_facet(&dir, 1).expect("open Trammel");
+        assert_eq!(
+            (fel.land(1792, 1024).graphic, tram.land(1792, 1024).graphic),
+            (0x022D, 0x022D)
+        );
+        assert_eq!(
+            (fel.land(1792, 1024).z, tram.land(1792, 1024).z),
+            (49, 56),
+            "facet 1 must come from map1LegacyMUL.uop, not facet 0's chunks"
+        );
     }
 
     // `score_walkable_z` is the pure core of `walkable_z` — these run against

@@ -15,11 +15,33 @@ use super::lengths::{packet_length, PacketLength};
 pub enum FramingError {
     /// Packet id is not in the length table — we can't know its boundary, so the
     /// stream can't be safely resynced without higher-level knowledge.
+    /// `net::lengths` covers all 256 ids, so this is the fail-closed path for a
+    /// row that went missing rather than something a shard can provoke.
     UnknownPacket(u8),
     /// A variable-length frame declared a total length < 3 (impossible: the
     /// id + length header alone is 3 bytes). Indicates a desync/corruption.
     MalformedLength { id: u8, declared: u16 },
 }
+
+impl std::fmt::Display for FramingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Name the opcode in hex: the only fix for either error is to go
+            // edit that id's row in `net::lengths`.
+            FramingError::UnknownPacket(id) => {
+                write!(f, "packet 0x{id:02X} has no entry in the length table")
+            }
+            FramingError::MalformedLength { id, declared } => {
+                write!(f, "packet 0x{id:02X} declared length {declared} (< 3)")
+            }
+        }
+    }
+}
+
+// Paired with `Display` like every other error in the net stack (`PacketError`
+// in `net::packet`, `DriverError` in `anima-net`), so a caller can box this or
+// `?` it into an error type that requires `std::error::Error`.
+impl std::error::Error for FramingError {}
 
 /// Accumulates bytes and yields complete frames.
 #[derive(Default)]
@@ -187,11 +209,18 @@ mod tests {
     }
 
     #[test]
-    fn unknown_and_malformed() {
+    fn unhandled_id_still_frames() {
+        // 0x50 is a bulletin-board packet we have no handler for. Framing it is
+        // still mandatory — before `net::lengths` was completed this errored out
+        // and took the whole session with it.
         let mut d = FrameDecoder::new();
-        d.feed(&[0x50]); // not in table
-        assert_eq!(d.pop(), Err(FramingError::UnknownPacket(0x50)));
+        d.feed(&[0x50, 0x00, 0x05, 0xAA, 0xBB, 0x55]);
+        assert_eq!(d.pop().unwrap(), Some(vec![0x50, 0x00, 0x05, 0xAA, 0xBB]));
+        assert_eq!(d.pop().unwrap(), Some(vec![0x55]));
+    }
 
+    #[test]
+    fn malformed_length() {
         let mut d2 = FrameDecoder::new();
         d2.feed(&[0xA8, 0x00, 0x02]); // variable but declared < 3
         assert_eq!(
@@ -200,6 +229,24 @@ mod tests {
                 id: 0xA8,
                 declared: 2
             })
+        );
+    }
+
+    #[test]
+    fn errors_name_the_opcode() {
+        // Both errors are fatal to the session, so the message has to say which
+        // id to go add — in hex, the way every packet reference writes them.
+        assert_eq!(
+            FramingError::UnknownPacket(0x50).to_string(),
+            "packet 0x50 has no entry in the length table"
+        );
+        assert_eq!(
+            FramingError::MalformedLength {
+                id: 0xA8,
+                declared: 2
+            }
+            .to_string(),
+            "packet 0xA8 declared length 2 (< 3)"
         );
     }
 }

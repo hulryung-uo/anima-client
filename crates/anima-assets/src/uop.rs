@@ -281,11 +281,31 @@ impl UopReader {
             .filter_map(move |h| self.decode(self.entries.get(h)?))
     }
 
-    /// Decompressed bytes for `pattern.format(index)`, e.g.
-    /// `"build/map0legacymul/{:08}.dat"` with `index`.
-    pub fn by_map_chunk(&self, index: usize) -> Option<Vec<u8>> {
-        let path = format!("build/map0legacymul/{index:08}.dat");
-        self.by_hash(uop_hash(&path))
+    /// The virtual path a map chunk is stored under, shared by the lookup and
+    /// the existence check so the two can never drift apart.
+    fn map_chunk_path(facet: u8, index: usize) -> String {
+        format!("build/map{facet}legacymul/{index:08}.dat")
+    }
+
+    /// Decompressed bytes for one map chunk (`build/map{facet}legacymul/{:08}.dat`).
+    /// The facet number is baked into the virtual path the entry hash is taken
+    /// over, so it MUST match the container this reader was opened from —
+    /// ClassicUO builds the same per-index pattern next to the file name
+    /// (`MapLoader.cs:149`). Hardcoding facet 0 here silently returned `None`
+    /// for every chunk of every other facet, which `MapData::load_land_block`
+    /// could not distinguish from real void.
+    pub fn by_map_chunk(&self, facet: u8, index: usize) -> Option<Vec<u8>> {
+        self.by_hash(uop_hash(&Self::map_chunk_path(facet, index)))
+    }
+
+    /// Whether the container even LISTS that chunk, without decompressing it.
+    /// [`Self::by_map_chunk`] returns `None` both for a path this container has
+    /// no entry for (wrong facet, wrong pattern) and for an entry whose payload
+    /// failed to decode (truncated download, bad zlib — see [`Self::decode`]),
+    /// and those two send whoever reads the error to opposite places.
+    pub fn has_map_chunk(&self, facet: u8, index: usize) -> bool {
+        self.entries
+            .contains_key(&uop_hash(&Self::map_chunk_path(facet, index)))
     }
 
     /// Decompressed bytes for an art entry (`build/artlegacymul/{:08}.tga` — the
@@ -450,6 +470,31 @@ mod tests {
         assert_eq!(e.compressed_size, payload.len());
         assert_eq!(e.compression, 0);
         assert_eq!(&data[e.offset..e.offset + e.compressed_size], payload);
+    }
+
+    /// A map chunk's virtual path carries the facet number, so a reader opened
+    /// on `map3LegacyMUL.uop` only ever answers for facet 3. Asking with the
+    /// wrong facet must miss — that miss is invisible to
+    /// `MapData::load_land_block` (it fills flat `(0, 0)` cells), which is how
+    /// the hardcoded-facet-0 path voided every other facet's terrain in silence.
+    #[test]
+    fn by_map_chunk_path_is_facet_specific() {
+        let payload = b"map3 chunk 7";
+        let data = build_single_entry_uop("build/map3legacymul/00000007.dat", payload);
+
+        let dir = std::env::temp_dir();
+        let file_path = dir.join(format!("anima_uop_facet_test_{}.uop", std::process::id()));
+        std::fs::write(&file_path, &data).expect("write temp uop");
+
+        let reader = UopReader::open(&file_path).expect("open");
+        assert_eq!(
+            reader.by_map_chunk(3, 7).as_deref(),
+            Some(payload.as_slice())
+        );
+        assert_eq!(reader.by_map_chunk(0, 7), None);
+        assert_eq!(reader.by_map_chunk(3, 8), None);
+
+        std::fs::remove_file(&file_path).ok();
     }
 
     #[test]

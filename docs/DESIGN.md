@@ -486,7 +486,7 @@ cargo doc --open        # browse the core API docs
 ```
 
 - **macOS / Apple Silicon note:** the core is pure logic, no native graphics deps, so no arm64 friction (unlike ClassicUO's SDL/FNA). Friction only appears at the renderer/Tauri stage — prefer arm64-native deps, WebGL2 fallback for WKWebView WebGPU gaps.
-- **Standalone desktop app:** `cargo run -p anima-desktop` (Tauri v2, no npm) — runs the `play` server in-process on an ephemeral loopback port and opens a native window at it; `crates/anima-desktop/README.md` covers `.app`/`.dmg` bundling.
+- **Standalone desktop app:** `cargo run -p anima-desktop` (Tauri v2, no npm) — runs the `play` server in-process on a loopback port kept stable across launches (first free of `8190..=8199`, remembered in the desktop config: `localStorage` is keyed by origin, so an ephemeral port silently reset every renderer preference each run) and opens a native window at it; `crates/anima-desktop/README.md` covers `.app`/`.dmg` bundling.
 - **Testing playbook:** [`docs/TESTING.md`](TESTING.md) — GM-assisted testing (teleport/spawn/give via a GM `play` session), the CDP screenshot driver (`scripts/drive.py`), and the `scripts/gm.sh` command wrapper. Set `ANIMA_DEBUG=1` on the `play`/`scene` bins for movement/pathfind/Z-transition traces; the web Options panel has a **Movement debug** HUD (server Z vs eased Z + recent walk notes).
 
 ---

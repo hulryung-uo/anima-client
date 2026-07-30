@@ -22,9 +22,11 @@ walking, spawn instead of hunting, `[set` a skill instead of training it.
 Two client entry points, same renderer underneath (`web/` + `anima_net::play_server`):
 
 - **`cargo run -p anima-desktop`** — the real desktop app (Tauri). This is
-  what a human plays on; it runs `play_server` in-process on an **ephemeral**
-  port (see `crates/anima-desktop/src/main.rs`), so it isn't addressable by a
-  fixed URL/port and isn't the automation target.
+  what a human plays on; it runs `play_server` in-process on the first free
+  port in `8190..=8199`, remembered across launches so the renderer's
+  `localStorage` settings survive (see `crates/anima-desktop/src/main.rs`).
+  It's still not the automation target: which port it lands on depends on
+  what else is running, and it owns a real interactive session.
 - **The headless `play` bin, on a fixed HTTP port** — `cargo run -p anima-net
   --bin play -- <host> <port> <user> <pass> <http_port>` (or the built binary
   directly, see below). Same renderer, same protocol handling, but you choose
@@ -69,7 +71,7 @@ ANIMA_DEBUG=1 ./target/debug/play 127.0.0.1 2594 <gm-account> <pass> 8788
   normal Player — `[` commands just get silently ignored by ServUO (see the
   gap noted in §3).
 - `8788` is an arbitrary fixed port so scripts/CDP can always find it — pick
-  any free port; it doesn't need to match the desktop app's (ephemeral) one.
+  any free port; keep it out of the desktop app's `8190..=8199` range.
 - Leave off `<web_dir>`/`<data_dir>` to use the repo's `web/` and
   `$HOME/dev/uo/uo-resource` defaults (see `crates/anima-net/src/bin/play.rs`).
 - Run it in the background (`&`, or a second terminal, or

@@ -86,7 +86,7 @@ impl std::fmt::Display for DriverError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DriverError::Io(e) => write!(f, "io error: {e}"),
-            DriverError::Framing(e) => write!(f, "framing error: {e:?}"),
+            DriverError::Framing(e) => write!(f, "framing error: {e}"),
             DriverError::Login(e) => write!(f, "login error: {e:?}"),
             DriverError::ConnectionClosed => write!(f, "connection closed by server"),
             DriverError::CharacterChoiceRequired => write!(f, "character choice required"),

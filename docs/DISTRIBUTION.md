@@ -9,8 +9,10 @@ about packaging.
 `anima-desktop` (Tauri v2, `crates/anima-desktop`) is the shippable artifact. It:
 
 - runs the `anima-net` **play server in-process** (direct TCP to the UO server,
-  no relay) on an ephemeral **loopback** port, and opens a native webview at that
-  URL;
+  no relay) on a **loopback** port that's kept stable across launches (8190
+  unless taken; remembered in the desktop config, because the renderer's
+  `localStorage` preferences are keyed by origin), and opens a native webview at
+  that URL;
 - **embeds the `web/` renderer into the binary at compile time**
   (`anima_net::play_server`), so there is **no npm/bundler step** and no `web/`
   directory to ship;

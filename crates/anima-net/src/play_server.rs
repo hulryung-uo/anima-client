@@ -672,7 +672,18 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
             if let (Ok(mut m), Ok(rc)) = (MapData::open(&ddir), RadarCol::open(&ddir)) {
                 let png = render_worldmap(&mut m, &rc, WORLDMAP_STEP);
                 eprintln!("play: worldmap ready ({} KB)", png.len() / 1024);
-                let _ = std::fs::write(&cache, &png);
+                // Write-then-rename: two clients (a desktop app and a `play` bin,
+                // or two desktop copies) share this one path under `temp_dir`, and
+                // a plain `write` truncates first — interleave two of them and
+                // every later run reads back a half-PNG that never repairs itself,
+                // because the cache-hit branch above only checks that the file
+                // exists. The temp name carries the pid so the writers can't
+                // collide before the (atomic) rename.
+                let staging = cache.with_extension(format!("{}.part", std::process::id()));
+                if std::fs::write(&staging, &png).is_ok() && std::fs::rename(&staging, &cache).is_err()
+                {
+                    let _ = std::fs::remove_file(&staging);
+                }
                 *slot.lock().unwrap() = Some(png);
             }
         });

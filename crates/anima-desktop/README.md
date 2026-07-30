@@ -1,8 +1,9 @@
 # anima-desktop
 
 Standalone desktop shell (Tauri v2). Runs the `anima-net` play server
-in-process — direct TCP to the UO server, no relay — on an ephemeral
-loopback (`127.0.0.1`) port, then opens a native webview at that URL. The
+in-process — direct TCP to the UO server, no relay — on a remembered
+loopback (`127.0.0.1`) port (8190 by default, see "Stable port" below),
+then opens a native webview at that URL. The
 web renderer is the same `web/` used by `anima-net`'s `play` bin, embedded
 into this binary at compile time (see `anima_net::play_server`), so there's
 no `web/` directory to ship and no npm/bundler step.
@@ -23,6 +24,25 @@ Once bound, a window opens showing the server/account login page. There are
 no baked-in credentials (unlike `play`'s CLI-arg auto-login) — this is the
 standalone default, matching the login page mode of the `play` bin
 (`ANIMA_LOGIN=1 cargo run -p anima-net --bin play`).
+
+## Stable port
+
+The renderer keeps its preferences (options, macros, markers, HUD layout) in
+`localStorage`, which the browser keys by **origin** — port included. So the
+port can't be OS-assigned, or every launch of the shipped app would start
+with an empty store. Instead the shell serves from the first free port in
+`8190..=8199` (8090 is left to the `play` bin) and remembers the one it got
+in `config.json`, next to the data dir.
+
+A remembered port is never overwritten: if it's busy at launch (a second
+copy of the app, or an unrelated process) the shell logs that and falls back
+to the next free one — that session gets its own store, and the original
+settings come back as soon as the original port is free again.
+
+The one case that can still split a store is two copies started together on
+the *first* run after upgrading, when neither has a remembered port yet: both
+claim one, and the write is re-checked but not locked, so the loser serves
+from its own port and logs that it left the winner's claim alone.
 
 ## Bundling an installable app (.app / .dmg / .exe)
 
