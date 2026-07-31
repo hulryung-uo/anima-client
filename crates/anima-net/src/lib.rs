@@ -27,7 +27,7 @@ use anima_core::net::outgoing::{
     build_house_design_close, build_house_design_commit, build_house_design_delete_item,
     build_house_design_delete_roof, build_house_design_go_to_floor, build_house_design_request,
     build_house_design_restore, build_house_design_revert, build_house_design_sync,
-    build_hue_picker_response, build_legacy_menu_response, build_logout_request, build_opl_request,
+    build_hue_picker_response, build_legacy_menu_response, build_logout_request, build_opl_request, OPL_REQUEST_BATCH,
     build_party_accept, build_party_decline, build_party_invite, build_party_leave,
     build_party_message, build_pick_up, build_ping, build_popup_request, build_popup_select,
     build_profile_request, build_profile_update, build_prompt_response, build_say, build_sell,
@@ -1099,6 +1099,15 @@ impl Session {
         // request — core never sends bytes, so drain and answer them here.
         for serial in self.world.take_house_design_requests() {
             self.send(&build_house_design_request(serial))?;
+        }
+        // Same shape for 0xDC OPLInfo: the handler only queues the serials whose
+        // tooltip went stale, so send the refetches here. Batched 15 to a packet
+        // like ClassicUO's `Send_MegaClilocRequest` — ServUO's
+        // `BatchQueryProperties` reads as many serials as the length carries, but
+        // there's no reason to diverge from the client every shard is tuned for.
+        let stale_opl = self.world.take_opl_requests();
+        for batch in stale_opl.chunks(OPL_REQUEST_BATCH) {
+            self.send(&build_opl_request(batch))?;
         }
         // 0x2C DeathStatus asks a ClassicUO-compatible client to request peace
         // mode. Preserve duplicate action-0/action-2 requests from ServUO; the

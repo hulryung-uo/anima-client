@@ -1183,9 +1183,21 @@ pub struct World {
     /// Stored raw because the core has no Cliloc table; the renderer/scene resolves
     /// `cliloc.format(id, args)` for display. See [`World::set_opl`].
     pub opl: HashMap<u32, Vec<(u32, String)>>,
-    /// The OPL revision hash last seen per serial (0xD6 header / 0xDC OPLInfo).
-    /// Lets a consumer detect a stale tooltip and re-request; not acted on in core.
+    /// The revision hash of the OPL we actually **hold** in [`World::opl`], keyed
+    /// by serial. Invariant: written only by [`World::set_opl`], i.e. only from a
+    /// 0xD6 header, so an entry here always describes the lines stored under the
+    /// same key — never "the revision the server last claimed". That is what lets
+    /// the 0xDC OPLInfo handler in [`crate::net::game`] tell a stale tooltip from
+    /// a current one; recording the notice's own revision here would make every
+    /// later comparison match and freeze the tooltip forever.
     pub opl_revision: HashMap<u32, u32>,
+    /// Serials whose held OPL went stale — 0xDC named a revision that isn't the
+    /// one [`World::opl_revision`] holds. Core never sends bytes, so the session
+    /// layer drains this every poll via [`World::take_opl_requests`] and sends
+    /// [`crate::net::outgoing::build_opl_request`], exactly like
+    /// [`World::pending_house_design_requests`]. Deduped and capped on push by
+    /// [`World::push_opl_request`].
+    pub pending_opl_requests: Vec<u32>,
     /// The player's party state (0xBF/0x06). See [`Party`].
     pub party: Party,
     /// Whether the player is in war mode (combat stance). Authoritatively set by
@@ -1421,6 +1433,10 @@ const MAX_CORPSE_LINKS: usize = 256;
 /// Defensive cap for server waypoints. ServUO sends every healer on the facet
 /// when a player dies, but a malformed shard must not grow this forever.
 const MAX_WAYPOINTS: usize = 2_048;
+/// Defensive cap for stale-tooltip refetches awaiting the driver. A shard emits
+/// 0xDC for everything entering view, so an undrained queue must not be able to
+/// pin growth for the rest of a session.
+const MAX_PENDING_OPL_REQUESTS: usize = 64;
 /// Defensive cap for concurrently-open legacy menus. Normal shards keep only a
 /// handful, but a malformed stream must not grow the list for the whole session.
 const MAX_LEGACY_MENUS: usize = 16;
@@ -2209,10 +2225,38 @@ impl World {
 
     /// Store an entity's Object Property List (0xD6 MegaCliloc): the raw property
     /// lines `(cliloc, args)` plus the `revision` hash. Replaces any prior list for
-    /// the serial (the server sends the full list each time).
+    /// the serial (the server sends the full list each time). The sole writer of
+    /// [`World::opl_revision`] — see that field for the invariant this upholds.
+    /// Any queued refetch for the serial is satisfied by this list, so it's dropped.
     pub fn set_opl(&mut self, serial: u32, revision: u32, lines: Vec<(u32, String)>) {
         self.opl_revision.insert(serial, revision);
         self.opl.insert(serial, lines);
+        self.pending_opl_requests.retain(|s| *s != serial);
+    }
+
+    /// Queue a 0xD6 refetch of `serial`'s tooltip (the OPL we hold went stale).
+    /// Deduped, and capped at [`MAX_PENDING_OPL_REQUESTS`] by dropping the oldest:
+    /// losing one is recoverable, since ServUO re-sends the 0xDC on the entity's
+    /// next `SendInfoTo`/`Delta` (Server/Item.cs, Server/Mobile.cs) — a permanently
+    /// growing queue would not be.
+    pub fn push_opl_request(&mut self, serial: u32) {
+        if self.pending_opl_requests.contains(&serial) {
+            return;
+        }
+        self.pending_opl_requests.push(serial);
+        let overflow = self
+            .pending_opl_requests
+            .len()
+            .saturating_sub(MAX_PENDING_OPL_REQUESTS);
+        if overflow > 0 {
+            self.pending_opl_requests.drain(0..overflow);
+        }
+    }
+
+    /// Take every serial whose tooltip needs a fresh 0xD6, leaving the queue
+    /// empty — the OPL twin of [`World::take_house_design_requests`].
+    pub fn take_opl_requests(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.pending_opl_requests)
     }
 
     /// Record a spellbook's known contents (0xBF/0x1B NewSpellbookContent).
@@ -2340,12 +2384,14 @@ impl World {
     /// the item they describe). A deleted spellbook likewise drops its
     /// [`World::spellbooks`] entry, a deleted map item drops its
     /// [`World::map_gumps`] window, and a deleted house foundation drops its
-    /// [`World::house_designs`] entry plus any queued re-request for it.
+    /// [`World::house_designs`] entry plus any queued re-request for it. Likewise
+    /// a queued OPL refetch: there is no longer anything to show a tooltip for.
     pub fn remove(&mut self, serial: u32) -> bool {
         let was_mobile = self.mobiles.remove(&serial).is_some();
         self.items.remove(&serial);
         self.opl.remove(&serial);
         self.opl_revision.remove(&serial);
+        self.pending_opl_requests.retain(|s| *s != serial);
         self.spellbooks.remove(&serial);
         self.corpse_of.remove(&serial);
         self.corpse_equip.remove(&serial);
@@ -2422,6 +2468,7 @@ impl World {
             self.waypoints.clear();
             self.opl.clear();
             self.opl_revision.clear();
+            self.pending_opl_requests.clear();
             self.spellbooks.clear();
             self.map_gumps.clear();
             self.house_designs.clear();
@@ -2452,6 +2499,7 @@ impl World {
         self.waypoints.clear();
         self.opl.retain(|serial, _| alive(serial));
         self.opl_revision.retain(|serial, _| alive(serial));
+        self.pending_opl_requests.retain(|s| alive(s));
         self.spellbooks.retain(|serial, _| alive(serial));
         self.map_gumps.retain(|serial, _| alive(serial));
         self.house_designs.retain(|serial, _| alive(serial));

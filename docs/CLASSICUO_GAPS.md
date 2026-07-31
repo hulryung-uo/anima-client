@@ -111,23 +111,36 @@ Closed by serving from the first free port in `8190..=8199` and remembering the
 port actually bound, which keeps the original reason for an ephemeral port (never
 collide with the `play` bin, or with a second copy) while giving a stable origin.
 
-### T0.4 Dyed items render in their default colour **[verified]**
+### T0.4 Dyed items render in their default colour — **CLOSED**
 
 A ground item's scene entry (`crates/anima-net/src/scene.rs:2589`) carries
 `x,y,z,g,serial,pz` and **no hue** — `Item::hue` is only used for corpses
 (`scene.rs:2625`). The browser then requests art with no hue query in all three
 places items appear: world (`web/main.js:2650`), container/backpack grids
 (`:6922`) and the vendor window (`:7755`, `:7770`). Only worn equipment on the
-paperdoll is hued (`:6830`). Effort: S.
+paperdoll is hued (`:6830`).
 
-### T0.5 Animated dynamic items never animate **[verified]**
+Closed, and PartialHue-correct: `tiledata`'s `TileFlag.PartialHue` (0x40000) is
+folded into bit `0x8000` of the shipped hue — ClassicUO's own encoding, which
+`anima_assets::apply_hue` already read — so only the gray pixels are recoloured on
+the 533 graphics that ask for it. Applied to every item surface including worn
+equipment, which the first pass had deferred (a full hue on a partial-hue item
+looks worse than no hue at all, and the doll and the backpack would have shown the
+same item in two different colours).
+
+### T0.5 Animated dynamic items never animate — **CLOSED**
 
 `anim_suffix` (`crates/anima-net/src/scene.rs:839`) is applied to map statics
 (`:3090`) and multi components (`:2370`) but not to the dynamic-item loop
 (`:2586`), so server-spawned animated items — spell fields, campfires, some
-braziers — render as a single frozen frame. Effort: S.
+braziers — render as a single frozen frame.
 
-### T0.6 Item tooltips (OPL) never refresh
+Closed: the item loop now emits the same animdata frame list statics get, and the
+renderer registers those sprites into the existing animation tick. The per-pixel
+hit area follows the drawn frame rather than frame 0, so a click still lands where
+the flame actually is.
+
+### T0.6 Item tooltips (OPL) never refresh — **CLOSED**
 
 `opl_info` (`crates/anima-core/src/net/game.rs:1769`) records the 0xDC revision and
 does nothing with it; `World::opl_revision` is written in four places and compared
@@ -135,16 +148,31 @@ nowhere. The only 0xD6 request path is `Action::OplRequest`, driven solely by a
 browser hover, and `web/main.js:726/769/6821` gate on `!oplReq.has(serial)` so a
 serial is fetched at most once. An item whose properties change keeps its stale
 tooltip forever. The identical staleness pattern *is* handled correctly for
-custom-house designs (`game.rs:3068-3085`), which is the model to copy. Effort: S.
+custom-house designs (`game.rs:3068-3085`), which is the model this followed.
 
-### T0.7 62 multi ids are invisible and non-solid
+Closed: a 0xDC naming a revision we do not hold queues a re-request, drained by
+the driver (core still never touches a socket), batched by `OPL_REQUEST_BATCH`
+next to the builder so both drivers and any future caller share the cap.
+
+### T0.7 62 multi ids are invisible and non-solid — **CLOSED**
 
 `crates/anima-assets/src/multis.rs` reads only `multi.idx`/`multi.mul`;
 `MultiCollection.uop` is unread. 62 ids exist only in the UOP — `0x50-0x53`,
 `0x147C-0x14A1`, `0x177C`, `0x1DF4-0x1DFB`, `0x2120-0x212A` — which covers ServUO's
 pre-built castles. For those, `placement_json` (`scene.rs:2166`) bails and the
 walkability fold gets nothing, so both the placement preview and collision are
-silently absent. Effort: M.
+silently absent.
+
+Closed by reading `MultiCollection.uop` and merging it under `multi.mul`. The
+audit missed the more important half, which the review surfaced: a component's
+**visible** set is not its **solid** set. ServUO maps UOP flag `0x101` to
+`TileFlag.Generic` and keeps it in the collision grid while ClassicUO does not
+draw it — a nodraw-but-solid component, and both references are right. Walkability
+now folds on a separate `server_keeps`, and because our ServUO reads the UOP
+(`Config/DataPath.cfg` → the same directory this reader opens) while our merge
+takes the MUL for shared ids, the UOP's keep answer is overlaid onto MUL
+components. That corrects 907 components across 70 multis — 281 of them on
+ordinary shared ids — which the client had called open where the server blocks.
 
 ---
 

@@ -131,6 +131,14 @@ impl WasmClient {
                     serial,
                 ));
         }
+        // Stale tooltips (a 0xDC OPLInfo naming a revision we don't hold) queue
+        // the same way; batched 15 serials to a packet like ClassicUO's
+        // `Send_MegaClilocRequest`.
+        let stale_opl = self.world.take_opl_requests();
+        for batch in stale_opl.chunks(anima_core::net::outgoing::OPL_REQUEST_BATCH) {
+            self.outbox
+                .extend(anima_core::net::outgoing::build_opl_request(batch));
+        }
         for on in self.world.take_war_mode_requests() {
             self.outbox
                 .extend(anima_core::net::outgoing::build_war_mode(on));

@@ -2646,11 +2646,23 @@ function syncWorld(s) {
     // Comparing the RESOLVED graphic below is what makes a growing/shrinking pile
     // re-texture: `it.g` never changes when only the amount does.
     const stackG = corpseUrl ? (it.g | 0) : stackGraphic(it.g, it.amount | 0);
-    if (e && e.g === stackG && e.x === it.x && e.y === it.y && e.z === iz && e.corpseUrl === corpseUrl) continue; // unchanged; see the blanket LRU-touch note above
-    const itemTexUrl = corpseUrl || `art/static/${stackG}.png`;
+    // Dye hue: the server bakes the recolor into the art (`?hue=`, PartialHue
+    // already folded into bit 0x8000 — see scene.rs `item_art_hue`). It has to be
+    // in the change key below for the same reason `stackG` is: a `[set Hue` leaves
+    // the graphic and position identical, so without it a dyed item keeps its old
+    // colour until it happens to move.
+    // Never for a corpse: scene.rs excludes 0x2006 from `item_art_hue` because its
+    // `hue` is the Corpse.def-remapped BODY hue, not an art dye. Keying off
+    // `corpseUrl` instead of the graphic tinted the generic corpse tile on every
+    // poll before the death-pose animinfo resolved — and forever when that fetch
+    // came back with frameCount 0.
+    const iHue = it.g === 0x2006 ? 0 : (it.hue | 0);
+    const hueQ = hueQuery(iHue);
+    if (e && e.g === stackG && e.hue === iHue && e.x === it.x && e.y === it.y && e.z === iz && e.corpseUrl === corpseUrl) continue; // unchanged; see the blanket LRU-touch note above
+    const itemTexUrl = corpseUrl || `art/static/${stackG}.png${hueQ}`;
     const tex = corpseTex || texFor(itemTexUrl);
     if (!tex) continue; // await art, retry next poll
-    if (e) { world.removeChild(e.sp); e.sp.destroy(); }
+    if (e) { animatedStatics.delete(e.sp); world.removeChild(e.sp); e.sp.destroy(); }
     const sp = new PIXI.Sprite(tex);
     const x = isoX(it.x, it.y), y = isoY(it.x, it.y, iz);
     // A resolved death-pose frame anchors by its draw-center, same as a mobile's
@@ -2672,20 +2684,38 @@ function syncWorld(s) {
     // Tile + foliage flag for the transparency pass (circle-of-transparency / foliage fade).
     sp._tx = it.x; sp._ty = it.y; sp._foliage = !!it.f;
     sp.eventMode = "static"; sp.cursor = "pointer";
-    // Per-pixel hit-testing (see pixelHitArea above) — this sprite/texture pair
-    // is fixed for `sp`'s lifetime (recreated, not mutated, when the item's
-    // graphic/position/corpse-pose changes), so the URL closure is constant.
-    sp.hitArea = pixelHitArea(sp, () => itemTexUrl);
+    // Per-pixel hit-testing (see pixelHitArea above). The closure re-reads the
+    // CURRENT frame because an animated item's texture is swapped under it by
+    // `tickAnimatedStatics` — testing a campfire's click against frame 0 while a
+    // taller flame is drawn makes the click fall through to whatever is behind it.
+    // `pixelHitArea` calls `getUrl()` on every `contains`, so following `_fidx`
+    // costs nothing for the still items that keep `_frameUrls` undefined.
+    sp.hitArea = pixelHitArea(sp, () =>
+      (sp._frameUrls && sp._fidx >= 0 ? sp._frameUrls[sp._fidx] : itemTexUrl));
     const serial = it.serial;
     sp.on("pointerdown", (ev) => onEntityPointerDown(serial, ev, true)); // world item → loot on dbl-click
     sp.on("pointerover", () => { hoverEntity(serial); targetHighlightOn(sp); });
     sp.on("pointerout", () => { hoverOut(serial); targetHighlightOff(sp); });
+    // Animated dynamic item (campfire, spell field, brazier): the server bakes the
+    // same animdata frame list statics get (`a`/`ai`, see scene.rs `anim_frames`),
+    // so hand it to the very same tick pass — a spawned campfire has to flicker
+    // exactly like a mapped one. Skipped for a corpse, whose texture is an anim
+    // frame this pass must not swap out from under.
+    if (!corpseUrl && Array.isArray(it.a) && it.a.length > 1) {
+      const frameUrls = it.a.map((id) => `art/static/${id}.png${hueQ}`);
+      sp._frames = frameUrls.map((u) => texFor(u));
+      sp._frameUrls = frameUrls;
+      sp._afids = it.a;
+      sp._ai = it.ai || 200;
+      sp._fidx = -1;
+      animatedStatics.add(sp);
+    }
     world.addChild(sp);
-    itemPool.set(key, { sp, g: stackG, x: it.x, y: it.y, z: iz, corpseUrl, url: itemTexUrl });
+    itemPool.set(key, { sp, g: stackG, hue: iHue, x: it.x, y: it.y, z: iz, corpseUrl, url: itemTexUrl });
     markDirty();
   }
   for (const [k, e] of itemPool) {
-    if (!seenI.has(k)) { world.removeChild(e.sp); e.sp.destroy(); itemPool.delete(k); markDirty(); }
+    if (!seenI.has(k)) { animatedStatics.delete(e.sp); world.removeChild(e.sp); e.sp.destroy(); itemPool.delete(k); markDirty(); }
   }
 
   // Tiles: keep once drawn — only drop them when they're well outside the
@@ -2723,7 +2753,10 @@ function forEachLiveTexUrl(fn) {
     fn(sp._texUrl);
     if (sp._frameUrls) for (const u of sp._frameUrls) fn(u);
   }
-  for (const e of itemPool.values()) fn(e.url);
+  for (const e of itemPool.values()) {
+    fn(e.url);
+    if (e.sp._frameUrls) for (const u of e.sp._frameUrls) fn(u); // animated item's other frames
+  }
   for (const st of anim.values()) {
     if (st.partTex) for (const e of st.partTex.values()) fn(e.url);
   }
@@ -6209,10 +6242,11 @@ function renderTradeGrid(gridEl, cont, readOnly) {
     cell.dataset.g = it.g;
     cell.dataset.amount = (it.amount | 0) || 1;
     cell.dataset.st = it.st ? "1" : "0";
+    cell.dataset.hue = it.hue | 0;          // carried into the drag ghost on lift
     if (readOnly) cell.dataset.ro = "1";
     const img = document.createElement("img");
     img.className = "cont-icon";
-    img.src = `art/static/${stackGraphic(it.g, it.amount | 0)}.png`;
+    img.src = `art/static/${stackGraphic(it.g, it.amount | 0)}.png${hueQuery(it.hue)}`;
     img.draggable = false;
     img.onerror = () => { img.style.visibility = "hidden"; };
     cell.appendChild(img);
@@ -6314,7 +6348,7 @@ function tradeSignature(t, scene) {
     t.theirCont, t.opponent, t.myAccept, t.theirAccept,
     t.myOfferGold, t.myOfferPlat, t.theirOfferGold, t.theirOfferPlat,
     t.balanceGold, t.balancePlat,
-    items.map((it) => `${it.cont >>> 0}:${it.serial >>> 0}:${it.g}:${it.amount | 0}`).join(","),
+    items.map((it) => `${it.cont >>> 0}:${it.serial >>> 0}:${it.g}:${it.amount | 0}:${it.hue | 0}`).join(","),
   ].join("|");
 }
 function renderTradeWindow(win, t) {
@@ -6738,7 +6772,7 @@ function refreshPaperdoll() {
     p.stam, p.stamMax, p.gold, p.body, p.hue,
     // Include each item's OPL name so the list re-renders (slot label → real name)
     // the moment its OPL arrives.
-    equip.map((e) => `${e.layer}:${e.g}:${e.serial >>> 0}:${oplName(e.serial)}`).join(",")].join("|");
+    equip.map((e) => `${e.layer}:${e.g}:${e.hue | 0}:${e.serial >>> 0}:${oplName(e.serial)}`).join(",")].join("|");
   if (pd._sig === sig) return;
   pd._sig = sig;
   set("pd-name", serverTitle || p.name || (isSelf ? "(unnamed)" : "(mobile)"));
@@ -6872,6 +6906,13 @@ function stackGraphic(g, amount) {
   if ((g | 0) === 0x0eed) return amount > 5 ? 0x0eef : amount > 1 ? 0x0eee : 0x0eed;
   return g | 0;
 }
+// `?hue=<n>` for an item art request, or "" when the item is undyed. The server
+// recolors the tile (partial-hue items already carry bit 0x8000 — see scene.rs
+// `item_art_hue`), so every icon of a dyed item — grid cell, trade cell, vendor
+// row, drag ghost — asks for it the same way.
+function hueQuery(hue) {
+  return (hue | 0) ? `?hue=${hue | 0}` : "";
+}
 
 function openContainer(serial) {
   serial = serial >>> 0;
@@ -6896,16 +6937,22 @@ function closeContainer(serial) {
 function containerSignature(scene, serial) {
   return ((scene && scene.contItems) || [])
     .filter((it) => (it.cont >>> 0) === serial)
-    .map((it) => `${it.serial >>> 0}:${it.g}:${it.amount | 0}`).join(",");
+    // `hue` belongs here for the same reason the amount does: a dye changes the
+    // icon's art request without touching serial/graphic/amount, and a signature
+    // that missed it would leave the grid showing the item's old colour.
+    .map((it) => `${it.serial >>> 0}:${it.g}:${it.amount | 0}:${it.hue | 0}`).join(",");
 }
 function refreshContainer(serial) {
   serial = serial >>> 0;
   const win = dialogWindow("containers", serial);
   if (!win) return;
   const items = (scene && scene.contItems || []).filter((it) => (it.cont >>> 0) === serial);
-  const sig = containerSignature(scene, serial);
-  if (win._sig === sig) return;
-  win._sig = sig;
+  // No signature check here: every caller already means "rebuild now". The
+  // dialog driver stamps `win._sig = sig` BEFORE calling update() (dialogs.js
+  // syncDialogFamily), so a second guard against that same field could only
+  // ever compare equal — it silently swallowed every server-driven change, and
+  // the grid only ever refreshed when the window was (re)opened. Found live: a
+  // `[set Hue` on an item in an open backpack left its icon in the old colour.
   const body = win.body;
   body.innerHTML = "";
   if (!items.length) { body.innerHTML = '<div class="cont-empty">(empty)</div>'; return; }
@@ -6918,8 +6965,9 @@ function refreshContainer(serial) {
     cell.dataset.g = it.g;
     cell.dataset.amount = (it.amount | 0) || 1;
     cell.dataset.st = it.st ? "1" : "0";
+    cell.dataset.hue = it.hue | 0;          // carried into the drag ghost on lift
     const img = document.createElement("img");
-    img.className = "cont-icon"; img.src = `art/static/${stackGraphic(it.g, it.amount | 0)}.png`;
+    img.className = "cont-icon"; img.src = `art/static/${stackGraphic(it.g, it.amount | 0)}.png${hueQuery(it.hue)}`;
     img.draggable = false;                  // let the cell own the drag
     img.onerror = () => { img.style.visibility = "hidden"; };
     cell.appendChild(img);
@@ -7723,9 +7771,9 @@ function renderShop(shop) {
     sort: shopSort,
     bv: buy ? (buy.vendor >>> 0) : 0,
     bp: buy ? buy.prices : 0,
-    bi: buyItems.map((it) => [it.serial >>> 0, it.g, it.amount | 0]),
+    bi: buyItems.map((it) => [it.serial >>> 0, it.g, it.amount | 0, it.hue | 0]),
     sv: sell ? (sell.vendor >>> 0) : 0,
-    si: sell ? sell.items.map((it) => [it.serial >>> 0, it.g, it.amount | 0, it.price]) : 0,
+    si: sell ? sell.items.map((it) => [it.serial >>> 0, it.g, it.amount | 0, it.price, it.hue | 0]) : 0,
   });
   if (shopWin.sig === sig) return;
   shopWin.sig = sig;
@@ -7741,7 +7789,7 @@ function renderShop(shop) {
     const pairItems = buyItems.slice().sort((a, b) => (a.x | 0) - (b.x | 0));
     let rows = pairItems.map((it, i) => ({ it, pr: buy.prices[i] })).filter((r) => r.pr)
       .map((r) => ({ g: r.it.g, serial: r.it.serial >>> 0, amount: r.it.amount | 0,
-        name: r.pr.name || ("item " + r.it.g), price: r.pr.price | 0 }));
+        hue: r.it.hue | 0, name: r.pr.name || ("item " + r.it.g), price: r.pr.price | 0 }));
     const k = shopSort.key, d = shopSort.dir;
     rows.sort((a, b) => d * (k === "name" ? a.name.localeCompare(b.name) : (a[k] | 0) - (b[k] | 0)));
     const arrow = (key) => shopSort.key === key ? (shopSort.dir > 0 ? " ▲" : " ▼") : "";
@@ -7752,7 +7800,7 @@ function renderShop(shop) {
       + `<span class="shop-sortk" data-k="amount">Qty${arrow("amount")}</span></div>`;
     for (const r of rows) {
       h += '<div class="shop-row">'
-        + `<img class="shop-icon" src="art/static/${r.g}.png" onerror="this.style.visibility='hidden'">`
+        + `<img class="shop-icon" src="art/static/${r.g}.png${hueQuery(r.hue)}" onerror="this.style.visibility='hidden'">`
         + `<span class="shop-name" title="${esc(r.name)}">${esc(r.name)}</span>`
         + `<span class="shop-stock" title="vendor stock">x${r.amount || 1}</span>`
         + `<span class="shop-price">${r.price}gp</span>`
@@ -7767,7 +7815,7 @@ function renderShop(shop) {
     for (const it of sell.items) {
       const name = it.name || ("item " + it.g);
       h += '<div class="shop-row">'
-        + `<img class="shop-icon" src="art/static/${it.g}.png" onerror="this.style.visibility='hidden'">`
+        + `<img class="shop-icon" src="art/static/${it.g}.png${hueQuery(it.hue)}" onerror="this.style.visibility='hidden'">`
         + `<span class="shop-name" title="${esc(name)}">${esc(name)} (x${it.amount | 0})</span>`
         + `<span class="shop-price">${it.price}gp</span>`
         + `<input class="shop-qty" type="number" min="1" max="${it.amount | 0}" value="${it.amount | 0}">`
@@ -7835,13 +7883,13 @@ function endGroundDrag() {
 // Lift an item onto the cursor (UO pickup): set the shared held state, send the
 // `pickup` ONCE, and show the floating ghost that now follows the mouse until the
 // item is placed. Reused by every drag source so lifting behaves identically.
-function liftToCursor(serial, g, amount, clientX, clientY) {
-  serial = serial >>> 0; g = g | 0; amount = amount || 1;
-  cursorItem = { serial, g, amount };
+function liftToCursor(serial, g, amount, clientX, clientY, hue) {
+  serial = serial >>> 0; g = g | 0; amount = amount || 1; hue = hue | 0;
+  cursorItem = { serial, g, amount, hue };
   sendInput("pickup:" + serial + (amount > 1 ? ":" + amount : ""));
   if (dragGhost) { dragGhost.remove(); dragGhost = null; }
   const img = document.createElement("img");
-  img.src = `art/static/${g}.png`;
+  img.src = `art/static/${g}.png${hueQuery(hue)}`;
   img.style.cssText = "position:fixed;transform:translate(-50%,-50%);opacity:0.8;" +
     "pointer-events:none;z-index:100000;image-rendering:pixelated;";   // pointer-events:none → never blocks elementFromPoint
   img.onerror = () => { img.style.visibility = "hidden"; };
@@ -7966,18 +8014,18 @@ function returnCursorItem() {
 // as if that many had been dragged; Cancel/Esc/✕/clicking away abandons the drag
 // and leaves the stack untouched (nothing was ever sent to the server for this
 // press — the pickup packet only goes out once liftToCursor actually runs).
-let splitWin = null;   // { el, serial, g, amount, clientX, clientY, input, slider } | null
+let splitWin = null;   // { el, serial, g, amount, hue, clientX, clientY, input, slider } | null
 function closeSplitDialog() {
   if (splitWin) { splitWin.el.remove(); splitWin = null; }
 }
 function confirmSplitDialog() {
   if (!splitWin) return;
   const n = Math.max(1, Math.min(splitWin.amount, parseInt(splitWin.input.value, 10) || 1));
-  const { serial, g, clientX, clientY } = splitWin;
+  const { serial, g, hue, clientX, clientY } = splitWin;
   closeSplitDialog();
-  liftToCursor(serial, g, n, clientX, clientY);
+  liftToCursor(serial, g, n, clientX, clientY, hue);
 }
-function openSplitDialog(serial, g, amount, clientX, clientY) {
+function openSplitDialog(serial, g, amount, clientX, clientY, hue) {
   closeSplitDialog();
   const el = document.createElement("div");
   el.className = "gump-win split-win";
@@ -7992,7 +8040,7 @@ function openSplitDialog(serial, g, amount, clientX, clientY) {
     + '</div>';
   document.body.appendChild(el);
   const slider = el.querySelector(".split-slider"), input = el.querySelector(".split-input");
-  splitWin = { el, serial, g, amount, clientX, clientY, input, slider };
+  splitWin = { el, serial, g, amount, hue: hue | 0, clientX, clientY, input, slider };
   // Slider and text field mirror each other (both clamped to 1..amount); typing an
   // out-of-range value just clamps rather than rejecting the keystroke.
   slider.addEventListener("input", () => { input.value = slider.value; });
@@ -8518,7 +8566,7 @@ function setupItemDnD() {
       }
       groundDrag.started = true;
       if (clickPend && (clickPend.serial >>> 0) === groundDrag.serial) { clearTimeout(clickPend.timer); clickPend = null; }
-      const { serial, g, amount, st } = groundDrag;
+      const { serial, g, amount, st, hue } = groundDrag;
       groundDrag = null;
       // A STACKABLE stack (amount > 1): mirror ClassicUO's SplitMenuGump — a plain
       // drag opens a split dialog to pick how many to lift; SHIFT+drag skips it and
@@ -8530,8 +8578,8 @@ function setupItemDnD() {
       // Read the live modifier off the event, not the mirrored `shiftHeld` — the
       // split dialog's own keydown handler stopPropagation()s Shift while it has
       // focus, which would otherwise leave `shiftHeld` stuck stale.
-      if (amount > 1 && st && !e.shiftKey) { openSplitDialog(serial, g, amount, e.clientX, e.clientY); return; }
-      liftToCursor(serial, g, amount, e.clientX, e.clientY);
+      if (amount > 1 && st && !e.shiftKey) { openSplitDialog(serial, g, amount, e.clientX, e.clientY, hue); return; }
+      liftToCursor(serial, g, amount, e.clientX, e.clientY, hue);
       liftDrag = true;            // the lifting press is still down; its release decides one-motion placement
     }
     if (cursorItem) moveGhost(e.clientX, e.clientY);
@@ -8579,6 +8627,7 @@ function setupItemDnD() {
       // the cell is the ONLY thing that promotes, not how long/far within it.
       groundDrag = { serial: (+cell.dataset.serial) >>> 0, g: +cell.dataset.g | 0,
                      amount: (+cell.dataset.amount) || 1, st: cell.dataset.st === "1",
+                     hue: +cell.dataset.hue | 0,
                      sx: e.clientX, sy: e.clientY, started: false, t: performance.now(),
                      rect: cell.getBoundingClientRect() };
       return;
@@ -8588,7 +8637,8 @@ function setupItemDnD() {
       if (ic) {
         e.preventDefault();
         groundDrag = { serial: (+ic.dataset.serial) >>> 0, g: +ic.dataset.g | 0,
-                       amount: 1, sx: e.clientX, sy: e.clientY, started: false, t: performance.now(),
+                       amount: 1, hue: +ic.dataset.hue | 0,
+                       sx: e.clientX, sy: e.clientY, started: false, t: performance.now(),
                        rect: ic.getBoundingClientRect() };
       }
     }
@@ -8753,7 +8803,8 @@ function onEntityPointerDown(serial, e, isItem) {
     if (isItem) {
       const it = (scene && scene.items || []).find((x) => (x.serial >>> 0) === (serial >>> 0));
       groundDrag = { serial: serial >>> 0, g: it ? it.g : 0, amount: (it && (it.amount | 0)) || 1,
-                     st: !!(it && it.st), sx: e.clientX, sy: e.clientY, started: false, t: performance.now() };
+                     st: !!(it && it.st), hue: (it && it.hue) | 0,
+                     sx: e.clientX, sy: e.clientY, started: false, t: performance.now() };
     }
   }
 }
@@ -9629,7 +9680,8 @@ function setupInput() {
     if (!img) return;
     e.preventDefault();
     groundDrag = { serial: (+img.dataset.serial) >>> 0, g: +img.dataset.g | 0,
-                   amount: 1, sx: e.clientX, sy: e.clientY, started: false };
+                   amount: 1, hue: +img.dataset.hue | 0,
+                   sx: e.clientX, sy: e.clientY, started: false };
   });
   pdb.addEventListener("mouseleave", () => {
     if (pdTipEl && pdTipEl.closest && pdTipEl.closest("#pd-doll")) { pdTipEl = null; hideTip(); }

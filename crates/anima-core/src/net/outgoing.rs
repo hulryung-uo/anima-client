@@ -18,11 +18,21 @@ pub fn build_client_version(version: &str) -> Vec<u8> {
     data
 }
 
+/// Serials per `0xD6` request. ClassicUO's `Send_MegaClilocRequest` batches this
+/// many, and every shard is tuned for that client — ServUO's
+/// `BatchQueryProperties` itself reads as many serials as the length carries, so
+/// this is a compatibility choice, not a protocol limit. It lives beside the
+/// builder rather than in a driver because it is a property of the packet: both
+/// `anima-net` and `anima-wasm` send these, and a third caller would otherwise
+/// have no way to know the cap exists.
+pub const OPL_REQUEST_BATCH: usize = 15;
+
 /// MegaClilocRequest `0xD6` (variable) — ask the server for the Object Property
 /// List (tooltip) of one or more entities. The server replies with a 0xD6
 /// MegaCliloc per serial. Ports ClassicUO `Send_MegaClilocRequest`:
-/// `[0xD6][len:u16][serial:u32]…` — a length-framed batch of serials. Empty input
-/// still produces a well-formed (header-only) packet.
+/// `[0xD6][len:u16][serial:u32]…` — a length-framed batch of serials. Callers
+/// chunk by [`OPL_REQUEST_BATCH`]. Empty input still produces a well-formed
+/// (header-only) packet.
 pub fn build_opl_request(serials: &[u32]) -> Vec<u8> {
     let mut w = PacketWriter::new();
     w.u8(0xD6).u16(0); // id + length placeholder

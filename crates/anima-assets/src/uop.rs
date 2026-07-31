@@ -323,6 +323,30 @@ impl UopReader {
         self.by_hash(uop_hash(&path))
     }
 
+    /// The virtual path a multi's component list is stored under — SIX digits,
+    /// not the eight the art/map/sound paths use (ClassicUO opens this
+    /// container with exactly `"build/multicollection/{0:D6}.bin"` in
+    /// `MultiLoader.Load`). Shared by the lookup and the existence check so
+    /// the two can never drift apart, same as [`Self::map_chunk_path`].
+    fn multi_path(index: usize) -> String {
+        format!("build/multicollection/{index:06}.bin")
+    }
+
+    /// Decompressed bytes for one multi's component list. `index` = the multi
+    /// id. The payload is NOT `multi.mul`'s record stream — see
+    /// [`crate::multis`]'s `parse_uop_components`.
+    pub fn by_multi(&self, index: usize) -> Option<Vec<u8>> {
+        self.by_hash(uop_hash(&Self::multi_path(index)))
+    }
+
+    /// Whether the container LISTS that multi id, without decompressing it —
+    /// lets [`crate::multis`] sweep the whole id domain (the container has no
+    /// id list of its own) and pay for zlib only on the ids it actually keeps.
+    pub fn has_multi(&self, index: usize) -> bool {
+        self.entries
+            .contains_key(&uop_hash(&Self::multi_path(index)))
+    }
+
     /// Gump entry (`build/gumpartlegacymul/{:08}.tga`). Gump UOP entries carry an
     /// 8-byte "extra" (width:i32, height:i32) ahead of the payload (ClassicUO opens
     /// this file with `hasExtra=true`). Returns `(decompressed payload, width, height)`

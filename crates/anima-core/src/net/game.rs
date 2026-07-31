@@ -1762,15 +1762,36 @@ fn mega_cliloc(world: &mut World, frame: &[u8]) -> PResult<()> {
 }
 
 /// 0xDC OPLInfo — the OPL revision hash for an entity (fixed 9 bytes):
-/// `[id][serial:u32][revision:u32]`. Tells the client `serial`'s current tooltip
-/// revision; if it differs from the cached one the client should re-request the
-/// full 0xD6. We just record the revision (the hover flow re-requests on demand),
-/// so this is effectively a lightweight note, not an action.
+/// `[id][serial:u32][revision:u32]`. ServUO emits one alongside every
+/// `SendInfoTo`/`Delta` of an entity (`Server/Item.cs`, `Server/Mobile.cs`), so
+/// like the 0xBF/0x1D house notice it is a *notice*, not a change event: act only
+/// when it names a revision other than the one the OPL we're holding came with,
+/// and then only by queueing — core never sends bytes, the session layer drains
+/// [`World::pending_opl_requests`] and sends the 0xD6.
+///
+/// The comparison masks off `0x4000_0000`. ServUO's `ObjectPropertyList` writes
+/// the raw `m_Hash` into the 0xD6 body (`Terminate`, seeking to offset 11) but
+/// `0x4000_0000 + m_Hash` into this packet (its `Hash` property, used by
+/// `OPLInfo`) — a literal comparison would therefore never match and every notice
+/// would re-request forever. ClassicUO masks identically, with a plain-equality
+/// fallback for shards that don't set the bit
+/// (`Game/Managers/ObjectPropertiesListManager.IsRevisionEquals`).
+///
+/// A serial we hold no OPL for stays hover-driven and is ignored here. ClassicUO
+/// does request one (`AddMegaClilocRequest`), but it can afford to: it coalesces
+/// a frame's serials into batched 0xD6 packets and gates on the tooltip feature
+/// flag. Since ServUO sends 0xDC for everything entering view, doing the same
+/// per-serial here would be a request storm for tooltips nobody asked to see.
 fn opl_info(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     let serial = r.u32()?;
     let revision = r.u32()?;
-    world.opl_revision.insert(serial, revision);
+    let Some(&held) = world.opl_revision.get(&serial) else {
+        return Ok(());
+    };
+    if (revision & !0x4000_0000) != held && revision != held {
+        world.push_opl_request(serial);
+    }
     Ok(())
 }
 
@@ -3507,11 +3528,36 @@ mod tests {
         assert_eq!(lines[0], (1_050_045, "\t\tLongsword".to_string()));
         assert_eq!(lines[1], (1_060_403, "15".to_string()));
 
-        // 0xDC OPLInfo updates just the revision hash.
+        // 0xDC OPLInfo carrying the same revision, with ServUO's 0x40000000 bit
+        // set the way `ObjectPropertyList.Hash` sets it: nothing to do.
+        let opl_info = |revision: u32| {
+            let mut q = PacketWriter::new();
+            q.u8(0xDC).u32(0xDEAD_BEEF).u32(revision);
+            q.into_vec()
+        };
+        assert!(apply_packet(&mut w, &opl_info(0x4000_0000 | 0x1234_5678)));
+        assert!(w.pending_opl_requests.is_empty());
+        // A different revision means our lines are stale: queue a refetch, once,
+        // without disturbing the revision the lines we hold actually came with.
+        assert!(apply_packet(&mut w, &opl_info(0x4000_0000 | 0x9999_0000)));
+        assert!(apply_packet(&mut w, &opl_info(0x4000_0000 | 0x9999_0000)));
+        assert_eq!(w.pending_opl_requests, vec![0xDEAD_BEEF]);
+        assert_eq!(w.opl_revision.get(&0xDEAD_BEEF), Some(&0x1234_5678));
+        // The answering 0xD6 satisfies the queued request.
+        assert!(apply_packet(&mut w, &frame));
+        assert!(w.pending_opl_requests.is_empty());
+    }
+
+    #[test]
+    fn opl_info_for_an_unfetched_serial_is_ignored() {
+        // Hover-driven only: a notice for a serial we hold no OPL for must not
+        // turn into a request (ServUO sends 0xDC for everything entering view).
+        let mut w = World::new();
         let mut q = PacketWriter::new();
-        q.u8(0xDC).u32(0xDEAD_BEEF).u32(0x9999_0000);
+        q.u8(0xDC).u32(0x4001_0203).u32(0x4000_0001);
         assert!(apply_packet(&mut w, &q.into_vec()));
-        assert_eq!(w.opl_revision.get(&0xDEAD_BEEF), Some(&0x9999_0000));
+        assert!(w.pending_opl_requests.is_empty());
+        assert!(w.opl_revision.is_empty());
     }
 
     #[test]

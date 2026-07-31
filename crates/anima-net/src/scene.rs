@@ -99,15 +99,22 @@ pub enum StepDeny {
 /// (pruned by 0x1D like any item), and `components_at` is O(components on
 /// this ONE tile) after the first call per multi id.
 ///
-/// Includes an invisible component when it's the multi's index-0 record
-/// (`MultiComponent::is_origin`) — ServUO's own collision/placement grid force
-/// -includes index 0 regardless of its flags (`Server/MultiData.cs`
-/// `MultiComponentList`, every constructor: `if (i == 0 ||
-/// allTiles[i].m_Flags != 0)`), so client-side walkability prediction must
-/// match that or risk disagreeing with a server-side deny/allow on the
-/// origin tile. This is the WALKABILITY rule only — rendering (the tile loop
-/// in [`build_scene`]) still checks `visible` on its own, since ClassicUO
-/// only ever *draws* visible components.
+/// Folds on [`MultiComponent::server_keeps`], NOT on `visible`: the two are
+/// different questions and a UOP `flags` of `0x101` answers them opposite ways
+/// — ClassicUO won't draw such a component, ServUO maps it to
+/// `TileFlag.Generic` and keeps it in the collision grid (see
+/// `anima_assets::multis`' module doc for the full flag table). Predicting
+/// walkability off `visible` made the client walk through tiles the server
+/// blocks, which is the rubber-band direction.
+///
+/// Index-0 is force-included regardless (`MultiComponent::is_origin`), because
+/// ServUO's grid does the same whatever that record's flags say
+/// (`Server/MultiData.cs` `MultiComponentList`, every constructor:
+/// `if (i == 0 || allTiles[i].m_Flags != 0)`).
+///
+/// This is the WALKABILITY rule only — rendering (the tile loop in
+/// [`build_scene`]) still folds on `visible`, since ClassicUO only ever *draws*
+/// visible components.
 fn multi_components_at(world: &World, multis: &Multis, x: i64, y: i64) -> Vec<(u16, i32)> {
     let mut out = Vec::new();
     for (serial, it) in world.items.iter().filter(|(_, it)| it.is_multi) {
@@ -143,7 +150,7 @@ fn multi_components_at(world: &World, multis: &Multis, x: i64, y: i64) -> Vec<(u
             continue;
         }
         for c in multis.components_at(it.graphic as u32, dx as i16, dy as i16) {
-            if c.visible || c.is_origin {
+            if c.server_keeps || c.is_origin {
                 out.push((c.graphic, it.pos.z as i32 + c.dz as i32));
             }
         }
@@ -818,6 +825,31 @@ const FLAG_FOLIAGE: u64 = 0x2_0000;
 /// whether a dragged stack (amount > 1) offers the split-stack dialog, mirroring
 /// ClassicUO `GameActions.PickUp` (`item.Amount > 1 && item.ItemData.IsStackable`).
 const FLAG_STACKABLE: u64 = 0x800;
+/// Partial-hue flag (`TileFlag.PartialHue` = 0x0004_0000, ClassicUO
+/// TileDataLoader.cs; `ItemData.IsPartialHue`): only the item art's GRAY pixels
+/// take the dye. See [`item_art_hue`].
+const FLAG_PARTIAL_HUE: u64 = 0x4_0000;
+
+/// The hue to ship for an ITEM's art, in the packet form the play server's
+/// `?hue=` — and so `anima_assets::apply_hue` — reads: bit `0x8000` means
+/// *partial* hue, i.e. recolor only the gray pixels so a dyed hatchet tints its
+/// metal head and keeps its wooden handle. ClassicUO takes that bit from
+/// tiledata per item (`ItemView.DrawInternal`: `bool partial =
+/// ItemData.IsPartialHue`) and folds it into the very same `0x8000` bit inside
+/// `ShaderHueTranslator.GetHueVector`, so encoding it here lets every consumer
+/// of the scene (world sprite, container grid, vendor row, drag ghost) just pass
+/// the value straight through as `?hue=`. An unhued item stays 0 = "no hue": the
+/// flag alone must never turn into a hue request.
+fn item_art_hue(hue: u16, flags: u64) -> u16 {
+    if hue == 0 {
+        return 0;
+    }
+    if flags & FLAG_PARTIAL_HUE != 0 {
+        hue | 0x8000
+    } else {
+        hue
+    }
+}
 
 /// Per-frame interval (ms) for an animated static, from animdata's `frameInterval`
 /// tick count. The raw value is a small tick count (often 0–3); we scale it into a
@@ -838,23 +870,37 @@ fn anim_interval_ms(interval: u8) -> u32 {
 /// without a live `Session` (see the `#[ignore]`d test below).
 fn anim_suffix(map: &MapData, animdata: Option<&AnimData>, graphic: u16) -> String {
     let mut anim = String::new();
-    if map.item_is_animated(graphic) {
-        if let Some(ad) = animdata {
-            let seq = ad.frame_sequence(graphic);
-            if seq.len() > 1 {
-                let ai = anim_interval_ms(ad.frames(graphic).1);
-                anim.push_str(",\"a\":[");
-                for (i, g) in seq.iter().enumerate() {
-                    if i > 0 {
-                        anim.push(',');
-                    }
-                    let _ = write!(anim, "{g}");
-                }
-                let _ = write!(anim, "],\"ai\":{ai}");
+    if let Some((seq, ai)) = anim_frames(map, animdata, graphic) {
+        anim.push_str(",\"a\":[");
+        for (i, g) in seq.iter().enumerate() {
+            if i > 0 {
+                anim.push(',');
             }
+            let _ = write!(anim, "{g}");
         }
+        let _ = write!(anim, "],\"ai\":{ai}");
     }
     anim
+}
+
+/// The `(frame sequence, per-frame interval ms)` behind [`anim_suffix`], or
+/// `None` when the graphic isn't animated / animdata gives fewer than 2 frames.
+/// Split out for the same reason [`path_bits`] was split out of [`path_suffix`]:
+/// the dynamic-items loop in [`build_scene`] builds a `serde_json::Value`, not a
+/// hand-written JSON string, and must emit the same `a`/`ai` a static with that
+/// graphic gets — otherwise a server-spawned campfire or spell field freezes on
+/// frame 0 while an identical static flickers.
+fn anim_frames(
+    map: &MapData,
+    animdata: Option<&AnimData>,
+    graphic: u16,
+) -> Option<(Vec<u16>, u32)> {
+    if !map.item_is_animated(graphic) {
+        return None;
+    }
+    let ad = animdata?;
+    let seq = ad.frame_sequence(graphic);
+    (seq.len() > 1).then(|| (seq, anim_interval_ms(ad.frames(graphic).1)))
 }
 
 /// The `h`/`pf` VALUES a graphic within [`PATH_RADIUS`] of the player would
@@ -2492,6 +2538,15 @@ pub fn build_scene(
         map.as_deref()
             .is_some_and(|m| m.item_flags(g) & FLAG_STACKABLE != 0)
     };
+    // A dyed item's art hue, PartialHue-aware (see [`item_art_hue`]). Every
+    // surface that draws item art — ground sprite, container/trade grid, vendor
+    // row, drag ghost — asks the art endpoint for this exact value.
+    let item_hue =
+        |g: u16, hue: u16| item_art_hue(hue, map.as_deref().map_or(0, |m| m.item_flags(g)));
+    // Animated dynamic item (campfire, spell field, brazier): the same animdata
+    // frame sequence a static with that graphic gets, resolved through the shared
+    // borrow before `map` is consumed by the tile loop below.
+    let item_frames = |g: u16| map.as_deref().and_then(|m| anim_frames(m, animdata, g));
     // Draw-sort priority for a dynamic item (same scheme as statics): base z, with
     // a background tile under, and a tile with height (a wall/door) over, same-tile flats.
     let item_pz = |g: u16, z: i32| -> i32 {
@@ -2535,6 +2590,13 @@ pub fn build_scene(
                     .filter(|it| it.container == Some(m.serial) && it.layer != 0)
                     .map(|it| {
                         let (a, gump, hue) = equip_conv(body, item_anim(it.graphic), it.hue);
+                        // PartialHue-encoded like every other item-art surface: the
+                        // /anim, /gump and /art endpoints all recolor through the
+                        // same `apply_hue`, and ClassicUO honors PartialHue on worn
+                        // sprites too (`Game/GameObjects/Views/ItemView.cs:278`).
+                        // Without this a dyed partial-hue weapon was fully recolored
+                        // on the character while correct in the backpack.
+                        let hue = item_hue(it.graphic, hue);
                         let mut v = json!({
                             "serial": it.serial, "layer": it.layer, "g": it.graphic,
                             "anim": a, "hue": hue
@@ -2615,6 +2677,20 @@ pub fn build_scene(
             // be picked up/split like an ordinary item anyway.
             if it.graphic != 0x2006 {
                 merge_obj(&mut v, stack_fields(it.amount, item_stackable(it.graphic)));
+                // Dye hue (omitted when the item is undyed). A corpse is excluded
+                // because its `hue` below is the dead creature's Corpse.def-remapped
+                // BODY hue, applied to an anim frame — not this item's art dye.
+                let hue = item_hue(it.graphic, it.hue);
+                if hue != 0 {
+                    v["hue"] = json!(hue);
+                }
+                // Animated (`TileFlag.Animation`): same baked frame list the statics
+                // loop emits, so a server-spawned campfire/spell field cycles instead
+                // of freezing on frame 0.
+                if let Some((seq, ai)) = item_frames(it.graphic) {
+                    v["a"] = json!(seq);
+                    v["ai"] = json!(ai);
+                }
             }
             // A corpse (graphic 0x2006): the dead creature's BODY id rides in
             // `amount` (see `Item::amount`'s doc comment) and its facing in
@@ -2660,6 +2736,10 @@ pub fn build_scene(
         .filter(|it| it.container == Some(p.serial) && it.layer != 0)
         .map(|it| {
             let (a, gump, hue) = equip_conv(equip_body, item_anim(it.graphic), it.hue);
+            // Same PartialHue encoding as the mobile-equip arm above; this one also
+            // feeds the paperdoll's icon list and doll gump layers, which ClassicUO
+            // hues partially as well (`PaperDollInteractable.cs:269`).
+            let hue = item_hue(it.graphic, hue);
             let mut v = json!({
                 "serial": it.serial, "g": it.graphic, "layer": it.layer,
                 "anim": a, "hue": hue
@@ -2692,11 +2772,18 @@ pub fn build_scene(
             let mut v = json!({
                 "serial": it.serial, "cont": it.container,
                 "g": it.graphic, "amount": it.amount,
-                "x": it.pos.x, "y": it.pos.y, "hue": it.hue,
+                "x": it.pos.x, "y": it.pos.y,
                 // Is this nested item itself a container? Only then should a
                 // double-click open a container window (bandages/potions/etc. must not).
                 "c": item_is_cont(it.graphic) as u8
             });
+            // Dye hue for the grid icon (and, via the vendor buy list's pairing to
+            // these entries, its shop rows). Omitted when undyed — this array is
+            // rebuilt every poll for up to 400 items.
+            let hue = item_hue(it.graphic, it.hue);
+            if hue != 0 {
+                v["hue"] = json!(hue);
+            }
             // Mark stackable so a dragged stack only offers the split dialog when
             // the server would actually accept a partial amount (only when true).
             if item_stackable(it.graphic) {
@@ -2735,10 +2822,18 @@ pub fn build_scene(
                 // `IShopSellInfo.GetNameFor` falls back to a bare numeric LabelNumber
                 // string for stock with no explicit `Item.Name` (see
                 // `resolve_shop_name`'s doc), which otherwise showed as a raw id.
-                json!({
+                let mut v = json!({
                     "serial": it.serial, "g": it.graphic, "amount": it.amount,
                     "price": it.price, "name": resolve_shop_name(&it.name, cliloc)
-                })
+                });
+                // The sell list (0x9E) carries its own hue, so the row icon shows the
+                // dyed item we're actually offering. (The buy side needs nothing here:
+                // its rows pair to the vendor container's `contItems`, which are hued.)
+                let hue = item_hue(it.graphic, it.hue);
+                if hue != 0 {
+                    v["hue"] = json!(hue);
+                }
+                v
             })
             .collect();
         json!({ "vendor": sl.vendor, "items": items })
@@ -4620,6 +4715,7 @@ mod tests {
                     dy: 0,
                     dz: 0,
                     visible: false,
+                    server_keeps: false,
                     is_origin: true,
                 },
                 MultiComponent {
@@ -4628,6 +4724,7 @@ mod tests {
                     dy: 0,
                     dz: 4,
                     visible: false,
+                    server_keeps: false,
                     is_origin: false,
                 },
                 MultiComponent {
@@ -4636,6 +4733,7 @@ mod tests {
                     dy: 0,
                     dz: 8,
                     visible: true,
+                    server_keeps: true,
                     is_origin: false,
                 },
                 MultiComponent {
@@ -4644,6 +4742,7 @@ mod tests {
                     dy: 0,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: false,
                 },
             ],
@@ -4747,6 +4846,7 @@ mod tests {
                 dy: 0,
                 dz: 0,
                 visible: true,
+                server_keeps: true,
                 is_origin: true,
             }],
         )]));
@@ -4777,6 +4877,7 @@ mod tests {
                     dy: 0,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: true,
                 },
                 // A second-floor component stacked on the SAME (dx, dy) as the
@@ -4787,6 +4888,7 @@ mod tests {
                     dy: 0,
                     dz: 4,
                     visible: true,
+                    server_keeps: true,
                     is_origin: false,
                 },
                 MultiComponent {
@@ -4795,6 +4897,7 @@ mod tests {
                     dy: 0,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: false,
                 },
                 MultiComponent {
@@ -4803,6 +4906,7 @@ mod tests {
                     dy: 1,
                     dz: 0,
                     visible: false,
+                    server_keeps: false,
                     is_origin: false,
                 },
             ],
@@ -4885,6 +4989,77 @@ mod tests {
         }
     }
 
+    /// ServUO's pre-built keeps/castles (`Multis/HousePlacementTool.cs` places
+    /// `0x147C` as the 23x23 3-Story Customizable Keep) exist ONLY in
+    /// `MultiCollection.uop`, not in `multi.idx`/`multi.mul`. While the reader
+    /// was MUL-only they resolved no components at all, so this crate's two
+    /// consumers both silently did nothing: [`placement_json`] bailed at its
+    /// `multis?.components(...)?` and the placement preview drew nothing, and
+    /// [`multi_components_at`] returned an empty fold so the structure was
+    /// walk-through. Both must now see the real component list.
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn uop_only_keep_multi_drives_placement_preview_and_walkability() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let multis = Multis::open(&dir).expect("open multi data");
+        let mut map = MapData::open(&dir).expect("open map data");
+
+        // Placement preview: a footprint, and the raw parts the browser draws.
+        let mut world = anima_core::World::new();
+        world.pending_target = Some(TargetCursor {
+            target_type: 1,
+            cursor_id: 1,
+            cursor_flag: 0,
+        });
+        world.pending_multi_placement = Some(MultiPlacement {
+            multi_id: 0x147C,
+            x_off: 0,
+            y_off: 0,
+            z_off: 0,
+            hue: 0,
+        });
+        let v = placement_json(&world, Some(&multis)).expect("keep foundation must resolve");
+        let raw = multis.components(0x147C).expect("keep components").len();
+        assert_eq!(raw, 622, "keep component count");
+        assert_eq!(
+            v["parts"].as_array().unwrap().len(),
+            raw,
+            "the whole component list fits under the parts cap"
+        );
+        assert!(!v["tiles"].as_array().unwrap().is_empty());
+        // 23x23 plot => a 4-story foundation (ServUO `HouseFoundation`), which
+        // only resolves now that the id has bounds to fold at all.
+        assert_eq!(house_design_max_levels(Some(&multis), 0x147C), 4);
+
+        // Walkability: place the keep over the same verified open-water box the
+        // SmallBoat test uses (nothing is walkable there without a multi), and
+        // check its components now reach the fold. A wall piece denies where
+        // open water alone merely had no surface; a floor piece carries a
+        // standing Z. Both are `DynamicItem`/`Ok` answers that only exist
+        // because `components_at` finally returns something for this id.
+        let (kx, ky, kz): (i64, i64, i32) = (1459, 1767, -15);
+        let mut world = anima_core::World::new();
+        world.items.insert(
+            1,
+            synth_item(1, 0x147C, kx as u16, ky as u16, kz as i8, true),
+        );
+        let flipped = multis
+            .components(0x147C)
+            .unwrap()
+            .iter()
+            .filter(|c| c.visible)
+            .filter(|c| {
+                let (tx, ty) = (kx + c.dx as i64, ky + c.dy as i64);
+                tile_walkable(&world, &mut map, None, tx, ty, kz)
+                    != tile_walkable(&world, &mut map, Some(&multis), tx, ty, kz)
+            })
+            .count();
+        assert!(
+            flipped > 100,
+            "the keep's components must change walkability on its own footprint, got {flipped}"
+        );
+    }
+
     #[test]
     fn placement_json_caps_tile_count() {
         let mut world = anima_core::World::new();
@@ -4910,6 +5085,7 @@ mod tests {
                     dy,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: dx == 0 && dy == 0,
                 });
             }
@@ -4980,6 +5156,7 @@ mod tests {
                     dy: -3,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: true,
                 },
                 MultiComponent {
@@ -4988,6 +5165,7 @@ mod tests {
                     dy: 3,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: false,
                 },
             ], // 7x7 footprint -> below the 14-tile threshold
@@ -5001,6 +5179,7 @@ mod tests {
                     dy: -7,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: true,
                 },
                 MultiComponent {
@@ -5009,6 +5188,7 @@ mod tests {
                     dy: 6,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: false,
                 },
             ], // exactly 14x14 -> at the threshold
@@ -5047,6 +5227,7 @@ mod tests {
                 dy: 0,
                 dz: 0,
                 visible: true,
+                server_keeps: true,
                 is_origin: true,
             }],
         )]));
@@ -5280,6 +5461,7 @@ mod tests {
                 dy: 0,
                 dz: 0,
                 visible: true,
+                server_keeps: true,
                 is_origin: true,
             }],
         )]));
@@ -5315,6 +5497,43 @@ mod tests {
         assert_eq!(anim_suffix(&map, Some(&animdata), 0x0001), "");
         // No animdata table at all → nothing, even for an animated graphic.
         assert_eq!(anim_suffix(&map, None, 0x03AE), "");
+    }
+
+    /// T0.5 (pure given real tiledata/animdata): the dynamic-item loop reads the
+    /// frame sequence through [`anim_frames`], so a server-spawned campfire
+    /// (0x0DE3) must resolve the same >1-frame list a static would — that's the
+    /// whole reason a placed campfire flickers instead of freezing.
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn anim_frames_resolves_a_spawnable_animated_item() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let map = MapData::open(&dir).expect("open map data");
+        let animdata = AnimData::open(&dir).expect("open animdata");
+
+        let (seq, ai) = anim_frames(&map, Some(&animdata), 0x0DE3).expect("campfire is animated");
+        assert!(seq.len() > 1, "campfire needs a real frame cycle, got {seq:?}");
+        assert!((100..=1000).contains(&ai), "interval out of range: {ai}");
+        // Same source as the statics path, so the two can never drift apart.
+        let suffix = anim_suffix(&map, Some(&animdata), 0x0DE3);
+        assert!(suffix.contains(&format!("\"ai\":{ai}")), "suffix={suffix}");
+
+        assert!(anim_frames(&map, Some(&animdata), 0x0001).is_none()); // plain wall
+        assert!(anim_frames(&map, None, 0x0DE3).is_none()); // no animdata table
+    }
+
+    /// T0.4: a dyed item's hue must reach the art request, and a
+    /// `TileFlag.PartialHue` item must reach it with bit 0x8000 set so
+    /// `anima_assets::apply_hue` recolors only the gray pixels (a full hue on a
+    /// partial-hue item looks worse than none at all). Pure — no data files.
+    #[test]
+    fn item_art_hue_marks_partial_hue_items_and_leaves_undyed_ones_alone() {
+        assert_eq!(item_art_hue(0x21, 0), 0x21);
+        assert_eq!(item_art_hue(0x21, FLAG_PARTIAL_HUE), 0x8021);
+        // Unrelated flags must not set the bit…
+        assert_eq!(item_art_hue(0x21, FLAG_STACKABLE | FLAG_FOLIAGE), 0x21);
+        // …and an undyed item stays "no hue" whatever tiledata says, or the
+        // renderer would request a hue of 0x8000 (= partial hue id 0).
+        assert_eq!(item_art_hue(0, FLAG_PARTIAL_HUE), 0);
     }
 
     /// Real bug regression (see `blocking_item_at`'s doc for the full live
@@ -5383,6 +5602,7 @@ mod tests {
                     dy: 0,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: true,
                 },
                 MultiComponent {
@@ -5391,6 +5611,7 @@ mod tests {
                     dy: -1,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: false,
                 },
                 MultiComponent {
@@ -5399,6 +5620,7 @@ mod tests {
                     dy: -1,
                     dz: 7,
                     visible: true,
+                    server_keeps: true,
                     is_origin: false,
                 },
             ],
@@ -5501,6 +5723,7 @@ mod tests {
                     dy: 0,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: true,
                 },
                 MultiComponent {
@@ -5509,6 +5732,7 @@ mod tests {
                     dy: -1,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: false,
                 },
                 // no floor component this time — nothing to stand on.
@@ -5566,6 +5790,7 @@ mod tests {
                     dy: 0,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: true,
                 },
                 MultiComponent {
@@ -5574,6 +5799,7 @@ mod tests {
                     dy: -1,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: false,
                 },
                 MultiComponent {
@@ -5582,6 +5808,7 @@ mod tests {
                     dy: -1,
                     dz: 7,
                     visible: true,
+                    server_keeps: true,
                     is_origin: false,
                 },
             ],
@@ -5668,6 +5895,7 @@ mod tests {
                     dy: 0,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: true,
                 },
                 MultiComponent {
@@ -5676,6 +5904,7 @@ mod tests {
                     dy: -1,
                     dz: 0,
                     visible: true,
+                    server_keeps: true,
                     is_origin: false,
                 },
                 // no floor component this time — nothing to stand on.
