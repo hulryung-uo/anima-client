@@ -245,7 +245,10 @@ anima-client/
     │       ├── lib.rs         # Session + Route/advance_route (non-blocking WalkTo state machine)
     │       ├── json.rs        # compatibility re-export of anima-contract-json
     │       ├── scene/         # build_scene: World + assets → the web renderer's JSON
-    │       │   ├── mod.rs     #   build_scene itself (holds every borrow at once)
+    │       │   ├── mod.rs     #   build_scene: order the pieces, assemble the JSON
+    │       │   ├── look.rs    #   asset lookups (was 15 closures inside build_scene)
+    │       │   ├── entities.rs#   mobiles, ground items, worn equipment, container contents
+    │       │   ├── terrain.rs #   the visible tile field — the only `&mut MapData` user
     │       │   ├── walk.rs    #   can the player stand there — and if not, is it a door?
     │       │   ├── height.rs  #   ClassicUO CalculateNewZ port: which surface you stand on
     │       │   ├── tiles.rs   #   tile flags + per-tile art/anim/path suffixes

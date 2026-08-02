@@ -1,0 +1,261 @@
+//! The entities in a scene: mobiles, ground items, worn equipment, and the
+//! contents of every open container.
+//!
+//! Each of these was an inline `let x: Vec<Value> = …` chain inside
+//! `build_scene`, several dozen lines long, reading the same handful of outer
+//! bindings. They are all pure projections of [`World`] through a [`Look`],
+//! with no borrow of the mutable map — which is why they can be plain
+//! functions, and why `build_scene` calls every one of them before it walks
+//! the tiles.
+
+use anima_core::world::Mobile;
+
+use super::look::Look;
+use super::*;
+
+/// Every mobile except the player: resolved animation body, worn equipment,
+/// and health/notoriety state.
+pub(super) fn mobiles_json(world: &World, look: &Look, player: &Mobile) -> Vec<Value> {
+    world
+        .mobiles
+        .values()
+        .filter(|m| m.serial != player.serial)
+        .map(|m| {
+            let (body, hue) = look.remap(m.body, m.hue);
+            // Only "people" bodies (>= 400) wear clothes/hair/beard; animals and
+            // monsters carry nothing, so skip the per-item work for them.
+            let equip: Vec<Value> = if body >= 400 {
+                world
+                    .items
+                    .values()
+                    .filter(|it| it.container == Some(m.serial) && it.layer != 0)
+                    .map(|it| {
+                        let (a, gump, hue) =
+                            look.equip_conv(body, look.item_anim(it.graphic), it.hue);
+                        // PartialHue-encoded like every other item-art surface: the
+                        // /anim, /gump and /art endpoints all recolor through the
+                        // same `apply_hue`, and ClassicUO honors PartialHue on worn
+                        // sprites too (`Game/GameObjects/Views/ItemView.cs:278`).
+                        // Without this a dyed partial-hue weapon was fully recolored
+                        // on the character while correct in the backpack.
+                        let hue = look.item_hue(it.graphic, hue);
+                        let mut v = json!({
+                            "serial": it.serial, "layer": it.layer, "g": it.graphic,
+                            "anim": a, "hue": hue
+                        });
+                        if let Some(g) = gump {
+                            v["gump"] = json!(g);
+                        }
+                        v
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // A mounted mobile wears a "mount item" on layer 25 (0x19); its tiledata
+            // AnimID IS the mount's animal body. Resolve it (0 = not mounted) so the
+            // renderer can draw the mount under the rider with the ONMOUNT groups.
+            let mount = world
+                .items
+                .values()
+                .find(|it| it.container == Some(m.serial) && it.layer == 25);
+            let mount_anim = mount.map_or(0u16, |it| {
+                mount_anim_for(it.graphic, &|g| look.item_anim(g))
+            });
+            let mut v = json!({
+                "serial": m.serial,
+                "x": m.pos.x, "y": m.pos.y, "z": m.pos.z, "dir": m.direction,
+                "body": body, "at": look.atype(body), "noto": m.notoriety, "name": m.name,
+                "hits": m.hits, "hitsMax": m.hits_max,
+                "hue": hue, "equip": equip,
+                "mounted": mount.is_some() as u8, "mountAnim": mount_anim
+            });
+            merge_obj(&mut v, hidden_field(m.hidden));
+            merge_obj(&mut v, poisoned_field(m.poisoned));
+            v
+        })
+        .collect()
+}
+
+/// Ground items in view: the sprite, its draw-sort priority, and the
+/// pathfinding bits a nearby one contributes to the browser's own Z resolution.
+pub(super) fn items_json(world: &World, look: &Look, px: i64, py: i64, max_z: i32) -> Vec<Value> {
+    world
+        .items
+        .values()
+        .filter(|it| {
+            // Same z-ceiling rule the statics loop applies: at/above max_z is
+            // hidden (roof lifted / cave ceiling), so no floating items. A multi
+            // (`is_multi`) isn't a drawable item at all — its `graphic` is a
+            // multi id, not an ART graphic; it's expanded into the statics
+            // stream (see the tile loop below) instead of drawn directly here.
+            !it.is_multi
+                && it.container.is_none()
+                && !look.item_nodraw(it.graphic)
+                && (it.pos.z as i32) < max_z
+        })
+        .map(|it| {
+            let mut v = json!({
+                "x": it.pos.x, "y": it.pos.y, "z": it.pos.z, "g": it.graphic,
+                "serial": it.serial, "pz": look.item_pz(it.graphic, it.pos.z as i32)
+            });
+            // Mark foliage so the renderer can fade it (only when true, small payload).
+            if look.item_foliage(it.graphic) {
+                v["f"] = json!(1);
+            }
+            // Mark containers so double-click opens a loot window (doors don't).
+            if look.item_is_cont(it.graphic) {
+                v["c"] = json!(1);
+            }
+            // `h`/`pf` (PATH_RADIUS-gated, see `item_path_bits`'s doc): omitted
+            // whenever out of radius or zero, so this is purely additive —
+            // an item outside PATH_RADIUS serializes exactly as before.
+            let in_radius = (it.pos.x as i64 - px).abs() <= PATH_RADIUS
+                && (it.pos.y as i64 - py).abs() <= PATH_RADIUS;
+            let (h, pf) = look.item_path_bits(it.graphic, in_radius);
+            if let Some(h) = h {
+                v["h"] = json!(h);
+            }
+            if let Some(pf) = pf {
+                v["pf"] = json!(pf);
+            }
+            // Stack count, so the renderer's pointer-drag can offer a stack-split
+            // dialog when lifting amount > 1 (ClassicUO SplitMenuGump). Omitted for
+            // a corpse (graphic 0x2006): its `amount` is overloaded with the dead
+            // creature's BODY id below, not a real stack size, and a corpse can't
+            // be picked up/split like an ordinary item anyway.
+            if it.graphic != 0x2006 {
+                merge_obj(
+                    &mut v,
+                    stack_fields(it.amount, look.item_stackable(it.graphic)),
+                );
+                // Dye hue (omitted when the item is undyed). A corpse is excluded
+                // because its `hue` below is the dead creature's Corpse.def-remapped
+                // BODY hue, applied to an anim frame — not this item's art dye.
+                let hue = look.item_hue(it.graphic, it.hue);
+                if hue != 0 {
+                    v["hue"] = json!(hue);
+                }
+                // Animated (`TileFlag.Animation`): same baked frame list the statics
+                // loop emits, so a server-spawned campfire/spell field cycles instead
+                // of freezing on frame 0.
+                if let Some((seq, ai)) = look.item_frames(it.graphic) {
+                    v["a"] = json!(seq);
+                    v["ai"] = json!(ai);
+                }
+            }
+            // A corpse (graphic 0x2006): the dead creature's BODY id rides in
+            // `amount` (see `Item::amount`'s doc comment) and its facing in
+            // `direction`. Remap through Corpse.def, resolve the primary death-pose
+            // group, and hand the renderer everything it needs to draw the real
+            // death-pose sprite instead of the generic corpse art.
+            if it.graphic == 0x2006 {
+                let (body, hue) = look.remap_corpse(it.amount, it.hue);
+                let dg = look.anim.map_or(0, |a| a.death_group(body));
+                merge_obj(&mut v, corpse_fields(body, hue, it.direction, dg));
+            }
+            v
+        })
+        .collect()
+}
+
+/// Cap on the glow pass — shared with the tile loop, which appends static
+/// light sources (wall torches, lamps) to the same list.
+pub(super) const LIGHT_CAP: usize = 64;
+
+/// Per-object light sources for the renderer's night glow. Returns a list the
+/// caller keeps appending to, not a finished one.
+pub(super) fn lights_json(world: &World, look: &Look, px: i64, py: i64, pz: i32) -> Vec<Value> {
+    let mut lights: Vec<Value> = Vec::new();
+    lights.push(json!({ "x": px, "y": py, "z": pz, "r": 5 }));
+    for it in world.items.values() {
+        if lights.len() >= LIGHT_CAP {
+            break;
+        }
+        // A multi's own entry carries a multi id in `graphic`, not an ART
+        // graphic — skip it here (any light-emitting components are handled
+        // per-component in the tile loop below, alongside static lights).
+        if !it.is_multi && it.container.is_none() && look.item_is_light(it.graphic) {
+            lights.push(json!({ "x": it.pos.x, "y": it.pos.y, "z": it.pos.z, "r": 3 }));
+        }
+    }
+    lights
+}
+
+/// The player's worn items (container == us, on a real layer), which drive the
+/// paperdoll. Layer 0 = not equipped; the backpack itself is layer 0x15.
+/// `equip_body` is the wearer's REMAPPED body, which is what `Equipconv.def`
+/// is keyed by.
+pub(super) fn equip_json(
+    world: &World,
+    look: &Look,
+    player: &Mobile,
+    equip_body: u16,
+) -> Vec<Value> {
+    world
+        .items
+        .values()
+        .filter(|it| it.container == Some(player.serial) && it.layer != 0)
+        .map(|it| {
+            let (a, gump, hue) = look.equip_conv(equip_body, look.item_anim(it.graphic), it.hue);
+            // Same PartialHue encoding as the mobile-equip arm above; this one also
+            // feeds the paperdoll's icon list and doll gump layers, which ClassicUO
+            // hues partially as well (`PaperDollInteractable.cs:269`).
+            let hue = look.item_hue(it.graphic, hue);
+            let mut v = json!({
+                "serial": it.serial, "g": it.graphic, "layer": it.layer,
+                "anim": a, "hue": hue
+            });
+            if let Some(g) = gump {
+                v["gump"] = json!(g);
+            }
+            v
+        })
+        .collect()
+}
+
+/// The contents of every open container/corpse/trade window, flattened — the
+/// browser keys each entry by its own `cont` serial.
+pub(super) fn container_items_json(world: &World, look: &Look) -> Vec<Value> {
+    world
+        .items
+        .values()
+        .filter(|it| it.container.is_some())
+        .take(400)
+        .map(|it| {
+            let mut v = json!({
+                "serial": it.serial, "cont": it.container,
+                "g": it.graphic, "amount": it.amount,
+                "x": it.pos.x, "y": it.pos.y,
+                // Is this nested item itself a container? Only then should a
+                // double-click open a container window (bandages/potions/etc. must not).
+                "c": look.item_is_cont(it.graphic) as u8
+            });
+            // Dye hue for the grid icon (and, via the vendor buy list's pairing to
+            // these entries, its shop rows). Omitted when undyed — this array is
+            // rebuilt every poll for up to 400 items.
+            let hue = look.item_hue(it.graphic, it.hue);
+            if hue != 0 {
+                v["hue"] = json!(hue);
+            }
+            // Mark stackable so a dragged stack only offers the split dialog when
+            // the server would actually accept a partial amount (only when true).
+            if look.item_stackable(it.graphic) {
+                v["st"] = json!(1);
+            }
+            v
+        })
+        .collect()
+}
+
+/// The player's mount item (layer 25) AnimID — the animal body to draw under
+/// the rider when mounted; 0 = on foot.
+pub(super) fn player_mount_anim(world: &World, look: &Look, player: &Mobile) -> u16 {
+    world
+        .items
+        .values()
+        .find(|it| it.container == Some(player.serial) && it.layer == 25)
+        .map_or(0u16, |it| {
+            mount_anim_for(it.graphic, &|g| look.item_anim(g))
+        })
+}
