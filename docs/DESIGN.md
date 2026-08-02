@@ -501,16 +501,23 @@ scripts/check.sh        # every gate CI runs, in CI's order (add --skip-desktop 
 ```
 
 **The toolchain pin is load-bearing.** `rustfmt`'s and `clippy`'s output both
-change between releases, so a local toolchain that isn't the pinned one
-disagrees with CI *in both directions* — and only rustup's `cargo`/`rustc`
-shims read `rust-toolchain.toml` at all; a Homebrew/distro `cargo` ignores it
-and silently uses whatever it shipped with. `scripts/check.sh` compares
+change between releases, and only rustup's `cargo`/`rustc` shims read
+`rust-toolchain.toml` at all — a Homebrew/distro `cargo` ignores it and
+silently uses whatever it shipped with. `scripts/check.sh` compares
 `rustc --version` against the pin and refuses to run on a mismatch rather than
-report a verdict CI won't share. (Observed: on Homebrew rust 1.97.1 the pinned
-1.96.1 gates invert — `cargo fmt --check` reports 30+ diffs and `clippy -D
-warnings` fails, on a tree CI calls clean. Do **not** "fix" that by
-reformatting; 1.97's rustfmt re-indents standalone comments that follow a
-trailing-comment line onto column 80, which is strictly worse. Install rustup.)
+report a verdict CI won't share.
+
+*How this was learned, since the wrong lesson is the tempting one:* on a
+machine with no rustup, Homebrew rust 1.97.1 reported 35 `cargo fmt --check`
+diffs and a failing `clippy -D warnings`, which looked like version drift
+against a tree CI was presumed to be happy with. It wasn't drift. CI runs the
+pinned 1.96.1 (verified in the run log) and reported **the same 35 diffs**;
+the fmt gate had been red for five consecutive commits. Formatting deviations
+are not toolchain disagreements until you have checked the CI log — and a
+long-red gate is invisible precisely because nobody reads a job that is always
+failing. One of those 35 was rustfmt (in *both* versions) re-indenting a
+standalone comment that follows a trailing-comment line onto column 80; the
+fix is to not write that construct, not to fight the formatter.
 
 - **macOS / Apple Silicon note:** the core is pure logic, no native graphics deps, so no arm64 friction (unlike ClassicUO's SDL/FNA). Friction only appears at the renderer/Tauri stage — prefer arm64-native deps, WebGL2 fallback for WKWebView WebGPU gaps.
 - **Standalone desktop app:** `cargo run -p anima-desktop` (Tauri v2, no npm) — runs the `play` server in-process on a loopback port kept stable across launches (first free of `8190..=8199`, remembered in the desktop config: `localStorage` is keyed by origin, so an ephemeral port silently reset every renderer preference each run) and opens a native window at it; `crates/anima-desktop/README.md` covers `.app`/`.dmg` bundling.

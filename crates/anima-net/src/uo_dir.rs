@@ -121,7 +121,13 @@ mod tests {
 
     #[test]
     fn missing_or_empty_field_is_none() {
-        assert_eq!(parse_json_string_field(r#"{"a":"b"}"#, "ultimaonlinedirectory"), None);
-        assert_eq!(parse_json_string_field(r#"{"ultimaonlinedirectory":""}"#, "ultimaonlinedirectory"), None);
+        assert_eq!(
+            parse_json_string_field(r#"{"a":"b"}"#, "ultimaonlinedirectory"),
+            None
+        );
+        assert_eq!(
+            parse_json_string_field(r#"{"ultimaonlinedirectory":""}"#, "ultimaonlinedirectory"),
+            None
+        );
     }
 }

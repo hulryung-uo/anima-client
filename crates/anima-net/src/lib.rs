@@ -27,18 +27,18 @@ use anima_core::net::outgoing::{
     build_house_design_close, build_house_design_commit, build_house_design_delete_item,
     build_house_design_delete_roof, build_house_design_go_to_floor, build_house_design_request,
     build_house_design_restore, build_house_design_revert, build_house_design_sync,
-    build_hue_picker_response, build_legacy_menu_response, build_logout_request, build_opl_request, OPL_REQUEST_BATCH,
+    build_hue_picker_response, build_legacy_menu_response, build_logout_request, build_opl_request,
     build_party_accept, build_party_decline, build_party_invite, build_party_leave,
     build_party_message, build_pick_up, build_ping, build_popup_request, build_popup_select,
     build_profile_request, build_profile_update, build_prompt_response, build_say, build_sell,
     build_single_click, build_skill_lock, build_stat_lock, build_status_request,
-    build_target_response,
-    build_text_entry_dialog_response, build_tip_request, build_trade_accept, build_trade_cancel,
-    build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
+    build_target_response, build_text_entry_dialog_response, build_tip_request, build_trade_accept,
+    build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability, build_use_skill,
+    build_war_mode, OPL_REQUEST_BATCH,
 };
 use anima_core::net::{
-    apply_packet, build_client_version, CharacterChoice, CharacterPrompt, FramingError,
-    walk_pacing, GameServerAddress, LoginConfig, LoginDirective, LoginError, LoginMachine,
+    apply_packet, build_client_version, walk_pacing, CharacterChoice, CharacterPrompt,
+    FramingError, GameServerAddress, LoginConfig, LoginDirective, LoginError, LoginMachine,
     LoginResult, StreamDecoder, Walker, CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE,
 };
 use anima_core::path::{find_path, find_path_near, Terrain, DEFAULT_MAX_EXPANSIONS};
@@ -527,8 +527,9 @@ impl Session {
         };
         // ServUO doesn't push our stats/skills unsolicited — request them so the
         // first Observation carries them (ClassicUO does the same on login).
-        session.send(&build_status_request(4, result.serial))?; // stats (0x11)
-        session.send(&build_status_request(5, result.serial))?; // skills (0x3A)
+        // 0x11 stats, then 0x3A skills.
+        session.send(&build_status_request(4, result.serial))?;
+        session.send(&build_status_request(5, result.serial))?;
         // Advertise our draw range so the server sends mobiles/items in view
         // (ClassicUO sends 0xC8 on login); keep World in sync with what we asked.
         session.send(&build_client_view_range(DEFAULT_VIEW_RANGE))?;

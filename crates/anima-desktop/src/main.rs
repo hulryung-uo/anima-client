@@ -165,7 +165,10 @@ fn resolve_data_dir(app: &AppHandle) -> PathBuf {
     // locations (dev path, /Applications, a configured ClassicUO, …). Persist a
     // hit so the picker never appears again on this machine.
     if let Some(found) = uo_dir::detect_uo_dir() {
-        println!("anima-desktop: auto-detected UO data at {}", found.display());
+        println!(
+            "anima-desktop: auto-detected UO data at {}",
+            found.display()
+        );
         persist_data_dir(app, &found);
         return found;
     }
@@ -367,7 +370,10 @@ mod tests {
 
     #[test]
     fn first_launch_takes_the_base_port() {
-        assert_eq!(choose_http_port(None, probe(&[])), Some(*PORT_RANGE.start()));
+        assert_eq!(
+            choose_http_port(None, probe(&[])),
+            Some(*PORT_RANGE.start())
+        );
     }
 
     #[test]

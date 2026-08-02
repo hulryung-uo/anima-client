@@ -704,7 +704,8 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
                 // exists. The temp name carries the pid so the writers can't
                 // collide before the (atomic) rename.
                 let staging = cache.with_extension(format!("{}.part", std::process::id()));
-                if std::fs::write(&staging, &png).is_ok() && std::fs::rename(&staging, &cache).is_err()
+                if std::fs::write(&staging, &png).is_ok()
+                    && std::fs::rename(&staging, &cache).is_err()
                 {
                     let _ = std::fs::remove_file(&staging);
                 }
@@ -906,8 +907,7 @@ impl Monitor {
     pub fn publish(&mut self, session: &mut Session, map: Option<&mut MapData>) {
         let t0 = Instant::now();
         self.drain_journal(session);
-        self.facet
-            .store(session.world.map_index, Ordering::Relaxed);
+        self.facet.store(session.world.map_index, Ordering::Relaxed);
         let mut art_guard = self.art.as_ref().map(|a| a.lock().unwrap());
         let json = build_scene(
             session,

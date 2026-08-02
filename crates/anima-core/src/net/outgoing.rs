@@ -547,7 +547,13 @@ pub fn build_house_design_commit(player_serial: u32) -> Vec<u8> {
 /// CustomHouse designer: delete a placed component at `(x, y, z)`. Sub-command
 /// `0x05`, args `[graphic, x, y, z]`. Ports ClassicUO `Send_CustomHouseDeleteItem`
 /// (`ServUO Designer_Delete` reads the same four `Int32`s in this order).
-pub fn build_house_design_delete_item(player_serial: u32, graphic: u16, x: i32, y: i32, z: i32) -> Vec<u8> {
+pub fn build_house_design_delete_item(
+    player_serial: u32,
+    graphic: u16,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> Vec<u8> {
     build_house_design(
         player_serial,
         0x05,
@@ -606,7 +612,13 @@ pub fn build_house_design_go_to_floor(player_serial: u32, floor: u8) -> Vec<u8> 
 /// CustomHouse designer: add a roof component at `(x, y, z)` (Samurai Empire
 /// roofs). Sub-command `0x13`, args `[graphic, x, y, z]`. Ports ClassicUO
 /// `Send_CustomHouseAddRoof` (`ServUO Designer_Roof`).
-pub fn build_house_design_add_roof(player_serial: u32, graphic: u16, x: i32, y: i32, z: i32) -> Vec<u8> {
+pub fn build_house_design_add_roof(
+    player_serial: u32,
+    graphic: u16,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> Vec<u8> {
     build_house_design(
         player_serial,
         0x13,
@@ -617,7 +629,13 @@ pub fn build_house_design_add_roof(player_serial: u32, graphic: u16, x: i32, y: 
 /// CustomHouse designer: delete a roof component at `(x, y, z)`. Sub-command
 /// `0x14`, args `[graphic, x, y, z]`. Ports ClassicUO `Send_CustomHouseDeleteRoof`
 /// (`ServUO Designer_RoofDelete`).
-pub fn build_house_design_delete_roof(player_serial: u32, graphic: u16, x: i32, y: i32, z: i32) -> Vec<u8> {
+pub fn build_house_design_delete_roof(
+    player_serial: u32,
+    graphic: u16,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> Vec<u8> {
     build_house_design(
         player_serial,
         0x14,

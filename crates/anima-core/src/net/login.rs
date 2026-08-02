@@ -514,8 +514,8 @@ pub struct StartingCity {
 pub struct CityLocation {
     pub x: u32,
     pub y: u32,
-    pub z: i32,   // written as i32 by the server
-    pub map: u32, // facet id: 0 Felucca, 1 Trammel, 2 Ilshenar, 3 Malas, 4 Tokuno, 5 TerMur
+    pub z: i32,           // written as i32 by the server
+    pub map: u32,         // facet id: 0 Felucca, 1 Trammel, 2 Ilshenar, 3 Malas, 4 Tokuno, 5 TerMur
     pub description: u32, // cliloc id, 0 when unset
 }
 
@@ -610,7 +610,9 @@ fn parse_character_list_tail(tail: &[u8]) -> (Vec<StartingCity>, u32) {
         // records end right after Building, so `location` stays `None`.
         let location = (stride == 89).then(|| {
             let fields = &record[1 + 2 * name_width..];
-            let u32_at = |i: usize| u32::from_be_bytes([fields[i], fields[i + 1], fields[i + 2], fields[i + 3]]);
+            let u32_at = |i: usize| {
+                u32::from_be_bytes([fields[i], fields[i + 1], fields[i + 2], fields[i + 3]])
+            };
             CityLocation {
                 x: u32_at(0),
                 y: u32_at(4),
@@ -1759,13 +1761,34 @@ mod tests {
         // is meaningful — 1075074 is the actual Britain city-blurb cliloc
         // ("<h2>Britain</h2><br>The City of Bards<br><br> ...").
         frame.extend(modern_city_record(
-            0, "New Haven", "New Haven Bank", 3494, 2559, 30, 1, 1075072,
+            0,
+            "New Haven",
+            "New Haven Bank",
+            3494,
+            2559,
+            30,
+            1,
+            1075072,
         ));
         frame.extend(modern_city_record(
-            3, "Britain", "Britain Bank", 3734, 2222, 20, 0, 1075074,
+            3,
+            "Britain",
+            "Britain Bank",
+            3734,
+            2222,
+            20,
+            0,
+            1075074,
         ));
         frame.extend(modern_city_record(
-            4, "Moonglow", "Moonglow Bank", 4408, 1173, 0, 0, 1075076,
+            4,
+            "Moonglow",
+            "Moonglow Bank",
+            4408,
+            1173,
+            0,
+            0,
+            1075076,
         ));
         frame.extend_from_slice(&CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE.to_be_bytes());
         let total = frame.len() as u16;

@@ -760,10 +760,10 @@ mod tests {
         let buf = synth_uop_entry(
             0x1F42,
             &[
-                (0, 0, 0, 0, 0, &[]),        // index 0, zeroed graphic
-                (0, 0, 1, 0, 0, &[9]),       // zeroed, and carries a cliloc to skip
-                (0x0FA0, 0, 2, 0, 0, &[]),   // a real one
-                (0, 0, 3, 0, 0x101, &[]),    // zeroed and "solid" — still dropped
+                (0, 0, 0, 0, 0, &[]),      // index 0, zeroed graphic
+                (0, 0, 1, 0, 0, &[9]),     // zeroed, and carries a cliloc to skip
+                (0x0FA0, 0, 2, 0, 0, &[]), // a real one
+                (0, 0, 3, 0, 0x101, &[]),  // zeroed and "solid" — still dropped
             ],
         );
 
@@ -793,16 +793,16 @@ mod tests {
         // 0x101 flag on the component the MUL called invisible.
         let uop = parse_uop_components(&synth_uop_entry(
             0,
-            &[
-                (0x1002, 2, 0, 0, 0, &[]),
-                (0x1000, 0, 0, 0, 0x101, &[]),
-            ],
+            &[(0x1002, 2, 0, 0, 0, &[]), (0x1000, 0, 0, 0, 0x101, &[])],
         ))
         .expect("uop parses");
         apply_uop_keep_overlay(&mut comps, &uop);
 
         assert!(!comps[0].visible, "rendering still follows multi.mul");
-        assert!(comps[0].server_keeps, "0x101 in the UOP => the server keeps it");
+        assert!(
+            comps[0].server_keeps,
+            "0x101 in the UOP => the server keeps it"
+        );
         assert!(
             !comps[1].server_keeps,
             "no UOP record keys this one — multi.mul's own answer stands"
@@ -966,7 +966,14 @@ mod tests {
             assert_eq!(merged.len(), comps.len(), "id 0x{id:04X} component count");
             for (got, want) in merged.iter().zip(comps) {
                 assert_eq!(
-                    (got.graphic, got.dx, got.dy, got.dz, got.visible, got.is_origin),
+                    (
+                        got.graphic,
+                        got.dx,
+                        got.dy,
+                        got.dz,
+                        got.visible,
+                        got.is_origin
+                    ),
                     (
                         want.graphic,
                         want.dx,
@@ -985,7 +992,10 @@ mod tests {
         // The overlay has to actually fire, or this test would pass just as well
         // against the pre-overlay reader: 281 components across 22 shared ids are
         // `0x101` in the UOP where the MUL flag is `0` (module doc).
-        assert_eq!(overlaid, 281, "components whose keep answer the UOP overrode");
+        assert_eq!(
+            overlaid, 281,
+            "components whose keep answer the UOP overrode"
+        );
         let bellows = m.components(0x1F42).expect("addon multi 0x1F42");
         assert!(
             bellows.iter().all(|c| c.graphic != 0),

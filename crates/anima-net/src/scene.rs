@@ -73,7 +73,10 @@ fn equip_conv_gump(wearer_body: u16, gump: u16) -> u16 {
 pub enum StepDeny {
     OffMap,
     Terrain(ZReason),
-    DynamicItem { graphic: u16, item_z: i32 },
+    DynamicItem {
+        graphic: u16,
+        item_z: i32,
+    },
     /// [`can_step_to`]'s equivalent of "nothing to land on at all":
     /// [`calculate_new_z`] returned `None` — no candidate surface/bridge
     /// within the StepHeight climb limit, or the nearest one lacked
@@ -214,10 +217,7 @@ fn dynamic_statics_at(world: &World, map: &MapData, x: i64, y: i64) -> Vec<Stati
         .items
         .values()
         .filter(|it| {
-            !it.is_multi
-                && it.container.is_none()
-                && it.pos.x as i64 == x
-                && it.pos.y as i64 == y
+            !it.is_multi && it.container.is_none() && it.pos.x as i64 == x && it.pos.y as i64 == y
         })
         .map(|it| StaticTile {
             graphic: it.graphic,
@@ -295,7 +295,8 @@ fn blocking_item_at(
     ghost: bool,
 ) -> Option<StepDeny> {
     if let Some(it) = dyn_items.iter().find(|st| {
-        map.item_blocks(st.graphic, st.z as i32, current_z) && !(ghost && map.item_is_door(st.graphic))
+        map.item_blocks(st.graphic, st.z as i32, current_z)
+            && !(ghost && map.item_is_door(st.graphic))
     }) {
         return Some(StepDeny::DynamicItem {
             graphic: it.graphic,
@@ -303,7 +304,9 @@ fn blocking_item_at(
         });
     }
     if let Some(multis) = multis {
-        if let Some((graphic, item_z)) = multi_blocker_at(world, multis, map, x, y, current_z, ghost) {
+        if let Some((graphic, item_z)) =
+            multi_blocker_at(world, multis, map, x, y, current_z, ghost)
+        {
             return Some(StepDeny::DynamicItem { graphic, item_z });
         }
     }
@@ -2687,8 +2690,9 @@ pub fn build_scene(
     // two can never derive different bits for the same graphic.
     let item_path_bits = |g: u16, ix: i64, iy: i64| -> (Option<u8>, Option<u8>) {
         let in_radius = (ix - px).abs() <= PATH_RADIUS && (iy - py).abs() <= PATH_RADIUS;
-        map.as_deref()
-            .map_or((None, None), |m| path_bits(in_radius, m.item_height(g), m.item_flags(g)))
+        map.as_deref().map_or((None, None), |m| {
+            path_bits(in_radius, m.item_height(g), m.item_flags(g))
+        })
     };
 
     let mobiles: Vec<Value> = s
@@ -3218,14 +3222,12 @@ pub fn build_scene(
                 // `li` (land impassable): PATH_RADIUS-gated, like the static `h`/`pf`
                 // above — the browser's `calculate_new_z` port needs to know the LAND
                 // itself can't be stood on before it'll fall back to a static surface.
-                let land_impassable = if dx.abs() <= PATH_RADIUS
-                    && dy.abs() <= PATH_RADIUS
-                    && land.impassable()
-                {
-                    ",\"li\":1"
-                } else {
-                    ""
-                };
+                let land_impassable =
+                    if dx.abs() <= PATH_RADIUS && dy.abs() <= PATH_RADIUS && land.impassable() {
+                        ",\"li\":1"
+                    } else {
+                        ""
+                    };
                 // `dr` (door to open): PATH_RADIUS-gated like `li` above, and
                 // only even worth computing for a tile that ISN'T strictly
                 // walkable (`walk == false` — a walkable tile has no door to
@@ -4647,7 +4649,10 @@ mod tests {
         // A tile with ONLY a closed door: walkable-for-planning, and the door's
         // own serial comes back with it.
         let (z, door) = explain_tile_walkable_for_planning(&world, &mut map, None, 1611, 1591, 5);
-        assert!(z.is_some(), "a door-only tile must be walkable for planning");
+        assert!(
+            z.is_some(),
+            "a door-only tile must be walkable for planning"
+        );
         assert_eq!(
             door,
             Some(door_serial),
@@ -4692,7 +4697,10 @@ mod tests {
         let empty_world = anima_core::World::new();
         let (z, door) =
             explain_tile_walkable_for_planning(&empty_world, &mut map, None, 1611, 1591, 5);
-        assert!(z.is_some(), "an ordinary tile with no items must be walkable");
+        assert!(
+            z.is_some(),
+            "an ordinary tile with no items must be walkable"
+        );
         assert_eq!(
             door, None,
             "an ordinary walkable tile must not get a door serial"
@@ -5414,8 +5422,14 @@ mod tests {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
         let mut map = MapData::open(&dir).expect("open map data");
         for (tx, ty) in [(1459u32, 1765u32), (1460u32, 1765u32)] {
-            assert!(map.land(tx, ty).impassable(), "({tx},{ty}) should be deep water");
-            assert!(map.statics(tx, ty).is_empty(), "({tx},{ty}) should have no real statics");
+            assert!(
+                map.land(tx, ty).impassable(),
+                "({tx},{ty}) should be deep water"
+            );
+            assert!(
+                map.statics(tx, ty).is_empty(),
+                "({tx},{ty}) should have no real statics"
+            );
         }
 
         // Deck alone, as a plain (non-multi) dynamic item: must contribute a
@@ -5546,7 +5560,10 @@ mod tests {
         let animdata = AnimData::open(&dir).expect("open animdata");
 
         let (seq, ai) = anim_frames(&map, Some(&animdata), 0x0DE3).expect("campfire is animated");
-        assert!(seq.len() > 1, "campfire needs a real frame cycle, got {seq:?}");
+        assert!(
+            seq.len() > 1,
+            "campfire needs a real frame cycle, got {seq:?}"
+        );
         assert!((100..=1000).contains(&ai), "interval out of range: {ai}");
         // Same source as the statics path, so the two can never drift apart.
         let suffix = anim_suffix(&map, Some(&animdata), 0x0DE3);
@@ -5608,7 +5625,11 @@ mod tests {
             "0x0063 must be impassable and NOT itself a surface"
         );
         assert_eq!(map.item_height(0x0063), 5);
-        assert_ne!(map.item_flags(0x31F4) & FLAG_SURFACE, 0, "0x31F4 must be a surface");
+        assert_ne!(
+            map.item_flags(0x31F4) & FLAG_SURFACE,
+            0,
+            "0x31F4 must be a surface"
+        );
 
         let (bridge_x, bridge_y) = (1459i64, 1766i64);
         let (plot_x, plot_y) = (bridge_x, bridge_y - 1);
@@ -5663,9 +5684,16 @@ mod tests {
 
         // `sz_chain`'s authoritative half: stepping north from the bridge
         // (stand z=2) resolves the climb to z=7.
-        let landing_z =
-            calculate_new_z(&world, &mut map, Some(&multis), plot_x, plot_y, 2, 0 /* north */)
-                .expect("the bridge-widened climb must resolve a landing Z");
+        let landing_z = calculate_new_z(
+            &world,
+            &mut map,
+            Some(&multis),
+            plot_x,
+            plot_y,
+            2,
+            0, /* north */
+        )
+        .expect("the bridge-widened climb must resolve a landing Z");
         assert_eq!(landing_z, 7);
 
         // `blocking_item_at`'s other half, checked against the body's ACTUAL
@@ -5699,14 +5727,26 @@ mod tests {
                 false,
             )
             .is_none();
-        assert!(walk, "the foundation's stairs must be walkable onto the plot");
+        assert!(
+            walk,
+            "the foundation's stairs must be walkable onto the plot"
+        );
 
         // The SAME riser, checked against the OLD pre-step Z (2) instead,
         // DOES block — proving why `build_scene` must pass the RESOLVED z,
         // not `pz`, into `blocking_item_at`.
         assert!(
-            blocking_item_at(&world, &mut map, Some(&multis), plot_x, plot_y, 2, &dyn_items, false)
-                .is_some(),
+            blocking_item_at(
+                &world,
+                &mut map,
+                Some(&multis),
+                plot_x,
+                plot_y,
+                2,
+                &dyn_items,
+                false
+            )
+            .is_some(),
             "checked against the pre-step Z the riser genuinely overlaps the body"
         );
 
@@ -5907,7 +5947,15 @@ mod tests {
                 is_multi: false,
             },
         );
-        match can_step_to(&door_world, &mut map, None, 1611, 1592, 5, 0 /* north, into the door */) {
+        match can_step_to(
+            &door_world,
+            &mut map,
+            None,
+            1611,
+            1592,
+            5,
+            0, /* north, into the door */
+        ) {
             Err(StepDeny::NoLanding) => {}
             other => panic!("expected the closed door to still deny the step, got {other:?}"),
         }
@@ -5945,9 +5993,19 @@ mod tests {
                 // no floor component this time — nothing to stand on.
             ],
         )]));
-        match can_step_to(&wall_world, &mut map, Some(&wall_multis), bridge_x, bridge_y, 2, 0) {
+        match can_step_to(
+            &wall_world,
+            &mut map,
+            Some(&wall_multis),
+            bridge_x,
+            bridge_y,
+            2,
+            0,
+        ) {
             Err(StepDeny::NoLanding) => {}
-            other => panic!("expected the unclimbable riser to refuse with NoLanding, got {other:?}"),
+            other => {
+                panic!("expected the unclimbable riser to refuse with NoLanding, got {other:?}")
+            }
         }
     }
 }
