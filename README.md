@@ -99,6 +99,7 @@ exception (miniz_oxide, for the protocol-mandated 0xDD zlib), WASM-ready),
 
 ```bash
 cargo build && cargo test --workspace   # ignored tests require local real-data files
+scripts/check.sh                        # every gate CI runs, in CI's order
 # boot a local ServUO (port 2594), then pick one:
 cargo run -p anima-net --bin play -- 127.0.0.1 2594 <user> <pass>  # human-playable (open :8090)
 ANIMA_LOGIN=1 cargo run -p anima-net --bin play                    # same, but log in via the browser page

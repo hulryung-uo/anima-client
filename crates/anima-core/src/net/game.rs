@@ -2991,7 +2991,7 @@ fn chat_message(world: &mut World, frame: &[u8]) -> PResult<()> {
             r.skip(4)?;
             let _name = utf16be_string(&mut r);
         }
-        0x0025 | 0x0026 | 0x0027 => {
+        0x0025..=0x0027 => {
             // a chat line: [skip4][msgType:u16][username][text]
             r.skip(4)?;
             let _msg_type = r.u16()?;
@@ -6571,7 +6571,7 @@ mod tests {
         // (str<<4 | dex<<2 | int); here Str=Down(1), Dex=Locked(2), Int=Up(0).
         let mut w = World::new();
         w.player = Some(crate::types::Serial(0x1001));
-        let state: u8 = (1 << 4) | (2 << 2) | 0;
+        let state: u8 = (1 << 4) | (2 << 2); // Int=Up(0) contributes nothing
         let mut p = PacketWriter::new();
         p.u8(0xBF)
             .u16(0)
@@ -7238,6 +7238,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::too_many_arguments)] // mirrors 0x23's flat wire layout
     fn drag_animation_frame(
         graphic: u16,
         inc: u8,
