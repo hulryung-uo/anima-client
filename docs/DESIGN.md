@@ -245,6 +245,13 @@ anima-client/
     │       ├── lib.rs         # Session + Route/advance_route (non-blocking WalkTo state machine)
     │       ├── json.rs        # compatibility re-export of anima-contract-json
     │       ├── scene.rs       # build_scene: World + assets → the web renderer's JSON
+    │       ├── play_server/   # the human-playable HTTP server (library form of the `play` bin)
+    │       │   ├── mod.rs     #   bind + the PlayServer game loop + shared types
+    │       │   ├── http.rs    #   router, request limits, same-origin check, SSE fan-out
+    │       │   ├── assets.rs  #   .mul/.uop → PNG/WAV on demand, behind byte-budgeted caches
+    │       │   ├── commands.rs#   `POST /input` → Action (the same contract a brain uses)
+    │       │   ├── login.rs   #   browser login/character-creation payload parsing
+    │       │   └── autowalk.rs#   click-to-walk pre-flight + tuning constants
     │       ├── main.rs        # `anima-login` bin (login-only smoke test)
     │       └── bin/
     │           ├── play.rs    # `play`: human-playable HTTP server (web/ + /scene.json + /input + SSE sound)

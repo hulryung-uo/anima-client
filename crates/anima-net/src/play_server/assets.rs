@@ -1,0 +1,638 @@
+//! Serving UO client data as web resources.
+//!
+//! Art, animation frames, gump art, texmaps, sound and music are decoded from the
+//! `.mul`/`.uop` files on demand and handed to the browser as PNG/WAV, behind a
+//! byte-budgeted cache — the four caches exist because decoding is far more
+//! expensive than the memory they cost.
+
+use super::*;
+
+/// A byte-budgeted FIFO cache. PNG sizes vary widely, so an entry-count cap
+/// cannot provide a meaningful memory bound. Hits do not reorder entries: the
+/// cache is deliberately simple because decoded assets are cheap to refill and
+/// the main requirement is a hard upper bound for long sessions.
+pub(super) struct ByteCache<K, V> {
+    entries: HashMap<K, (V, usize)>,
+    order: VecDeque<K>,
+    bytes: usize,
+    max_bytes: usize,
+}
+
+impl<K: Clone + Eq + Hash, V> ByteCache<K, V> {
+    pub(super) fn new(max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            max_bytes,
+        }
+    }
+
+    pub(super) fn get_cloned(&self, key: &K) -> Option<V>
+    where
+        V: Clone,
+    {
+        self.entries.get(key).map(|(value, _)| value.clone())
+    }
+
+    pub(super) fn insert(&mut self, key: K, value: V, weight: usize) {
+        if weight > self.max_bytes {
+            return;
+        }
+        if let Some((_, old_weight)) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(old_weight);
+            self.order.retain(|queued| queued != &key);
+        }
+        while self.bytes.saturating_add(weight) > self.max_bytes {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some((_, old_weight)) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(old_weight);
+            }
+        }
+        self.bytes = self.bytes.saturating_add(weight);
+        self.order.push_back(key.clone());
+        self.entries.insert(key, (value, weight));
+    }
+}
+
+pub(super) const TILE_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+pub(super) const ANIM_CACHE_BYTES: usize = 48 * 1024 * 1024;
+
+pub(super) const GUMP_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+pub(super) const TEXMAP_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
+pub(super) fn respond_png(req: tiny_http::Request, bytes: Vec<u8>) {
+    let mut r = Response::from_data(bytes);
+    r.add_header(ctype("image/png"));
+    r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=86400"[..]).unwrap());
+    let _ = req.respond(r);
+}
+
+/// Like [`respond_png`] but also sends the anim frame's draw-center as `X-Cx`/`X-Cy`
+/// headers, so the renderer can place each part at `(screenX - cx, screenY - h - cy)`
+/// (ClassicUO positioning) instead of a naïve foot anchor — which is what aligns
+/// held items, hair, armor and a rider on a mount.
+pub(super) fn respond_png_center(req: tiny_http::Request, bytes: Vec<u8>, cx: i16, cy: i16) {
+    let mut r = Response::from_data(bytes);
+    r.add_header(ctype("image/png"));
+    r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=86400"[..]).unwrap());
+    r.add_header(Header::from_bytes(&b"X-Cx"[..], cx.to_string().as_bytes()).unwrap());
+    r.add_header(Header::from_bytes(&b"X-Cy"[..], cy.to_string().as_bytes()).unwrap());
+    let _ = req.respond(r);
+}
+
+/// Serve audio bytes with a content type and a long cache (assets never change).
+pub(super) fn respond_audio(req: tiny_http::Request, bytes: Vec<u8>, mime: &str) {
+    let mut r = Response::from_data(bytes);
+    r.add_header(ctype(mime));
+    r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=86400"[..]).unwrap());
+    let _ = req.respond(r);
+}
+
+/// Match `/sound/<id>.wav` → sound id.
+pub(super) fn parse_sound_url(url: &str) -> Option<u16> {
+    url.strip_prefix("/sound/")?
+        .strip_suffix(".wav")?
+        .parse()
+        .ok()
+}
+
+pub(super) fn serve_sound(sounds: &Option<Arc<Sounds>>, id: u16, req: tiny_http::Request) {
+    match sounds.as_ref().and_then(|s| s.wav(id)) {
+        Some(b) => respond_audio(req, b, "audio/wav"),
+        None => {
+            let _ = req.respond(Response::from_string("no sound").with_status_code(404));
+        }
+    }
+}
+
+/// Match `/music/<id>.mp3` → music id.
+pub(super) fn parse_music_url(url: &str) -> Option<u16> {
+    url.strip_prefix("/music/")?
+        .strip_suffix(".mp3")?
+        .parse()
+        .ok()
+}
+
+pub(super) fn serve_music(music: &Arc<HashMap<u16, PathBuf>>, id: u16, req: tiny_http::Request) {
+    let bytes = music.get(&id).and_then(|p| std::fs::read(p).ok());
+    match bytes {
+        Some(b) => respond_audio(req, b, "audio/mpeg"),
+        None => {
+            let _ = req.respond(Response::from_string("no music").with_status_code(404));
+        }
+    }
+}
+
+/// Parse `Music/Digital/Config.txt` → music id → resolved `.mp3` path. Each line
+/// is `<id> <name>[,loop]`; filenames omit the extension and UO is inconsistent
+/// about case, so we resolve names case-insensitively against the actual files
+/// found under `Music/` (mirrors ClassicUO `SoundsLoader.GetTrueFileName`).
+pub(super) fn load_music_map(data_dir: &Path) -> HashMap<u16, PathBuf> {
+    let music_dir = data_dir.join("Music");
+    // lowercase file stem → actual path, for all .mp3 under Music/ (recursively).
+    let mut by_stem: HashMap<String, PathBuf> = HashMap::new();
+    let mut stack = vec![music_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| x.eq_ignore_ascii_case("mp3"))
+            {
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    by_stem.insert(stem.to_ascii_lowercase(), p.clone());
+                }
+            }
+        }
+    }
+
+    let mut map = HashMap::new();
+    let config = music_dir.join("Digital").join("Config.txt");
+    let Ok(text) = std::fs::read_to_string(&config) else {
+        return map;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Tokens split on space/comma/tab (e.g. "9 britainpos,loop").
+        let mut toks = line.split([' ', ',', '\t']).filter(|s| !s.is_empty());
+        let Some(id) = toks.next().and_then(|t| t.parse::<u16>().ok()) else {
+            continue;
+        };
+        let Some(name) = toks.next() else { continue };
+        // Strip any extension, then resolve case-insensitively to a real file.
+        let stem = Path::new(name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(name);
+        if let Some(path) = by_stem.get(&stem.to_ascii_lowercase()) {
+            map.insert(id, path.clone());
+        }
+    }
+    map
+}
+
+/// Match `/anim/<body>/<group>/<dir>/<frame>.png` → (body, group, dir, frame).
+pub(super) fn parse_anim_url(url: &str) -> Option<(u16, u8, u8, u16)> {
+    let mut p = url.strip_prefix("/anim/")?.split('/');
+    let body = p.next()?.parse().ok()?;
+    let group = p.next()?.parse().ok()?;
+    let dir = p.next()?.parse().ok()?;
+    let frame = p.next()?.strip_suffix(".png")?.parse().ok()?;
+    Some((body, group, dir, frame))
+}
+
+/// Match `/gump/<id>.png` → gump id.
+pub(super) fn parse_gump_url(url: &str) -> Option<u32> {
+    url.strip_prefix("/gump/")?
+        .strip_suffix(".png")?
+        .parse()
+        .ok()
+}
+
+/// Match `/animinfo/<body>/<group>/<dir>` → (body, group, dir).
+pub(super) fn parse_animinfo_url(url: &str) -> Option<(u16, u8, u8)> {
+    let mut p = url.strip_prefix("/animinfo/")?.split('/');
+    Some((
+        p.next()?.parse().ok()?,
+        p.next()?.parse().ok()?,
+        p.next()?.parse().ok()?,
+    ))
+}
+
+/// Match `/iteminfo/<graphic>` → graphic. Resolves a worn item's AnimID.
+pub(super) fn parse_iteminfo_url(url: &str) -> Option<u16> {
+    url.strip_prefix("/iteminfo/")?.parse().ok()
+}
+
+/// Extract `hue=<n>` from a raw URL query string (`...?hue=123`). 0 if absent.
+pub(super) fn parse_hue_query(raw_url: &str) -> u16 {
+    let Some(q) = raw_url.split('?').nth(1) else {
+        return 0;
+    };
+    for kv in q.split('&') {
+        if let Some(v) = kv.strip_prefix("hue=") {
+            return v.parse().unwrap_or(0);
+        }
+    }
+    0
+}
+
+/// JSON palette used by the ordinary dye picker. ServUO clips picker responses
+/// to hues 2..=1001; ClassicUO exposes exactly those 1000 colors across five
+/// 200-cell graduations. Ramp 24 is the same representative swatch used by the
+/// existing `/hue/<id>.json` endpoint.
+pub(super) fn dyed_palette_json(hues: Option<&Hues>) -> String {
+    let colors: Vec<String> = (2u16..=1001)
+        .map(|hue| {
+            let c = hues.map(|h| h.color(hue, 24)).unwrap_or([0, 0, 0, 0]);
+            format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
+        })
+        .collect();
+    serde_json::json!({ "start": 2, "colors": colors }).to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn serve_anim(
+    anim: &Option<Arc<Anim>>,
+    hues: &Option<Arc<Hues>>,
+    cache: &AnimCache,
+    body: u16,
+    group: u8,
+    dir: u8,
+    frame: u16,
+    hue: u16,
+    req: tiny_http::Request,
+) {
+    let key = (body, group, dir, frame, hue);
+    if let Some((b, cx, cy)) = cache.lock().unwrap().get_cloned(&key) {
+        return respond_png_center(req, b, cx, cy);
+    }
+    // Decode outside the cache lock so concurrent requests don't serialize.
+    // Apply the hue (skin/clothes/hair/equipment recolor) before PNG-encoding.
+    let out = anim
+        .as_ref()
+        .and_then(|a| a.frame(body, group, dir, frame as usize))
+        .map(|(mut i, cx, cy)| {
+            if hue != 0 {
+                if let Some(h) = hues.as_ref() {
+                    anima_assets::apply_hue(&mut i, h, hue);
+                }
+            }
+            (i.to_png(), cx, cy)
+        });
+    match out {
+        Some((b, cx, cy)) => {
+            let weight = b.len();
+            cache
+                .lock()
+                .unwrap()
+                .insert(key, (b.clone(), cx, cy), weight);
+            respond_png_center(req, b, cx, cy);
+        }
+        None => {
+            let _ = req.respond(Response::from_string("no anim").with_status_code(404));
+        }
+    }
+}
+
+pub(super) fn serve_gump(
+    gumps: &Option<Arc<Gumps>>,
+    hues: &Option<Arc<Hues>>,
+    cache: &GumpCache,
+    id: u32,
+    hue: u16,
+    req: tiny_http::Request,
+) {
+    let key = (id, hue);
+    if let Some(b) = cache.lock().unwrap().get_cloned(&key) {
+        return respond_png(req, b);
+    }
+    let bytes = gumps
+        .as_ref()
+        .and_then(|g| g.get(id as usize))
+        .map(|mut i| {
+            if hue != 0 {
+                if let Some(h) = hues.as_ref() {
+                    anima_assets::apply_hue(&mut i, h, hue);
+                }
+            }
+            i.to_png()
+        });
+    match bytes {
+        Some(b) => {
+            let weight = b.len();
+            cache.lock().unwrap().insert(key, b.clone(), weight);
+            respond_png(req, b);
+        }
+        None => {
+            let _ = req.respond(Response::from_string("no gump").with_status_code(404));
+        }
+    }
+}
+
+/// Match `/texmap/<id>.png` → texmap id.
+pub(super) fn parse_texmap_url(url: &str) -> Option<u16> {
+    url.strip_prefix("/texmap/")?
+        .strip_suffix(".png")?
+        .parse()
+        .ok()
+}
+
+pub(super) fn serve_texmap(
+    texmaps: &Option<Arc<Texmaps>>,
+    cache: &TexmapCache,
+    id: u16,
+    req: tiny_http::Request,
+) {
+    if let Some(b) = cache.lock().unwrap().get_cloned(&id) {
+        return respond_png(req, b);
+    }
+    let bytes = texmaps
+        .as_ref()
+        .and_then(|t| t.texmap(id))
+        .map(|i| i.to_png());
+    match bytes {
+        Some(b) => {
+            let weight = b.len();
+            cache.lock().unwrap().insert(id, b.clone(), weight);
+            respond_png(req, b);
+        }
+        None => {
+            let _ = req.respond(Response::from_string("no texmap").with_status_code(404));
+        }
+    }
+}
+
+/// Match `/art/land/<g>.png` or `/art/static/<g>.png` → (is_static, graphic).
+pub(super) fn parse_art_url(url: &str) -> Option<(bool, u16)> {
+    let rest = url.strip_prefix("/art/")?;
+    let (kind, file) = rest.split_once('/')?;
+    let g: u16 = file.strip_suffix(".png")?.parse().ok()?;
+    match kind {
+        "land" => Some((false, g)),
+        "static" => Some((true, g)),
+        _ => None,
+    }
+}
+
+pub(super) fn serve_art(
+    art: &Option<Arc<Mutex<Art>>>,
+    hues: &Option<Arc<Hues>>,
+    cache: &TileCache,
+    is_static: bool,
+    g: u16,
+    hue: u16,
+    req: tiny_http::Request,
+) {
+    let key = (is_static, g, hue);
+    if let Some(b) = cache.lock().unwrap().get_cloned(&key) {
+        return respond_png(req, b);
+    }
+    // Hold the Art lock only for the raw decode, not the PNG encode. A nonzero hue
+    // (graphical effects pass `?hue=`) recolors the tile like /anim and /gump do.
+    let bytes = art
+        .as_ref()
+        .and_then(|a| {
+            let guard = a.lock().unwrap();
+            if is_static {
+                guard.static_tile(g)
+            } else {
+                guard.land(g)
+            }
+        })
+        .map(|mut i| {
+            if hue != 0 {
+                if let Some(h) = hues.as_ref() {
+                    anima_assets::apply_hue(&mut i, h, hue);
+                }
+            }
+            i.to_png()
+        });
+    match bytes {
+        Some(b) => {
+            let weight = b.len();
+            cache.lock().unwrap().insert(key, b.clone(), weight);
+            respond_png(req, b);
+        }
+        None => {
+            let _ = req.respond(Response::from_string("no art").with_status_code(404));
+        }
+    }
+}
+
+/// Points of interest (towns, banks, shops, dungeons, moongates, shrines, …) for
+/// the world map, parsed from ServUO's UOAM-style `Data/Common.map` (embedded at
+/// build time). Each non-header line is `[+|-]<category>: <x> <y> <z> [name]`,
+/// where the category may contain spaces (e.g. `weapons guild`). Returns a JSON
+/// array string `[{"x":..,"y":..,"cat":"..","name":".."}, …]` built once at startup.
+pub(super) fn parse_pois() -> String {
+    const RAW: &str = include_str!("../../data/Common.map");
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    for line in RAW.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Header is a bare count (e.g. "3"); every POI line has a "category:" head.
+        let Some(colon) = line.find(':') else {
+            continue;
+        };
+        let cat = line[..colon]
+            .trim_start_matches(['+', '-'])
+            .trim()
+            .to_ascii_lowercase();
+        if cat.is_empty() {
+            continue;
+        }
+        let mut rest = line[colon + 1..].split_whitespace();
+        let (Some(xs), Some(ys), Some(_zs)) = (rest.next(), rest.next(), rest.next()) else {
+            continue;
+        };
+        let (Ok(x), Ok(y)) = (xs.parse::<i32>(), ys.parse::<i32>()) else {
+            continue;
+        };
+        let name = rest.collect::<Vec<_>>().join(" ");
+        out.push(serde_json::json!({ "x": x, "y": y, "cat": cat, "name": name }));
+    }
+    serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
+}
+
+/// Build the `/regions.json` body: every guarded rect tagged for facet `cur`,
+/// as `[{"x":..,"y":..,"w":..,"h":..}, …]`. `facet` is omitted per-rect since
+/// the whole array is already filtered to one.
+pub(super) fn regions_json(rects: &[GuardRect], cur: u8) -> String {
+    let mut out = String::from("[");
+    let mut first = true;
+    for r in rects.iter().filter(|r| r.facet == cur) {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        out.push_str(&format!(
+            "{{\"x\":{},\"y\":{},\"w\":{},\"h\":{}}}",
+            r.x, r.y, r.w, r.h
+        ));
+    }
+    out.push(']');
+    out
+}
+
+/// Cached `GET /housecatalog` body. `pois`/`guard_rects` above are read
+/// eagerly at `bind()` because every session wants a world map; the house
+/// designer is opt-in and comparatively rare, so this only reads+parses the
+/// eight `customhouse` catalog files ([`CustomHouseCatalog`]'s doc) on the
+/// FIRST request — `OnceLock` makes every worker thread after that (and every
+/// later request) just clone the cached `Arc<String>` instead of re-parsing.
+pub(super) struct HouseCatalogCache {
+    data_dir: PathBuf,
+    once: OnceLock<Arc<String>>,
+}
+
+impl HouseCatalogCache {
+    pub(super) fn new(data_dir: PathBuf) -> Self {
+        HouseCatalogCache {
+            data_dir,
+            once: OnceLock::new(),
+        }
+    }
+
+    pub(super) fn get(&self) -> Arc<String> {
+        self.once
+            .get_or_init(|| Arc::new(house_catalog_json(&self.data_dir)))
+            .clone()
+    }
+}
+
+/// Shape [`CustomHouseCatalog`] into the flat JSON `GET /housecatalog` serves.
+/// Only `comment` (the style's display name) and `graphics` (its placeable
+/// tile ids) survive per entry — every other column (feature masks, per-side
+/// piece ids, …) only matters to how `graphics` was already assembled by
+/// `anima_assets::customhouse`'s parser, so the UI never needs them. Walls,
+/// misc fixtures, and roofs keep their real "category, several styles per
+/// category" grouping (mirrors the in-game designer's flip-page-of-styles
+/// gump); floors, doors, stairs, and teleporters are flat lists, matching
+/// `CustomHouseCatalog`'s own shape (see that module's doc). A missing/
+/// unreadable data directory degrades to an empty catalog (logged, not
+/// fatal) — same soft-failure stance `CustomHouseCatalog::open` itself takes
+/// for any one missing file.
+pub(super) fn house_catalog_json(data_dir: &Path) -> String {
+    let catalog = CustomHouseCatalog::open(data_dir).unwrap_or_else(|e| {
+        eprintln!("play: house catalog not loaded ({e})");
+        CustomHouseCatalog::default()
+    });
+    fn categories_json<T>(
+        cats: &[anima_assets::CustomHouseCategory<T>],
+        f: impl Fn(&T) -> (&str, &[u16]),
+    ) -> serde_json::Value {
+        let arr: Vec<serde_json::Value> = cats
+            .iter()
+            .map(|c| {
+                let items: Vec<serde_json::Value> = c
+                    .items
+                    .iter()
+                    .map(|it| {
+                        let (comment, graphics) = f(it);
+                        serde_json::json!({ "comment": comment, "graphics": graphics })
+                    })
+                    .collect();
+                serde_json::json!({ "category": c.category, "items": items })
+            })
+            .collect();
+        serde_json::Value::Array(arr)
+    }
+    fn flat_json<T>(items: &[T], f: impl Fn(&T) -> (&str, &[u16])) -> serde_json::Value {
+        serde_json::Value::Array(
+            items
+                .iter()
+                .map(|it| {
+                    let (comment, graphics) = f(it);
+                    serde_json::json!({ "comment": comment, "graphics": graphics })
+                })
+                .collect(),
+        )
+    }
+    let body = serde_json::json!({
+        "walls": categories_json(&catalog.walls, |w| (w.comment.as_str(), w.graphics.as_slice())),
+        "floors": flat_json(&catalog.floors, |x| (x.comment.as_str(), x.graphics.as_slice())),
+        "doors": flat_json(&catalog.doors, |x| (x.comment.as_str(), x.graphics.as_slice())),
+        "misc": categories_json(&catalog.misc, |m| (m.comment.as_str(), m.graphics.as_slice())),
+        "stairs": flat_json(&catalog.stairs, |x| (x.comment.as_str(), x.graphics.as_slice())),
+        "teleporters": flat_json(&catalog.teleporters, |x| (x.comment.as_str(), x.graphics.as_slice())),
+        "roofs": categories_json(&catalog.roofs, |r| (r.comment.as_str(), r.graphics.as_slice())),
+    });
+    serde_json::to_string(&body).unwrap_or_else(|_| "{}".into())
+}
+
+#[cfg(test)]
+mod hue_palette_tests {
+    use super::*;
+
+    #[test]
+    fn missing_assets_still_emit_complete_dyed_hue_range() {
+        let value: serde_json::Value = serde_json::from_str(&dyed_palette_json(None)).unwrap();
+        assert_eq!(value["start"], 2);
+        let colors = value["colors"].as_array().unwrap();
+        assert_eq!(colors.len(), 1000);
+        assert_eq!(colors.first().unwrap(), "#000000"); // hue 2
+        assert_eq!(colors.last().unwrap(), "#000000"); // hue 1001
+    }
+
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource/hues.mul
+    fn real_hues_mul_produces_visible_varied_picker_colors() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let hues = Hues::open(dir).expect("open real hues.mul");
+        let value: serde_json::Value =
+            serde_json::from_str(&dyed_palette_json(Some(&hues))).unwrap();
+        let colors = value["colors"].as_array().unwrap();
+        assert_eq!(colors.len(), 1000);
+        assert!(colors.iter().any(|color| color != "#000000"));
+        let unique: std::collections::HashSet<_> = colors.iter().collect();
+        assert!(unique.len() > 100, "picker palette should have many colors");
+    }
+}
+
+#[cfg(test)]
+mod resource_limit_tests {
+    use super::{read_text_limited, ByteCache};
+    use std::io::Cursor;
+
+    #[test]
+    fn byte_cache_evicts_oldest_entries_to_stay_within_budget() {
+        let mut cache = ByteCache::new(6);
+        cache.insert(1, vec![1; 3], 3);
+        cache.insert(2, vec![2; 3], 3);
+        assert_eq!(cache.bytes, 6);
+
+        cache.insert(3, vec![3; 4], 4);
+        assert!(cache.get_cloned(&1).is_none());
+        assert!(cache.get_cloned(&2).is_none());
+        assert_eq!(cache.get_cloned(&3), Some(vec![3; 4]));
+        assert_eq!(cache.bytes, 4);
+    }
+
+    #[test]
+    fn byte_cache_replacement_and_oversized_values_keep_accounting_exact() {
+        let mut cache = ByteCache::new(5);
+        cache.insert("same", vec![1; 4], 4);
+        cache.insert("same", vec![2; 2], 2);
+        assert_eq!(cache.bytes, 2);
+        assert_eq!(cache.order.len(), 1);
+
+        cache.insert("too-large", vec![0; 6], 6);
+        assert!(cache.get_cloned(&"too-large").is_none());
+        assert_eq!(cache.bytes, 2);
+    }
+
+    #[test]
+    fn body_reader_accepts_limit_and_rejects_limit_plus_one() {
+        let mut exact = Cursor::new(b"1234".to_vec());
+        assert_eq!(
+            read_text_limited(&mut exact, 4).unwrap(),
+            Some("1234".to_string())
+        );
+
+        let mut too_large = Cursor::new(b"12345".to_vec());
+        assert_eq!(read_text_limited(&mut too_large, 4).unwrap(), None);
+    }
+
+    #[test]
+    fn body_reader_rejects_invalid_utf8() {
+        let mut invalid = Cursor::new(vec![0xFF]);
+        assert!(read_text_limited(&mut invalid, 4).is_err());
+    }
+}

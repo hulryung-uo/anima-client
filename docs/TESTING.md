@@ -324,15 +324,15 @@ scripts/gm.sh 8788 --raw 'walk:0:1'
 With `ANIMA_DEBUG=1` set on the `play` process, watch its stderr for:
 
 - `[srv <ms>] MOVED (x,y) -> (x,y) confirms=N denies=N` — every accepted step
-  (`play_server.rs:679-686`).
+  (`play_server/mod.rs`, the game loop).
 - `play: step dir=<d> (x,y) z <old> -> <new> (land z=<z>, <static note>)` —
   printed only when Z actually changes on a step, naming the static whose
   span covers the new Z if one is cheaply findable
-  (`play_server.rs:705-715`) — this is *the* line that proves a stair/ramp
+  (`play_server/mod.rs`, the same loop) — this is *the* line that proves a stair/ramp
   climb resolved correctly.
 - If a `walkto` ever silently fails to path, `[pathdbg] dir=<d> (x,y):
   ALLOW/DENY <reason>` for all 8 neighbors explains exactly why
-  (`play_server.rs:96-145`, `debug_probe_neighbors`).
+  (`play_server/autowalk.rs`, `debug_probe_neighbors`).
 
 Optionally enable the in-page HUD instead of/alongside stderr-watching:
 `python3 scripts/drive.py eval "settings.debugMove = true"` (Options panel's
