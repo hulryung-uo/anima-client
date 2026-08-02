@@ -244,7 +244,15 @@ anima-client/
     │   └── src/
     │       ├── lib.rs         # Session + Route/advance_route (non-blocking WalkTo state machine)
     │       ├── json.rs        # compatibility re-export of anima-contract-json
-    │       ├── scene.rs       # build_scene: World + assets → the web renderer's JSON
+    │       ├── scene/         # build_scene: World + assets → the web renderer's JSON
+    │       │   ├── mod.rs     #   build_scene itself (holds every borrow at once)
+    │       │   ├── walk.rs    #   can the player stand there — and if not, is it a door?
+    │       │   ├── height.rs  #   ClassicUO CalculateNewZ port: which surface you stand on
+    │       │   ├── tiles.rs   #   tile flags + per-tile art/anim/path suffixes
+    │       │   ├── dialogs.rs #   gumps/menus/prompts/trades/maps → renderer JSON
+    │       │   ├── feeds.rs   #   seq-stamped replay feeds (sound/anim/damage/effects)
+    │       │   ├── multis.rs  #   placed houses/boats + 0xD8 custom-house designs
+    │       │   └── worldmap.rs#   radar colours → world-map PNG
     │       ├── play_server/   # the human-playable HTTP server (library form of the `play` bin)
     │       │   ├── mod.rs     #   bind + the PlayServer game loop + shared types
     │       │   ├── http.rs    #   router, request limits, same-origin check, SSE fan-out

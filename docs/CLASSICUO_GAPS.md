@@ -210,7 +210,7 @@ The receive side is generally complete; there is no way to *act*.
 
 | Gap | Note | Effort |
 |---|---|---|
-| **Extended status sheet** | resistances, damage range, luck, followers, tithing, weight and stats-cap are all parsed into `World` but `scene.rs:3205-3216` never emits them, so `refreshStatus` can only show HP/mana/stam/str/dex/int/gold | M |
+| **Extended status sheet** | resistances, damage range, luck, followers, tithing, weight and stats-cap are all parsed into `World` but `scene/mod.rs`'s `build_scene` never emits them, so `refreshStatus` can only show HP/mana/stam/str/dex/int/gold | M |
 | **0x11 `type >= 6` combat tail** | max resists, HCI/DCI/SSI/DI/LRC/SDI/FCR/FC/LMC are explicitly not parsed (`game.rs:2757`); no field of that family exists anywhere | M |
 | **Buff names** | 0xDF's title/description clilocs and their args are never read; names come from a hardcoded 35-entry English table against 189 icon graphics, so most buffs show as `#1234` and the buff/debuff tint is a regex over that name | M |
 | Journal | works, but one flat colour, no message-type filter, no tabs, no timestamps, not its own resizable window | M |
@@ -226,7 +226,7 @@ The receive side is generally complete; there is no way to *act*.
 
 Shadows; corpse equipment layers (corpses render as a bare body); death animation
 (mobiles do not fall); `light.mul` light shapes/colours (a radius-only light system
-exists — `scene.rs:2631-2648`); directional lighting on stretched land; seasonal
+exists — `build_scene`'s `lights` list in `scene/mod.rs`); directional lighting on stretched land; seasonal
 land/static graphic remap (the season *system* exists, the remap does not);
 `TileFlag.Translucent` statics drawn opaque; static hue from `statics.mul` discarded
 at decode; mount rider vertical offset; seated-character deformation; roof/ceiling
