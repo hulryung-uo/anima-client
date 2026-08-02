@@ -215,7 +215,12 @@ anima-client/
     │       │   ├── framing.rs           # frame decoder + game-mode (Huffman) + StreamDecoder
     │       │   ├── huffman.rs           # server→client decompression
     │       │   ├── login.rs             # builders/parsers + LoginMachine (+ char create)
-    │       │   ├── game.rs              # game packet codec → World mutation (76 incoming ids, §8)
+    │       │   ├── game/                # game packet codec → World mutation (76 incoming ids, §8)
+    │       │   │   ├── mod.rs           #   apply_packet + the id-ordered `dispatch` index
+    │       │   │   ├── text.rs          #   shared decoding primitives (no World)
+    │       │   │   ├── mobiles.rs · items.rs · combat.rs · effects.rs
+    │       │   │   ├── ui.rs · chat.rs · session.rs · general_info.rs   # handlers by topic
+    │       │   │   └── tests.rs         #   the module's own `mod tests`, split out for size
     │       │   ├── movement.rs          # walk requests + Walker (seq/confirm/deny) + 0x21/0x22
     │       │   └── outgoing.rs          # client version + action builders
     │       ├── world/mod.rs             # World/Mobile/Item/PlayerStats/journal/gumps/trades/…
@@ -316,7 +321,7 @@ The driver is the only code that knows about sockets — write it once for nativ
 4. ✅ Character create + select + delete (`build_create_character`,
    `build_delete_character`, `CharacterAppearance`), including the browser's
    server-provided list and confirmation-gated deletion flow.
-5. ✅ Game packet codec → World mutation (`net/game.rs`): originally 0x20/0x77/0x78/
+5. ✅ Game packet codec → World mutation (`net/game/`): originally 0x20/0x77/0x78/
    0x1A/0x1D/0x11/0xA1-3/0x1C/0xAE/0xBF; now **76 incoming ids** dispatched (count
    the match arms in `dispatch()`) covering combat/damage/effects, full vitals,
    containers,
@@ -454,7 +459,7 @@ Distilled from `anima/CLAUDE.md` — verify against ClassicUO/captures while imp
 - **Key packet ids** (login phase): `0x1B` EnterWorld, `0x55` LoginComplete.
   (Full incoming-packet handler list: ClassicUO `PacketHandlers.cs`.)
 - **Game-phase incoming coverage (current, verified by counting `net::game::dispatch`'s
-  match arms):** **76** packet ids handled in `net/game.rs` — `0x20` MobileUpdate,
+  match arms):** **76** packet ids handled in `net/game/` — `0x20` MobileUpdate,
   `0x77`/`0x78` mobile moving/incoming, `0x2E` EquipItem, `0x1A`/`0xF3` world item
   (legacy/HS), `0x1D` Delete, `0x11` CharacterStatus, `0xA1-3` vitals, `0x1C`/`0xAE`
   Talk/UnicodeTalk, `0xBF` general-info subcommands (facet change, party, …), `0x6C`
