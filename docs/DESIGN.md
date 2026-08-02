@@ -274,9 +274,25 @@ anima-client/
             name collides with anima-net's `bin/agent.rs`, also named `anima-agent`; cargo warns
             but builds both — disambiguate with `-p anima-agent` / `-p anima-net`)
 web/                          # Phase 2+ renderer (outside the Cargo workspace)
-├── index.html · main.js      # PixiJS iso renderer: terrain, sprites, gumps, sound, chat, HUD
+├── index.html                # the page + all CSS; the <script> order below is load-bearing
+├── js/                       # PixiJS iso renderer: terrain, sprites, gumps, sound, chat, HUD
+│   ├── 00-state · 01-audio · 02-textures · 03-world   # globals, caches, pools
+│   ├── 04-boot · 05-poll · 06-movement                # main(), scene poll, prediction
+│   ├── 07-hud · 08-overlays · 09-gumps · 10-housing   # HUD, name plates, windows
+│   └── 11-dragdrop · 12-input · 13-macros             # interaction
 └── vendor/pixi.min.js        # vendored PixiJS v8 (standalone, no CDN)
 ```
+
+**`web/main.js` was split into `web/js/*` (2026-08-02).** Older citations in
+these docs — `web/main.js:5028`, and similar — point into the single 9.7k-line
+file that preceded it; find the code by name rather than by line. The split is
+by *load order*, not by module system: these are classic `<script>` tags
+sharing one global scope, exactly as the single file did, so no binding moved
+and no import/export exists. Two consequences worth knowing before editing:
+the `<script>` order in `index.html` is the original file's top-to-bottom
+order and is load-bearing (top-level statements still run in it), and a new
+file needs a new tag or it is silently never loaded.
+
 
 ### Running the human-playable client (current primary way to use this repo)
 ```

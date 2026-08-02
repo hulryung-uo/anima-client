@@ -43,8 +43,10 @@ run cargo fmt --all -- --check
 run cargo clippy --all-targets -- -D warnings
 run cargo test
 run cargo check -p anima-wasm --target wasm32-unknown-unknown
-run node --check web/main.js
-run node --check web/dialogs.js
+# Every script the page loads (vendor/ is a pre-built PixiJS drop, not ours).
+while IFS= read -r js; do
+    run node --check "$js"
+done < <(find web -name '*.js' -not -path 'web/vendor/*' | sort)
 
 if [ "${1-}" != "--skip-desktop" ]; then
     # CI runs this as a separate macOS/Windows job; it is the slow one (Tauri).

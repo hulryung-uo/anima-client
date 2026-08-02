@@ -93,7 +93,7 @@ pub struct PlayConfig {
     /// HTTP port to serve the renderer on. `0` = OS-assigned (ephemeral) —
     /// read the real port back from [`PlayServer::port`] after [`bind`].
     pub http_port: u16,
-    /// Disk directory holding `web/` (index.html/main.js/vendor/…). `None`
+    /// Disk directory holding `web/` (index.html, js/*, vendor/…). `None`
     /// (or a path that doesn't exist / is missing a file) falls back to the
     /// copy embedded in this binary at compile time.
     pub web_dir: Option<PathBuf>,

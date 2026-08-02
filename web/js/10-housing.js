@@ -1,0 +1,1368 @@
+// ---- custom house design editor (server-driven "design mode" — scene.houseDesign
+// is present ONLY while the player has a foundation open for customization; the
+// server (0xBF/0x20 + friends) decides when that starts and ends, this panel only
+// REFLECTS scene.houseDesign and never asks to enter/leave design mode on its own).
+// The design itself already renders through the ordinary world pipeline (0xD8
+// viewing swaps the foundation's components for the current design tiles right in
+// the scene — see DESIGN.md), so this panel is purely picker/action chrome; it
+// never draws the house. Built dynamically — one window total, like .trade-win/
+// .map-win — created when a session starts and torn down when it ends, not rebuilt
+// every poll (see refreshHouseDesign's early-out below). ----
+const HDESIGN_MODES = ["wall", "door", "floor", "stair", "roof", "misc"];
+const HDESIGN_LABELS = { wall: "Wall", door: "Door", floor: "Floor", stair: "Stair", roof: "Roof", misc: "Misc" };
+// Catalog JSON key per mode (GET /housecatalog — see loadHouseCatalog).
+const HDESIGN_CATALOG_KEY = { wall: "walls", door: "doors", floor: "floors", stair: "stairs", roof: "roofs", misc: "misc" };
+// wall/roof/misc are CATEGORISED (an array of {category, items:[{comment,graphics}]}
+// style groups); floor/door/stair are already a flat [{comment,graphics}] list — see
+// hdesignStyles() below, which reduces both shapes to one for the picker.
+const HDESIGN_GROUPED = new Set(["wall", "roof", "misc"]);
+// Some catalog rows (newer Gargish-era styles, e.g. floors.txt category 52
+// "Gargish Green Stone") legitimately list graphics at 0x4000+ — ClassicUO's
+// own CustomHouse*.Parse never filters this, it just reflects whatever the
+// data files say. But 0x4000 is the MULTI id range, not a placeable item/tile
+// id, and ServUO's Designer_Build (`ValidPiece`) masks/rejects anything
+// outside the item table it actually loaded — on an ordinary (non-Gargish)
+// tiledata install that's every one of these. The rejection is entirely
+// silent to the player: the server just drops the piece and appends one line
+// to its own comp_val.log ("Invalid ItemID 0x4092" etc.) with no client-
+// visible error at all, so a bad selection here is invisible without server
+// log access. Treat it exactly like graphic `0` — never offer it, never send it.
+const HDESIGN_MAX_GRAPHIC = 0x4000;
+let hdesignWin = null;     // the single panel, once built ({ el, styleSel, grid, eraserCb, floorRow, floors })
+let hdesignSerial = null;  // houseDesign.serial the panel is currently built for
+let hdesignCatalog = null; // GET /housecatalog response — static, fetched once (see loadHouseCatalog)
+let hdesignCatalogPromise = null;
+let hdesignMode = "wall";  // active tab
+const hdesignStyleIdx = { wall: 0, door: 0, floor: 0, stair: 0, roof: 0, misc: 0 }; // remembered <select> pick per mode
+let hdesignPiece = null;   // { mode, graphic } currently selected to place, or null (nothing to place yet)
+let hdesignEraser = false; // eraser toggle: a ground click deletes instead of placing
+let hdesignFloor = 1;      // active floor (1..houseDesign.floors), client-tracked — the server has no
+                            // "current floor" readback, it just acts on whichever hdesign:floor:<n> came last
+
+// Static per-server catalog (same shape for every foundation) — fetch once and cache
+// forever, same pattern as loadDyedPalette() above; re-entering design mode later
+// (even for a different house) reuses it rather than refetching.
+function loadHouseCatalog() {
+  if (!hdesignCatalogPromise) {
+    hdesignCatalogPromise = fetch("/housecatalog")
+      .then((r) => { if (!r.ok) throw new Error("housecatalog HTTP " + r.status); return r.json(); })
+      .then((data) => { hdesignCatalog = data; if (hdesignWin) renderHouseDesignPicker(); return data; })
+      .catch((error) => {
+        console.warn("house catalog unavailable", error);
+        hdesignCatalogPromise = null; // allow a later attempt (e.g. reopening the editor) to retry
+        return null;
+      });
+  }
+  return hdesignCatalogPromise;
+}
+
+// Reduce either catalog shape (grouped wall/roof/misc vs flat floor/door/stair) to
+// one list of {comment, graphics, group} "styles" for the active mode's picker.
+// `group` carries the server's numeric category (grouped modes only) as an optgroup
+// label — it's purely cosmetic, nothing gates on it.
+function hdesignStyles(mode) {
+  const key = HDESIGN_CATALOG_KEY[mode];
+  const list = (hdesignCatalog && hdesignCatalog[key]) || [];
+  if (!HDESIGN_GROUPED.has(mode)) return list.map((it) => ({ comment: it.comment, graphics: it.graphics || [], group: null }));
+  const out = [];
+  for (const cat of list) {
+    for (const it of (cat.items || [])) {
+      out.push({ comment: it.comment, graphics: it.graphics || [], group: "Category " + (cat.category | 0) });
+    }
+  }
+  return out;
+}
+
+// Rebuild the grid of clickable piece art for one style (or clear it if none is
+// selected yet / the mode has no styles). Graphic `0` means "no piece in this slot"
+// (a style's list is padded to a fixed width), and graphic >= HDESIGN_MAX_GRAPHIC
+// means "the server will silently drop this" (see that constant's doc) — both
+// skipped, never rendered as a clickable cell and so never selectable/sendable.
+function renderHouseDesignGrid(style) {
+  if (!hdesignWin) return;
+  const grid = hdesignWin.grid;
+  grid.innerHTML = "";
+  if (!style) return;
+  for (const raw of style.graphics || []) {
+    const gph = raw | 0;
+    if (!gph || gph >= HDESIGN_MAX_GRAPHIC) continue;
+    const cell = document.createElement("div");
+    cell.className = "hdesign-piece";
+    if (hdesignPiece && hdesignPiece.mode === hdesignMode && hdesignPiece.graphic === gph) cell.classList.add("selected");
+    const img = document.createElement("img");
+    img.className = "hdesign-piece-icon";
+    img.src = `art/static/${gph}.png`;
+    img.onerror = () => { img.style.visibility = "hidden"; };
+    cell.appendChild(img);
+    cell.addEventListener("click", () => {
+      hdesignPiece = { mode: hdesignMode, graphic: gph };
+      grid.querySelectorAll(".hdesign-piece.selected").forEach((c) => c.classList.remove("selected"));
+      cell.classList.add("selected");
+    });
+    grid.appendChild(cell);
+  }
+}
+// Rebuild the style <select> for the active mode (labelled by each style's own
+// `comment`, grouped into <optgroup>s for wall/roof/misc) and its piece grid below
+// it. Called on every tab switch and once the catalog finishes loading.
+function renderHouseDesignPicker() {
+  if (!hdesignWin) return;
+  const sel = hdesignWin.styleSel;
+  if (!hdesignCatalog) { sel.replaceChildren(new Option("loading…", "")); renderHouseDesignGrid(null); return; }
+  const styles = hdesignStyles(hdesignMode);
+  const grouped = HDESIGN_GROUPED.has(hdesignMode);
+  const kids = [];
+  let group = null;
+  styles.forEach((st, i) => {
+    const opt = new Option(st.comment || ("Style " + i), String(i));
+    if (grouped) {
+      if (!group || group.label !== st.group) { group = document.createElement("optgroup"); group.label = st.group; kids.push(group); }
+      group.appendChild(opt);
+    } else {
+      kids.push(opt);
+    }
+  });
+  sel.replaceChildren(...(kids.length ? kids : [new Option("(none)", "")]));
+  const idx = Math.min(hdesignStyleIdx[hdesignMode] || 0, Math.max(0, styles.length - 1));
+  sel.value = String(idx);
+  renderHouseDesignGrid(styles[idx] || null);
+}
+// Rebuild the 1..floors button row (only called when the panel is first built or
+// `floors` actually changes — see refreshHouseDesign).
+function renderHouseDesignFloors() {
+  if (!hdesignWin) return;
+  const row = hdesignWin.floorRow;
+  row.innerHTML = "";
+  for (let n = 1; n <= hdesignWin.floors; n++) {
+    const b = document.createElement("button");
+    b.className = "dlg-btn hdesign-floor-btn" + (n === hdesignFloor ? " active" : "");
+    b.textContent = String(n);
+    b.addEventListener("click", () => {
+      hdesignFloor = n;
+      row.querySelectorAll(".hdesign-floor-btn").forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+      sendInput("hdesign:floor:" + n);
+    });
+    row.appendChild(b);
+  }
+}
+function closeHouseDesignWindow() {
+  if (hdesignWin) { hdesignWin.el.remove(); hdesignWin = null; }
+  hdesignSerial = null;
+  clearHouseDesignGhost(); // don't leave a stale ghost sprite behind once the session/panel is gone
+}
+function buildHouseDesignWindow(hd) {
+  const { el, body } = makeWindowFrame({
+    cls: "hdesign-win", title: "House Design", pos: { left: 260, top: 70 },
+    onClose: () => sendInput("hdesign:close"),
+  });
+  body.innerHTML =
+    '<div class="hdesign-tabs">' + HDESIGN_MODES.map((m) =>
+        `<button class="hdesign-tab${m === hdesignMode ? " active" : ""}" data-mode="${m}">${HDESIGN_LABELS[m]}</button>`).join("")
+    + '</div>'
+    + '<select class="hdesign-style"></select>'
+    + '<div class="hdesign-grid"></div>'
+    + '<label class="hdesign-eraser"><input type="checkbox" class="hdesign-eraser-cb"> Eraser (click deletes)</label>'
+    + '<div class="hdesign-floor-row"></div>'
+    + '<div class="hdesign-actions">'
+    + '<button class="dlg-btn" data-cmd="commit">Commit</button>'
+    + '<button class="dlg-btn" data-cmd="revert">Revert</button>'
+    + '<button class="dlg-btn" data-cmd="backup">Backup</button>'
+    + '<button class="dlg-btn" data-cmd="restore">Restore</button>'
+    + '<button class="dlg-btn" data-cmd="clear">Clear</button>'
+    + '<button class="dlg-btn" data-cmd="close">Exit</button>'
+    + '</div>';
+  hdesignWin = {
+    el,
+    styleSel: el.querySelector(".hdesign-style"),
+    grid: el.querySelector(".hdesign-grid"),
+    eraserCb: el.querySelector(".hdesign-eraser-cb"),
+    floorRow: el.querySelector(".hdesign-floor-row"),
+    floors: hd.floors | 0,
+  };
+  // (The ✕ is wired in makeWindowFrame above: like the Exit action it only ASKS
+  // the server to leave design mode. The panel disappears when scene.houseDesign
+  // actually goes away — dismiss:"none" on the family, because the panel never
+  // decides for itself that the session is over.)
+  el.querySelectorAll(".hdesign-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      hdesignMode = btn.dataset.mode;
+      el.querySelectorAll(".hdesign-tab").forEach((b) => b.classList.toggle("active", b === btn));
+      renderHouseDesignPicker();
+    });
+  });
+  hdesignWin.styleSel.addEventListener("change", () => {
+    hdesignStyleIdx[hdesignMode] = parseInt(hdesignWin.styleSel.value, 10) || 0;
+    renderHouseDesignGrid(hdesignStyles(hdesignMode)[hdesignStyleIdx[hdesignMode]] || null);
+  });
+  hdesignWin.eraserCb.addEventListener("change", () => { hdesignEraser = hdesignWin.eraserCb.checked; });
+  el.querySelectorAll(".hdesign-actions [data-cmd]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const cmd = btn.dataset.cmd;
+      // Commit and Clear are destructive (finalizes the layout / wipes it back to an
+      // empty foundation) — confirm first, matching the character-delete confirm.
+      if (cmd === "commit" && !window.confirm("Commit this house design? This finalizes the layout.")) return;
+      if (cmd === "clear" && !window.confirm("Clear the entire design back to an empty foundation? This cannot be undone.")) return;
+      sendInput("hdesign:" + cmd);
+    });
+  });
+  renderHouseDesignFloors();
+  renderHouseDesignPicker();
+}
+// Show/hide the panel to match scene.houseDesign (absent outside design mode — see
+// this section's opening comment) and keep its floor-count in sync. Cheap early-out:
+// once the panel exists for the current house, an ordinary poll (only `revision`
+// ticking as pieces are added) has nothing here to react to — the design itself
+// renders through the normal world/tile pipeline, not this panel.
+registerDialog({
+  id: "houseDesign",
+  source: (scene) => (scene && scene.houseDesign ? [scene.houseDesign] : []),
+  key: (hd) => hd.serial >>> 0,
+  // Only the floor count can change under a live session; `revision` ticks on
+  // every placed piece and must NOT rebuild the panel (the design itself renders
+  // through the world/tile pipeline, not here).
+  sig: (hd) => String(hd.floors | 0),
+  // dismiss:"none" — the ✕ asks the SERVER to end the session (hdesign:close)
+  // and this panel waits for that to land, so there is never a locally-closed
+  // window for a stale snapshot to resurrect.
+  build: (hd, { key }) => {
+    hdesignSerial = key;
+    hdesignFloor = 1; hdesignPiece = null; hdesignEraser = false; // fresh session, fresh picker state
+    buildHouseDesignWindow(hd);
+    loadHouseCatalog();
+    return hdesignWin;
+  },
+  update: (win, hd) => {
+    if (win.floors === (hd.floors | 0)) return;
+    win.floors = hd.floors | 0;
+    renderHouseDesignFloors();
+  },
+  close: closeHouseDesignWindow,
+});
+// Left-click handler for design mode, called from the canvas mousedown below BEFORE
+// the target-cursor branch so it takes priority whenever a session is open — returns
+// true to tell the caller the click is consumed (even when nothing is actually sent,
+// e.g. no piece picked yet), false when there's no session at all so every existing
+// path (target cursor, steering) runs exactly as before scene.houseDesign existed.
+// Coordinates are FOUNDATION-relative: ServUO `Designer_Build` does
+// `mcl.Add(itemID, x, y, z)` with x/y already relative to the multi's center and
+// derives z from the CURRENT floor server-side — so add/stair send no z at all.
+// Roof pieces are the one exception the wire format itself calls out (both
+// hdesign:roof and hdesign:roofdel take a z): a roof can sit at more than one height
+// on the same tile, so we pass the clicked tile's z (from groundTileAt) there —
+// erasing anything else needs that same z to disambiguate which item on the tile.
+function handleHouseDesignClick(e) {
+  const hd = scene && scene.houseDesign;
+  if (!hd) return false;
+  if (!hdesignPiece || hd.x == null) return true; // nothing selected, or foundation position not known yet
+  const g = clientToGlobal(e.clientX, e.clientY);
+  const t = groundTileAt(g.x, g.y);
+  const dx = t.x - (hd.x | 0), dy = t.y - (hd.y | 0);
+  // `graphic` is always a catalog id off hdesignPiece — never a scene/static/
+  // multi graphic — and renderHouseDesignGrid already dropped anything that
+  // couldn't legally be picked (0, or >= HDESIGN_MAX_GRAPHIC — see its doc:
+  // the server drops those silently, comp_val.log only, no client-visible
+  // error), so there's nothing further to validate here before sending.
+  const { mode, graphic } = hdesignPiece;
+  if (hdesignEraser) sendInput(`hdesign:${mode === "roof" ? "roofdel" : "del"}:${graphic}:${dx}:${dy}:${t.z}`);
+  else if (mode === "stair") sendInput(`hdesign:stair:${graphic}:${dx}:${dy}`);
+  else if (mode === "roof") sendInput(`hdesign:roof:${graphic}:${dx}:${dy}:${t.z}`);
+  else sendInput(`hdesign:add:${graphic}:${dx}:${dy}`);
+  return true;
+}
+
+// The worn backpack is the equip entry on layer 21 (0x15).
+function backpackSerial() {
+  const p = scene && scene.player;
+  if (!p || !p.equip) return null;
+  const bp = p.equip.find((e) => e.layer === BACKPACK_LAYER);
+  return bp ? (bp.serial >>> 0) : null;
+}
+// Open the backpack window AND ask the server to push its latest contents.
+function openBackpack() {
+  const s = backpackSerial();
+  if (s == null) return;
+  openContainer(s);
+  sendInput("use:" + s);
+}
+// Rebuild the paperdoll body only when stats/equip actually changed (no flicker).
+function refreshPaperdoll() {
+  if (!paperdollOn) return;
+  const pd = document.getElementById("paperdoll"), body = document.getElementById("pd-body");
+  // Source: our own doll (pdTarget null) → scene.player; else the clicked mobile.
+  const isSelf = pdTarget == null;
+  const p = isSelf ? (scene && scene.player)
+    : ((scene && scene.mobiles) || []).find((m) => (m.serial >>> 0) === (pdTarget >>> 0));
+  if (!p) {
+    set("pd-name", "—");
+    body.innerHTML = '<div class="cont-empty">' + (isSelf ? "no character data" : "(out of view)") + "</div>";
+    return;
+  }
+  const equip = (p.equip || []).slice().sort((a, b) => (a.layer | 0) - (b.layer | 0));
+  // Prefer the server's own title line (0x88 DisplayPaperdoll — e.g. "Anima the
+  // Adventurer") over the plain mobile name, when it's for THIS target.
+  const targetSerial = isSelf ? ((scene && scene.player && scene.player.serial) >>> 0) : (pdTarget >>> 0);
+  const serverTitle = (pdServerInfo && (pdServerInfo.serial >>> 0) === targetSerial) ? pdServerInfo.title : null;
+  const sig = [isSelf ? "s" : pdTarget, p.name, serverTitle, p.str, p.dex, p.int, p.hits, p.hitsMax, p.mana, p.manaMax,
+    p.stam, p.stamMax, p.gold, p.body, p.hue,
+    // Include each item's OPL name so the list re-renders (slot label → real name)
+    // the moment its OPL arrives.
+    equip.map((e) => `${e.layer}:${e.g}:${e.hue | 0}:${e.serial >>> 0}:${oplName(e.serial)}`).join(",")].join("|");
+  if (pd._sig === sig) return;
+  pd._sig = sig;
+  set("pd-name", serverTitle || p.name || (isSelf ? "(unnamed)" : "(mobile)"));
+  // The paperdoll DOLL: the base body gump (male 0x0C / female 0x0D) hued by skin,
+  // then each worn item's paperdoll gump (AnimID + gender offset, hued by item),
+  // stacked back→front at the same origin (ClassicUO style). Held weapons included.
+  const female = p.body === 401 || p.body === 403;
+  const dollBody = female ? 13 : 12;
+  const gOff = female ? FEMALE_GUMP_OFFSET : MALE_GUMP_OFFSET;
+  const skinQ = p.hue ? `?hue=${p.hue}` : "";
+  const byLayer = {};
+  for (const e of equip) if ((e.anim | 0) > 0) byLayer[e.layer] = e;
+  let h = `<div id="pd-doll"><img src="gump/${dollBody}.png${skinQ}" alt="" crossorigin="anonymous">`;
+  for (const layer of PAPERDOLL_ORDER) {
+    // Layer 15 (Face) is a server pseudo-item — the face is already part of the body
+    // gump and has no paperdoll art, so drawing it 404'd and showed a broken-image
+    // "?" at the doll's top-left. Skip it here too (the equip list already skips it).
+    if (layer === 15) continue;
+    const e = byLayer[layer];
+    if (!e) continue;
+    const hueQ = e.hue ? `?hue=${e.hue}` : "";
+    // Equipconv.def override: the server already resolved a gender-correct
+    // absolute gump id (anima-net `equip_conv_gump`) when this item's (wearer
+    // body, AnimID) has a conversion — use it as-is. Otherwise fall back to the
+    // plain AnimID + gender-offset convention.
+    const gid = e.gump != null ? e.gump : e.anim + gOff;
+    // Hide any item whose paperdoll gump is missing rather than show a broken "?".
+    // Female items (no explicit override) may lack a female gump → fall back to
+    // the male offset first; an explicit `gump` is already gender-resolved, so it
+    // just hides on error instead of guessing another id.
+    const hide = "this.onerror=null;this.style.display='none'";
+    const onerr = (e.gump == null && female)
+      ? `this.onerror=function(){${hide}};this.src='gump/${e.anim + MALE_GUMP_OFFSET}.png${hueQ}'`
+      : hide;
+    // Tag each layer so hovering the figure (per-pixel hit-test) can resolve the item.
+    h += `<img src="gump/${gid}.png${hueQ}" alt="" crossorigin="anonymous" draggable="false"`
+      + ` data-serial="${e.serial >>> 0}" data-layer="${e.layer}" data-g="${e.g}" data-hue="${e.hue | 0}" onerror="${onerr}">`;
+  }
+  h += "</div>";
+  // Stats: our own doll shows the full sheet; another mobile shows only what the
+  // server actually sent for it (usually name + HP, sometimes nothing).
+  h += '<div class="pd-stats">';
+  if (p.str != null) h += `<div class="row"><span class="k">STR / DEX / INT</span><span>${p.str} / ${p.dex} / ${p.int}</span></div>`;
+  if ((p.hitsMax | 0) > 0) h += `<div class="row"><span class="k">HP</span><span>${p.hits} / ${p.hitsMax}</span></div>`;
+  if (isSelf) {
+    h += `<div class="row"><span class="k">Mana</span><span>${p.mana} / ${p.manaMax}</span></div>`;
+    h += `<div class="row"><span class="k">Stamina</span><span>${p.stam} / ${p.stamMax}</span></div>`;
+    h += `<div class="row"><span class="k">Gold</span><span>${p.gold}</span></div>`;
+  }
+  h += "</div>";
+  h += `<div class="pd-profile-actions"><button type="button" class="dlg-btn pd-profile"`
+    + ` data-profile="${targetSerial}">PROFILE</button></div>`;
+  // Appearance: hair & facial hair are part of the body, not worn gear — show them
+  // in their own section with an inline dye-colour swatch (no OPL/weight/AR exists).
+  const hairItems = equip.filter((e) => e.layer === 11 || e.layer === 16);
+  if (hairItems.length) {
+    h += '<div id="pd-appear">';
+    for (const e of hairItems) {
+      const nm = e.layer === 11 ? "Hair" : "Beard";
+      const hue = e.hue | 0;
+      h += `<div class="ap-row"><span class="ap-k">${nm}</span>`
+        + (hue ? `<span class="hue-sw" data-hue="${hue}"></span><span class="ap-hue">Hue ${hue & 0x3FFF}</span>`
+               : '<span class="ap-hue">default</span>')
+        + "</div>";
+    }
+    h += "</div>";
+  }
+  h += '<div id="pd-equip">';
+  // Worn gear only. Hair (11) / beard (16) are shown in Appearance above; the Face
+  // layer (15) is the character's virtual face (a server pseudo-item with no real
+  // item art → it rendered as the "UNUSED" placeholder), not wearable gear — skip it.
+  const worn = equip.filter((e) => e.layer !== 11 && e.layer !== 16 && e.layer !== 15);
+  if (!worn.length) h += '<div class="cont-empty">(nothing equipped)</div>';
+  for (const e of worn) {
+    const serial = e.serial >>> 0;
+    // Show the REAL item name (OPL line 0, e.g. "wide-brim hat") rather than the
+    // generic slot label ("Head"). Request the OPL once; until it lands we show
+    // the slot name as a placeholder, then re-render swaps in the real name.
+    const nm = oplName(serial);
+    if (!nm && !oplReq.has(serial)) { oplReq.add(serial); sendInput("oplreq:" + serial); }
+    const slot = nm || EQUIP_SLOTS[e.layer] || ("Layer " + e.layer);
+    // Backpack: our own → open it; another mobile's → SNOOP (a crime, warned).
+    const isBp = e.layer === BACKPACK_LAYER;
+    const attr = isBp ? (isSelf ? ' data-bp="1"' : ' data-snoop="1"') : "";
+    // Tint the icon by the item's dye hue (server recolors the tile via ?hue=), so a
+    // dyed robe/cloak/etc. shows its real colour in the list instead of base art.
+    const hueQ = (e.hue | 0) ? `?hue=${e.hue | 0}` : "";
+    h += `<div class="eq-row${isBp ? " bp" : ""}"${attr}>`
+      + `<img class="eq-icon" src="art/static/${e.g}.png${hueQ}" alt="" draggable="false"`
+      + ` data-serial="${e.serial >>> 0}" data-g="${e.g}" data-amount="1"`
+      + ` data-layer="${e.layer}" data-hue="${e.hue | 0}"`
+      + ` onerror="this.style.visibility='hidden'">`
+      + `<span class="eq-slot">${slot}</span>`
+      + (isBp ? `<span class="eq-open">${isSelf ? "open" : "snoop"} ▸</span>` : "")
+      + "</div>";
+  }
+  h += "</div>";
+  body.innerHTML = h;
+  applyHueSwatches();
+}
+// Fill the inline hair/beard colour swatches (async hue→rgb; re-applied on load).
+function applyHueSwatches() {
+  const pd = document.getElementById("pd-body");
+  if (!pd) return;
+  for (const sw of pd.querySelectorAll(".hue-sw[data-hue]")) {
+    const hx = hueHex((+sw.dataset.hue) | 0);
+    if (hx) sw.style.background = hx;
+  }
+}
+// Fill the character-creation wizard's appearance swatches (step 4) — same
+// async hue→rgb pattern as applyHueSwatches above, scoped to `.wiz-hue` since
+// the wizard and the paperdoll are never mounted at the same time but share
+// the same cache/fetch path.
+function applyWizHueSwatches() {
+  for (const sw of document.querySelectorAll(".wiz-hue[data-hue]")) {
+    const hx = hueHex((+sw.dataset.hue) | 0);
+    if (hx) sw.style.background = hx;
+  }
+}
+
+// --- container windows (one per serial; openContainer focuses an existing one) ---
+const containerCascade = { n: 0, left: 220, top: 70, wrap: 9, step: 26 };
+// Item graphics that are spellbooks (double-click opens the spell-cast UI, not a
+// container). Magery 0x0EFA plus the AOS+ school books for completeness.
+const SPELLBOOK_GRAPHICS = new Set([0x0efa, 0x2252, 0x2253, 0x238c, 0x23a0, 0x2d50, 0x2d9d]);
+function isSpellbook(g) { return SPELLBOOK_GRAPHICS.has((g | 0) & 0xffff); }
+
+// Amount-tiered stackables show a bigger pile as the stack grows, like the real UO
+// client: gold coins (0x0EED) become a small pile (0x0EEE) then a big pile (0x0EEF).
+function stackGraphic(g, amount) {
+  if ((g | 0) === 0x0eed) return amount > 5 ? 0x0eef : amount > 1 ? 0x0eee : 0x0eed;
+  return g | 0;
+}
+// `?hue=<n>` for an item art request, or "" when the item is undyed. The server
+// recolors the tile (partial-hue items already carry bit 0x8000 — see scene.rs
+// `item_art_hue`), so every icon of a dyed item — grid cell, trade cell, vendor
+// row, drag ghost — asks for it the same way.
+function hueQuery(hue) {
+  return (hue | 0) ? `?hue=${hue | 0}` : "";
+}
+
+function openContainer(serial) {
+  serial = serial >>> 0;
+  const existing = dialogWindow("containers", serial);
+  if (existing) { bringToFront(existing.el); existing._sig = null; refreshContainer(serial); return; }
+  const { el, body } = makeWindowFrame({
+    cls: "container-win", title: "Container", bodyCls: "cont-grid", cascade: containerCascade,
+    onClose: () => closeContainer(serial),
+  });
+  // Leaving the window entirely clears any item OPL tooltip it was showing (there's
+  // no PIXI pointerout for DOM cells to fall back on).
+  el.addEventListener("mouseleave", () => { if (tipSerial != null) { tipSerial = null; hideTip(); } });
+  dialogWindows("containers").set(serial, { el, body, _sig: null });
+  refreshContainer(serial);
+}
+function closeContainer(serial) {
+  closeDialog("containers", serial >>> 0);
+}
+// Rebuild a container's grid only when its contents changed. Double-click an item →
+// use it; also openContainer(itemSerial) so nested bags pop open (a non-container
+// just opens an empty window the user can close — acceptable).
+function containerSignature(scene, serial) {
+  return ((scene && scene.contItems) || [])
+    .filter((it) => (it.cont >>> 0) === serial)
+    // `hue` belongs here for the same reason the amount does: a dye changes the
+    // icon's art request without touching serial/graphic/amount, and a signature
+    // that missed it would leave the grid showing the item's old colour.
+    .map((it) => `${it.serial >>> 0}:${it.g}:${it.amount | 0}:${it.hue | 0}`).join(",");
+}
+function refreshContainer(serial) {
+  serial = serial >>> 0;
+  const win = dialogWindow("containers", serial);
+  if (!win) return;
+  const items = (scene && scene.contItems || []).filter((it) => (it.cont >>> 0) === serial);
+  // No signature check here: every caller already means "rebuild now". The
+  // dialog driver stamps `win._sig = sig` BEFORE calling update() (dialogs.js
+  // syncDialogFamily), so a second guard against that same field could only
+  // ever compare equal — it silently swallowed every server-driven change, and
+  // the grid only ever refreshed when the window was (re)opened. Found live: a
+  // `[set Hue` on an item in an open backpack left its icon in the old colour.
+  const body = win.body;
+  body.innerHTML = "";
+  if (!items.length) { body.innerHTML = '<div class="cont-empty">(empty)</div>'; return; }
+  for (const it of items) {
+    const itemSerial = it.serial >>> 0;
+    const cell = document.createElement("div");
+    cell.className = "cont-item";
+    cell.draggable = false;                // pointer-drag (held-on-cursor), not native HTML5 drag
+    cell.dataset.serial = itemSerial;
+    cell.dataset.g = it.g;
+    cell.dataset.amount = (it.amount | 0) || 1;
+    cell.dataset.st = it.st ? "1" : "0";
+    cell.dataset.hue = it.hue | 0;          // carried into the drag ghost on lift
+    const img = document.createElement("img");
+    img.className = "cont-icon"; img.src = `art/static/${stackGraphic(it.g, it.amount | 0)}.png${hueQuery(it.hue)}`;
+    img.draggable = false;                  // let the cell own the drag
+    img.onerror = () => { img.style.visibility = "hidden"; };
+    cell.appendChild(img);
+    if ((it.amount | 0) > 1) {
+      const a = document.createElement("span");
+      a.className = "cont-amt"; a.textContent = it.amount;
+      cell.appendChild(a);
+    }
+    cell.addEventListener("dblclick", () => {
+      // Belt and braces: a completed double-click on this cell means the press
+      // was a click, not a drag, no matter what — disarm a still-pending
+      // groundDrag for this same serial so a stray later pointermove (or the
+      // dialog/gump that "use" may pop, covering the cell) can't still promote
+      // it into a lift out from under the click that just resolved.
+      if (groundDrag && (groundDrag.serial >>> 0) === itemSerial) groundDrag = null;
+      // A spellbook opens the spell-casting UI, not a container view.
+      if (isSpellbook(it.g)) { if (!spellbookOn) toggleSpellbook(); return; }
+      sendInput("use:" + itemSerial);
+      // Only open a container window if this item is ACTUALLY a container (`c`).
+      // Otherwise (bandages, potions, food, …) double-click just uses it — opening
+      // an empty container gump for those was the bug.
+      if (it.c) openContainer(itemSerial);
+    });
+    body.appendChild(cell);
+  }
+}
+registerDialog({
+  id: "containers",
+  // open:"local" — a container window exists because the PLAYER opened it (a
+  // double-click, or the server's 0x24 container-open event), never because it
+  // appears in a snapshot list. The snapshot only supplies the contents, so
+  // there is nothing here to auto-open, auto-close, or guard against.
+  open: "local",
+  sig: containerSignature,
+  update: (win, scene, { key }) => refreshContainer(key),
+});
+
+// --- generic server gumps / dialogs (0xB0 / 0xDD) ------------------------
+// Each scene.gumps entry is a server dialog (quest/NPC menu/confirm box) parsed
+// (server-side) into positioned elements, each tagged with its gump "page"
+// (0 = always visible; see scene.rs parse_gump_layout). We mirror one draggable
+// .gump-win per serial: build on first sight, rebuild when its content signature
+// changes, and remove when it's gone from scene.gumps. Every window tracks its
+// own current page (starts at 1); "page-jump" buttons (pageflag 0) just flip
+// that locally via applyGumpPage() — no packet is ever sent for those. A real
+// reply button (pageflag 1) collects the on-state of all checkboxes/radios +
+// text-entry values (across every page, not just the visible one — they stay
+// in the DOM, just hidden) and sends a `gump:` reply, then closes locally; the
+// ✕ sends button 0 (cancel). These are normal windows — they don't block the
+// rest of the game.
+const gumpCascade = { n: 0, left: 160, top: 90, step: 24 };
+// Remembered screen position per gump KIND (gumpId), like ClassicUO's saved gump
+// locations. ServUO craft/menu gumps close and REOPEN with a fresh serial on every
+// selection, so keying position by serial (or cascading each build) walked the
+// window down-right across the screen. Reopening the same kind now lands where the
+// last one of that kind sat; a user drag updates the remembered spot.
+const gumpPos = new Map();       // gumpId → { left, top }
+function gumpSignature(g) {
+  return JSON.stringify([g.gumpId >>> 0, g.w | 0, g.h | 0, g.elements || []]);
+}
+registerDialog({
+  id: "gumps",
+  source: (scene) => (scene && scene.gumps) || [],
+  key: (g) => g.serial >>> 0,
+  sig: gumpSignature,
+  // No update(): a re-sent gump is a whole new server-authored layout, so the
+  // window is rebuilt — carrying the player's current page across (see build).
+  dismiss: "content",
+  build: buildGumpWindow,
+});
+
+// ── Legacy item/question menus (0x7C → 0x7D) ──────────────────────────────
+// Several may be open at once. Each window is keyed by the server menu serial;
+// answering removes it locally immediately and suppresses the same snapshot
+// until the server consumes the response (avoids one-poll flicker/reopening).
+const legacyMenuCascade = { n: 0, left: 220, top: 110 };
+
+function legacyMenuSignature(menu) {
+  return JSON.stringify([menu.menuId | 0, menu.question || "", menu.kind || "question", menu.entries || []]);
+}
+
+function answerLegacyMenu(serial, index) {
+  if (!dialogWindow("legacyMenus", serial)) return;
+  dismissDialog("legacyMenus", serial);
+  sendInput("menusel:" + serial + ":" + index);
+}
+
+function buildLegacyMenuWindow(menu) {
+  const serial = menu.serial >>> 0;
+  const entries = menu.entries || [];
+  const itemMenu = menu.kind === "items";
+  const { el, body } = makeWindowFrame({
+    cls: "legacy-menu-win", title: "Menu", bodyCls: "legacy-menu-body", cascade: legacyMenuCascade,
+    onClose: () => answerLegacyMenu(serial, 0),
+  });
+  body.innerHTML = '<div class="legacy-menu-question"></div>'
+    + '<div class="legacy-menu-entries"></div><div class="legacy-menu-actions">'
+    + '<button class="dlg-btn legacy-menu-continue">Continue</button>'
+    + '<button class="dlg-btn legacy-menu-cancel">Cancel</button></div>';
+  el.querySelector(".legacy-menu-question").textContent = menu.question || "Choose an option";
+  const list = el.querySelector(".legacy-menu-entries");
+  if (itemMenu) list.classList.add("legacy-item-grid");
+
+  const state = { el, selected: entries.length ? (entries[0].index | 0) : 0 };
+  for (const entry of entries) {
+    const index = entry.index | 0;
+    const label = document.createElement("label");
+    label.className = itemMenu ? "legacy-item-choice" : "legacy-question-choice";
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = "legacy-menu-" + serial;
+    radio.value = String(index);
+    radio.checked = index === state.selected;
+    radio.addEventListener("change", () => { state.selected = index; });
+    label.appendChild(radio);
+    if (itemMenu) {
+      const img = document.createElement("img");
+      img.src = "art/static/" + (entry.graphic | 0) + ".png" + ((entry.hue | 0) ? ("?hue=" + (entry.hue | 0)) : "");
+      img.alt = "";
+      img.draggable = false;
+      img.addEventListener("error", () => { img.style.visibility = "hidden"; });
+      label.appendChild(img);
+      label.addEventListener("dblclick", (event) => {
+        event.preventDefault();
+        answerLegacyMenu(serial, index);
+      });
+    }
+    const text = document.createElement("span");
+    text.textContent = entry.text || ("Option " + index);
+    label.appendChild(text);
+    list.appendChild(label);
+  }
+
+  const proceed = el.querySelector(".legacy-menu-continue");
+  proceed.disabled = state.selected === 0;
+  proceed.addEventListener("click", () => {
+    if (state.selected) answerLegacyMenu(serial, state.selected);
+  });
+  el.querySelector(".legacy-menu-cancel").addEventListener("click", () => answerLegacyMenu(serial, 0));
+  el.addEventListener("keydown", (event) => {
+    if (event.code === "Escape") {
+      event.preventDefault(); event.stopPropagation(); answerLegacyMenu(serial, 0);
+    } else if (event.code === "Enter" || event.code === "NumpadEnter") {
+      event.preventDefault(); event.stopPropagation();
+      if (state.selected) answerLegacyMenu(serial, state.selected);
+    }
+  });
+  return state;
+}
+
+registerDialog({
+  id: "legacyMenus",
+  source: (scene) => (scene && scene.legacyMenus) || [],
+  key: (menu) => menu.serial >>> 0,
+  sig: legacyMenuSignature,
+  dismiss: "content",
+  build: buildLegacyMenuWindow,
+});
+
+// ── Server dye hue pickers (0x95 request/response) ─────────────────────────
+// ClassicUO presents 1000 ordinary dyed hues as five 20×10 grids. Graduation
+// g contains hues `2 + g + cell*5`, covering exactly ServUO's clipped 2..1001
+// range. A server-owned picker has no cancel packet, so these windows have no X.
+const huePickerCascade = { n: 0, left: 250, top: 90 };
+let dyedPalettePromise = null;
+
+function loadDyedPalette() {
+  if (!dyedPalettePromise) {
+    dyedPalettePromise = fetch("hues/dyed.json", { cache: "force-cache" })
+      .then((response) => {
+        if (!response.ok) throw new Error("palette HTTP " + response.status);
+        return response.json();
+      })
+      .then((data) => {
+        if ((data.start | 0) !== 2 || !Array.isArray(data.colors) || data.colors.length !== 1000) {
+          throw new Error("invalid dyed palette");
+        }
+        return data.colors;
+      })
+      .catch((error) => {
+        console.warn("dye palette unavailable", error);
+        dyedPalettePromise = null; // allow a later picker to retry
+        return Array(1000).fill("#444");
+      });
+  }
+  return dyedPalettePromise;
+}
+
+function huePickerSignature(picker) {
+  return JSON.stringify([picker.graphic | 0]);
+}
+
+function dyedHue(graduation, cell) {
+  return 2 + (graduation | 0) + (cell | 0) * 5;
+}
+
+function updateHuePickerPreview(state) {
+  state.label.textContent = "Hue " + state.selectedHue;
+  state.preview.src = "art/static/" + state.graphic + ".png?hue=" + state.selectedHue;
+}
+
+function renderHuePickerGrid(state) {
+  state.grid.innerHTML = "";
+  for (let cell = 0; cell < 200; cell++) {
+    const hue = dyedHue(state.graduation, cell);
+    const swatch = document.createElement("button");
+    swatch.type = "button";
+    swatch.className = "hue-picker-swatch" + (hue === state.selectedHue ? " selected" : "");
+    swatch.style.backgroundColor = state.colors[hue - 2] || "#444";
+    swatch.title = "Hue " + hue;
+    swatch.setAttribute("aria-label", "Hue " + hue);
+    swatch.addEventListener("click", () => {
+      state.selectedCell = cell;
+      state.selectedHue = hue;
+      for (const old of state.grid.querySelectorAll(".selected")) old.classList.remove("selected");
+      swatch.classList.add("selected");
+      updateHuePickerPreview(state);
+    });
+    swatch.addEventListener("dblclick", () => answerHuePicker(state.serial, hue));
+    state.grid.appendChild(swatch);
+  }
+}
+
+function answerHuePicker(serial, hue) {
+  if (!dialogWindow("huePickers", serial)) return;
+  dismissDialog("huePickers", serial);
+  sendInput("huepick:" + serial + ":" + hue);
+}
+
+function buildHuePickerWindow(picker) {
+  const serial = picker.serial >>> 0;
+  const graphic = (picker.graphic | 0) || 0x0FAB;
+  // A server-owned picker has no cancel packet, so this frame keeps no ✕ — the
+  // only ways out are Apply (answerHuePicker) and the server dropping it.
+  const { el, body, closer } = makeWindowFrame({
+    cls: "hue-picker-win", title: "Dye color", bodyCls: "hue-picker-body", cascade: huePickerCascade,
+  });
+  closer.remove();
+  body.innerHTML = '<div class="hue-picker-toolbar">'
+    + '<div class="hue-picker-preview"><img alt="Dye preview" draggable="false"></div>'
+    + '<div class="hue-picker-controls"><span class="hue-picker-label">Hue 3</span>'
+    + '<label>Graduation <input class="hue-picker-slider" type="range" min="0" max="4" step="1" value="1"></label>'
+    + '</div></div><div class="hue-picker-grid" aria-label="Dye colors"></div>'
+    + '<button class="dlg-btn hue-picker-apply">Apply color</button>';
+  const state = {
+    el, serial, graphic, graduation: 1, selectedCell: 0, selectedHue: 3, colors: null,
+    grid: el.querySelector(".hue-picker-grid"),
+    preview: el.querySelector(".hue-picker-preview img"),
+    label: el.querySelector(".hue-picker-label"),
+  };
+  updateHuePickerPreview(state);
+  state.preview.addEventListener("error", () => { state.preview.style.visibility = "hidden"; });
+  const slider = el.querySelector(".hue-picker-slider");
+  slider.addEventListener("input", () => {
+    state.graduation = slider.value | 0;
+    // ClassicUO keeps the selected grid cell while changing graduation.
+    state.selectedHue = dyedHue(state.graduation, state.selectedCell);
+    if (state.colors) renderHuePickerGrid(state);
+    updateHuePickerPreview(state);
+  });
+  el.querySelector(".hue-picker-apply").addEventListener("click", () => {
+    answerHuePicker(serial, state.selectedHue);
+  });
+  el.addEventListener("keydown", (event) => {
+    if (event.code === "Escape") {
+      // ClassicUO sets CanCloseWithRightClick=false for server-owned pickers.
+      event.preventDefault(); event.stopPropagation();
+    } else if (event.code === "Enter" || event.code === "NumpadEnter") {
+      event.preventDefault(); event.stopPropagation(); answerHuePicker(serial, state.selectedHue);
+    }
+  });
+  state.grid.textContent = "Loading colors…";
+  loadDyedPalette().then((colors) => {
+    if (dialogWindow("huePickers", serial) !== state) return; // window went away mid-fetch
+    state.colors = colors;
+    renderHuePickerGrid(state);
+  });
+}
+
+registerDialog({
+  id: "huePickers",
+  source: (scene) => (scene && scene.huePickers) || [],
+  key: (picker) => picker.serial >>> 0,
+  sig: huePickerSignature,
+  dismiss: "content",
+  build: buildHuePickerWindow,
+});
+// ── Right-click context (popup) menu (0xBF/0x14) ───────────────────────────
+// scene.popup = { serial, entries:[{ index, text }] } | null. We show a small
+// menu div at the last cursor position; a row click sends popupsel and hides it;
+// click-away / Esc / the popup clearing also hides it.
+// The menu is a singleton, so the family below holds at most one window; these
+// two mirror it for the click-away/Esc paths that don't know the serial.
+let popupEl = null;            // the live menu element (null = hidden)
+let popupSerial = 0;           // serial the menu was opened for
+// The server keeps its popup set until we select or its target is removed, so a
+// user-closed menu needs the family's session guard or it would reopen next poll.
+function hidePopup(dismissed) {
+  if (popupSerial) {
+    if (dismissed) dismissDialog("popup", popupSerial);
+    else closeDialog("popup", popupSerial);
+  }
+  popupEl = null; popupSerial = 0;
+}
+function buildPopupMenu(p, { key }) {
+  const serial = key;
+  const el = document.createElement("div");
+  el.className = "popup-menu";
+  // Anchor at the cursor, clamped to stay on-screen.
+  const x = Math.min(lastMenuX, window.innerWidth - 200);
+  const y = Math.min(lastMenuY, window.innerHeight - (p.entries.length * 26 + 12));
+  el.style.left = Math.max(4, x) + "px";
+  el.style.top = Math.max(4, y) + "px";
+  for (const e of p.entries) {
+    const row = document.createElement("div");
+    row.className = "popup-row" + (e.hl ? " popup-row-hl" : ""); // 0x01 = highlighted default action
+    row.textContent = e.text || ("#" + e.index);
+    const index = e.index | 0;
+    row.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      sendInput("popupsel:" + serial + ":" + index);
+      hidePopup();
+    });
+    el.appendChild(row);
+  }
+  document.body.appendChild(el);
+  popupEl = el;
+  popupSerial = serial;
+  return { el };
+}
+
+registerDialog({
+  id: "popup",
+  // A singleton is just a list of at most one — no special case needed.
+  source: (scene) => {
+    const p = scene && scene.popup;
+    return p && p.entries && p.entries.length ? [p] : [];
+  },
+  key: (p) => p.serial >>> 0,
+  // No sig: the menu is anchored at the cursor position it was opened with, so
+  // leave an open one exactly where the player put it.
+  dismiss: "session",
+  build: buildPopupMenu,
+  close: (win) => { win.el.remove(); if (popupEl === win.el) { popupEl = null; popupSerial = 0; } },
+});
+
+
+function buildGumpWindow(g, { previous } = {}) {
+  const serial = g.serial >>> 0;
+  const gumpId = g.gumpId >>> 0;
+  // Reopen at the remembered spot for this gump KIND; only a first-seen kind
+  // cascades (so distinct dialogs don't stack exactly). This keeps a craft/menu
+  // gump anchored across its close-and-reopen-with-a-new-serial cycle.
+  const saved = gumpPos.get(gumpId);
+  const { el, bar: title, body } = makeWindowFrame({
+    cls: "dialog-win", title: "Dialog", cascade: gumpCascade, pos: saved,
+    onClose: () => { sendInput(`gump:${serial}:${gumpId}:0`); closeGump(serial); },
+    draggable: false, // wired below so the drag can also update gumpPos
+  });
+  if (!saved) gumpPos.set(gumpId, { left: parseInt(el.style.left, 10), top: parseInt(el.style.top, 10) });
+  const w = Math.max(80, g.w | 0), h = Math.max(48, g.h | 0);
+  const canvas = document.createElement("div");
+  canvas.className = "dialog-canvas";
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+  body.appendChild(canvas);
+
+  // `page` is this window's *local* current page (the server never sees it —
+  // UO pages are a pure client-side layout concept, ClassicUO's Gump.ActivePage).
+  // Page 1 is shown initially. Every element is built once and stays in the DOM
+  // (so checkbox/text-entry state on a page you navigate away from survives);
+  // applyGumpPage() just toggles which ones are visible. Elements with no
+  // "page" token before them in the layout parsed to page 0 and are shown on
+  // every page.
+  // Carry the player's page across a server-driven rebuild (the server resending
+  // the same gump shouldn't kick them back to page 1), clamped to the new
+  // layout's highest real page — a refreshed gump with FEWER pages would
+  // otherwise show only its page-0 chrome, with no page ever matching.
+  const maxPage = (g.elements || []).reduce((m, e) => Math.max(m, e.page | 0), 0);
+  const page = previous ? Math.min(previous.page, maxPage || 1) : 1;
+  const win = { el, serial, gumpId, canvas, page, nodes: [] };
+  for (const e of (g.elements || [])) {
+    const node = buildGumpElement(win, e);
+    node.dataset.page = e.page | 0;
+    win.nodes.push(node);
+    canvas.appendChild(node);
+  }
+  applyGumpPage(win);
+  // Remember where the user drags this window, keyed by kind, so the next reopen
+  // (fresh serial) lands there too.
+  makeDraggable(el, title, (x, y) => gumpPos.set(gumpId, { left: x, top: y }));
+  return win;
+}
+// Show/hide this window's elements for its current local page: page-0
+// elements are always visible; everything else only shows while it's the
+// active page. Called on first build and again whenever a pageflag-0 button
+// flips `win.page` — that's a pure local redraw, no packet goes to the server
+// (ClassicUO Button.ButtonAction.SwitchPage).
+function applyGumpPage(win) {
+  for (const node of win.nodes) {
+    const p = Number(node.dataset.page) || 0;
+    node.style.display = (p === 0 || p === win.page) ? "" : "none";
+  }
+}
+// ── UO gump HTML mini-parser ────────────────────────────────────────────
+// Servers embed a small HTML subset in gump text — both `text`/`croppedtext`
+// strings AND resolved `htmlgump`/`xmfhtml*` blocks arrive as the same "t":
+// "text" JSON shape (anima-core's gump_layout.rs keeps both raw; anima-net's
+// scene.rs shapes them identically — see those files' doc comments). E.g.
+// ServUO's CraftGump sends literal `<CENTER>ALCHEMY MENU</CENTER>`. This
+// turns that string into safe DOM nodes: CENTER/LEFT/RIGHT become a
+// block-level wrapper with the matching text-align (.gh-center/.gh-left/
+// .gh-right, scoped under .dialog-win in index.html), B/I/U/BIG/SMALL become
+// inline <span> classes, BASEFONT COLOR sets a running text color (sanitized
+// — #rrggbb/#rgb or a small named-color whitelist, never the raw attribute
+// text), BR is a line break, and any other tag (<A HREF>, <P>, …) is
+// stripped but its inner text kept.
+//
+// SAFETY: the string is tokenized by hand on '<'/'>' and every node is built
+// with createElement/createTextNode — never innerHTML/outerHTML and never a
+// tag name taken from the server — so a malicious server string (even
+// `<script>…</script>`) can only ever become inert text content, never a
+// real element, attribute, or executable markup.
+const GUMP_NAMED_COLORS = new Set([
+  "red", "cyan", "blue", "darkblue", "lightblue", "purple", "yellow", "lime",
+  "magenta", "white", "silver", "gray", "grey", "black", "orange", "brown",
+  "maroon", "green", "olive",
+]);
+// `raw` is whatever came after `color=` in a BASEFONT tag, already isolated
+// by a regex that stops at the first quote/space — validate it's an actual
+// #rrggbb/#rgb hex or one of the whitelisted names before it ever reaches
+// `style.color`; anything else (an attempted CSS/style-breakout string,
+// junk) is dropped (returns null, meaning "leave color unset").
+function gumpSanitizeColor(raw) {
+  const hex = (raw || "").trim().replace(/^#/, "");
+  if (/^[0-9a-fA-F]{6}$/.test(hex) || /^[0-9a-fA-F]{3}$/.test(hex)) return "#" + hex.toLowerCase();
+  const name = (raw || "").trim().toLowerCase();
+  return GUMP_NAMED_COLORS.has(name) ? name : null;
+}
+// Decode the handful of entities UO gump text actually uses. Deliberately a
+// fixed whitelist regex (not a generic &name; decoder) — only ever produces
+// plain characters, never re-introduces '<'/'>' as anything but literal text
+// (the result is inserted via createTextNode, so it can't become markup
+// even if it contains those characters).
+function gumpDecodeEntities(s) {
+  return s.replace(/&(amp|lt|gt|nbsp|quot|apos|#39);/gi, (m, name) => {
+    switch (name.toLowerCase()) {
+      case "amp": return "&";
+      case "lt": return "<";
+      case "gt": return ">";
+      case "nbsp": return "\u00A0";
+      case "quot": return '"';
+      case "apos": case "#39": return "'";
+      default: return m;
+    }
+  });
+}
+// Parse a gump text/html string into a DocumentFragment of safe DOM nodes.
+// `boxWidth` isn't consulted directly (an alignment wrapper is a `width:100%`
+// block div — it centers within whatever explicit CSS width the caller has
+// already set on the element, e.g. croppedtext's `w`); a `null`/absent width
+// (a plain unbounded `text`) still parses fine, it just has no box to center
+// within. Malformed input (unclosed tags, stray closes, no `>`) degrades
+// gracefully — it never throws and never drops trailing text.
+function renderGumpHtml(raw, boxWidth) {
+  const root = document.createDocumentFragment();
+  const str = String(raw == null ? "" : raw);
+  // One stack frame per currently-open recognized/unknown tag: `el` is where
+  // new nodes get appended (the fragment for the untouched root, or the
+  // span/div pushed for a recognized tag, or the PARENT's `el` again for an
+  // unknown tag — so it's tracked for matching but contributes no DOM node).
+  // `name` is the upper-cased tag name a closing tag must match.
+  const stack = [{ el: root, name: null }];
+  // BASEFONT's color is a running property, not a stack frame (real gump
+  // text rarely closes it) — applies to every later text run until changed
+  // or reset by a bare <basefont>.
+  let color = null;
+
+  const top = () => stack[stack.length - 1];
+  const appendText = (chunk) => {
+    if (!chunk) return;
+    const text = gumpDecodeEntities(chunk);
+    if (!text) return;
+    if (color) {
+      const span = document.createElement("span");
+      span.style.color = color; // already sanitized — see gumpSanitizeColor
+      span.appendChild(document.createTextNode(text));
+      top().el.appendChild(span);
+    } else {
+      top().el.appendChild(document.createTextNode(text));
+    }
+  };
+  const openBlock = (cls, name) => {
+    const div = document.createElement("div");
+    div.className = cls;
+    top().el.appendChild(div);
+    stack.push({ el: div, name });
+  };
+  const openInline = (cls, name) => {
+    const span = document.createElement("span");
+    span.className = cls;
+    top().el.appendChild(span);
+    stack.push({ el: span, name });
+  };
+  const closeTag = (name) => {
+    // Pop back to (and including) the nearest matching open frame; a stray
+    // close with no match (or one that would pop the implicit root) is
+    // simply ignored rather than throwing.
+    for (let i = stack.length - 1; i > 0; i--) {
+      if (stack[i].name === name) { stack.length = i; return; }
+    }
+  };
+
+  let i = 0;
+  while (i < str.length) {
+    const lt = str.indexOf("<", i);
+    if (lt === -1) { appendText(str.slice(i)); break; }
+    appendText(str.slice(i, lt));
+    const gt = str.indexOf(">", lt);
+    if (gt === -1) {
+      // Unterminated '<' — nothing left can parse as a tag; keep the rest
+      // as literal text instead of throwing or silently dropping it.
+      appendText(str.slice(lt));
+      break;
+    }
+    const body = str.slice(lt + 1, gt).trim();
+    i = gt + 1;
+    if (!body) continue;
+    const closing = body[0] === "/";
+    const rest = closing ? body.slice(1) : body;
+    const m = rest.match(/^[A-Za-z][A-Za-z0-9]*/);
+    if (!m) continue; // "<>", "</>", "<123>" — not a tag we can name; skip
+    const name = m[0].toUpperCase();
+
+    if (closing) { closeTag(name); continue; }
+
+    switch (name) {
+      case "CENTER": openBlock("gh-center", name); break;
+      case "LEFT": openBlock("gh-left", name); break;
+      case "RIGHT": openBlock("gh-right", name); break;
+      case "BR": top().el.appendChild(document.createElement("br")); break;
+      case "B": case "BOLD": openInline("gh-b", name); break;
+      case "I": case "EM": openInline("gh-i", name); break;
+      case "U": openInline("gh-u", name); break;
+      case "BIG": openInline("gh-big", name); break;
+      case "SMALL": openInline("gh-small", name); break;
+      case "BASEFONT": {
+        const cm = rest.match(/color\s*=\s*"?([^"\s>]+)"?/i);
+        color = cm ? gumpSanitizeColor(cm[1]) : null; // bare <basefont> resets
+        break;
+      }
+      // Unknown tag (<A HREF>, <P>, …): stripped, inner text kept — track it
+      // (so a later matching close pops cleanly) without adding a DOM node.
+      default: stack.push({ el: top().el, name }); break;
+    }
+  }
+  return root;
+}
+function buildGumpElement(win, e) {
+  const { serial, gumpId } = win;
+  const node = document.createElement(e.t === "button" ? "button" : "div");
+  node.className = "dlg-el";
+  node.style.left = (e.x | 0) + "px";
+  node.style.top = (e.y | 0) + "px";
+  if (e.t === "bg") {
+    node.classList.add("dlg-bg");
+    if (e.w) node.style.width = (e.w | 0) + "px";
+    if (e.h) node.style.height = (e.h | 0) + "px";
+  } else if (e.t === "text") {
+    node.classList.add("dlg-text");
+    // croppedtext (w present) gets a clip box (.dlg-text-crop: overflow
+    // hidden at exactly w px) — it never wraps, it clips. Plain text (no w,
+    // scene.rs's parse_gump_layout never emits one for it) gets no width and
+    // no clip, just runs on past its start point; both are single-line
+    // (.dlg-text: white-space: nowrap, in index.html). This same shape also
+    // carries a resolved htmlgump/xmfhtml* block (anima-net's scene.rs shapes
+    // both identically, `w` always present for those) — either way `s` may
+    // carry raw UO gump-HTML (`<CENTER>…</CENTER>`, `<basefont color=…>`,
+    // …), which renderGumpHtml turns into safe, styled DOM nodes instead of
+    // literal tag text.
+    if (e.w) { node.classList.add("dlg-text-crop"); node.style.width = (e.w | 0) + "px"; }
+    node.appendChild(renderGumpHtml(e.s || "", e.w ? (e.w | 0) : null));
+  } else if (e.t === "button") {
+    node.classList.add("dlg-btn");
+    node.type = "button";
+    // Draw the real button gump art (a small image sized to the art) so it sits in
+    // the slot the gump intended — not a wide numbered box that overlaps the text.
+    // Fall back to the reply id text if the art is missing.
+    if (e.g) {
+      node.classList.add("img");
+      const img = document.createElement("img");
+      img.className = "dlg-btn-img";
+      img.src = `gump/${e.g | 0}.png`;
+      img.alt = "";
+      img.onerror = () => { img.remove(); node.classList.remove("img"); node.textContent = (e.id | 0) || "?"; };
+      node.appendChild(img);
+    } else {
+      node.textContent = (e.id | 0) || "?";
+    }
+    // pageflag 0 = local page-jump (switch to page `param`, never touches the
+    // network); pageflag 1 (or absent, for callers that never set it) = a real
+    // reply button that sends 0xB1 GumpResponse with this element's reply id.
+    if ((e.pageflag | 0) === 0) {
+      node.title = "page " + (e.param | 0);
+      node.addEventListener("click", () => { win.page = e.param | 0; applyGumpPage(win); });
+    } else {
+      node.title = "reply " + (e.id | 0);
+      node.addEventListener("click", () => submitGump(serial, gumpId, e.id | 0));
+    }
+  } else if (e.t === "check" || e.t === "radio") {
+    const input = document.createElement("input");
+    input.type = e.t === "check" ? "checkbox" : "radio";
+    input.dataset.swid = (e.id | 0);
+    if (e.on) input.checked = true;
+    node.appendChild(input);
+  } else if (e.t === "entry") {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "dlg-entry";
+    input.dataset.entryid = (e.id | 0);
+    input.value = e.s || "";
+    if (e.w) input.style.width = (e.w | 0) + "px";
+    node.appendChild(input);
+  }
+  return node;
+}
+// Collect every checked switch + text-entry value in this gump and send the reply.
+function submitGump(serial, gumpId, button) {
+  const win = dialogWindow("gumps", serial >>> 0);
+  let cmd = `gump:${serial}:${gumpId}:${button}`;
+  if (win) {
+    const switches = [...win.el.querySelectorAll("input[data-swid]")]
+      .filter((i) => i.checked).map((i) => i.dataset.swid);
+    if (switches.length) cmd += ":sw=" + switches.join(",");
+    // Text entries: skip commas/colons/equals which would break the delimited form.
+    const entries = [...win.el.querySelectorAll("input[data-entryid]")]
+      .map((i) => `${i.dataset.entryid}=${(i.value || "").replace(/[,:=]/g, " ")}`);
+    if (entries.length) cmd += ":e=" + entries.join(",");
+  }
+  sendInput(cmd);
+  closeGump(serial);
+}
+function closeGump(serial) {
+  dismissDialog("gumps", serial >>> 0);
+}
+
+// ── book reader (0x93/0xD4 header + 0x66 pages) ────────────────────────────
+// scene.book = { serial, title, author, writable, pageCount, pages:[[line,…],…] }
+// | null. A dark gump opens when a book appears; if its pages are still empty we
+// auto-request them (outgoing 0x66 via `bookreq`). Read-only — page editing for a
+// writable book is not implemented (noted as a limitation). ✕ closes the reader.
+let bookWin = null;        // the live reader element (null = closed)
+let bookSerial = 0;        // serial of the book being shown
+let bookPage = 0;          // current page index (0-based)
+let bookRequested = 0;     // serial we've already sent a page request for
+function closeBook() {
+  if (bookSerial) dismissDialog("book", bookSerial); // stays closed until a NEW book
+}
+registerDialog({
+  id: "book",
+  source: (scene) => (scene && scene.book ? [scene.book] : []),
+  key: (b) => b.serial >>> 0,
+  sig: (b) => JSON.stringify([b.title, b.author, b.writable, b.pageCount, b.pages]),
+  dismiss: "session",
+  build: (b, { key }) => {
+    bookSerial = key;
+    bookPage = 0;                       // a new book always starts at page 1
+    return { el: buildBookWindow(b) };
+  },
+  update: (win, b, { key }) => {
+    // Ask for the text once if the header arrived with empty pages.
+    const empty = !b.pages || b.pages.every((p) => !p || p.length === 0);
+    if (empty && (b.pageCount | 0) > 0 && bookRequested !== key) {
+      bookRequested = key;
+      sendInput("bookreq:" + key + ":" + (b.pageCount | 0));
+    }
+    renderBookPage(b);
+  },
+  close: (win) => {
+    win.el.remove();
+    bookWin = null; bookSerial = 0; bookRequested = 0; bookPage = 0;
+  },
+});
+
+
+function buildBookWindow(b) {
+  const el = document.createElement("div");
+  el.className = "gump-win book-win";
+  const title = document.createElement("div");
+  title.className = "gump-title";
+  const name = (b.title || "Book") + (b.author ? " · " + b.author : "");
+  const t = document.createElement("span");
+  t.textContent = name;
+  const x = document.createElement("span");
+  x.className = "gump-close"; x.textContent = "✕";
+  x.addEventListener("click", closeBook);
+  title.appendChild(t); title.appendChild(x);
+  el.appendChild(title);
+
+  const body = document.createElement("div");
+  body.className = "gump-body";
+  const text = document.createElement("div");
+  text.className = "book-text";
+  body.appendChild(text);
+  const nav = document.createElement("div");
+  nav.className = "book-nav";
+  const prev = document.createElement("button");
+  prev.type = "button"; prev.className = "book-btn"; prev.textContent = "‹ Prev";
+  const label = document.createElement("span");
+  label.className = "book-pageno";
+  const next = document.createElement("button");
+  next.type = "button"; next.className = "book-btn"; next.textContent = "Next ›";
+  prev.addEventListener("click", () => { if (bookPage > 0) { bookPage--; renderBookPage(scene && scene.book); } });
+  next.addEventListener("click", () => {
+    const bk = scene && scene.book;
+    const last = bk ? (bk.pageCount | 0) - 1 : 0;
+    if (bookPage < last) { bookPage++; renderBookPage(bk); }
+  });
+  nav.appendChild(prev); nav.appendChild(label); nav.appendChild(next);
+  body.appendChild(nav);
+  el.appendChild(body);
+  el._text = text; el._label = label; el._prev = prev; el._next = next;
+
+  makeDraggable(el, title);
+  document.body.appendChild(el);
+  bookWin = el;
+  return el;
+}
+function renderBookPage(b) {
+  if (!bookWin || !b) return;
+  const count = b.pageCount | 0;
+  if (bookPage > count - 1) bookPage = Math.max(0, count - 1);
+  const lines = (b.pages && b.pages[bookPage]) || [];
+  bookWin._text.textContent = lines.length ? lines.join("\n") : "(blank page)";
+  bookWin._label.textContent = "page " + (bookPage + 1) + " / " + Math.max(1, count);
+  bookWin._prev.disabled = bookPage <= 0;
+  bookWin._next.disabled = bookPage >= count - 1;
+}
+
+// --- vendor shop window (BUY + SELL) -------------------------------------
+// Auto-opens when scene.shop arrives (a vendor was double-clicked). BUY lists the
+// vendor's stock (its container's contItems matched to scene.shop.buy.prices by
+// index) with a qty + Buy button; SELL lists pack items the vendor will buy with a
+// qty + Sell button. ✕ closes (and suppresses reopen until the vendor window is
+// gone). Mirrors the dark gump chrome; only acts via sendInput().
+let shopWin = null;        // { el, body, sig }
+let shopSort = { key: "name", dir: 1 }; // buy-list sort: key name|price|amount, dir 1/-1
+// One vendor window at a time, keyed by the vendor whose stock it shows.
+const SHOP_KEY = "vendor";
+registerDialog({
+  id: "shop",
+  source: (scene) => (scene && scene.shop ? [scene.shop] : []),
+  key: () => SHOP_KEY,
+  // renderShop() does its own change detection off shopWin.sig, so this family
+  // only needs to know the window exists; it pushes every snapshot through.
+  dismiss: "session",
+  build: () => { openShop(); return { el: shopWin.el }; },
+  update: (win, shop) => renderShop(shop),
+  close: () => closeShop(),
+});
+function openShop() {
+  const { el } = makeWindowFrame({
+    title: "Vendor", bodyCls: "shop-body",
+    onClose: () => dismissDialog("shop", SHOP_KEY),
+  });
+  el.id = "shop-win";
+  // One delegated click handler for all Buy/Sell buttons.
+  const body = el.querySelector(".shop-body");
+  body.addEventListener("click", (e) => {
+    // sort header: click a column to sort by it (click again toggles direction)
+    const sk = e.target.closest(".shop-sortk");
+    if (sk) {
+      const k = sk.dataset.k;
+      shopSort = { key: k, dir: shopSort.key === k ? -shopSort.dir : 1 };
+      shopWin.sig = null; renderShop(scene && scene.shop);
+      return;
+    }
+    const btn = e.target.closest(".shop-btn");
+    if (!btn) return;
+    const row = btn.closest(".shop-row");
+    const qtyEl = row.querySelector(".shop-qty");
+    let qty = Math.max(1, Math.min(60000, parseInt(qtyEl.value, 10) || 1));
+    const serial = (+btn.dataset.serial) >>> 0;
+    const vendor = (+btn.dataset.vendor) >>> 0;
+    sendInput(`${btn.dataset.act}:${vendor}:${serial}x${qty}`);
+  });
+  shopWin = { el, body, sig: null };
+}
+function closeShop() {
+  if (shopWin) { shopWin.el.remove(); shopWin = null; }
+}
+function renderShop(shop) {
+  if (!shopWin) return;
+  const buy = shop.buy, sell = shop.sell;
+  // Match the vendor container's contItems to the price list by index.
+  const buyItems = buy
+    ? (scene && scene.contItems || []).filter((it) => (it.cont >>> 0) === (buy.cont >>> 0))
+    : [];
+  // Signature → only rebuild on change (preserves typed quantities; no flicker).
+  const sig = JSON.stringify({
+    sort: shopSort,
+    bv: buy ? (buy.vendor >>> 0) : 0,
+    bp: buy ? buy.prices : 0,
+    bi: buyItems.map((it) => [it.serial >>> 0, it.g, it.amount | 0, it.hue | 0]),
+    sv: sell ? (sell.vendor >>> 0) : 0,
+    si: sell ? sell.items.map((it) => [it.serial >>> 0, it.g, it.amount | 0, it.price, it.hue | 0]) : 0,
+  });
+  if (shopWin.sig === sig) return;
+  shopWin.sig = sig;
+  let h = "";
+  if (buy && buy.prices && buy.prices.length) {
+    const vendor = buy.vendor >>> 0;
+    // Pair each price to its container item by the item's X slot. ServUO's buy list
+    // (0x74) is in sorted forward order, while the container-content packet (0x3C) is
+    // written REVERSED but stamps each item with X = its 1-based position (Packets.cs
+    // VendorBuyContent). Our items live in a HashMap (arrival order lost), so neither
+    // forward nor reverse indexing is reliable — sorting by that X restores the exact
+    // 0x74 order (this is also why ClassicUO sorts the vendor container by X).
+    const pairItems = buyItems.slice().sort((a, b) => (a.x | 0) - (b.x | 0));
+    let rows = pairItems.map((it, i) => ({ it, pr: buy.prices[i] })).filter((r) => r.pr)
+      .map((r) => ({ g: r.it.g, serial: r.it.serial >>> 0, amount: r.it.amount | 0,
+        hue: r.it.hue | 0, name: r.pr.name || ("item " + r.it.g), price: r.pr.price | 0 }));
+    const k = shopSort.key, d = shopSort.dir;
+    rows.sort((a, b) => d * (k === "name" ? a.name.localeCompare(b.name) : (a[k] | 0) - (b[k] | 0)));
+    const arrow = (key) => shopSort.key === key ? (shopSort.dir > 0 ? " ▲" : " ▼") : "";
+    h += '<div class="shop-sect">Buy</div>';
+    h += '<div class="shop-sortbar">Sort: '
+      + `<span class="shop-sortk" data-k="name">Name${arrow("name")}</span>`
+      + `<span class="shop-sortk" data-k="price">Price${arrow("price")}</span>`
+      + `<span class="shop-sortk" data-k="amount">Qty${arrow("amount")}</span></div>`;
+    for (const r of rows) {
+      h += '<div class="shop-row">'
+        + `<img class="shop-icon" src="art/static/${r.g}.png${hueQuery(r.hue)}" onerror="this.style.visibility='hidden'">`
+        + `<span class="shop-name" title="${esc(r.name)}">${esc(r.name)}</span>`
+        + `<span class="shop-stock" title="vendor stock">x${r.amount || 1}</span>`
+        + `<span class="shop-price">${r.price}gp</span>`
+        + `<input class="shop-qty" type="number" min="1" max="${r.amount || 1}" value="1">`
+        + `<button class="shop-btn" data-act="buy" data-vendor="${vendor}" data-serial="${r.serial}">Buy</button>`
+        + "</div>";
+    }
+  }
+  if (sell && sell.items && sell.items.length) {
+    const vendor = sell.vendor >>> 0;
+    h += '<div class="shop-sect">Sell</div>';
+    for (const it of sell.items) {
+      const name = it.name || ("item " + it.g);
+      h += '<div class="shop-row">'
+        + `<img class="shop-icon" src="art/static/${it.g}.png${hueQuery(it.hue)}" onerror="this.style.visibility='hidden'">`
+        + `<span class="shop-name" title="${esc(name)}">${esc(name)} (x${it.amount | 0})</span>`
+        + `<span class="shop-price">${it.price}gp</span>`
+        + `<input class="shop-qty" type="number" min="1" max="${it.amount | 0}" value="${it.amount | 0}">`
+        + `<button class="shop-btn" data-act="sell" data-vendor="${vendor}" data-serial="${it.serial >>> 0}">Sell</button>`
+        + "</div>";
+    }
+  }
+  if (!h) h = '<div class="cont-empty">(vendor has nothing)</div>';
+  shopWin.body.innerHTML = h;
+}
+// Minimal HTML-escape for vendor item names (server-supplied strings).
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+

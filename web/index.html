@@ -1123,8 +1123,27 @@
     </div>
     <script src="vendor/pixi.min.js"></script>
     <!-- Dialog window lifecycle (registerDialog/syncDialogs). Must load before
-         main.js, which declares its dialog families at evaluation time. -->
+         js/*, which declares its dialog families at evaluation time. -->
     <script src="dialogs.js"></script>
-    <script src="main.js"></script>
+    <!-- The client, split out of a single 9.7k-line main.js. These are classic
+         scripts, NOT modules: they share one global scope exactly as the single
+         file did, so the split changed no binding. That also means the ORDER
+         BELOW IS LOAD-BEARING — it is the original file's top-to-bottom order,
+         and top-level statements still run in it. Adding a file means adding a
+         tag here; renaming one without renaming the tag silently loses it. -->
+    <script src="js/00-state.js"></script>
+    <script src="js/01-audio.js"></script>
+    <script src="js/02-textures.js"></script>
+    <script src="js/03-world.js"></script>
+    <script src="js/04-boot.js"></script>
+    <script src="js/05-poll.js"></script>
+    <script src="js/06-movement.js"></script>
+    <script src="js/07-hud.js"></script>
+    <script src="js/08-overlays.js"></script>
+    <script src="js/09-gumps.js"></script>
+    <script src="js/10-housing.js"></script>
+    <script src="js/11-dragdrop.js"></script>
+    <script src="js/12-input.js"></script>
+    <script src="js/13-macros.js"></script>
   </body>
 </html>

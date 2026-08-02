@@ -3,7 +3,7 @@
 //! macro call runs at compile time but — on stable Rust — has no way to
 //! register its own extra dependency paths with cargo, so cargo has no idea
 //! the embedded binary depends on anything under `web/`: editing e.g.
-//! `web/main.js` doesn't trigger a rebuild of this crate, and the embedded
+//! a file under `web/js/` doesn't trigger a rebuild of this crate, and the embedded
 //! copy (what `anima-desktop` actually serves) silently goes stale relative
 //! to disk. Emitting `rerun-if-changed` ourselves fixes that; cargo watches
 //! a directory recursively, so any add/edit/remove under `web/` invalidates
