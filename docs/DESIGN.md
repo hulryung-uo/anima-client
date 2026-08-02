@@ -336,9 +336,18 @@ The driver is the only code that knows about sockets — write it once for nativ
    mobtypes.txt), art, gump art, hues, sound, cliloc, texmap, radar colors, mounts.
 8. ✅ Pathfinding (`path/`): A* + `Terrain` trait, Z-aware, diagonal-safe.
 9. ✅ Observation/Action contract (`agent.rs`) + `Session::apply_action` / `navigate_to`.
-   `agent.rs`'s `Action` enum now has 46 variants; `anima-contract-json` mirrors the
+   `agent.rs`'s `Action` enum now has 48 variants; `anima-contract-json` mirrors the
    full `Observation`/`Action` surface as versioned JSON for the out-of-process
    Python brain (`anima2`), table-tested for every variant.
+   **`Observation.terrain`** (schema v17) is the one field that does not come from
+   a packet: local walkability (walkable / standing Z / the serial of a closed door
+   in the way), so a brain can tell a wall from open ground rather than delegating
+   every route to the driver's pathfinder. The core still reads no map files —
+   `World::observe` leaves it `None`, and a driver holding `MapData` fills it via
+   `agent::survey_terrain` over the existing `path::Terrain` trait
+   (`Session::observation_with_terrain`). That keeps D3 intact: perception the core
+   *can* derive from packets stays in the core; perception that needs assets is
+   injected by whoever owns the assets.
 
 **Remaining compatibility work:** tracked against ClassicUO's handler registry in
 [`CLASSICUO_GAPS.md`](CLASSICUO_GAPS.md). Fastwalk is consumed but most shards
@@ -483,7 +492,20 @@ cargo build             # build workspace
 cargo test --workspace  # ignored tests require local real-data files
 cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --open        # browse the core API docs
+scripts/check.sh        # every gate CI runs, in CI's order (add --skip-desktop to skip Tauri)
 ```
+
+**The toolchain pin is load-bearing.** `rustfmt`'s and `clippy`'s output both
+change between releases, so a local toolchain that isn't the pinned one
+disagrees with CI *in both directions* — and only rustup's `cargo`/`rustc`
+shims read `rust-toolchain.toml` at all; a Homebrew/distro `cargo` ignores it
+and silently uses whatever it shipped with. `scripts/check.sh` compares
+`rustc --version` against the pin and refuses to run on a mismatch rather than
+report a verdict CI won't share. (Observed: on Homebrew rust 1.97.1 the pinned
+1.96.1 gates invert — `cargo fmt --check` reports 30+ diffs and `clippy -D
+warnings` fails, on a tree CI calls clean. Do **not** "fix" that by
+reformatting; 1.97's rustfmt re-indents standalone comments that follow a
+trailing-comment line onto column 80, which is strictly worse. Install rustup.)
 
 - **macOS / Apple Silicon note:** the core is pure logic, no native graphics deps, so no arm64 friction (unlike ClassicUO's SDL/FNA). Friction only appears at the renderer/Tauri stage — prefer arm64-native deps, WebGL2 fallback for WKWebView WebGPU gaps.
 - **Standalone desktop app:** `cargo run -p anima-desktop` (Tauri v2, no npm) — runs the `play` server in-process on a loopback port kept stable across launches (first free of `8190..=8199`, remembered in the desktop config: `localStorage` is keyed by origin, so an ephemeral port silently reset every renderer preference each run) and opens a native window at it; `crates/anima-desktop/README.md` covers `.app`/`.dmg` bundling.

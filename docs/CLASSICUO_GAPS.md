@@ -4,6 +4,11 @@ Working inventory for bringing `anima-client` toward ClassicUO feature coverage.
 A feature counts as complete only when its packet/state, native driver contract,
 scene/agent exposure, and user-facing behavior (where applicable) all exist.
 
+Closed since the audit (2026-08-02): the five Tier 1 rows marked **CLOSED**
+below (speech modes, stat locks, auto-walk speed tiers, shard list + relay
+address, login/character rejection reasons) and the Tier 4 terrain-perception
+row — the one the audit called out as cutting against the project's own thesis.
+
 ## Audit baseline
 
 - Audited: **2026-07-30** (supersedes the 2026-07-22 pass; 60 commits landed between
@@ -182,14 +187,14 @@ The receive side is generally complete; there is no way to *act*.
 
 | Gap | Where it stands | Effort |
 |---|---|---|
-| **Speech modes** (whisper / yell / emote / guild / alliance) | `build_say`/`build_unicode_say` already take `msg_type`, and the receive side styles all types — but the only caller (`anima-net/src/lib.rs:533`) hardcodes 0, and no Action/command/prefix parser exists | S |
-| **Stat locks** (0xBF/0x1A) | locks are *decoded* into `PlayerStats::{str,dex,int}_lock`; no builder, Action or UI. The skill-lock twin is complete end-to-end — copy it | S |
+| ~~**Speech modes** (whisper / yell / emote / guild / alliance)~~ — **CLOSED** | `Action::Say` now carries a `SpeechMode` (`agent.rs`), the driver writes its `MessageType` byte, `play_server` gained `whisper:`/`yell:`/`emote:`/`guild:`/`alliance:` commands, and the chat bar routes `/w`, `/y`, `/e`, `/g`, `/a` prefixes. JSON `Say.mode` is optional, so pre-mode brains are unaffected | S |
+| ~~**Stat locks** (0xBF/0x1A)~~ — **CLOSED** | `build_stat_lock` + `Action::StatLock` + `statlock:<stat>:<lock>`, with the same optimistic local update the skill-lock twin does | S |
 | **Armed weapon ability state** (0xBF/0x21 clear, 0xBF/0x25 toggle) | send works, but the server's clear/toggle feedback is unhandled, so the bar's armed highlight goes stale after every use | S |
 | Pre-AOS stun / disarm (0xBF/0x09, 0x0A) | absent | S |
 | Targeted use (0xBF/0x2C) — bandage self/target in one packet | absent | S |
-| **Auto-walk always runs at unmounted-walk speed** | `movement.rs::step_delay_ms` has all four tiers (100/200/200/400); `ROUTE_STEP` (`anima-net/src/lib.rs:123`) is a hardcoded 400 ms and never consults it | S |
-| **Shard list** | 0xA8 is never parsed — only server index 0 can be selected; 0x8C's relay IP/port is discarded so the second connection returns to the login endpoint | M |
-| **Login/character rejection reasons** | 0x53 PopupMessage / 0x82 / 0xFD are framed then dropped, so a refusal is silent | S |
+| ~~**Auto-walk always runs at unmounted-walk speed**~~ — **CLOSED** | new `movement::walk_pacing(world, want_run)` returns `(run, ms)` from live state — ClassicUO `PlayerMobile.Walk`'s rules, including `SpeedMode >= CantRun`, spent stamina (ghosts exempt), and `FastUnmount` taking the mounted tier without a mount. Both auto-walkers (`Route::step_delay`, `play_server`'s loop) consult it per tick and now run | S |
+| ~~**Shard list**~~ — **CLOSED** | `parse_server_list` (0xA8) + `LoginMachine::servers()`; `cfg.server_index` names the shard's *own* index and an unlisted one fails with the shard names instead of hanging. 0x8C now yields a `GameServerAddress`, which the native driver dials first (5s timeout) before falling back to the login endpoint — ClassicUO's `IgnoreRelayIp`/`ip == 0` case, available as `Endpoint::ignore_relay_ip`. **Watch the byte order:** 0xA8's address is reversed, 0x8C's is not | M |
+| ~~**Login/character rejection reasons**~~ — **CLOSED** | 0x82 gained `account_denied_text`, 0x53 became `LoginError::CharacterLoginRejected` with `character_login_rejected_text`, and 0xFD's queue window is stored and quoted by 0x53 codes 13/14. `LoginError` now implements `Display`, so the browser login page and CLI show the server's stated reason instead of a Debug dump | S |
 | Book authoring (title/author + page text) | 0x93/0xD4 header edit and page write builders exist as round-trip stubs; no UI drives them | M |
 | Map pin editing (0x56) | read-only | S |
 | Boat helm control (0xBF/0x33) | absent | M |
@@ -234,13 +239,23 @@ projectile rotation; StaticFilters (tree→stumps, hide vegetation).
 
 This is the one that cuts against the project's own thesis.
 
-- **Brains have no terrain perception.** `Observation`
-  (`crates/anima-core/src/agent.rs:134`) carries player, mobiles, items, journal,
-  target, skills, gumps, prompt, trades, buffs, shops, popup, menus and hue pickers —
-  and no land, statics or walkability. The browser receives full per-tile terrain from
-  the same `World`. `WanderBrain` moves only because `Action::WalkTo` is pathfound by
-  the *driver* against a server-side `MapData`; the brain itself cannot tell a wall
-  from open ground, plan around water, or find a door. **[verified]** Effort: L.
+- ~~**Brains have no terrain perception.**~~ — **CLOSED.** `Observation.terrain` is
+  an optional `TerrainView`: a square walkability window (`walkable`, standing `z`,
+  and the serial of a closed door that would have to be opened first) filled by
+  `agent::survey_terrain` over the existing `path::Terrain` trait. The core still
+  reads no map files — `World::observe` leaves it `None` and a driver holding
+  `MapData` fills it (`Session::observation_with_terrain`, surveyed through the same
+  `scene::MapTerrain` the auto-walk route uses, so brain and driver cannot disagree
+  about what is walkable). Wired through the JSON contract (schema **v17**; per-tile
+  data packed as parallel `walk` string + `z` array + sparse `doors`, since this is
+  the largest field in an observation and is re-sent every poll), the NDJSON bridge
+  (`{"cmd":"observe","terrain_radius":N}`), and both agent runners. `WanderBrain`
+  now turns before hitting a wall it can see and opens a door instead of walking
+  into it, with tests for both — and, with no window supplied, behaves exactly as
+  it did before.
+  **Known limit, by design:** every tile is judged as a step from the player's
+  current Z, so the far edge of the window is approximate on sharply sloped
+  ground; exact multi-step reachability still means `find_path`.
 - Cliloc-localized messages reach brains as an unresolved id plus raw args, so a brain
   cannot read most system messages.
 - 0xCC ClilocMessageAffix drops the affix-flags byte and concatenates the affix into
