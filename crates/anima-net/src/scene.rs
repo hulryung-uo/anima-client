@@ -283,6 +283,7 @@ fn multi_blocker_at(
 /// rather than re-fetched so a caller that already ran
 /// [`dynamic_statics_at`] (as [`explain_tile_walkable`] does, for its surface
 /// fold) never scans `World::items` twice for the same tile.
+#[allow(clippy::too_many_arguments)] // tile coords + the caller's pre-fetched fold
 fn blocking_item_at(
     world: &World,
     map: &mut MapData,
@@ -1622,7 +1623,7 @@ fn gumps_json(world: &World, cliloc: Option<&Cliloc>) -> String {
             })
         })
         .collect();
-    serde_json::to_string(&gumps).unwrap_or_else(|_| "[]".into())
+    json_array(&gumps)
 }
 
 /// Build the `popup` object for the scene: the open context menu (0xBF/0x14), or
@@ -2428,6 +2429,122 @@ fn emit_multi_component(
     if lights.len() < light_cap && map.item_is_light(graphic) {
         lights.push(json!({ "x": x, "y": y, "z": cz, "r": 3 }));
     }
+}
+
+/// Serialize a scene array, falling back to `[]` rather than failing the whole
+/// frame. Every one of these fields is either replayable next poll or re-sent
+/// every poll, so a frame the renderer can still parse beats no frame at all.
+fn json_array(v: &[Value]) -> String {
+    serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
+}
+
+/// [`json_array`] for the fields this file builds as a finished array `Value`
+/// rather than a `Vec<Value>`. (Two helpers rather than one generic one: naming
+/// the bound would mean depending on `serde` directly, which nothing else here
+/// needs.)
+fn json_array_value(v: &Value) -> String {
+    serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
+}
+
+// ---------------------------------------------------------------------------
+// Replay feeds.
+//
+// Each of these is a *seq-stamped event log*, not state: the renderer keeps the
+// highest `seq` it has acted on and plays only what is newer, so the same
+// entries reappear across polls until they age out of `World`'s capped buffer.
+// That is why they are `World`-only (no map/art/session), and why dropping one
+// frame is harmless.
+// ---------------------------------------------------------------------------
+
+/// Sound events (0x54): `id` at world `(x, y)` for positional panning.
+fn sounds_json(world: &World) -> Vec<Value> {
+    world
+        .recent_sounds
+        .iter()
+        .map(|&(seq, id, x, y)| json!({ "seq": seq, "id": id, "x": x, "y": y }))
+        .collect()
+}
+
+/// Character-animation events (0x6E): play group `act` on `serial` once
+/// (combat swings, bows, get-hit).
+fn anims_json(world: &World) -> Vec<Value> {
+    world
+        .recent_anims
+        .iter()
+        .map(|&(seq, serial, act, frames, fwd, delay)| {
+            json!({ "seq": seq, "serial": serial, "act": act, "frames": frames, "fwd": fwd, "delay": delay })
+        })
+        .collect()
+}
+
+/// *Typed* animation events (0xE2): `serial` was told to play `AnimationType`
+/// `typ`'s `act` (an emote/gesture/alert/…), with `mode` (the wire "delay"
+/// byte) available for the client to pick a cosmetic variant. Unlike 0x6E's
+/// `act`, `typ`/`act` here are NOT a raw animation group — the client converts
+/// them per body (ClassicUO `GetObjectNewAnimation`), since only it knows each
+/// body's animation-group layout.
+fn typed_anims_json(world: &World) -> Vec<Value> {
+    world
+        .recent_typed_anims
+        .iter()
+        .map(|&(seq, serial, typ, act, mode)| {
+            json!({ "seq": seq, "serial": serial, "typ": typ, "act": act, "mode": mode })
+        })
+        .collect()
+}
+
+/// Damage events (0x0B): `serial` took `amt` HP. The client floats a number
+/// over the target for each `seq` newer than the last it showed.
+fn damage_json(world: &World) -> Vec<Value> {
+    world
+        .recent_damage
+        .iter()
+        .map(|&(seq, serial, amt)| json!({ "seq": seq, "serial": serial, "amt": amt }))
+        .collect()
+}
+
+/// Graphical effects (0x70/0xC0/0xC7): spell bolts, hit sparkles, explosions,
+/// fields. The ART tile-id animation sequence + per-frame interval are resolved
+/// here from `animdata.mul` so the client just cycles `frames`.
+fn effects_json(world: &World, animdata: Option<&AnimData>) -> Vec<Value> {
+    world
+        .recent_effects
+        .iter()
+        .map(|e| {
+            let (frames, interval) = match animdata {
+                Some(ad) => (ad.frame_sequence(e.graphic), ad.frames(e.graphic).1),
+                None => (vec![e.graphic], 0u8),
+            };
+            json!({
+                "seq": e.seq, "kind": e.kind, "src": e.src_serial, "tgt": e.tgt_serial,
+                "sx": e.sx, "sy": e.sy, "sz": e.sz, "tx": e.tx, "ty": e.ty, "tz": e.tz,
+                "g": e.graphic, "hue": e.hue, "speed": e.speed, "dur": e.duration,
+                "frames": frames, "interval": interval
+            })
+        })
+        .collect()
+}
+
+/// Active buffs/debuffs (0xDF): icon (the upsert key), short name, duration in
+/// seconds.
+fn buffs_json(world: &World) -> Vec<Value> {
+    world
+        .buffs
+        .iter()
+        .map(|b| json!({ "icon": b.icon, "name": b.name, "dur": b.dur }))
+        .collect()
+}
+
+/// The player's skills (0x3A), sorted by id. Values stay in tenths (wire
+/// units): 500 == 50.0, and the client divides by 10 for display.
+/// `lock`: 0 = up, 1 = down, 2 = locked.
+fn skills_json(world: &World) -> Vec<Value> {
+    let mut skills: Vec<&anima_core::world::Skill> = world.skills.values().collect();
+    skills.sort_by_key(|sk| sk.id);
+    skills
+        .iter()
+        .map(|sk| json!({ "id": sk.id, "v": sk.value, "b": sk.base, "c": sk.cap, "lock": sk.lock }))
+        .collect()
 }
 
 /// Serialize the current world + a map window (walkability/Z + real terrain
@@ -3311,72 +3428,11 @@ pub fn build_scene(
     });
     merge_obj(&mut player, hidden_field(p.hidden));
     merge_obj(&mut player, poisoned_field(p.poisoned));
-    // Recent sound events (the client plays only seqs newer than its last) and the
-    // current background music id. Both are read-only views of world audio state.
-    let sounds: Vec<Value> = s
-        .world
-        .recent_sounds
-        .iter()
-        .map(|&(seq, id, x, y)| json!({ "seq": seq, "id": id, "x": x, "y": y }))
-        .collect();
-    let sounds = serde_json::to_string(&sounds).unwrap_or_else(|_| "[]".into());
-    // Recent character-animation events (0x6E): play group `act` on `serial` once
-    // (combat swings, bows, get-hit). The client plays each `seq` newer than its last.
-    let anims: Vec<Value> = s
-        .world
-        .recent_anims
-        .iter()
-        .map(|&(seq, serial, act, frames, fwd, delay)| {
-            json!({ "seq": seq, "serial": serial, "act": act, "frames": frames, "fwd": fwd, "delay": delay })
-        })
-        .collect();
-    let anims = serde_json::to_string(&anims).unwrap_or_else(|_| "[]".into());
-    // Recent *typed* animation events (0xE2): `serial` was told to play
-    // `AnimationType` `typ`'s `act` (an emote/gesture/alert/…), with `mode` (the
-    // wire "delay" byte) available for the client to pick a cosmetic variant. Unlike
-    // 0x6E's `act`, `typ`/`act` here are NOT a raw animation group — the client
-    // converts them per body (ClassicUO `GetObjectNewAnimation`), since only it
-    // knows each body's animation-group layout.
-    let tanims: Vec<Value> = s
-        .world
-        .recent_typed_anims
-        .iter()
-        .map(|&(seq, serial, typ, act, mode)| {
-            json!({ "seq": seq, "serial": serial, "typ": typ, "act": act, "mode": mode })
-        })
-        .collect();
-    let tanims = serde_json::to_string(&tanims).unwrap_or_else(|_| "[]".into());
-    // Recent damage events (0x0B): `serial` took `amt` HP. The client floats a
-    // number over the target for each `seq` newer than the last it showed.
-    let damage: Vec<Value> = s
-        .world
-        .recent_damage
-        .iter()
-        .map(|&(seq, serial, amt)| json!({ "seq": seq, "serial": serial, "amt": amt }))
-        .collect();
-    let damage = serde_json::to_string(&damage).unwrap_or_else(|_| "[]".into());
-    // Recent graphical effects (0x70/0xC0/0xC7): spell bolts, hit sparkles,
-    // explosions, fields. The client spawns a visual for each `seq` newer than the
-    // last it saw. We resolve the ART tile-id animation sequence + per-frame
-    // interval server-side from animdata.mul so the client just cycles `frames`.
-    let effects: Vec<Value> = s
-        .world
-        .recent_effects
-        .iter()
-        .map(|e| {
-            let (frames, interval) = match animdata {
-                Some(ad) => (ad.frame_sequence(e.graphic), ad.frames(e.graphic).1),
-                None => (vec![e.graphic], 0u8),
-            };
-            json!({
-                "seq": e.seq, "kind": e.kind, "src": e.src_serial, "tgt": e.tgt_serial,
-                "sx": e.sx, "sy": e.sy, "sz": e.sz, "tx": e.tx, "ty": e.ty, "tz": e.tz,
-                "g": e.graphic, "hue": e.hue, "speed": e.speed, "dur": e.duration,
-                "frames": frames, "interval": interval
-            })
-        })
-        .collect();
-    let effects = serde_json::to_string(&effects).unwrap_or_else(|_| "[]".into());
+    let sounds = json_array(&sounds_json(&s.world));
+    let anims = json_array(&anims_json(&s.world));
+    let tanims = json_array(&typed_anims_json(&s.world));
+    let damage = json_array(&damage_json(&s.world));
+    let effects = json_array(&effects_json(&s.world, animdata));
     let music = match s.world.current_music {
         Some(id) => id.to_string(),
         None => "null".to_string(),
@@ -3389,53 +3445,33 @@ pub fn build_scene(
     // Current season (0xBC): the renderer may tint the scene per season. We do not
     // remap tree/foliage graphics (a much larger change).
     let season = s.world.season;
-    // Active buffs/debuffs (0xDF): icon (upsert key), short name, duration secs.
-    let buffs: Vec<Value> = s
-        .world
-        .buffs
-        .iter()
-        .map(|b| json!({ "icon": b.icon, "name": b.name, "dur": b.dur }))
-        .collect();
-    let buffs = serde_json::to_string(&buffs).unwrap_or_else(|_| "[]".into());
-    // The player's skills (0x3A), sorted by id. Values stay in tenths (wire units):
-    // 500 == 50.0; the client divides by 10 for display. `lock`: 0=up,1=down,2=locked.
-    let mut skills: Vec<&anima_core::world::Skill> = s.world.skills.values().collect();
-    skills.sort_by_key(|sk| sk.id);
-    let skills: Vec<Value> = skills
-        .iter()
-        .map(|sk| json!({ "id": sk.id, "v": sk.value, "b": sk.base, "c": sk.cap, "lock": sk.lock }))
-        .collect();
-    let skills = serde_json::to_string(&skills).unwrap_or_else(|_| "[]".into());
-    let lights = serde_json::to_string(&lights).unwrap_or_else(|_| "[]".into());
-    let mobiles = serde_json::to_string(&mobiles).unwrap_or_else(|_| "[]".into());
-    let items = serde_json::to_string(&items).unwrap_or_else(|_| "[]".into());
-    let cont_items = serde_json::to_string(&cont_items).unwrap_or_else(|_| "[]".into());
+    let buffs = json_array(&buffs_json(&s.world));
+    let skills = json_array(&skills_json(&s.world));
+    let lights = json_array(&lights);
+    let mobiles = json_array(&mobiles);
+    let items = json_array(&items);
+    let cont_items = json_array(&cont_items);
     let target = serde_json::to_string(&target).unwrap_or_else(|_| "{}".into());
-    let dbg = serde_json::to_string(&dbg).unwrap_or_else(|_| "[]".into());
-    let journal = serde_json::to_string(journal).unwrap_or_else(|_| "[]".into());
+    let dbg = json_array(&dbg);
+    let journal = json_array(journal);
     // Open server gumps/dialogs (0xB0/0xDD), each parsed into positioned elements.
     let gumps = gumps_json(&s.world, cliloc);
     // The open right-click context menu (0xBF/0x14), with cliloc labels resolved.
     let popup =
         serde_json::to_string(&popup_json(&s.world, cliloc)).unwrap_or_else(|_| "null".into());
     // Legacy item/question menus (0x7C), potentially several at once.
-    let legacy_menus =
-        serde_json::to_string(&legacy_menus_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    let legacy_menus = json_array_value(&legacy_menus_json(&s.world));
     // Server dye hue pickers (0x95), potentially several callback serials.
-    let hue_pickers =
-        serde_json::to_string(&hue_pickers_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    let hue_pickers = json_array_value(&hue_pickers_json(&s.world));
     // Concurrent 0xA6 Tip/Notice windows. Only kind "tip" has prev/next.
-    let tips = serde_json::to_string(&tips_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    let tips = json_array_value(&tips_json(&s.world));
     // Concurrent modal 0xAB text-entry dialogs, keyed in the browser by seq.
-    let text_entry_dialogs =
-        serde_json::to_string(&text_entry_dialogs_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    let text_entry_dialogs = json_array_value(&text_entry_dialogs_json(&s.world));
     // Persistent 0xB8 character profile windows, keyed by exact response seq.
-    let profiles =
-        serde_json::to_string(&character_profiles_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    let profiles = json_array_value(&character_profiles_json(&s.world));
     let logout_ack =
         serde_json::to_string(&logout_ack_json(&s.world)).unwrap_or_else(|_| "null".into());
-    let boat_moves =
-        serde_json::to_string(&boat_movements_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    let boat_moves = json_array_value(&boat_movements_json(&s.world));
     // The open book (0x93/0xD4 + 0x66), or null.
     let book = serde_json::to_string(&book_json(&s.world)).unwrap_or_else(|_| "null".into());
     // Known spellbook contents (0xBF/0x1B), one entry per book we've been told
@@ -3458,7 +3494,7 @@ pub fn build_scene(
             })
         })
         .collect();
-    let spellbooks = serde_json::to_string(&spellbooks).unwrap_or_else(|_| "[]".into());
+    let spellbooks = json_array(&spellbooks);
     // Object Property Lists / tooltips (0xD6), resolved to display lines, capped.
     let opl = serde_json::to_string(&opl_json(&s.world, cliloc)).unwrap_or_else(|_| "{}".into());
     // The on-screen quest arrow target tile (0xBA), or null.
@@ -3492,12 +3528,11 @@ pub fn build_scene(
         .iter()
         .map(|&(seq, reason)| json!({ "seq": seq, "reason": reason }))
         .collect();
-    let lift_rejects = serde_json::to_string(&lift_rejects).unwrap_or_else(|_| "[]".into());
+    let lift_rejects = json_array(&lift_rejects);
     // Item-drag completion acknowledgements (0x28 EndDraggingItem / 0x29
     // DropItemAccepted). The browser correlates these with pending placements
     // before clearing its cursor, protecting a newer lift from a delayed ack.
-    let drag_completions =
-        serde_json::to_string(&drag_completions_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    let drag_completions = json_array_value(&drag_completions_json(&s.world));
     let death_screen =
         serde_json::to_string(&death_screen_json(&s.world)).unwrap_or_else(|_| "null".into());
     // Recent server-initiated container opens (0x24 DrawContainer): a window we
@@ -3505,8 +3540,7 @@ pub fn build_scene(
     // snoop, …). The client opens a window for each `seq` newer than the last it
     // handled (reusing the same `openContainer` it uses for its own double-clicks).
     // Filtered by `container_opens_json` to real container gumpIds — see its doc.
-    let container_opens =
-        serde_json::to_string(&container_opens_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    let container_opens = json_array_value(&container_opens_json(&s.world));
     // Recent Swing events (0x2F): `attacker` just swung at `defender`. Purely
     // cosmetic — the client briefly faces the attacker toward the defender.
     let swings: Vec<Value> = s
@@ -3515,22 +3549,21 @@ pub fn build_scene(
         .iter()
         .map(|&(seq, attacker, defender)| json!({ "seq": seq, "attacker": attacker, "defender": defender }))
         .collect();
-    let swings = serde_json::to_string(&swings).unwrap_or_else(|_| "[]".into());
+    let swings = json_array(&swings);
     // The latest server-initiated paperdoll open/refresh (0x88), or null. See
     // `paperdoll_json`'s doc for the `seq` "fresh request" semantics.
     let paperdoll =
         serde_json::to_string(&paperdoll_json(&s.world)).unwrap_or_else(|_| "null".into());
     // Validated 0xA5 external-page requests. The browser seq-gates these and
     // requires an explicit click before opening a new tab.
-    let open_urls =
-        serde_json::to_string(&open_urls_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    let open_urls = json_array_value(&open_urls_json(&s.world));
     // Current facet/map index (0xBF/0x08 MapChange); see `World::map_index`'s doc
     // for what a real per-facet `MapData` reload would additionally require.
     let facet = s.world.map_index;
     // Every open secure-trade session (0x6F), or []. See `trades_json`'s doc.
-    let trades = serde_json::to_string(&trades_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    let trades = json_array_value(&trades_json(&s.world));
     // Open treasure/decoration map windows (0x90/0xF5 + 0x56), or []. See `maps_json`'s doc.
-    let maps = serde_json::to_string(&maps_json(&s.world)).unwrap_or_else(|_| "[]".into());
+    let maps = json_array_value(&maps_json(&s.world));
     // Purely additive: omit the key entirely when nothing is pending (see
     // `placement_json`'s doc), rather than a `"placement":null`, so an idle
     // scene's JSON is unchanged from before this field existed.
@@ -5137,8 +5170,10 @@ mod tests {
         assert_eq!(v["y"], 200);
         assert_eq!(v["z"], 5);
 
-        let mut design = anima_core::world::HouseDesign::default();
-        design.revision = 7;
+        let design = anima_core::world::HouseDesign {
+            revision: 7,
+            ..Default::default()
+        };
         world.house_designs.insert(serial, design);
         let v = house_design_json(&world, None).unwrap();
         assert_eq!(v["revision"], 7, "once the 0xD8 arrives, its revision wins");
