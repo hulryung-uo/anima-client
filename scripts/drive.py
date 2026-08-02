@@ -43,7 +43,11 @@ Commands (chain multiple with `--`, executed in order, one connection):
     goto <url>                        navigate the page, wait ~1s for load
     eval <js-expression>              Runtime.evaluate, prints the JSON value
     shot <outfile.png>                full-viewport screenshot
-    key <DOM-code, e.g. KeyR>         keydown+keyup dispatched at the window
+    key <DOM-code, e.g. KeyR>         keydown+keyup — a tap, for toggles
+    hold <DOM-code> <seconds>         keydown, wait, keyup — for anything the
+                                      client only does *while* a key is down
+    keydown <DOM-code>                press and leave pressed
+    keyup <DOM-code>                  release
     click <x> <y>                     mousePressed+mouseReleased (left button)
     dblclick <x> <y>                  click, then a clickCount=2 click
     drag <x1> <y1> <x2> <y2>          mousedown, 8 interpolated moves, mouseup
@@ -59,6 +63,11 @@ Examples
 
     # Toggle the guard-zone overlay (R key) and re-screenshot:
     python3 scripts/drive.py key KeyR -- sleep 0.3 -- shot /tmp/guardlines.png
+
+    # Walk east for two seconds. `key` would NOT do this: the client walks
+    # while the key is held (the step queue commits one step per cadence
+    # tick), so a tap moves at most one tile and usually none.
+    python3 scripts/drive.py hold KeyD 2 -- sleep 1 -- eval "scene.player.x"
 
     # Read a value out of the page's live `scene` object:
     python3 scripts/drive.py eval "scene.player.x + ',' + scene.player.y"
@@ -110,20 +119,59 @@ def cmd(ws, method, params=None):
             return r
 
 
+# DOM `code` → (`key`, virtual-key code) for the keys that aren't a plain
+# letter or digit. The web client dispatches on `e.code` alone, but `e.key` and
+# `e.keyCode` are what a *focused input* (the chat bar, the macro recorder, a
+# gump's text field) reads, so a synthetic event that omits them is only half a
+# key press.
+_NAMED_KEYS = {
+    "ArrowLeft": ("ArrowLeft", 37), "ArrowUp": ("ArrowUp", 38),
+    "ArrowRight": ("ArrowRight", 39), "ArrowDown": ("ArrowDown", 40),
+    "Enter": ("Enter", 13), "NumpadEnter": ("Enter", 13),
+    "Escape": ("Escape", 27), "Space": (" ", 32), "Tab": ("Tab", 9),
+    "Backspace": ("Backspace", 8), "Delete": ("Delete", 46),
+    "Home": ("Home", 36), "End": ("End", 35),
+    "PageUp": ("PageUp", 33), "PageDown": ("PageDown", 34),
+    "ShiftLeft": ("Shift", 16), "ShiftRight": ("Shift", 16),
+    "ControlLeft": ("Control", 17), "ControlRight": ("Control", 17),
+    "AltLeft": ("Alt", 18), "AltRight": ("Alt", 18),
+    "Minus": ("-", 189), "Equal": ("=", 187),
+}
+
+
+def _key_fields(code):
+    """`(key, virtual-key code, text)` for a DOM `code`. `text` is empty for
+    keys that produce no character — Chrome uses it to decide whether the
+    press also generates a `keypress`/input."""
+    if len(code) == 4 and code.startswith("Key"):        # KeyA … KeyZ
+        ch = code[3].lower()                             # unshifted: "d", not "D"
+        return ch, ord(ch.upper()), ch
+    if len(code) == 6 and code.startswith("Digit"):      # Digit0 … Digit9
+        return code[5], ord(code[5]), code[5]
+    if code in _NAMED_KEYS:
+        key, vk = _NAMED_KEYS[code]
+        return key, vk, key if key == " " else ""
+    if code.startswith("F") and code[1:].isdigit():      # F1 … F12
+        return code, 111 + int(code[1:]), ""
+    # Unknown code: pass it through as its own `key` and let the page decide.
+    return code, 0, ""
+
+
 def key_event(ws, code, typ):
-    # Minimal raw key event; main.js's key handlers key off `e.code`, so that's
-    # the field that matters. `key` is a best-effort single-char guess (fine
-    # for the letter-key shortcuts this is meant to drive, e.g. KeyR).
-    cmd(
-        ws,
-        "Input.dispatchKeyEvent",
-        {
-            "type": typ,
-            "code": code,
-            "key": code[-1] if code.startswith("Key") else code,
-            "windowsVirtualKeyCode": 0,
-        },
-    )
+    key, vk, text = _key_fields(code)
+    params = {
+        "type": typ,
+        "code": code,
+        "key": key,
+        "windowsVirtualKeyCode": vk,
+        "nativeVirtualKeyCode": vk,
+    }
+    # Only a keyDown carries text; sending it on keyUp makes Chrome drop the
+    # event as malformed.
+    if text and typ == "keyDown":
+        params["text"] = text
+        params["unmodifiedText"] = text
+    cmd(ws, "Input.dispatchKeyEvent", params)
 
 
 def mouse(ws, typ, x, y, button="left", click_count=1):
@@ -158,6 +206,14 @@ def run(ws, groups):
             print("shot", g[1])
         elif op == "key":
             key_event(ws, g[1], "keyDown")
+            key_event(ws, g[1], "keyUp")
+        elif op == "hold":
+            key_event(ws, g[1], "keyDown")
+            time.sleep(float(g[2]))
+            key_event(ws, g[1], "keyUp")
+        elif op == "keydown":
+            key_event(ws, g[1], "keyDown")
+        elif op == "keyup":
             key_event(ws, g[1], "keyUp")
         elif op == "click":
             x, y = int(g[1]), int(g[2])

@@ -279,9 +279,16 @@ python3 scripts/drive.py goto http://127.0.0.1:8788/ -- sleep 1.5 -- shot /tmp/w
 ```
 
 Ops (chain with `--`): `goto <url>` · `eval <js-expr>` · `shot <file.png>` ·
-`key <DOM-code>` · `click x y` · `dblclick x y` · `drag x1 y1 x2 y2` ·
-`sleep <secs>`. `CDP_PORT` env var overrides the default port (9333) if you
-run more than one Chrome instance.
+`key <DOM-code>` · `hold <DOM-code> <secs>` · `keydown`/`keyup <DOM-code>` ·
+`click x y` · `dblclick x y` · `drag x1 y1 x2 y2` · `sleep <secs>`.
+`CDP_PORT` env var overrides the default port (9333) if you run more than one
+Chrome instance.
+
+**`key` is a tap; movement needs `hold`.** The client walks *while* a
+direction key is down — the step queue commits one step per cadence tick — so
+`key KeyD` moves at most one tile and usually none, which reads exactly like
+broken input. `hold KeyD 2` walks. Verified end to end: `hold KeyD 2.5` took
+the avatar 1605→1612.
 
 **The pattern:** set up GM/movement state via curl/`scripts/gm.sh` against
 `/input` (no browser involved), *then* screenshot/read via `drive.py` against
