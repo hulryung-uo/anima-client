@@ -222,6 +222,7 @@ fn main() {
                     port: 0,
                     user: String::new(),
                     pass: String::new(),
+                    shard: 0, // the login page carries its own shard choice
                     http_port,
                     web_dir: None,
                     data_dir: data_dir.clone(),

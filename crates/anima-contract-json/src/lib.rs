@@ -69,17 +69,22 @@
 //! `TextEntryResponse` and `TextEntryClose` actions. v15: added 0xB8
 //! `character_profiles` plus `ProfileRequest`, `ProfileUpdate`, and
 //! `ProfileClose` actions. v16: added 0xD1 `logout_ack` plus the `Logout`
-//! action.)
+//! action. v17: added `terrain` — local walkability, the first field that
+//! comes from the map files rather than a packet, so a brain can finally tell
+//! a wall from open ground instead of delegating every route to the driver;
+//! `null` unless the driver surveyed it. Same version added `Say`'s optional
+//! `mode` (whisper/yell/emote/guild/alliance — absent still means plain
+//! speech) and the `StatLock` action.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 16;
+pub const SCHEMA_VERSION: u32 = 17;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
-    WaypointView,
+    SpeechMode, TerrainView, WaypointView,
 };
 use anima_core::gump_layout::{GumpElement, HtmlText};
 use anima_core::types::Position;
@@ -474,6 +479,37 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "recent_damage": recent_damage,
         "spellbooks": obs.spellbooks.iter().map(spellbook_json).collect::<Vec<_>>(),
         "map_gumps": obs.map_gumps.iter().map(map_view_json).collect::<Vec<_>>(),
+        "terrain": obs.terrain.as_ref().map(terrain_json),
+    })
+}
+
+/// A [`TerrainView`] as `{origin, radius, side, walk, z, doors}`.
+///
+/// The per-tile data goes out as **parallel flat arrays**, not an array of
+/// objects: this is by far the largest field in an observation — a radius-12
+/// window is 625 tiles — and it is re-sent on every poll. `walk` is a string of
+/// `'.'`/`'#'` (one char per tile, row-major) and `z` a flat integer array, so
+/// the common case costs roughly one byte per tile instead of a ~30-byte JSON
+/// object. `doors` is sparse (`[index, serial]` pairs), since almost every tile
+/// has none.
+fn terrain_json(view: &TerrainView) -> Value {
+    let mut walk = String::with_capacity(view.tiles.len());
+    let mut z = Vec::with_capacity(view.tiles.len());
+    let mut doors = Vec::new();
+    for (i, tile) in view.tiles.iter().enumerate() {
+        walk.push(if tile.walkable { '.' } else { '#' });
+        z.push(tile.z);
+        if let Some(serial) = tile.door {
+            doors.push(json!([i, serial]));
+        }
+    }
+    json!({
+        "origin": [view.origin.0, view.origin.1],
+        "radius": view.radius,
+        "side": view.side(),
+        "walk": walk,
+        "z": z,
+        "doors": doors,
     })
 }
 
@@ -565,7 +601,18 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
             x: req_u16("x")?,
             y: req_u16("y")?,
         }),
-        "Say" => Ok(Action::Say { text: text("text") }),
+        // `mode` is optional and defaults to plain speech, so every brain
+        // written against the pre-mode contract keeps working unchanged. An
+        // unrecognized name is an error rather than a silent downgrade —
+        // saying a guild line out loud is exactly the mistake worth catching.
+        "Say" => Ok(Action::Say {
+            text: text("text"),
+            mode: match v.get("mode").and_then(Value::as_str) {
+                None => SpeechMode::default(),
+                Some(name) => SpeechMode::from_name(name)
+                    .ok_or_else(|| format!("action Say has unknown mode '{name}'"))?,
+            },
+        }),
         "PartySay" => Ok(Action::PartySay { text: text("text") }),
         "Attack" => Ok(Action::Attack {
             serial: req_u32("serial")?,
@@ -623,6 +670,10 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         }),
         "UseAbility" => Ok(Action::UseAbility {
             ability: v.get("ability").and_then(Value::as_u64).unwrap_or(0) as u8,
+        }),
+        "StatLock" => Ok(Action::StatLock {
+            stat: v.get("stat").and_then(Value::as_u64).unwrap_or(0) as u8,
+            lock: v.get("lock").and_then(Value::as_u64).unwrap_or(0) as u8,
         }),
         "SkillLock" => Ok(Action::SkillLock {
             skill: v.get("skill").and_then(Value::as_u64).unwrap_or(0) as u16,
@@ -773,6 +824,7 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anima_core::agent::TerrainTile;
     use anima_core::world::{PromptKind, TipKind};
 
     /// Table-driven: every [`Action`] variant round-trips through
@@ -791,7 +843,21 @@ mod tests {
             ),
             (
                 json!({"type": "Say", "text": "hi"}),
-                Action::Say { text: "hi".into() },
+                Action::Say {
+                    text: "hi".into(),
+                    mode: SpeechMode::Say,
+                },
+            ),
+            (
+                json!({"type": "Say", "text": "psst", "mode": "whisper"}),
+                Action::Say {
+                    text: "psst".into(),
+                    mode: SpeechMode::Whisper,
+                },
+            ),
+            (
+                json!({"type": "StatLock", "stat": 1, "lock": 2}),
+                Action::StatLock { stat: 1, lock: 2 },
             ),
             (
                 json!({"type": "PartySay", "text": "go"}),
@@ -1144,8 +1210,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v16_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 16);
+    fn schema_v17_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 17);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,
@@ -1176,6 +1242,52 @@ mod tests {
                 "name": "Wandering Healer",
                 "distance": 17,
             }])
+        );
+    }
+
+    #[test]
+    fn terrain_serializes_compactly_and_is_null_when_unsurveyed() {
+        // The core alone never perceives ground, so the default must be null
+        // rather than an empty grid a brain could mistake for "all walls".
+        assert_eq!(
+            observation_to_json(&Observation::default())["terrain"],
+            json!(null)
+        );
+
+        let obs = Observation {
+            terrain: Some(TerrainView {
+                origin: (1000, 2000),
+                radius: 1,
+                // A 3×3: two walls, one dip, one raised tile, one door.
+                tiles: [
+                    (true, 0, None),
+                    (false, 0, None),
+                    (true, -5, None),
+                    (true, 0, None),
+                    (true, 0, Some(0x4001)),
+                    (true, 0, None),
+                    (false, 0, None),
+                    (true, 12, None),
+                    (true, 0, None),
+                ]
+                .into_iter()
+                .map(|(walkable, z, door)| TerrainTile { walkable, z, door })
+                .collect(),
+            }),
+            ..Observation::default()
+        };
+        assert_eq!(
+            observation_to_json(&obs)["terrain"],
+            json!({
+                "origin": [1000, 2000],
+                "radius": 1,
+                "side": 3,
+                // One char per tile beats ~30 bytes of JSON object per tile on
+                // a field this size that is re-sent every poll.
+                "walk": ".#....#..",
+                "z": [0, 0, -5, 0, 0, 0, 0, 12, 0],
+                "doors": [[4, 0x4001]],
+            })
         );
     }
 
@@ -1415,6 +1527,7 @@ mod tests {
             "recent_damage",
             "spellbooks",
             "map_gumps",
+            "terrain",
         ] {
             assert!(v.get(k).is_some(), "missing key {k}");
         }

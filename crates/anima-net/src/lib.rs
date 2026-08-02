@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{ErrorKind, Read, Write};
-use std::net::TcpStream;
+use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::time::{Duration, Instant};
 
 pub mod json;
@@ -18,7 +18,7 @@ pub mod scene;
 pub mod uo_dir;
 
 use anima_assets::MapData;
-use anima_core::agent::{Action, HouseDesignAction, Observation};
+use anima_core::agent::{survey_terrain, Action, HouseDesignAction, Observation};
 use anima_core::net::outgoing::{
     build_ascii_prompt_response, build_attack, build_book_page_request, build_buy,
     build_cast_spell, build_client_view_range, build_double_click, build_drop, build_equip,
@@ -31,14 +31,15 @@ use anima_core::net::outgoing::{
     build_party_accept, build_party_decline, build_party_invite, build_party_leave,
     build_party_message, build_pick_up, build_ping, build_popup_request, build_popup_select,
     build_profile_request, build_profile_update, build_prompt_response, build_say, build_sell,
-    build_single_click, build_skill_lock, build_status_request, build_target_response,
+    build_single_click, build_skill_lock, build_stat_lock, build_status_request,
+    build_target_response,
     build_text_entry_dialog_response, build_tip_request, build_trade_accept, build_trade_cancel,
     build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
 };
 use anima_core::net::{
-    apply_packet, build_client_version, CharacterChoice, CharacterPrompt, FramingError, LoginConfig,
-    LoginDirective, LoginError, LoginMachine, LoginResult, StreamDecoder, Walker,
-    CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE,
+    apply_packet, build_client_version, CharacterChoice, CharacterPrompt, FramingError,
+    walk_pacing, GameServerAddress, LoginConfig, LoginDirective, LoginError, LoginMachine,
+    LoginResult, StreamDecoder, Walker, CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE,
 };
 use anima_core::path::{find_path, find_path_near, Terrain, DEFAULT_MAX_EXPANSIONS};
 use anima_core::world::{LegacyMenuKind, PromptKind, TipKind, World};
@@ -57,6 +58,13 @@ const CLIENT_VERSION: &str = "7.0.102.3";
 pub struct Endpoint {
     pub host: String,
     pub port: u16,
+    /// Never dial the game-server address the shard advertises in `0x8C`; go
+    /// straight back to `host`/`port` for phase 2. ClassicUO's `IgnoreRelayIp`.
+    /// Off by default — [`connect_game_server`] already falls back on its own,
+    /// so this is only needed when the advertised address is not merely
+    /// unreachable but *wrong* (a live host that isn't this shard), where a
+    /// failed connect would never happen to trigger the fallback.
+    pub ignore_relay_ip: bool,
 }
 
 impl Endpoint {
@@ -64,6 +72,7 @@ impl Endpoint {
         Self {
             host: host.into(),
             port,
+            ignore_relay_ip: false,
         }
     }
 }
@@ -87,7 +96,7 @@ impl std::fmt::Display for DriverError {
         match self {
             DriverError::Io(e) => write!(f, "io error: {e}"),
             DriverError::Framing(e) => write!(f, "framing error: {e}"),
-            DriverError::Login(e) => write!(f, "login error: {e:?}"),
+            DriverError::Login(e) => write!(f, "login error: {e}"),
             DriverError::ConnectionClosed => write!(f, "connection closed by server"),
             DriverError::CharacterChoiceRequired => write!(f, "character choice required"),
             DriverError::CharacterChoiceCancelled => write!(f, "character choice cancelled"),
@@ -104,6 +113,10 @@ impl From<std::io::Error> for DriverError {
 }
 
 const CONNECT_READ_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long to wait on the game-server address a shard advertises in `0x8C`
+/// before falling back to the endpoint we logged in through. Short on purpose:
+/// see [`connect_game_server`].
+const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 // Short so the game loop ticks fast (like ClassicUO's per-frame loop): the
 // movement *pacing* gate (run 200ms / walk 400ms) is only as precise as how
 // often the loop checks it. A long read timeout stalls the loop on the socket
@@ -120,6 +133,9 @@ const DEFAULT_VIEW_RANGE: u8 = 18;
 /// [`Action::WalkTo`] step cadence, mirroring the play-server's own
 /// click-to-walk pacing (`anima-net/src/bin/play.rs`'s `AUTO_WALK_STEP_MS`):
 /// ClassicUO's unmounted-walk step is 400ms.
+/// Slowest step cadence — unmounted walking. The live cadence comes from
+/// [`walk_pacing`] per tick ([`Route::step_delay`]); this remains the floor a
+/// fresh `Route` starts from and what "already due" is measured against.
 const ROUTE_STEP: Duration = Duration::from_millis(400);
 /// Give up a route after this many issued steps (runaway guard, mirrors
 /// `play.rs`'s `AUTO_WALK_MAX_STEPS`).
@@ -206,6 +222,12 @@ struct Route {
     steps: u32,
     max_steps: u32,
     last_step: Instant,
+    /// Cadence for the next step, refreshed from [`walk_pacing`] each tick by
+    /// [`Session::advance_route`] — a mounted or running character steps two to
+    /// four times as often as [`ROUTE_STEP`]'s unmounted walk. Seeded to the
+    /// slowest tier so a `Route` driven directly (the unit tests, any caller
+    /// that doesn't refresh it) keeps the old, always-safe pacing.
+    step_delay: Duration,
     /// Whether the last *armed* (successfully sent) step was a real move (not
     /// a turn) and, if so, where we were and which tile we aimed for — lets
     /// the next `advance` detect a server deny (the tile didn't change) and
@@ -239,6 +261,7 @@ impl Route {
             // Already "due" so the very first `advance` after a `WalkTo` steps
             // immediately instead of waiting a full cadence.
             last_step: Instant::now() - ROUTE_STEP,
+            step_delay: ROUTE_STEP,
             pending_move: false,
             from: (0, 0),
             target: (0, 0),
@@ -275,7 +298,7 @@ impl Route {
         if (px as u32, py as u32) == self.goal {
             return RouteStep::Done;
         }
-        if self.last_step.elapsed() < ROUTE_STEP {
+        if self.last_step.elapsed() < self.step_delay {
             return RouteStep::Wait;
         }
         // Did the previously *armed* move land? If our tile didn't change, the
@@ -515,8 +538,40 @@ impl Session {
 
     /// Build a perception [`Observation`] for a brain (advances the journal cursor
     /// so each line is seen once).
+    ///
+    /// The result's `terrain` is `None`: the ground is not in any packet, so
+    /// only a caller holding map data can perceive it — see
+    /// [`Session::observation_with_terrain`].
     pub fn observation(&mut self) -> Observation {
         self.world.observe(&mut self.journal_cursor)
+    }
+
+    /// [`Session::observation`] plus a walkability window of `radius` tiles
+    /// around the player, so a brain can see walls, water, height and doors
+    /// instead of delegating every movement decision to this driver's
+    /// pathfinder.
+    ///
+    /// Surveyed through the same [`scene::MapTerrain`] the auto-walk route
+    /// uses, so what the brain sees and what `Action::WalkTo` will actually do
+    /// cannot disagree. Costs `(2 * radius + 1)²` walkability queries against
+    /// cached map blocks; `radius` 8–12 covers the screen, and the caller
+    /// chooses because a combat brain polling every tick wants a smaller
+    /// window than a mapper.
+    pub fn observation_with_terrain(&mut self, map: &mut MapData, radius: u8) -> Observation {
+        let mut obs = self.observation();
+        let Some(p) = self.world.player_mobile() else {
+            return obs; // not in the world yet — nothing to centre on
+        };
+        let (center, from_z) = ((p.pos.x, p.pos.y), p.pos.z);
+        let empty = HashSet::new();
+        let mut terrain = MapTerrain {
+            world: &self.world,
+            map,
+            blocked: &empty,
+            multis: None,
+        };
+        obs.terrain = Some(survey_terrain(&mut terrain, center, from_z, radius));
+        obs
     }
 
     /// Execute a high-level [`Action`] from a brain.
@@ -530,11 +585,12 @@ impl Session {
             }
             // ASCII stays on the classic 0x03 path; anything else (Korean/한글…)
             // goes out as UNICODE 0xAD so it isn't mangled to '?'.
-            Action::Say { text } => {
+            Action::Say { text, mode } => {
+                let msg_type = mode.wire();
                 if text.is_ascii() {
-                    self.send(&build_say(text, 0, 0x0034, 3))?
+                    self.send(&build_say(text, msg_type, 0x0034, 3))?
                 } else {
-                    self.send(&build_unicode_say(text, 0, 0x0034, 3))?
+                    self.send(&build_unicode_say(text, msg_type, 0x0034, 3))?
                 }
             }
             Action::PartySay { text } => self.send(&build_party_message(text))?,
@@ -652,6 +708,18 @@ impl Session {
                 // immediately (the server also echoes a 0x3A single update).
                 if let Some(s) = self.world.skills.get_mut(skill) {
                     s.lock = *lock;
+                }
+            }
+            Action::StatLock { stat, lock } => {
+                self.send(&build_stat_lock(*stat, *lock))?;
+                // Same optimistic local update as `SkillLock` above: ServUO
+                // echoes the new state in the next 0xBF/0x19, but the UI
+                // shouldn't wait a round trip to show the toggle.
+                match stat {
+                    0 => self.world.player_stats.str_lock = *lock,
+                    1 => self.world.player_stats.dex_lock = *lock,
+                    2 => self.world.player_stats.int_lock = *lock,
+                    _ => {}
                 }
             }
             Action::UseSkill { skill } => self.send(&build_use_skill(*skill))?,
@@ -855,6 +923,12 @@ impl Session {
         };
         let pos = (p.pos.x, p.pos.y, p.pos.z);
         let facing = p.direction;
+        // Auto-walk *runs*, like a player holding the mouse down — but only
+        // as fast as this character is actually allowed to move right now.
+        // Re-read every tick: mounting, dismounting, running out of stamina
+        // and a 0xBF/0x26 SpeedMode change all move this mid-route.
+        let (run, step_ms) = walk_pacing(&self.world, true);
+        route.step_delay = Duration::from_millis(step_ms);
         // Scoped so `terrain`'s borrow of `self.world` ends before the match
         // arms below need `&mut self` (e.g. `self.walk`/`self.apply_action`).
         let step = {
@@ -871,7 +945,7 @@ impl Session {
             RouteStep::Wait => self.route = Some(route),
             RouteStep::Done => {} // arrived, or no path left — drop the route
             RouteStep::Walk(dir) => {
-                let sent = self.walk(dir, false)?;
+                let sent = self.walk(dir, run)?;
                 route.step_sent(sent);
                 if route.steps <= route.max_steps {
                     self.route = Some(route);
@@ -1275,8 +1349,8 @@ fn login(
             for directive in machine.on_packet(&frame).map_err(DriverError::Login)? {
                 match directive {
                     LoginDirective::Send(bytes) => stream.write_all(&bytes)?,
-                    LoginDirective::ReconnectToGameServer { then } => {
-                        stream = connect(endpoint)?;
+                    LoginDirective::ReconnectToGameServer { address, then } => {
+                        stream = connect_game_server(endpoint, address)?;
                         decoder.switch_to_game();
                         stream.write_all(&then)?;
                     }
@@ -1342,6 +1416,48 @@ fn connect(e: &Endpoint) -> Result<TcpStream, DriverError> {
     stream.set_nodelay(true).ok();
     stream.set_read_timeout(Some(CONNECT_READ_TIMEOUT)).ok();
     Ok(stream)
+}
+
+/// Open the phase-2 (game-server) connection.
+///
+/// A shard names its own game server in `0x8C`, and on any real multi-shard
+/// login server that address is the only way to reach the shard you picked —
+/// so it is tried first. It is also frequently unreachable *from where we are*:
+/// a shard behind NAT advertises its LAN address, and a tunnelled one
+/// advertises whatever its config says rather than the tunnel. So a failure to
+/// connect is not fatal — we fall back to the endpoint the caller dialed for
+/// phase 1, which is exactly what this driver did unconditionally before, and
+/// what ClassicUO does under `IgnoreRelayIp` / `ip == 0`.
+///
+/// The advertised attempt is bounded by [`RELAY_CONNECT_TIMEOUT`] rather than
+/// the OS default: an address that black-holes SYNs would otherwise stall
+/// login for over a minute before the fallback that was always going to work.
+/// No DNS is involved (`0x8C` carries four raw bytes), so a `SocketAddrV4` is
+/// built directly.
+fn connect_game_server(
+    login: &Endpoint,
+    advertised: GameServerAddress,
+) -> Result<TcpStream, DriverError> {
+    let same_as_login = advertised.host() == login.host && advertised.port == login.port;
+    if !login.ignore_relay_ip && advertised.is_routable() && !same_as_login {
+        let addr = SocketAddrV4::new(Ipv4Addr::from(advertised.ip), advertised.port);
+        match TcpStream::connect_timeout(&addr.into(), RELAY_CONNECT_TIMEOUT) {
+            Ok(stream) => {
+                stream.set_nodelay(true).ok();
+                stream.set_read_timeout(Some(CONNECT_READ_TIMEOUT)).ok();
+                return Ok(stream);
+            }
+            Err(e) if std::env::var("ANIMA_DEBUG").is_ok() => {
+                eprintln!(
+                    "[login] shard advertised {addr}, unreachable ({e}); \
+                     falling back to {}:{}",
+                    login.host, login.port
+                );
+            }
+            Err(_) => {}
+        }
+    }
+    connect(login)
 }
 
 #[cfg(test)]

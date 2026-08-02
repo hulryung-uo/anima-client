@@ -35,6 +35,32 @@ pub fn step_delay_ms(run: bool, mounted: bool) -> u64 {
     }
 }
 
+/// What an auto-walk driver should send and how fast, from live world state:
+/// `(run, milliseconds_per_step)`.
+///
+/// A driver that hardcodes one cadence is wrong in both directions — it walks a
+/// mounted character at half the speed the server will grant, and it would
+/// out-run a server that has forbidden running (which answers with denies and a
+/// resync). Ported from ClassicUO `PlayerMobile.Walk`:
+///
+/// * running is refused when `SpeedMode >= CantRun` (0xBF/0x26) or when
+///   stamina is spent (`Stamina <= 1` while alive — a ghost always runs);
+/// * the *mounted* speed tier also applies to the `FastUnmount` speed modes,
+///   not only to an actual mount.
+///
+/// `want_run` is the caller's preference; this can only ever downgrade it.
+pub fn walk_pacing(world: &World, want_run: bool) -> (bool, u64) {
+    let speed_mode = world.player_stats.speed_mode;
+    let dead = world
+        .player_mobile()
+        .is_some_and(|m| crate::world::is_ghost_body(m.body));
+    let stamina_spent = world.player_mobile().is_some_and(|m| m.stam <= 1 && !dead);
+    // CharacterSpeedType: 0 Normal, 1 FastUnmount, 2 CantRun, 3 FastUnmountAndCantRun.
+    let run = want_run && speed_mode < 2 && !stamina_spent;
+    let fast = world.player_mounted() || speed_mode == 1 || speed_mode == 3;
+    (run, step_delay_ms(run, fast))
+}
+
 /// (dx, dy) tile delta for a direction (low 3 bits).
 pub fn direction_delta(dir: u8) -> (i32, i32) {
     match dir & 0x07 {
@@ -311,6 +337,41 @@ mod tests {
             character_list_flags: 0,
         });
         w
+    }
+
+    #[test]
+    fn walk_pacing_follows_the_four_speed_tiers() {
+        let mut w = world_at(100, 100, 0);
+        // Give the player enough stamina that the spent-stamina rule doesn't
+        // fire; a freshly-entered mobile has none.
+        w.player_mobile_mut().unwrap().stam = 50;
+
+        assert_eq!(walk_pacing(&w, false), (false, 400), "unmounted walk");
+        assert_eq!(walk_pacing(&w, true), (true, 200), "unmounted run");
+
+        // FastUnmount (1) gets the mounted tier without a mount.
+        w.player_stats.speed_mode = 1;
+        assert_eq!(walk_pacing(&w, true), (true, 100), "fast-unmount run");
+        // CantRun (2) downgrades the caller's request rather than obeying it.
+        w.player_stats.speed_mode = 2;
+        assert_eq!(
+            walk_pacing(&w, true),
+            (false, 400),
+            "server forbids running"
+        );
+        w.player_stats.speed_mode = 3;
+        assert_eq!(
+            walk_pacing(&w, true),
+            (false, 200),
+            "fast-unmount AND can't run"
+        );
+
+        // Spent stamina forces a walk, but only while alive.
+        w.player_stats.speed_mode = 0;
+        w.player_mobile_mut().unwrap().stam = 1;
+        assert_eq!(walk_pacing(&w, true), (false, 400), "out of stamina");
+        w.player_mobile_mut().unwrap().body = 0x192; // ghost
+        assert_eq!(walk_pacing(&w, true), (true, 200), "a ghost always runs");
     }
 
     #[test]

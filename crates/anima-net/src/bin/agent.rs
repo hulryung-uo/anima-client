@@ -21,6 +21,9 @@
 //!
 //! Protocol — one JSON object per line:
 //!   → `{"cmd":"observe"}`            ← `{"ok":true,"obs":{...}}`
+//!     (add `"terrain_radius":N` to widen/narrow the walkability window in
+//!     `obs.terrain`, or `0` to omit it; it is only ever filled when
+//!     `data_dir` gave us map files to read)
 //!   → `{"cmd":"act","action":{...}}` ← `{"ok":true}`
 //!   → `{"cmd":"pump","ms":400}`      ← `{"ok":true,"applied":N}`
 //!   → `{"cmd":"quit"}`               ← `{"ok":true,"bye":true}` then exit
@@ -42,6 +45,12 @@ use anima_core::net::LoginConfig;
 use anima_net::json::{action_from_json, observation_to_json, SCHEMA_VERSION};
 use anima_net::play_server::{self, PlayConfig};
 use anima_net::{Endpoint, Session};
+
+/// Default half-width of the walkability window in `observe`'s `obs.terrain`.
+/// 12 covers roughly what the renderer draws, so a brain sees the same ground a
+/// human would; 625 tiles of it costs about a kilobyte on the wire (see
+/// `terrain_json`'s packing).
+const TERRAIN_RADIUS: u8 = 12;
 use serde_json::{json, Value};
 
 fn main() {
@@ -94,6 +103,7 @@ fn main() {
                 port: 0,
                 user: String::new(),
                 pass: String::new(),
+                shard: 0, // spectator only — this config never logs in
                 http_port,
                 web_dir: None, // the copy embedded in anima-net at compile time
                 data_dir: data_dir.clone().into(),
@@ -182,7 +192,20 @@ fn handle(
         .ok_or("missing 'cmd'")?;
     match cmd {
         "observe" => {
-            let obs = session.observation();
+            // With map data loaded, the observation carries local walkability
+            // too — the brain can see walls/water/doors rather than only being
+            // able to hand `WalkTo` a destination and hope. `radius` is the
+            // caller's, since a combat brain polling every tick wants a
+            // smaller window than a mapper; the default covers the screen.
+            let radius = msg
+                .get("terrain_radius")
+                .and_then(Value::as_u64)
+                .map_or(TERRAIN_RADIUS, |r| r.min(u64::from(u8::MAX)) as u8);
+            let obs = match (map, radius) {
+                (Some(map), 1..) => session.observation_with_terrain(map, radius),
+                // No map files, or the brain explicitly asked for none.
+                _ => session.observation(),
+            };
             Ok(Some(
                 json!({ "ok": true, "obs": observation_to_json(&obs) }),
             ))

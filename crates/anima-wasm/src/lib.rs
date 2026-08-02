@@ -29,6 +29,12 @@ pub struct WasmClient {
     outbox: Vec<u8>,
     logged_in: bool,
     logout_handshake: bool,
+    /// Game-server address the shard advertised in `0x8C`, `None` when it sent
+    /// none worth dialing. The relay, not this crate, opens that socket.
+    game_server: Option<String>,
+    game_server_port: u16,
+    /// Why the login handshake failed, if it did. See [`WasmClient::login_error`].
+    login_error: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -57,7 +63,31 @@ impl WasmClient {
             outbox: initial,
             logged_in: false,
             logout_handshake: false,
+            game_server: None,
+            game_server_port: 0,
+            login_error: None,
         }
+    }
+
+    /// Why the login handshake failed — the server's own stated reason, e.g.
+    /// "the server rejected the account: incorrect name or password (code 0)".
+    /// Empty while nothing has gone wrong. A page that sees this should stop
+    /// waiting: no further packet is coming.
+    pub fn login_error(&self) -> String {
+        self.login_error.clone().unwrap_or_default()
+    }
+
+    /// The game server the shard named in `0x8C`, as `"a.b.c.d"`, once
+    /// [`WasmClient::logged_in`] is true. Empty when the shard advertised
+    /// nothing routable — the relay should then reuse the host the page
+    /// logged in through (ClassicUO's `IgnoreRelayIp` case).
+    pub fn game_server_host(&self) -> String {
+        self.game_server.clone().unwrap_or_default()
+    }
+
+    /// Port half of [`WasmClient::game_server_host`]; 0 when there is none.
+    pub fn game_server_port(&self) -> u16 {
+        self.game_server_port
     }
 
     /// True once the login handshake reconnected to the game server (JS must
@@ -77,11 +107,26 @@ impl WasmClient {
     fn handle(&mut self, frame: &[u8]) {
         // During login, drive the handshake.
         if let Some(machine) = self.login.as_mut() {
-            if let Ok(directives) = machine.on_packet(frame) {
+            let outcome = machine.on_packet(frame);
+            // A refusal (bad password, character already online, queue full…)
+            // arrives as an error on exactly one packet and nothing follows it,
+            // so dropping it here left the page waiting on a login that was
+            // already over. Record it for `login_error` instead.
+            if let Err(e) = &outcome {
+                self.login_error = Some(e.to_string());
+            }
+            if let Ok(directives) = outcome {
                 for d in directives {
                     match d {
                         LoginDirective::Send(b) => self.outbox.extend(b),
-                        LoginDirective::ReconnectToGameServer { then } => {
+                        LoginDirective::ReconnectToGameServer { address, then } => {
+                            // JS owns the socket here (a WebSocket to the
+                            // relay, §4), so the core can't dial this itself —
+                            // record it for `game_server_address` and let the
+                            // page decide, exactly as the native driver's
+                            // fallback does.
+                            self.game_server = address.is_routable().then(|| address.host());
+                            self.game_server_port = address.port;
                             self.decoder.switch_to_game();
                             self.outbox.extend(then);
                             self.logged_in = true;

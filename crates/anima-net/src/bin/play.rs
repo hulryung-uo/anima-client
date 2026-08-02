@@ -54,11 +54,21 @@ fn main() {
     // See the module doc comment: loopback by default, LAN-viewable opt-in.
     let bind_addr = std::env::var("ANIMA_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
 
+    // A login server that fronts more than one shard needs to be told which
+    // one; a single-shard ServUO ignores this. Env rather than an 8th
+    // positional arg, since the positional list is already at seven and every
+    // existing script passes them by position.
+    let shard: u16 = std::env::var("ANIMA_SHARD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
     let cfg = PlayConfig {
         host,
         port,
         user,
         pass,
+        shard,
         http_port,
         web_dir: Some(web_dir),
         data_dir,

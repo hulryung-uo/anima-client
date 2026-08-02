@@ -9688,8 +9688,21 @@ function setupInput() {
   });
 }
 // In-game chat bar (replaces window.prompt). Enter opens it; type and Enter sends;
-// Esc cancels. Prefix routes the channel: "/p <msg>" or "/party <msg>" → party,
-// otherwise a normal in-game say.
+// Esc cancels. A leading prefix routes the channel; anything else is normal
+// in-game speech.
+//
+// Each entry maps a set of typed prefixes to the `/input` command that carries
+// it. Party is its own packet (0xBF/0x06); the rest are ordinary speech with a
+// different MessageType byte, which the server routes — see
+// `anima_core::agent::SpeechMode`.
+const CHAT_PREFIXES = [
+  { keys: ["p", "party"], cmd: "party" },
+  { keys: ["w", "whisper"], cmd: "whisper" },
+  { keys: ["y", "yell", "shout"], cmd: "yell" },
+  { keys: ["e", "em", "emote", "me"], cmd: "emote" },
+  { keys: ["g", "guild"], cmd: "guild" },
+  { keys: ["a", "alliance", "ally"], cmd: "alliance" },
+];
 function openChat() {
   if (chatting) return;
   chatting = true;
@@ -9707,8 +9720,11 @@ function submitChat() {
   const bar = document.getElementById("chatbar");
   const text = bar.value.trim();
   if (text) {
-    const m = /^\/(p|party)\s+(.+)$/i.exec(text);
-    if (m) sendInput("party:" + m[2].trim());
+    const m = /^\/([a-z]+)\s+(.+)$/i.exec(text);
+    const route = m && CHAT_PREFIXES.find((p) => p.keys.includes(m[1].toLowerCase()));
+    // An unrecognized "/word" is spoken verbatim rather than swallowed — the
+    // shard may well define it as a server command (e.g. "/help").
+    if (route) sendInput(route.cmd + ":" + m[2].trim());
     else sendInput("say:" + text);
   }
   closeChat();

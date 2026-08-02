@@ -32,8 +32,10 @@ use anima_assets::{
     Anim, AnimData, Art, Cliloc, CustomHouseCatalog, Gumps, Hues, MapData, Multis, RadarCol,
     Sounds, Texmaps, TileData,
 };
-use anima_core::agent::HouseDesignAction;
-use anima_core::net::{CharacterAppearance, CharacterChoice, CharacterPrompt, LoginConfig};
+use anima_core::agent::{HouseDesignAction, SpeechMode};
+use anima_core::net::{
+    walk_pacing, CharacterAppearance, CharacterChoice, CharacterPrompt, LoginConfig,
+};
 use anima_core::path::{find_path, find_path_near};
 use anima_core::Action;
 use include_dir::{include_dir, Dir};
@@ -71,7 +73,10 @@ fn delta_dir(dx: i64, dy: i64) -> u8 {
 }
 
 /// Auto-walk (click-to-walk) tuning.
-/// Walking step cadence (ms). ClassicUO unmounted-walk is 400ms; we don't run yet.
+/// Slowest step cadence (ms) — ClassicUO's unmounted walk. The cadence actually
+/// used per step comes from `anima_core::net::walk_pacing`, which picks the
+/// right one of the four tiers from live world state; this value is only the
+/// "already due" seed, so the first step of a route never waits.
 const AUTO_WALK_STEP_MS: u64 = 400;
 /// Reject a click farther than this (Chebyshev tiles) so a distant/cross-map
 /// click fails fast instead of churning the pathfinder.
@@ -244,6 +249,10 @@ pub struct PlayConfig {
     pub port: u16,
     pub user: String,
     pub pass: String,
+    /// Shard to enter from the login server's `0xA8` list, by the shard's own
+    /// index. 0 on a single-shard server (the usual case). Only consulted for
+    /// the auto-login path — the browser login form carries its own.
+    pub shard: u16,
     /// HTTP port to serve the renderer on. `0` = OS-assigned (ephemeral) —
     /// read the real port back from [`PlayServer::port`] after [`bind`].
     pub http_port: u16,
@@ -320,6 +329,12 @@ struct LoginAttempt {
     /// `Some` means explicitly create a new character, even if other slots
     /// are occupied. `None` keeps the existing select-or-create-if-empty flow.
     create: Option<CharacterAppearance>,
+    /// Which shard from the login server's `0xA8` list to enter, by the
+    /// shard's own index. Defaults to 0 — the only value that worked before
+    /// the list was parsed, and still the right answer for the single-shard
+    /// ServUO this is usually pointed at. A wrong one now fails with the
+    /// available shards named rather than hanging.
+    shard: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -362,6 +377,7 @@ fn parse_login_attempt(body: &str) -> Result<LoginAttempt, &'static str> {
             character_slot: None,
             interactive: false,
             create: None,
+            shard: 0,
         });
     }
 
@@ -395,6 +411,13 @@ fn parse_login_attempt(body: &str) -> Result<LoginAttempt, &'static str> {
         .get("interactive")
         .and_then(|field| field.as_bool())
         .unwrap_or(false);
+    let shard = match value.get("shard") {
+        Some(field) if !field.is_null() => field
+            .as_u64()
+            .and_then(|shard| u16::try_from(shard).ok())
+            .ok_or("shard must be between 0 and 65535")?,
+        _ => 0,
+    };
 
     let create = value.get("create").filter(|field| !field.is_null());
     let create = if let Some(create) = create {
@@ -411,6 +434,7 @@ fn parse_login_attempt(body: &str) -> Result<LoginAttempt, &'static str> {
         character_slot,
         interactive,
         create,
+        shard,
     })
 }
 
@@ -909,7 +933,7 @@ impl Monitor {
         // sluggish run.
         // Periodic cost report, so "being watched is cheap" is a measured claim rather
         // than an assumption — this work sits in the brain's critical path.
-        if self.build_count % 50 == 0 {
+        if self.build_count.is_multiple_of(50) {
             eprintln!(
                 "[anima-agent] monitor frames n={} avg={:.1}ms max={:.1}ms",
                 self.build_count,
@@ -1026,10 +1050,12 @@ impl PlayServer {
                 character_slot,
                 interactive,
                 create,
+                shard,
             } = attempt;
             let mut c = LoginConfig {
                 username,
                 password,
+                server_index: shard,
                 create_new: create.is_some(),
                 character_slot: character_slot.unwrap_or(0),
                 require_character_slot: create.is_none() && character_slot.is_some(),
@@ -1146,6 +1172,7 @@ impl PlayServer {
                     character_slot: None,
                     interactive: false,
                     create: None,
+                    shard: cfg.shard,
                 }) {
                     Ok(s) => s,
                     Err(e) => {
@@ -1417,9 +1444,16 @@ impl PlayServer {
                         Some((px, py, _, _)) if (px as u32, py as u32) == (gx, gy) => {
                             auto_goal = None; // arrived
                         }
+                        // Cadence and run flag both come from live world state
+                        // (mount, stamina, 0xBF/0x26 SpeedMode), so a mounted
+                        // click-to-walk no longer crawls at unmounted-walk
+                        // speed. Recomputed per tick because all three inputs
+                        // can change mid-route.
                         Some((px, py, pz, facing))
-                            if last_step.elapsed() >= Duration::from_millis(AUTO_WALK_STEP_MS) =>
+                            if last_step.elapsed()
+                                >= Duration::from_millis(walk_pacing(&session.world, true).1) =>
                         {
+                            let auto_run = walk_pacing(&session.world, true).0;
                             // Did the previous *move* land? If our tile didn't change, the
                             // server denied that tile → blacklist it so the re-path detours.
                             if auto_pending_move && (px, py) == auto_from {
@@ -1463,7 +1497,11 @@ impl PlayServer {
                                         Some(resolved.map(|(nd, _, _)| nd).unwrap_or(want))
                                     };
                                     if let Some(sd) = send {
-                                        if session.walk(sd, false).unwrap_or(false) {
+                                        // A turn is not a step: sending it with
+                                        // the run flag would ask the server for a
+                                        // running turn we haven't earned.
+                                        let run = auto_run && facing == sd;
+                                        if session.walk(sd, run).unwrap_or(false) {
                                             auto_from = (px, py);
                                             // Same-facing = a real tile move; a facing change
                                             // is a turn (no move) and must not count as a deny.
@@ -2994,7 +3032,9 @@ fn parse_house_design_command(body: &str) -> Option<Action> {
 }
 
 /// Parse a `cmd:arg` input line into an [`Action`]. Supported:
-/// `walk:<dir>:<run>` · `run:<dir>` · `say:<text>` · `use:<serial>` ·
+/// `walk:<dir>:<run>` · `run:<dir>` · `say:<text>` (plus the same-shaped
+/// `whisper:` / `yell:` / `emote:` / `guild:` / `alliance:`, which differ only
+/// in the MessageType byte) · `statlock:<stat>:<lock>` · `use:<serial>` ·
 /// `click:<serial>` · `attack:<serial>` · `pickup:<serial>[:<amount>]` ·
 /// `drop:<serial>:<x>:<y>:<z>[:<container>]` (container default 0xFFFFFFFF =
 /// ground) · `equip:<serial>[:<layer>]` (layer 0 = derive from tiledata) ·
@@ -3046,8 +3086,12 @@ fn parse_command(body: &str) -> Option<Action> {
                 y: y.trim().parse().ok()?,
             })
         }
-        "say" => Some(Action::Say {
+        // say / whisper / yell / emote / guild / alliance — the same packet
+        // with the MessageType byte the mode implies. The receive side already
+        // styles all of them; only the send side was stuck on plain speech.
+        "say" | "whisper" | "yell" | "emote" | "guild" | "alliance" => Some(Action::Say {
             text: arg.to_string(),
+            mode: SpeechMode::from_name(cmd)?,
         }),
         "party" => Some(Action::PartySay {
             text: arg.to_string(),
@@ -3205,6 +3249,14 @@ fn parse_command(body: &str) -> Option<Action> {
             let skill = p.next()?.parse().ok()?;
             let lock = p.next()?.parse().ok()?;
             Some(Action::SkillLock { skill, lock })
+        }
+        // statlock:<stat>:<lock> — stat is 0 str / 1 dex / 2 int, lock is
+        // 0 up / 1 down / 2 locked, exactly as `skilllock` above.
+        "statlock" => {
+            let mut p = arg.split(':');
+            let stat: u8 = p.next()?.parse().ok()?;
+            let lock: u8 = p.next()?.parse().ok()?;
+            (stat <= 2 && lock <= 2).then_some(Action::StatLock { stat, lock })
         }
         // useskill:<id> — invoke an active skill (0x12 ActionRequest type 0x24).
         "useskill" => Some(Action::UseSkill {
@@ -3469,6 +3521,47 @@ mod hue_palette_tests {
     }
 
     #[test]
+    fn speech_commands_carry_their_message_type() {
+        for (cmd, mode) in [
+            ("say", SpeechMode::Say),
+            ("whisper", SpeechMode::Whisper),
+            ("yell", SpeechMode::Yell),
+            ("emote", SpeechMode::Emote),
+            ("guild", SpeechMode::Guild),
+            ("alliance", SpeechMode::Alliance),
+        ] {
+            assert_eq!(
+                parse_command(&format!("{cmd}:hello there")),
+                Some(Action::Say {
+                    text: "hello there".into(),
+                    mode,
+                }),
+                "{cmd}"
+            );
+        }
+        // Party is a different packet entirely, not a speech mode.
+        assert_eq!(
+            parse_command("party:hello"),
+            Some(Action::PartySay {
+                text: "hello".into()
+            })
+        );
+    }
+
+    #[test]
+    fn stat_lock_command_rejects_out_of_range_values() {
+        assert_eq!(
+            parse_command("statlock:1:2"),
+            Some(Action::StatLock { stat: 1, lock: 2 })
+        );
+        // Only three stats and three lock states exist; anything else would be
+        // a packet the server has no meaning for.
+        assert!(parse_command("statlock:3:0").is_none());
+        assert!(parse_command("statlock:0:9").is_none());
+        assert!(parse_command("statlock:0").is_none());
+    }
+
+    #[test]
     fn logout_command_is_exact_and_argument_free() {
         assert_eq!(parse_command("logout"), Some(Action::Logout));
         assert!(parse_command("logout:anything").is_none());
@@ -3637,6 +3730,26 @@ mod login_request_tests {
         assert_eq!(attempt.character_slot, None);
         assert!(!attempt.interactive);
         assert!(attempt.create.is_none());
+        assert_eq!(attempt.shard, 0);
+    }
+
+    #[test]
+    fn a_login_body_can_name_the_shard_to_enter() {
+        let attempt = parse_login_attempt(
+            r#"{"host":"127.0.0.1","port":2593,"username":"a","password":"b","shard":7}"#,
+        )
+        .unwrap();
+        assert_eq!(attempt.shard, 7);
+        // Omitted stays 0, which is what every single-shard server answers to.
+        let attempt = parse_login_attempt(
+            r#"{"host":"127.0.0.1","port":2593,"username":"a","password":"b"}"#,
+        )
+        .unwrap();
+        assert_eq!(attempt.shard, 0);
+        assert!(parse_login_attempt(
+            r#"{"host":"h","port":1,"username":"a","password":"b","shard":99999}"#
+        )
+        .is_err());
     }
 
     #[test]

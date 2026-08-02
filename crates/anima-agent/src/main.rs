@@ -13,6 +13,11 @@ use anima_core::net::LoginConfig;
 use anima_core::{Action, Brain};
 use anima_net::{Endpoint, Session};
 
+/// Half-width of the walkability window handed to the brain each tick. A
+/// wanderer only ever consults its immediate neighbours, but the window is the
+/// brain's whole view of the ground, so keep it wide enough to plan in.
+const TERRAIN_RADIUS: u8 = 12;
+
 fn main() {
     let mut a = std::env::args().skip(1);
     let host = a.next().unwrap_or_else(|| "127.0.0.1".into());
@@ -63,7 +68,13 @@ fn main() {
     let _ = s.observe(Duration::from_millis(800));
 
     for t in 0..ticks {
-        let obs = s.observation();
+        // With map data loaded the brain also perceives the ground around it
+        // (walls, water, height, doors) instead of discovering obstacles by
+        // walking into them — see `Session::observation_with_terrain`.
+        let obs = match map.as_mut() {
+            Some(map) => s.observation_with_terrain(map, TERRAIN_RADIUS),
+            None => s.observation(),
+        };
         let actions = brain.decide(&obs);
 
         // Log a compact perception + decision line.
@@ -74,7 +85,7 @@ fn main() {
                     format!("walk(d{dir}{})", if *run { ",run" } else { "" })
                 }
                 Action::WalkTo { x, y } => format!("walkto({x},{y})"),
-                Action::Say { text } => format!("say({text:?})"),
+                Action::Say { text, mode } => format!("{}({text:?})", mode.name()),
                 Action::PartySay { text } => format!("party({text:?})"),
                 Action::PickUp { serial, .. } => format!("pickup(0x{serial:08X})"),
                 Action::Drop {
@@ -123,6 +134,7 @@ fn main() {
                 }
                 Action::UseAbility { ability } => format!("ability({ability})"),
                 Action::SkillLock { skill, lock } => format!("skilllock({skill}={lock})"),
+                Action::StatLock { stat, lock } => format!("statlock({stat}={lock})"),
                 Action::UseSkill { skill } => format!("useskill({skill})"),
                 Action::OplRequest { serial } => format!("oplreq(0x{serial:08X})"),
                 Action::PartyInvite => "partyinvite".into(),

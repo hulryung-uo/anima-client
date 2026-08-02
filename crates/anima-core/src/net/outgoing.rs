@@ -649,6 +649,21 @@ pub fn build_skill_lock(skill_id: u16, lock: u8) -> Vec<u8> {
     data
 }
 
+/// StatLock — change which way a stat trains. GeneralInfo `0xBF`, subcommand
+/// `0x001A`. Ports ClassicUO `Send_StatLockStateRequest`:
+/// `[0xBF][len:u16][0x001A][stat:u8][state:u8]`.
+///
+/// `stat` is 0 = Strength, 1 = Dexterity, 2 = Intelligence. `state` uses the
+/// same `Lock` values as [`build_skill_lock`] — 0 = up (raise), 1 = down
+/// (lower), 2 = locked — which is why the incoming half of this pair decodes
+/// into `PlayerStats::{str,dex,int}_lock` with exactly those meanings.
+pub fn build_stat_lock(stat: u8, lock: u8) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x001A);
+    w.u8(stat).u8(lock);
+    finish_variable(w.into_vec())
+}
+
 /// UseSkill `0x12` ActionRequest (variable) — invoke an (active) skill by id.
 ///
 /// Ports ClassicUO `Send_UseSkill` (OutgoingPackets.cs): the request type byte

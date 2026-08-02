@@ -10,6 +10,7 @@
 //! native/WASM backends all plug into the same interface (see DESIGN.md §3).
 
 use crate::gump_layout::GumpElement;
+use crate::path::Terrain;
 use crate::types::Position;
 use crate::world::{
     is_ghost_body, Book, Buff, CharacterProfile, HuePicker, JournalEntry, LegacyMenu, LogoutAck,
@@ -269,6 +270,115 @@ pub struct Observation {
     /// same for Y), e.g. to walk to a decoded treasure map's chest (pin index
     /// 0) without a human reading the parchment.
     pub map_gumps: Vec<(u32, MapView)>,
+    /// Local walkability around the player — the one part of perception the
+    /// core cannot fill on its own, because it lives in the map files
+    /// (`anima-assets`) rather than in any packet. [`World::observe`] always
+    /// leaves this `None`; a driver that holds map data fills it with
+    /// [`survey_terrain`] (`anima-net`'s `Session::observation_with_terrain`).
+    ///
+    /// Without it a brain can see mobiles and items but not the ground, so it
+    /// cannot tell a wall from open floor, route around water, or notice the
+    /// door in its way — it can only hand a destination to the driver's
+    /// pathfinder and hope. See [`TerrainView`].
+    pub terrain: Option<TerrainView>,
+}
+
+/// A square window of walkability centred on the player, in world tiles.
+///
+/// `tiles` is row-major over the `(2 * radius + 1)²` square whose top-left
+/// corner is `origin`, so tile `(x, y)` is at index
+/// `(y - origin.1) * side + (x - origin.0)` — use [`TerrainView::at`] rather
+/// than doing that by hand. Tiles clipped by the map edge are present but
+/// unwalkable, which keeps the grid rectangular for a consumer that wants to
+/// reshape it into a matrix.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TerrainView {
+    /// World tile of the top-left corner (the player minus `radius` on both
+    /// axes, clamped at the map origin).
+    pub origin: (u16, u16),
+    /// Half-width. The window is `2 * radius + 1` tiles on a side.
+    pub radius: u8,
+    /// Row-major walkability, `side * side` entries.
+    pub tiles: Vec<TerrainTile>,
+}
+
+impl TerrainView {
+    /// Side length of the square: `2 * radius + 1`.
+    pub fn side(&self) -> u16 {
+        u16::from(self.radius) * 2 + 1
+    }
+
+    /// The tile at world coordinates `(x, y)`, or `None` outside the window.
+    pub fn at(&self, x: u16, y: u16) -> Option<TerrainTile> {
+        let (ox, oy) = self.origin;
+        let (dx, dy) = (x.checked_sub(ox)?, y.checked_sub(oy)?);
+        let side = self.side();
+        if dx >= side || dy >= side {
+            return None;
+        }
+        self.tiles
+            .get(usize::from(dy) * usize::from(side) + usize::from(dx))
+            .copied()
+    }
+}
+
+/// One tile of a [`TerrainView`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TerrainTile {
+    /// Whether the player could stand here — including tiles reachable only by
+    /// opening a `door` first, which is what makes a door distinguishable from
+    /// a wall at all (route *planning* treats a closed door as passable; see
+    /// [`crate::path::Terrain::door_at`]).
+    pub walkable: bool,
+    /// The Z the player would stand at. Meaningless when `!walkable`.
+    pub z: i8,
+    /// Serial of a closed door that has to be opened before this tile can
+    /// actually be stepped onto — answer with [`Action::Use`]. `None` on an
+    /// ordinary tile, walkable or not.
+    pub door: Option<u32>,
+}
+
+/// Survey walkability in a square around `center` and return it as a
+/// [`TerrainView`].
+///
+/// Every tile is judged as a step taken **from `from_z`** (the player's current
+/// Z), not from its own neighbour, because a window has no single "previous
+/// tile". That makes the far edge approximate on sharply sloped ground — a
+/// staircase two tiles up reads as unreachable even though walking it one step
+/// at a time works. It is exact for the ring the player can actually step onto
+/// this tick, which is what a brain needs it for; anything longer-range should
+/// go through [`crate::path::find_path`], which does resolve Z per step.
+pub fn survey_terrain<T: Terrain>(
+    terrain: &mut T,
+    center: (u16, u16),
+    from_z: i8,
+    radius: u8,
+) -> TerrainView {
+    let side = u32::from(radius) * 2 + 1;
+    let origin = (
+        center.0.saturating_sub(u16::from(radius)),
+        center.1.saturating_sub(u16::from(radius)),
+    );
+    let mut tiles = Vec::with_capacity((side * side) as usize);
+    for dy in 0..side {
+        for dx in 0..side {
+            let (x, y) = (u32::from(origin.0) + dx, u32::from(origin.1) + dy);
+            let z = terrain.walkable_step(x, y, i32::from(from_z));
+            tiles.push(TerrainTile {
+                walkable: z.is_some(),
+                z: z.unwrap_or(0).clamp(i8::MIN as i32, i8::MAX as i32) as i8,
+                // Only meaningful where the tile is otherwise passable: a wall
+                // has no door to open, and `door_at` is the more expensive of
+                // the two queries.
+                door: z.and_then(|_| terrain.door_at(x, y, i32::from(from_z))),
+            });
+        }
+    }
+    TerrainView {
+        origin,
+        radius,
+        tiles,
+    }
 }
 
 /// A read-only view of an open server gump/dialog.
@@ -307,6 +417,70 @@ pub fn dir_toward(dx: i32, dy: i32) -> Option<u8> {
     (0u8..8).find(|&d| direction_delta(d) == (sx, sy))
 }
 
+/// How a line of speech is delivered. The wire values are the `MessageType`
+/// byte both ClassicUO (`Game/Data/MessageType.cs`) and ServUO
+/// (`Server/Network/PacketHandlers.cs`) agree on, and the receive side already
+/// styles every one of them — only the send side was ever fixed to `Say`.
+///
+/// Guild and alliance chat go out as ordinary speech with this type set, which
+/// is why they need no separate action; the server routes them by type.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SpeechMode {
+    /// Normal speech, heard by everyone nearby.
+    #[default]
+    Say,
+    /// Reduced range (`MessageType.Whisper`).
+    Whisper,
+    /// Extended range (`MessageType.Yell`).
+    Yell,
+    /// Rendered as an emote by the receiving client (`MessageType.Emote`).
+    Emote,
+    /// Guild channel (`MessageType.Guild`).
+    Guild,
+    /// Alliance channel (`MessageType.Alliance`).
+    Alliance,
+}
+
+impl SpeechMode {
+    /// The `MessageType` byte to put in `0x03`/`0xAD`.
+    pub fn wire(self) -> u8 {
+        match self {
+            SpeechMode::Say => 0,
+            SpeechMode::Emote => 2,
+            SpeechMode::Whisper => 8,
+            SpeechMode::Yell => 9,
+            SpeechMode::Guild => 13,
+            SpeechMode::Alliance => 14,
+        }
+    }
+
+    /// Stable lowercase name used by the JSON contract and the web client.
+    pub fn name(self) -> &'static str {
+        match self {
+            SpeechMode::Say => "say",
+            SpeechMode::Whisper => "whisper",
+            SpeechMode::Yell => "yell",
+            SpeechMode::Emote => "emote",
+            SpeechMode::Guild => "guild",
+            SpeechMode::Alliance => "alliance",
+        }
+    }
+
+    /// Inverse of [`SpeechMode::name`]; `None` for anything unrecognized so a
+    /// caller can reject rather than silently speak in the clear.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "say" => SpeechMode::Say,
+            "whisper" => SpeechMode::Whisper,
+            "yell" => SpeechMode::Yell,
+            "emote" => SpeechMode::Emote,
+            "guild" => SpeechMode::Guild,
+            "alliance" => SpeechMode::Alliance,
+            _ => return None,
+        })
+    }
+}
+
 /// A high-level intent emitted by the brain. The driver executes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -319,8 +493,8 @@ pub enum Action {
     /// does the same non-blockingly via `Session::advance_route` (call it once
     /// per tick; `Session::navigate_to` remains for a blocking one-shot walk).
     WalkTo { x: u16, y: u16 },
-    /// Speak in-game.
-    Say { text: String },
+    /// Speak in-game. `mode` picks the delivery — see [`SpeechMode`].
+    Say { text: String, mode: SpeechMode },
     /// Send a message to the player's party (all members).
     PartySay { text: String },
     /// Begin attacking a target. The driver remembers `serial` as the "last
@@ -407,6 +581,11 @@ pub enum Action {
     /// 0 = up (raise on gain), 1 = down (lower on gain), 2 = locked. The driver
     /// optimistically updates the world's skill lock so the UI reflects it at once.
     SkillLock { skill: u16, lock: u8 },
+    /// Change a stat's training lock (UO 0xBF/0x1A StatLockStateRequest).
+    /// `stat` is 0 = Strength, 1 = Dexterity, 2 = Intelligence; `lock` uses the
+    /// same values as [`Action::SkillLock`] (0 up, 1 down, 2 locked). The
+    /// driver optimistically updates the world's lock, as the skill twin does.
+    StatLock { stat: u8, lock: u8 },
     /// Invoke an active skill by id (UO 0x12 ActionRequest, type 0x24 "use skill").
     /// Works for active skills (Hiding, Meditation, Anatomy, Animal Lore, …);
     /// passive skills are a no-op server-side.
@@ -733,6 +912,9 @@ impl World {
             recent_damage: self.recent_damage.clone(),
             spellbooks,
             map_gumps,
+            // The core has no map files by design (DESIGN.md D3) — a driver
+            // that does calls `survey_terrain` and fills this in.
+            terrain: None,
         }
     }
 }
@@ -741,6 +923,75 @@ impl World {
 mod tests {
     use super::*;
     use crate::net::login::LoginResult;
+
+    /// A flat grid with a wall column, a raised ledge, and one closed door —
+    /// enough to prove the survey distinguishes all three.
+    struct Grid {
+        wall_x: u32,
+        ledge: std::collections::HashSet<(u32, u32)>,
+        door: Option<(u32, u32)>,
+    }
+    impl Terrain for Grid {
+        fn walkable_step(&mut self, x: u32, y: u32, _from_z: i32) -> Option<i32> {
+            if x == self.wall_x {
+                return None;
+            }
+            Some(if self.ledge.contains(&(x, y)) { 12 } else { 0 })
+        }
+        fn door_at(&mut self, x: u32, y: u32, _current_z: i32) -> Option<u32> {
+            (self.door == Some((x, y))).then_some(0x4001)
+        }
+    }
+
+    #[test]
+    fn survey_terrain_reports_walls_heights_and_doors() {
+        let mut g = Grid {
+            wall_x: 102,
+            ledge: [(99, 100)].into_iter().collect(),
+            door: Some((100, 101)),
+        };
+        let view = survey_terrain(&mut g, (100, 100), 0, 2);
+
+        assert_eq!(view.origin, (98, 98));
+        assert_eq!(view.side(), 5);
+        assert_eq!(view.tiles.len(), 25);
+
+        // The wall column is the one thing a brain could not previously see.
+        let wall = view.at(102, 100).expect("inside the window");
+        assert!(!wall.walkable);
+        assert_eq!(wall.door, None, "a wall is not a door");
+
+        // A raised tile is walkable but at a different Z.
+        assert_eq!(
+            view.at(99, 100),
+            Some(TerrainTile {
+                walkable: true,
+                z: 12,
+                door: None
+            })
+        );
+
+        // A door reads as walkable *and* names the serial to `Use` first —
+        // that distinction is the whole reason `door` exists.
+        let door = view.at(100, 101).expect("inside the window");
+        assert!(door.walkable);
+        assert_eq!(door.door, Some(0x4001));
+
+        assert_eq!(view.at(200, 200), None, "outside the window");
+    }
+
+    #[test]
+    fn survey_terrain_stays_rectangular_at_the_map_origin() {
+        // A player near (0,0) must not produce a wrapped or short grid.
+        let mut g = Grid {
+            wall_x: u32::MAX,
+            ledge: Default::default(),
+            door: None,
+        };
+        let view = survey_terrain(&mut g, (1, 0), 0, 3);
+        assert_eq!(view.origin, (0, 0), "clamped, not wrapped");
+        assert_eq!(view.tiles.len(), 49);
+    }
 
     #[test]
     fn observe_sorts_by_distance_and_advances_journal() {

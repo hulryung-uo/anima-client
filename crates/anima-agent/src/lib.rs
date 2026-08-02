@@ -5,10 +5,31 @@
 //! does the IO. This is the whole point of the core⊥brain split: the same brain
 //! runs against the live server, a replay, or a test world unchanged.
 
+use anima_core::agent::{SpeechMode, TerrainTile};
+use anima_core::net::movement::direction_delta;
 use anima_core::{dir_toward, Action, Brain, Observation};
 
 /// Notoriety byte for a murderer/red ("kill on sight").
 const NOTO_MURDERER: u8 = 6;
+
+/// The tile one step in UO direction `dir`, from the observation's walkability
+/// window — `None` when the driver surveyed no terrain (then a brain has to go
+/// back to walking into things to find out where they are) or when that step
+/// falls outside the window.
+fn step_tile(obs: &Observation, dir: u8) -> Option<TerrainTile> {
+    let view = obs.terrain.as_ref()?;
+    let (dx, dy) = direction_delta(dir);
+    let x = obs.player.pos.x.checked_add_signed(dx as i16)?;
+    let y = obs.player.pos.y.checked_add_signed(dy as i16)?;
+    view.at(x, y)
+}
+
+/// Whether stepping `dir` is known to be pointless. Conservative on purpose:
+/// with no terrain perception nothing is "known blocked", so behaviour is
+/// exactly what it was before the window existed.
+fn known_blocked(obs: &Observation, dir: u8) -> bool {
+    step_tile(obs, dir).is_some_and(|t| !t.walkable)
+}
 
 /// A simple but genuinely autonomous wanderer:
 /// - **flees** a nearby red (murderer) mobile,
@@ -79,6 +100,7 @@ impl Brain for WanderBrain {
             if is_real_speaker && self.greeted.insert(line.name.clone()) {
                 actions.push(Action::Say {
                     text: format!("Well met, {}!", line.name),
+                    mode: SpeechMode::Say,
                 });
             }
         }
@@ -111,6 +133,22 @@ impl Brain for WanderBrain {
             self.dir = self.wander_dir();
             self.steps_in_dir = 0;
         }
+        // With terrain perception, don't walk into what we can already see is a
+        // wall — turn now instead of spending a tick discovering it by bumping.
+        // A closed door isn't a wall: open it and step through next tick, which
+        // is a route a blind wanderer could never take at all.
+        if let Some(tile) = step_tile(obs, self.dir) {
+            if let Some(door) = tile.door {
+                actions.push(Action::Use { serial: door });
+                return actions;
+            }
+            if !tile.walkable {
+                if let Some(open) = (0u8..8).find(|&d| !known_blocked(obs, d)) {
+                    self.dir = open;
+                    self.steps_in_dir = 0;
+                } // else: boxed in — step anyway and let stuck-detection run.
+            }
+        }
         self.steps_in_dir += 1;
         actions.push(Action::Walk {
             dir: self.dir,
@@ -130,6 +168,83 @@ mod tests {
         let mut o = Observation::default();
         o.player.pos = Position { x, y, z: 0 };
         o
+    }
+
+    /// An observation whose terrain window says every tile is walkable except
+    /// those in `walls`, with an optional door serial on `door_at`.
+    fn obs_with_terrain(
+        x: u16,
+        y: u16,
+        radius: u8,
+        walls: &[(u16, u16)],
+        door_at: Option<((u16, u16), u32)>,
+    ) -> Observation {
+        use anima_core::agent::TerrainView;
+        let mut o = obs_at(x, y);
+        let origin = (x - u16::from(radius), y - u16::from(radius));
+        let side = u16::from(radius) * 2 + 1;
+        let mut tiles = Vec::new();
+        for dy in 0..side {
+            for dx in 0..side {
+                let at = (origin.0 + dx, origin.1 + dy);
+                tiles.push(TerrainTile {
+                    walkable: !walls.contains(&at),
+                    z: 0,
+                    door: door_at.filter(|(t, _)| *t == at).map(|(_, s)| s),
+                });
+            }
+        }
+        o.terrain = Some(TerrainView {
+            origin,
+            radius,
+            tiles,
+        });
+        o
+    }
+
+    #[test]
+    fn wanders_around_a_wall_it_can_see() {
+        let mut b = WanderBrain::new();
+        // Box the player in on every side but west (dir 6).
+        let walls = [
+            (100, 99),
+            (101, 99),
+            (101, 100),
+            (101, 101),
+            (100, 101),
+            (99, 101),
+            (99, 99),
+        ];
+        let o = obs_with_terrain(100, 100, 2, &walls, None);
+        let acts = b.decide(&o);
+        // Whatever direction the wanderer picked, it must not be one it can
+        // already see is a wall — the whole point of terrain perception.
+        match acts.last() {
+            Some(Action::Walk { dir, .. }) => {
+                assert_eq!(*dir, 6, "west is the only open step; got dir {dir}")
+            }
+            other => panic!("expected a walk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn opens_a_door_instead_of_walking_into_it() {
+        let mut b = WanderBrain::new();
+        // Put a door on every neighbouring tile so whichever direction the
+        // wanderer picks, it meets the door.
+        let mut o = obs_with_terrain(100, 100, 1, &[], None);
+        for tile in o.terrain.as_mut().unwrap().tiles.iter_mut() {
+            tile.door = Some(0x4001);
+        }
+        assert_eq!(b.decide(&o), vec![Action::Use { serial: 0x4001 }]);
+    }
+
+    #[test]
+    fn without_terrain_the_wanderer_behaves_exactly_as_before() {
+        // No window => nothing is "known blocked" => the old blind walk.
+        let mut b = WanderBrain::new();
+        let acts = b.decide(&obs_at(100, 100));
+        assert!(matches!(acts.last(), Some(Action::Walk { .. })));
     }
 
     #[test]
@@ -175,9 +290,8 @@ mod tests {
             cliloc: 0,
         });
         let acts = b.decide(&o);
-        assert!(acts
-            .iter()
-            .any(|a| matches!(a, Action::Say { text } if text.contains("Hastin"))));
+        assert!(acts.iter().any(|a| matches!(a, Action::Say { text, mode }
+                if text.contains("Hastin") && *mode == SpeechMode::Say)));
         // Second time: no repeat greeting (journal already consumed; new empty).
         let acts2 = b.decide(&obs_at(100, 100));
         assert!(!acts2.iter().any(|a| matches!(a, Action::Say { .. })));

@@ -383,13 +383,104 @@ fn parse_supported_features(frame: &[u8]) -> u32 {
     }
 }
 
-/// Parse the auth key out of ServerRedirect `0x8C`.
-/// Layout: `[0x8C][ip:u32][port:u16][auth_key:u32]` (11 bytes).
-pub fn parse_server_redirect(frame: &[u8]) -> Result<u32, LoginError> {
+/// One shard advertised in the server list `0xA8`.
+///
+/// `index` is what ServerSelect `0xA0` must echo back — it is the server's own
+/// id for the row, not our position in the vector, so a shard that numbers its
+/// rows sparsely still round-trips (ClassicUO selects `Servers[i].Index`, not
+/// `i`, for the same reason).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardEntry {
+    pub index: u16,
+    pub name: String,
+    /// 0..=100, how full the shard reports itself to be.
+    pub percent_full: u8,
+    /// Signed hours from GMT, as the server states it (`sbyte` on the wire).
+    pub timezone: i8,
+    /// Dotted quad the shard advertises for itself, already un-reversed (see
+    /// [`parse_server_list`]). `[0, 0, 0, 0]` when the shard sends none.
+    pub ip: [u8; 4],
+}
+
+/// Parse ServerList `0xA8`. Layout after the 3-byte `[id][len:u16]` header:
+/// `[flag:u8][count:u16]` then `count ×
+/// ([index:u16][name:ascii32][percent_full:u8][timezone:i8][ip:u32])`
+/// (ServUO `Server/Network/Packets.cs` `AccountLoginAck`, ClassicUO
+/// `LoginScene.ServerListEntry.Create`).
+///
+/// **The address byte order here is the reverse of `0x8C`'s.** ServUO writes
+/// this field with its big-endian `Write(int)` over a value that already holds
+/// the address in network-order-as-little-endian, so the four bytes arrive
+/// reversed; `0x8C` writes the same value byte-by-byte from the low end, so
+/// those arrive in dotted-quad order. ClassicUO carries both interpretations
+/// per entry and pings the reversed one — that reversed one is the reachable
+/// address, so it is what we store.
+pub fn parse_server_list(frame: &[u8]) -> Result<Vec<ShardEntry>, LoginError> {
+    let t = |_| LoginError::Truncated(0xA8);
+    let mut r = PacketReader::new(frame.get(3..).unwrap_or(&[]));
+    r.u8().map_err(t)?; // unused flag byte (ServUO writes 0x5D)
+    let count = r.u16().map_err(t)?;
+    let mut servers = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let index = r.u16().map_err(t)?;
+        let name = r.fixed_ascii(32).map_err(t)?;
+        let percent_full = r.u8().map_err(t)?;
+        let timezone = r.u8().map_err(t)? as i8;
+        let ip = r.bytes(4).map_err(t)?;
+        servers.push(ShardEntry {
+            index,
+            name,
+            percent_full,
+            timezone,
+            ip: [ip[3], ip[2], ip[1], ip[0]],
+        });
+    }
+    Ok(servers)
+}
+
+/// Where the login server told us to reconnect, from ServerRedirect `0x8C`.
+/// Layout: `[0x8C][ip:4][port:u16][auth_key:u32]` (11 bytes).
+///
+/// `ip` is in dotted-quad order as received (unlike `0xA8`'s — see
+/// [`parse_server_list`]). It is routinely **unusable**: a shard behind NAT
+/// advertises its LAN address, and a shard reached through a proxy or an SSH
+/// tunnel advertises an address that resolves to the wrong host entirely.
+/// ClassicUO handles this with an explicit `IgnoreRelayIp` setting plus an
+/// `ip == 0` special case (`LoginScene.HandleRelayServerPacket`), both of
+/// which fall back to the address the user originally typed. The core only
+/// reports what the packet said; deciding whether to trust it is the driver's
+/// call — see [`GameServerAddress::is_routable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GameServerAddress {
+    pub ip: [u8; 4],
+    pub port: u16,
+}
+
+impl GameServerAddress {
+    /// Whether this address is worth dialing at all. `0.0.0.0` is ClassicUO's
+    /// documented "ignore me" value, and a zero port can't be connected to.
+    /// Everything else is plausible — a driver that fails to connect anyway
+    /// should fall back to the endpoint the user gave it.
+    pub fn is_routable(&self) -> bool {
+        self.ip != [0, 0, 0, 0] && self.port != 0
+    }
+
+    /// `"a.b.c.d"` — the host half, for handing to a resolver/socket API.
+    pub fn host(&self) -> String {
+        let [a, b, c, d] = self.ip;
+        format!("{a}.{b}.{c}.{d}")
+    }
+}
+
+/// Parse ServerRedirect `0x8C` into the game-server address and auth key.
+pub fn parse_server_redirect(frame: &[u8]) -> Result<(GameServerAddress, u32), LoginError> {
+    let t = |_| LoginError::Truncated(0x8C);
     let mut r = PacketReader::new(&frame[1..]);
-    r.bytes(4).map_err(|_| LoginError::Truncated(0x8C))?; // ip (we reconnect to same host)
-    r.bytes(2).map_err(|_| LoginError::Truncated(0x8C))?; // port
-    r.u32().map_err(|_| LoginError::Truncated(0x8C))
+    let ip = r.bytes(4).map_err(t)?;
+    let ip = [ip[0], ip[1], ip[2], ip[3]];
+    let port = r.u16().map_err(t)?;
+    let auth_key = r.u32().map_err(t)?;
+    Ok((GameServerAddress { ip, port }, auth_key))
 }
 
 /// A character slot from the character-list packet.
@@ -598,7 +689,16 @@ pub enum LoginDirective {
     /// Close the phase-1 (login-server) connection, open a fresh one to the game
     /// server, switch the incoming framer to **game mode (Huffman)**, then write
     /// `then`. Everything received after this is Huffman-compressed.
-    ReconnectToGameServer { then: Vec<u8> },
+    ///
+    /// `address` is what the shard advertised in `0x8C`. Prefer it when
+    /// [`GameServerAddress::is_routable`], but keep the endpoint the user
+    /// originally dialed as a fallback: NAT'd and tunnelled shards routinely
+    /// advertise an address only reachable from inside their own network, and
+    /// ClassicUO ships an `IgnoreRelayIp` setting precisely because of that.
+    ReconnectToGameServer {
+        address: GameServerAddress,
+        then: Vec<u8>,
+    },
     /// Account authentication succeeded (or a previous `CharacterChoice::Delete`
     /// was rejected by the server). The driver must obtain a user choice and
     /// feed it back through [`LoginMachine::choose_character`].
@@ -638,8 +738,19 @@ pub enum CharacterChoice {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginError {
-    /// Server rejected us. `0x82` (login) / `0x82` (game). `reason` is the code.
-    Denied(u8),
+    /// The server rejected the **account** (`0x82`) — bad password, account in
+    /// use, blocked, and so on. `reason` is the raw code; `text` is the gloss
+    /// from [`account_denied_text`].
+    Denied { reason: u8, text: &'static str },
+    /// The server accepted the account but refused to put the **character** in
+    /// the world (`0x53`). `reason` is the raw code, `text` the gloss from
+    /// [`character_login_rejected_text`], and `retry_minutes` the window a
+    /// preceding `0xFD` gave for the two queue-related codes.
+    CharacterLoginRejected {
+        reason: u8,
+        text: &'static str,
+        retry_minutes: Option<(u16, u16)>,
+    },
     /// A packet ended before we'd read everything its layout requires.
     Truncated(u8),
     /// We reached the character list with no selectable character and automatic
@@ -665,8 +776,118 @@ pub enum LoginError {
     /// `reason` is the raw `DeleteResultType` byte; `text` is a human-readable
     /// gloss for logs/UI.
     CharacterDeleteRejected { reason: u8, text: &'static str },
+    /// `LoginConfig::server_index` names a shard the server list `0xA8` never
+    /// advertised. Sending it anyway is a silent hang — the server just never
+    /// answers `0x8C` — so the list we did get comes back with the error.
+    /// `available` is `(index, name)` per advertised shard rather than bare
+    /// indices, because the only useful thing to do with this error is print
+    /// the choices — and the driver that catches it no longer holds the machine
+    /// it could ask via [`LoginMachine::servers`].
+    ServerIndexUnknown {
+        requested: u16,
+        available: Vec<(u16, String)>,
+    },
     /// Got a packet that doesn't belong in the current state in a way we can't ignore.
     Unexpected { state: &'static str, id: u8 },
+}
+
+impl std::fmt::Display for LoginError {
+    /// Written for a human staring at a failed login — the browser login page
+    /// and the CLI both surface this string verbatim, so every arm has to say
+    /// what the *server* refused, not which packet carried the refusal.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoginError::Denied { reason, text } => {
+                write!(f, "the server rejected the account: {text} (code {reason})")
+            }
+            LoginError::CharacterLoginRejected {
+                reason,
+                text,
+                retry_minutes,
+            } => {
+                write!(f, "the server refused the character: {text}")?;
+                if let Some((min, max)) = retry_minutes {
+                    write!(f, " (retry in {min}–{max} minutes)")?;
+                }
+                write!(f, " (code {reason})")
+            }
+            LoginError::Truncated(id) => {
+                write!(f, "packet 0x{id:02X} ended mid-field")
+            }
+            LoginError::NoCharacterAndCreateUnsupported => {
+                write!(f, "the account has no character and creation is disabled")
+            }
+            LoginError::CharacterSlotsFull => {
+                write!(f, "every character slot on the account is occupied")
+            }
+            LoginError::CharacterSlotEmpty(slot) => {
+                write!(f, "character slot {slot} is empty")
+            }
+            LoginError::InvalidCharacterAppearance(why) => {
+                write!(f, "invalid character appearance: {why}")
+            }
+            LoginError::CharacterChoiceNotExpected => {
+                write!(f, "a character choice arrived out of turn")
+            }
+            LoginError::CharacterDeleteRejected { reason, text } => {
+                write!(f, "the server refused the delete: {text} (code {reason})")
+            }
+            LoginError::ServerIndexUnknown {
+                requested,
+                available,
+            } => {
+                write!(f, "this login server has no shard {requested}; it offers")?;
+                for (index, name) in available {
+                    write!(f, " {index}={name}")?;
+                }
+                Ok(())
+            }
+            LoginError::Unexpected { state, id } => {
+                write!(f, "packet 0x{id:02X} is not valid while {state}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LoginError {}
+
+/// Maps an account-rejection `0x82` code to a human-readable reason. Order and
+/// clamping ported from ClassicUO `Game/Data/ServerErrorMessages.cs`
+/// (`_generalErrors`, `GetError` case `0x82`): anything `>= 9` collapses onto
+/// the last row rather than reading past the table.
+pub fn account_denied_text(reason: u8) -> &'static str {
+    match reason {
+        0 => "incorrect name or password",
+        1 => "someone is already using this account",
+        2 => "your account has been blocked",
+        3 => "your account credentials are invalid",
+        4 => "communication problem",
+        5 => "the IGR concurrency limit has been met",
+        6 => "the IGR time limit has been met",
+        7 => "general IGR authentication failure",
+        _ => "couldn't connect to Ultima Online",
+    }
+}
+
+/// Maps a character-login rejection `0x53` code to a human-readable reason.
+/// Ported from ClassicUO `ServerErrorMessages.GetLoginError`. Codes 13 and 14
+/// are the login-queue pair whose real text embeds the minute window a
+/// preceding `0xFD` supplied — see [`LoginError::CharacterLoginRejected`].
+pub fn character_login_rejected_text(reason: u8) -> &'static str {
+    match reason {
+        0 => "incorrect password",
+        1 => "character does not exist",
+        2 => "character already exists",
+        3 | 4 => "client could not attach to the server",
+        5 => "another character on this account is already online",
+        6 => "error in synchronization",
+        7 => "idle for too long",
+        8 => "could not attach to the server",
+        9 => "character transfer in progress",
+        10 => "name is invalid",
+        13 | 14 => "the login queue is full — try again later",
+        _ => "unknown login-rejection reason",
+    }
 }
 
 /// Maps ServUO's `DeleteResultType` (`Server/Network/Packets.cs`) byte order
@@ -773,6 +994,13 @@ pub struct LoginMachine {
     /// so a subsequent (refreshed) character list is selected/created normally
     /// instead of looping the delete forever.
     delete_sent: bool,
+    /// Shards advertised by `0xA8`, in the order the server listed them.
+    /// Exposed through [`LoginMachine::servers`] so a driver can show a shard
+    /// picker; empty until the list arrives.
+    servers: Vec<ShardEntry>,
+    /// Login-queue window `(min, max)` in minutes from the most recent `0xFD`,
+    /// which a following `0x53` code 13/14 quotes.
+    login_delay: Option<(u16, u16)>,
     pending_characters: Option<CharacterList>,
     /// The list shown to the driver when it most recently chose
     /// `CharacterChoice::Delete`. Kept only so a rejected delete (`0x85`) can
@@ -796,6 +1024,8 @@ impl LoginMachine {
             aos: false,
             character_list_flags: 0,
             delete_sent: false,
+            servers: Vec::new(),
+            login_delay: None,
             pending_characters: None,
             pending_delete_list: None,
         };
@@ -804,6 +1034,12 @@ impl LoginMachine {
 
     pub fn is_done(&self) -> bool {
         self.state == State::Done
+    }
+
+    /// Shards the login server advertised in `0xA8`, in list order. Empty until
+    /// that packet arrives (and on shards that send none).
+    pub fn servers(&self) -> &[ShardEntry] {
+        &self.servers
     }
 
     /// Resume a deferred login after the driver displayed [`CharacterList`].
@@ -875,10 +1111,39 @@ impl LoginMachine {
         }
         let id = frame[0];
 
-        // LoginDenied can arrive in either phase.
+        // Account rejection `0x82` can arrive in either phase.
         if id == 0x82 {
             let reason = frame.get(1).copied().unwrap_or(0);
-            return Err(LoginError::Denied(reason));
+            return Err(LoginError::Denied {
+                reason,
+                text: account_denied_text(reason),
+            });
+        }
+
+        // Character-login rejection `0x53`: the account was fine, the character
+        // is not going into the world. Framed but dropped before, so every one
+        // of these refusals — "another character is already online" above all —
+        // showed up as a login that simply never completed.
+        if id == 0x53 {
+            let reason = frame.get(1).copied().unwrap_or(0);
+            return Err(LoginError::CharacterLoginRejected {
+                reason,
+                text: character_login_rejected_text(reason),
+                // Only the queue codes have a window, and only if the server
+                // sent the `0xFD` that carries it.
+                retry_minutes: matches!(reason, 13 | 14)
+                    .then_some(self.login_delay)
+                    .flatten(),
+            });
+        }
+
+        // `0xFD` LoginDelay: `[id][delay:u8]`, the queue window in units of ten
+        // minutes. It always precedes the `0x53` that cites it (ClassicUO
+        // `LoginScene.HandleLoginDelayPacket`), so it is stored, not raised.
+        if id == 0xFD {
+            let delay = u16::from(frame.get(1).copied().unwrap_or(0));
+            self.login_delay = Some((delay.saturating_sub(1) * 10, delay * 10));
+            return Ok(vec![]);
         }
 
         // SupportedFeatures `0xB9` (sent during the character-list phase): records
@@ -892,6 +1157,28 @@ impl LoginMachine {
         match self.state {
             State::AwaitServerList => {
                 if id == 0xA8 {
+                    self.servers = parse_server_list(frame)?;
+                    // `cfg.server_index` names a shard's OWN index, so honour
+                    // it when the list contains it. Selecting an index the
+                    // shard never advertised is a silent hang (the server
+                    // simply never answers 0x8C), so refuse it here — except
+                    // for the default 0 against a server that sent no list at
+                    // all, which is how this worked before the list was
+                    // parsed and is still the right guess.
+                    let known = self
+                        .servers
+                        .iter()
+                        .any(|s| s.index == self.cfg.server_index);
+                    if !known && !self.servers.is_empty() {
+                        return Err(LoginError::ServerIndexUnknown {
+                            requested: self.cfg.server_index,
+                            available: self
+                                .servers
+                                .iter()
+                                .map(|s| (s.index, s.name.clone()))
+                                .collect(),
+                        });
+                    }
                     self.state = State::AwaitRedirect;
                     Ok(vec![LoginDirective::Send(build_server_select(
                         self.cfg.server_index,
@@ -902,7 +1189,8 @@ impl LoginMachine {
             }
             State::AwaitRedirect => {
                 if id == 0x8C {
-                    self.auth_key = parse_server_redirect(frame)?;
+                    let (address, auth_key) = parse_server_redirect(frame)?;
+                    self.auth_key = auth_key;
                     self.state = State::AwaitCharacterList;
                     let mut then = build_game_seed(self.auth_key);
                     then.extend(build_game_login(
@@ -910,7 +1198,10 @@ impl LoginMachine {
                         &self.cfg.username,
                         &self.cfg.password,
                     ));
-                    Ok(vec![LoginDirective::ReconnectToGameServer { then }])
+                    Ok(vec![LoginDirective::ReconnectToGameServer {
+                        address,
+                        then,
+                    }])
                 } else {
                     Ok(vec![])
                 }
@@ -1111,9 +1402,16 @@ mod tests {
 
     #[test]
     fn parse_redirect_and_login_confirm() {
-        // ServerRedirect 0x8C: id, ip(4), port(2), auth(4) = 11 bytes
+        // ServerRedirect 0x8C: id, ip(4), port(2), auth(4) = 11 bytes.
+        // 0x0A21 = 2593. Unlike 0xA8's, this address is NOT byte-reversed
+        // (ServUO writes it low byte first, ClassicUO reads it as UInt32LE).
         let frame = [0x8C, 1, 2, 3, 4, 0x0A, 0x21, 0xDE, 0xAD, 0xBE, 0xEF];
-        assert_eq!(parse_server_redirect(&frame).unwrap(), 0xDEAD_BEEF);
+        let (addr, auth) = parse_server_redirect(&frame).unwrap();
+        assert_eq!(auth, 0xDEAD_BEEF);
+        assert_eq!(addr.ip, [1, 2, 3, 4]);
+        assert_eq!(addr.port, 2593);
+        assert_eq!(addr.host(), "1.2.3.4");
+        assert!(addr.is_routable());
 
         // LoginConfirm 0x1B (37 bytes), serial=0x2A, body=400, x=1000, y=2000,
         // z=-5 (0xFFFB as short), dir=3.
@@ -1157,18 +1455,23 @@ mod tests {
         assert_eq!(initial[0], 0xEF); // seed first
         assert!(!m.is_done());
 
-        // ServerList 0xA8 (variable). Minimal valid frame: [id][len:u16][body].
-        let server_list = vec![0xA8, 0x00, 0x06, 0x00, 0x01, 0x00];
-        let d = m.on_packet(&server_list).unwrap();
+        // ServerList 0xA8: [id][len:u16][flag][count:u16] and no records — the
+        // shape a shard that advertises nothing sends. Selection falls back to
+        // `cfg.server_index`, which is what happened before the list was
+        // parsed at all.
+        let d = m.on_packet(&empty_server_list()).unwrap();
+        assert!(m.servers().is_empty());
         assert_eq!(d, vec![LoginDirective::Send(build_server_select(0))]);
 
         // ServerRedirect 0x8C → reconnect + game seed/login.
         let redirect = [0x8C, 127, 0, 0, 1, 0x0A, 0x21, 0x11, 0x22, 0x33, 0x44];
         let d = m.on_packet(&redirect).unwrap();
         match &d[0] {
-            LoginDirective::ReconnectToGameServer { then } => {
+            LoginDirective::ReconnectToGameServer { address, then } => {
                 assert_eq!(&then[0..4], &[0x11, 0x22, 0x33, 0x44]); // game seed = auth key
                 assert_eq!(then[4], 0x91); // GameLogin follows
+                assert_eq!(address.host(), "127.0.0.1");
+                assert_eq!(address.port, 2593);
             }
             other => panic!("expected reconnect, got {other:?}"),
         }
@@ -1222,13 +1525,132 @@ mod tests {
     fn login_denied_errors() {
         let cfg = LoginConfig::default();
         let (mut m, _) = LoginMachine::start(cfg);
-        assert_eq!(m.on_packet(&[0x82, 0x03]), Err(LoginError::Denied(3)));
+        assert_eq!(
+            m.on_packet(&[0x82, 0x03]),
+            Err(LoginError::Denied {
+                reason: 3,
+                text: "your account credentials are invalid",
+            })
+        );
+    }
+
+    /// A `0xA8` advertising no shards: `[id][len:u16][flag][count=0]`.
+    fn empty_server_list() -> Vec<u8> {
+        vec![0xA8, 0x00, 0x06, 0x5D, 0x00, 0x00]
+    }
+
+    /// A `0xA8` carrying `(index, name, ip)` records in ServUO's layout. The
+    /// address goes out **reversed** — see [`parse_server_list`].
+    fn server_list(entries: &[(u16, &str, [u8; 4])]) -> Vec<u8> {
+        let mut w = PacketWriter::new();
+        w.u8(0xA8)
+            .u16((6 + entries.len() * 40) as u16)
+            .u8(0x5D)
+            .u16(entries.len() as u16);
+        for (index, name, ip) in entries {
+            w.u16(*index)
+                .fixed_ascii(name, 32)
+                .u8(50) // percent full
+                .u8(0xFB) // timezone -5
+                .bytes(&[ip[3], ip[2], ip[1], ip[0]]);
+        }
+        w.into_vec()
+    }
+
+    #[test]
+    fn server_list_parses_and_unreverses_the_address() {
+        let frame = server_list(&[(0, "Anima", [127, 0, 0, 1]), (7, "Second", [10, 0, 1, 5])]);
+        let servers = parse_server_list(&frame).unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "Anima");
+        assert_eq!(servers[0].ip, [127, 0, 0, 1]);
+        assert_eq!(servers[0].percent_full, 50);
+        assert_eq!(servers[0].timezone, -5);
+        // The shard's own index, not the row position — 0xA0 must echo THIS.
+        assert_eq!(servers[1].index, 7);
+        assert_eq!(servers[1].ip, [10, 0, 1, 5]);
+    }
+
+    #[test]
+    fn server_list_is_exposed_and_selection_uses_the_shard_index() {
+        let cfg = LoginConfig {
+            server_index: 7,
+            ..Default::default()
+        };
+        let (mut m, _initial) = LoginMachine::start(cfg);
+        let frame = server_list(&[(0, "First", [127, 0, 0, 1]), (7, "Second", [10, 0, 1, 5])]);
+        let d = m.on_packet(&frame).unwrap();
+        assert_eq!(d, vec![LoginDirective::Send(build_server_select(7))]);
+        assert_eq!(m.servers().len(), 2);
+        assert_eq!(m.servers()[1].name, "Second");
+    }
+
+    #[test]
+    fn selecting_a_shard_the_server_never_listed_fails_loudly() {
+        // Silence here means the server simply never answers 0x8C and login
+        // hangs forever, which is what made this worth an error at all.
+        let cfg = LoginConfig {
+            server_index: 3,
+            ..Default::default()
+        };
+        let (mut m, _initial) = LoginMachine::start(cfg);
+        let frame = server_list(&[(0, "First", [127, 0, 0, 1]), (7, "Second", [10, 0, 1, 5])]);
+        assert_eq!(
+            m.on_packet(&frame),
+            Err(LoginError::ServerIndexUnknown {
+                requested: 3,
+                available: vec![(0, "First".into()), (7, "Second".into())],
+            })
+        );
+    }
+
+    #[test]
+    fn a_character_login_rejection_names_its_reason() {
+        let cfg = LoginConfig::default();
+        let (mut m, _) = LoginMachine::start(cfg);
+        assert_eq!(
+            m.on_packet(&[0x53, 0x05]),
+            Err(LoginError::CharacterLoginRejected {
+                reason: 5,
+                text: "another character on this account is already online",
+                retry_minutes: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_queue_rejection_carries_the_window_the_preceding_0xfd_gave() {
+        let cfg = LoginConfig::default();
+        let (mut m, _) = LoginMachine::start(cfg);
+        // 0xFD is informational on its own — it must not fail the login.
+        assert_eq!(m.on_packet(&[0xFD, 3]).unwrap(), vec![]);
+        assert_eq!(
+            m.on_packet(&[0x53, 13]),
+            Err(LoginError::CharacterLoginRejected {
+                reason: 13,
+                text: "the login queue is full — try again later",
+                retry_minutes: Some((20, 30)),
+            })
+        );
+    }
+
+    #[test]
+    fn an_unroutable_advertised_address_is_reported_as_such() {
+        // ClassicUO's `ip == 0` case: the shard is telling us to keep using
+        // the address we already have.
+        let frame = [0x8C, 0, 0, 0, 0, 0x0A, 0x21, 0x11, 0x22, 0x33, 0x44];
+        let (addr, _) = parse_server_redirect(&frame).unwrap();
+        assert!(!addr.is_routable());
+        // …and so is a real address with no port to dial.
+        let frame = [0x8C, 10, 0, 0, 5, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44];
+        let (addr, _) = parse_server_redirect(&frame).unwrap();
+        assert!(!addr.is_routable());
     }
 
     /// Drives past phase 1 into `AwaitCharacterList` and returns the machine.
     fn machine_at_character_list(cfg: LoginConfig) -> LoginMachine {
         let (mut m, _initial) = LoginMachine::start(cfg);
-        m.on_packet(&[0xA8, 0x00, 0x06, 0x00, 0x01, 0x00]).unwrap();
+        m.on_packet(&empty_server_list()).unwrap();
         let redirect = [0x8C, 127, 0, 0, 1, 0x0A, 0x21, 0x11, 0x22, 0x33, 0x44];
         m.on_packet(&redirect).unwrap();
         m
