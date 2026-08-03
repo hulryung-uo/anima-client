@@ -8,6 +8,7 @@
 //! [`decide_blocked_step`].
 
 use super::*;
+use anima_core::world::Item;
 
 /// Why [`explain_tile_walkable`] (or [`can_step_to`] — the movement-gate
 /// twin, scored via [`calculate_new_z`] instead of `walkable_z_explain`)
@@ -34,6 +35,85 @@ pub enum StepDeny {
     /// (and thereby misreporting) a [`ZReason`] that implies detail
     /// `can_step_to` doesn't actually have.
     NoLanding,
+}
+
+/// Ground items and placed multis, bucketed once instead of rescanned per tile.
+///
+/// [`dynamic_statics_at`] and [`multi_components_at`] each walked **all** of
+/// `World::items` for every tile asked about. `build_scene` asks about 2,232
+/// tiles per frame, so even with only ~200 items in view that was ~30ms of a
+/// ~48ms scene build — against ~2ms of actual terrain math — and it blocked
+/// the game loop (movement pacing + net pump) exactly as the `Value`
+/// round-trip used to. Building this once makes both a hash lookup.
+///
+/// Cheap enough that the one-shot entry points ([`tile_walkable`] and friends)
+/// just build one per call: that is the same single pass they already paid for.
+pub(super) struct TileScan<'a> {
+    world: &'a World,
+    ground: std::collections::HashMap<(i64, i64), Vec<StaticTile>>,
+    multis: Vec<(u32, &'a Item)>,
+}
+
+impl<'a> TileScan<'a> {
+    pub(super) fn build(world: &'a World, map: &MapData) -> Self {
+        let mut ground: std::collections::HashMap<(i64, i64), Vec<StaticTile>> =
+            std::collections::HashMap::new();
+        let mut multis = Vec::new();
+        for (serial, it) in world.items.iter() {
+            if it.is_multi {
+                multis.push((*serial, it));
+            } else if it.container.is_none() {
+                // `height`/`flags` are resolved here rather than per lookup —
+                // the same tiledata reads `dynamic_statics_at` did, just once
+                // per item instead of once per (item, tile) pair.
+                ground
+                    .entry((it.pos.x as i64, it.pos.y as i64))
+                    .or_default()
+                    .push(StaticTile {
+                        graphic: it.graphic,
+                        z: it.pos.z,
+                        height: map.item_height(it.graphic),
+                        flags: map.item_flags(it.graphic),
+                    });
+            }
+        }
+        Self {
+            world,
+            ground,
+            multis,
+        }
+    }
+
+    #[cfg(test)]
+    /// Just the multi list — no ground buckets, so no tiledata and no map.
+    /// [`multi_components_at`] needs nothing else.
+    pub(super) fn multis_only(world: &'a World) -> Self {
+        Self {
+            world,
+            ground: std::collections::HashMap::new(),
+            multis: world
+                .items
+                .iter()
+                .filter(|(_, it)| it.is_multi)
+                .map(|(serial, it)| (*serial, it))
+                .collect(),
+        }
+    }
+
+    pub(super) fn world(&self) -> &'a World {
+        self.world
+    }
+
+    /// Dynamic (non-multi, uncontained) items standing on `(x, y)`.
+    pub(super) fn ground_at(&self, x: i64, y: i64) -> &[StaticTile] {
+        self.ground.get(&(x, y)).map_or(&[][..], |v| &v[..])
+    }
+
+    /// Every placed multi, as `(serial, item)`. Usually a handful; the point is
+    /// not to walk the whole item table to find them.
+    pub(super) fn multis(&self) -> &[(u32, &'a Item)] {
+        &self.multis
+    }
 }
 
 /// Every multi component (boat hull/deck, house wall/floor — never the
@@ -65,14 +145,17 @@ pub enum StepDeny {
 /// This is the WALKABILITY rule only — rendering (the tile loop in
 /// [`build_scene`]) still folds on `visible`, since ClassicUO only ever *draws*
 /// visible components.
-pub(super) fn multi_components_at(
-    world: &World,
+///
+/// (Both fold through [`TileScan`] rather than rescanning the item table.)
+pub(super) fn multi_components_at_scanned(
+    scan: &TileScan,
     multis: &Multis,
     x: i64,
     y: i64,
 ) -> Vec<(u16, i32)> {
+    let world = scan.world();
     let mut out = Vec::new();
-    for (serial, it) in world.items.iter().filter(|(_, it)| it.is_multi) {
+    for (serial, it) in scan.multis().iter().map(|(s, it)| (s, *it)) {
         let (dx, dy) = (x - it.pos.x as i64, y - it.pos.y as i64);
         if dx < i16::MIN as i64
             || dx > i16::MAX as i64
@@ -120,13 +203,13 @@ pub(super) fn multi_components_at(
 /// blocks, using the EXACT SAME impassable/surface/bridge rules a real static
 /// gets (`StaticTile::impassable`/`::surface`), not a parallel ad hoc check.
 pub(super) fn multi_statics_at(
-    world: &World,
+    scan: &TileScan,
     multis: &Multis,
     map: &MapData,
     x: i64,
     y: i64,
 ) -> Vec<StaticTile> {
-    multi_components_at(world, multis, x, y)
+    multi_components_at_scanned(scan, multis, x, y)
         .into_iter()
         .map(|(graphic, z)| StaticTile {
             graphic,
@@ -164,20 +247,12 @@ pub(super) fn multi_statics_at(
 /// copied straight from `Item::pos.z`, which is already the wire's `i8` —
 /// unlike a multi component's synthesized `(origin_z + dz)` sum, there's no
 /// offset arithmetic here that could overflow, so no clamp is needed.
-pub(super) fn dynamic_statics_at(world: &World, map: &MapData, x: i64, y: i64) -> Vec<StaticTile> {
-    world
-        .items
-        .values()
-        .filter(|it| {
-            !it.is_multi && it.container.is_none() && it.pos.x as i64 == x && it.pos.y as i64 == y
-        })
-        .map(|it| StaticTile {
-            graphic: it.graphic,
-            z: it.pos.z,
-            height: map.item_height(it.graphic),
-            flags: map.item_flags(it.graphic),
-        })
-        .collect()
+pub(super) fn dynamic_statics_at_scanned<'s>(
+    scan: &'s TileScan,
+    x: i64,
+    y: i64,
+) -> &'s [StaticTile] {
+    scan.ground_at(x, y)
 }
 
 /// Does a **multi component** block a body at `current_z` stepping onto `(x,
@@ -186,7 +261,7 @@ pub(super) fn dynamic_statics_at(world: &World, map: &MapData, x: i64, y: i64) -
 /// `BaseHouse.AddSouthDoor`), so no door exception is needed here — that
 /// already flows through the ordinary dynamic-item path above.
 pub(super) fn multi_blocker_at(
-    world: &World,
+    scan: &TileScan,
     multis: &Multis,
     map: &mut MapData,
     x: i64,
@@ -194,7 +269,7 @@ pub(super) fn multi_blocker_at(
     current_z: i32,
     ghost: bool,
 ) -> Option<(u16, i32)> {
-    multi_components_at(world, multis, x, y)
+    multi_components_at_scanned(scan, multis, x, y)
         .into_iter()
         .find(|&(graphic, comp_z)| {
             map.item_blocks(graphic, comp_z, current_z) && !(ghost && map.item_is_door(graphic))
@@ -236,8 +311,8 @@ pub(super) fn multi_blocker_at(
 /// [`dynamic_statics_at`] (as [`explain_tile_walkable`] does, for its surface
 /// fold) never scans `World::items` twice for the same tile.
 #[allow(clippy::too_many_arguments)] // tile coords + the caller's pre-fetched fold
-pub(super) fn blocking_item_at(
-    world: &World,
+pub(super) fn blocking_item_at_scanned(
+    scan: &TileScan,
     map: &mut MapData,
     multis: Option<&Multis>,
     x: i64,
@@ -256,8 +331,7 @@ pub(super) fn blocking_item_at(
         });
     }
     if let Some(multis) = multis {
-        if let Some((graphic, item_z)) =
-            multi_blocker_at(world, multis, map, x, y, current_z, ghost)
+        if let Some((graphic, item_z)) = multi_blocker_at(scan, multis, map, x, y, current_z, ghost)
         {
             return Some(StepDeny::DynamicItem { graphic, item_z });
         }
@@ -294,21 +368,22 @@ pub(super) fn blocking_item_at(
 /// to tell "wall" from "door" apart. The blocker check itself still walks
 /// every item [`dynamic_statics_at`] returned (unfiltered), so an impassable
 /// item denies exactly as before.
-pub fn explain_tile_walkable(
-    world: &World,
+pub(super) fn explain_tile_walkable_scanned(
+    scan: &TileScan,
     map: &mut MapData,
     multis: Option<&Multis>,
     x: i64,
     y: i64,
     current_z: i32,
 ) -> Result<i32, StepDeny> {
+    let world = scan.world();
     if x < 0 || y < 0 {
         return Err(StepDeny::OffMap);
     }
     let ghost = player_is_ghost(world);
-    let dyn_items = dynamic_statics_at(world, map, x, y);
+    let dyn_items = dynamic_statics_at_scanned(scan, x, y);
     let mut extra = multis
-        .map(|m| multi_statics_at(world, m, map, x, y))
+        .map(|m| multi_statics_at(scan, m, map, x, y))
         .unwrap_or_default();
     extra.extend(
         dyn_items
@@ -319,7 +394,9 @@ pub fn explain_tile_walkable(
     let z = map
         .walkable_z_explain(x as u32, y as u32, current_z, &extra)
         .map_err(StepDeny::Terrain)?;
-    if let Some(deny) = blocking_item_at(world, map, multis, x, y, current_z, &dyn_items, ghost) {
+    if let Some(deny) =
+        blocking_item_at_scanned(scan, map, multis, x, y, current_z, dyn_items, ghost)
+    {
         return Err(deny);
     }
     Ok(z)
@@ -339,7 +416,8 @@ pub fn tile_walkable(
     y: i64,
     current_z: i32,
 ) -> bool {
-    explain_tile_walkable(world, map, multis, x, y, current_z).is_ok()
+    let scan = TileScan::build(world, map);
+    explain_tile_walkable_scanned(&scan, map, multis, x, y, current_z).is_ok()
 }
 
 /// Is tile (x, y) walkable for **click-to-walk route planning**, at
@@ -367,7 +445,8 @@ pub fn tile_walkable_for_planning(
     y: i64,
     current_z: i32,
 ) -> Option<i32> {
-    explain_tile_walkable_for_planning(world, map, multis, x, y, current_z).0
+    let scan = TileScan::build(world, map);
+    explain_tile_walkable_for_planning_scanned(&scan, map, multis, x, y, current_z).0
 }
 
 /// [`tile_walkable_for_planning`]'s full answer: the resolved standing Z, PLUS
@@ -382,15 +461,16 @@ pub fn tile_walkable_for_planning(
 /// it. A `Some` serial only ever comes back alongside a `Some` Z; a tile
 /// that's walkable outright (no door involved, e.g. an already-open doorway)
 /// reports a Z with no serial.
-pub(super) fn explain_tile_walkable_for_planning(
-    world: &World,
+pub(super) fn explain_tile_walkable_for_planning_scanned(
+    scan: &TileScan,
     map: &mut MapData,
     multis: Option<&Multis>,
     x: i64,
     y: i64,
     current_z: i32,
 ) -> (Option<i32>, Option<u32>) {
-    match explain_tile_walkable(world, map, multis, x, y, current_z) {
+    let world = scan.world();
+    match explain_tile_walkable_scanned(scan, map, multis, x, y, current_z) {
         Ok(z) => (Some(z), None),
         Err(StepDeny::DynamicItem { .. }) => {
             // `explain_tile_walkable`'s `.find()` only reports the FIRST
@@ -423,13 +503,13 @@ pub(super) fn explain_tile_walkable_for_planning(
                 }
                 !blocks || is_door
             }) && multis
-                .is_none_or(|m| multi_blocker_at(world, m, map, x, y, current_z, ghost).is_none());
+                .is_none_or(|m| multi_blocker_at(scan, m, map, x, y, current_z, ghost).is_none());
             if all_blockers_are_doors {
                 // Every blocker on this tile is an openable door — recompute
                 // without dynamic items (the static base — real statics AND
                 // any multi-contributed surface — still applies).
                 let extra = multis
-                    .map(|m| multi_statics_at(world, m, map, x, y))
+                    .map(|m| multi_statics_at(scan, m, map, x, y))
                     .unwrap_or_default();
                 let z = map
                     .walkable_z_explain(x as u32, y as u32, current_z, &extra)
@@ -672,8 +752,9 @@ pub fn can_step_to(
     }
     let z = calculate_new_z(world, map, multis, nx, ny, pz, dir).ok_or(StepDeny::NoLanding)?;
     let ghost = player_is_ghost(world);
-    let dyn_items = dynamic_statics_at(world, map, nx, ny);
-    match blocking_item_at(world, map, multis, nx, ny, z, &dyn_items, ghost) {
+    let scan = TileScan::build(world, map);
+    let dyn_items = dynamic_statics_at_scanned(&scan, nx, ny);
+    match blocking_item_at_scanned(&scan, map, multis, nx, ny, z, dyn_items, ghost) {
         Some(deny) => Err(deny),
         None => Ok(z),
     }
@@ -745,4 +826,74 @@ pub fn can_walk(
     } else {
         None
     }
+}
+
+// One-shot entry points, in the `&World` shape these had before the index: each
+// builds a `TileScan` and hands off, which is the single pass they already paid
+// for. Callers asking about many tiles (the scene's tile loop) build one scan
+// and call the `_scanned` forms directly.
+//
+// Only `explain_tile_walkable` survives outside tests — the rest are kept
+// because the tests read better calling them, and are marked as such rather
+// than left looking like live API.
+
+/// See [`explain_tile_walkable_scanned`].
+pub fn explain_tile_walkable(
+    world: &World,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    x: i64,
+    y: i64,
+    current_z: i32,
+) -> Result<i32, StepDeny> {
+    let scan = TileScan::build(world, map);
+    explain_tile_walkable_scanned(&scan, map, multis, x, y, current_z)
+}
+
+/// See [`explain_tile_walkable_for_planning_scanned`].
+#[cfg(test)]
+pub(super) fn explain_tile_walkable_for_planning(
+    world: &World,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    x: i64,
+    y: i64,
+    current_z: i32,
+) -> (Option<i32>, Option<u32>) {
+    let scan = TileScan::build(world, map);
+    explain_tile_walkable_for_planning_scanned(&scan, map, multis, x, y, current_z)
+}
+
+/// See [`blocking_item_at_scanned`].
+#[allow(clippy::too_many_arguments)] // mirrors the scanned form
+#[cfg(test)]
+pub(super) fn blocking_item_at(
+    world: &World,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    x: i64,
+    y: i64,
+    current_z: i32,
+    dyn_items: &[StaticTile],
+    ghost: bool,
+) -> Option<StepDeny> {
+    let scan = TileScan::build(world, map);
+    blocking_item_at_scanned(&scan, map, multis, x, y, current_z, dyn_items, ghost)
+}
+
+/// See [`multi_components_at_scanned`].
+#[cfg(test)]
+pub(super) fn multi_components_at(
+    world: &World,
+    multis: &Multis,
+    x: i64,
+    y: i64,
+) -> Vec<(u16, i32)> {
+    multi_components_at_scanned(&TileScan::multis_only(world), multis, x, y)
+}
+
+/// See [`dynamic_statics_at_scanned`].
+#[cfg(test)]
+pub(super) fn dynamic_statics_at(world: &World, map: &MapData, x: i64, y: i64) -> Vec<StaticTile> {
+    TileScan::build(world, map).ground_at(x, y).to_vec()
 }

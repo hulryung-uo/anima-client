@@ -86,9 +86,18 @@ pub fn build_scene(
     // `s.world` — needs `multis` for the foundation's `multi.mul` bounds, so it's
     // a no-op (and every design stays `tiles_ready == false`, rendering as the
     // stock foundation) when the caller has no `Multis` loaded at all.
+    let prof = std::env::var("ANIMA_PROFILE").is_ok();
+    let mut t = Instant::now();
+    let mark = |name: &str, t: &mut Instant| {
+        if prof {
+            eprintln!("[prof] {name}: {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
+            *t = Instant::now();
+        }
+    };
     if let Some(m) = multis {
         ensure_house_tiles(&mut s.world, m);
     }
+    mark("house_tiles", &mut t);
     let p = s.world.player_mobile().cloned().unwrap_or_default();
     let st = &s.world.player_stats;
     let mounted = s.world.player_mounted();
@@ -107,6 +116,7 @@ pub fn build_scene(
     // Every asset lookup the emitters below need, as one value instead of
     // fifteen closures. It holds the SHARED `&MapData`; the tile loop further
     // down takes the `&mut` one, so `look` must be out of scope by then.
+    mark("max_draw_z", &mut t);
     let look = Look {
         map: map.as_deref(),
         anim,
@@ -127,6 +137,7 @@ pub fn build_scene(
     let equip = equip_json(&s.world, &look, &p, equip_body);
     let player_mount_anim = player_mount_anim(&s.world, &look, &p);
     let cont_items = container_items_json(&s.world, &look);
+    mark("entities", &mut t);
     // Vendor shop windows. `buy` (0x74) lists the vendor's for-sale prices in
     // packet order — the renderer matches them to that container's `contItems` by
     // index. `sell` (0x9E) lists the items in our pack the vendor will buy. Either
@@ -213,6 +224,7 @@ pub fn build_scene(
         ),
         None => TileEmission::default(),
     };
+    mark("emit_tiles", &mut t);
     // Drop the trailing commas left by the per-entry writes.
     if tiles.ends_with(',') {
         tiles.pop();
@@ -221,6 +233,7 @@ pub fn build_scene(
         statics.pop();
     }
 
+    mark("dialogs+feeds", &mut t);
     // Small parts go through serde (cheap + handles string escaping for names).
     let mut player = json!({
         "serial": p.serial,
@@ -389,6 +402,7 @@ pub fn build_scene(
         ),
         None => String::new(),
     };
+    mark("small_parts", &mut t);
     format!(
         "{{\"player\":{player},\
          \"map\":{{\"cx\":{px},\"cy\":{py},\"radius\":{LAND_RADIUS},\"viewRange\":{RADIUS},\"tiles\":[{tiles}],\"maxZ\":{max_z},\"dbg\":{dbg}}},\

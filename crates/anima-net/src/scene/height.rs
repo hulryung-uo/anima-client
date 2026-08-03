@@ -17,7 +17,7 @@ use super::*;
 /// without this a boat/house roof would never cull and the interior would
 /// never show.
 pub(super) fn roof_scan_tiles(
-    world: &World,
+    scan: &TileScan,
     multis: Option<&Multis>,
     map: &mut MapData,
     x: i64,
@@ -30,7 +30,7 @@ pub(super) fn roof_scan_tiles(
         .collect();
     if let Some(multis) = multis {
         out.extend(
-            multi_components_at(world, multis, x, y)
+            multi_components_at_scanned(scan, multis, x, y)
                 .into_iter()
                 .map(|(graphic, z)| (z, map.item_flags(graphic))),
         );
@@ -42,8 +42,8 @@ pub(super) fn roof_scan_tiles(
 /// or upper floor over the player vanishes and the interior shows. 127 = draw all.
 /// `multis` widens both scans below to in-view multi components (a house roof
 /// is no different from a real static one) via [`roof_scan_tiles`].
-pub(super) fn max_draw_z(
-    world: &World,
+pub(super) fn max_draw_z_scanned(
+    scan: &TileScan,
     map: &mut MapData,
     multis: Option<&Multis>,
     px: i64,
@@ -63,7 +63,7 @@ pub(super) fn max_draw_z(
     }
     // Statics (+ multi components) over the player's own tile: an upper floor
     // / non-roof blocker.
-    for (tz, flags) in roof_scan_tiles(world, multis, map, px, py) {
+    for (tz, flags) in roof_scan_tiles(scan, multis, map, px, py) {
         if tz > pz14 && tz < max_z {
             let is_roof = flags & FLAG_ROOF != 0;
             let is_surface = flags & FLAG_SURFACE != 0;
@@ -76,12 +76,12 @@ pub(super) fn max_draw_z(
     // ceiling to the *near-Z* of its whole connected span (CalculateNearZ), so a
     // pitched roof lifts off cleanly instead of just its peak band.
     let mut roof_found = false;
-    for (tz, flags) in roof_scan_tiles(world, multis, map, px + 1, py + 1) {
+    for (tz, flags) in roof_scan_tiles(scan, multis, map, px + 1, py + 1) {
         if tz > pz14 && tz < max_z {
             let is_roof = flags & FLAG_ROOF != 0;
             if (flags & 0x204) == 0 && is_roof {
                 let mut visited = HashSet::new();
-                max_z = calculate_near_z(world, multis, map, px + 1, py + 1, tz, tz, &mut visited);
+                max_z = calculate_near_z(scan, multis, map, px + 1, py + 1, tz, tz, &mut visited);
                 roof_found = true;
             }
         }
@@ -102,7 +102,7 @@ pub(super) fn max_draw_z(
 /// connected span instead of stopping dead at the first non-static tile.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn calculate_near_z(
-    world: &World,
+    scan: &TileScan,
     multis: Option<&Multis>,
     map: &mut MapData,
     x: i64,
@@ -114,17 +114,17 @@ pub(super) fn calculate_near_z(
     if x < 0 || y < 0 || !visited.insert((x, y)) {
         return default_z;
     }
-    let roof = roof_scan_tiles(world, multis, map, x, y)
+    let roof = roof_scan_tiles(scan, multis, map, x, y)
         .into_iter()
         .find(|&(tz, flags)| flags & FLAG_ROOF != 0 && (z - tz).abs() <= 6);
     let Some((tz, _)) = roof else {
         return default_z;
     };
     let mut near = default_z.min(tz);
-    near = calculate_near_z(world, multis, map, x - 1, y, tz, near, visited);
-    near = calculate_near_z(world, multis, map, x + 1, y, tz, near, visited);
-    near = calculate_near_z(world, multis, map, x, y - 1, tz, near, visited);
-    near = calculate_near_z(world, multis, map, x, y + 1, tz, near, visited);
+    near = calculate_near_z(scan, multis, map, x - 1, y, tz, near, visited);
+    near = calculate_near_z(scan, multis, map, x + 1, y, tz, near, visited);
+    near = calculate_near_z(scan, multis, map, x, y - 1, tz, near, visited);
+    near = calculate_near_z(scan, multis, map, x, y + 1, tz, near, visited);
     near
 }
 
@@ -253,7 +253,7 @@ pub(super) fn tiledata_path_obj(z: i32, height: i32, tile_flags: u64) -> Option<
 /// its own separate `blocked_by_item` check regardless of what
 /// `calculate_new_z` decides).
 pub(super) fn create_item_list(
-    world: &World,
+    scan: &TileScan,
     map: &mut MapData,
     multis: Option<&Multis>,
     x: i64,
@@ -285,13 +285,13 @@ pub(super) fn create_item_list(
             list.push(obj);
         }
     }
-    for it in dynamic_statics_at(world, map, x, y) {
+    for it in dynamic_statics_at_scanned(scan, x, y) {
         if let Some(obj) = tiledata_path_obj(it.z as i32, it.height as i32, it.flags) {
             list.push(obj);
         }
     }
     if let Some(multis) = multis {
-        for (graphic, cz) in multi_components_at(world, multis, x, y) {
+        for (graphic, cz) in multi_components_at_scanned(scan, multis, x, y) {
             let h = map.item_height(graphic) as i32;
             if let Some(obj) = tiledata_path_obj(cz, h, map.item_flags(graphic)) {
                 list.push(obj);
@@ -336,7 +336,7 @@ pub(super) fn bound_min_max_z(
 /// ClassicUO `Pathfinder.CalculateMinMaxZ`: bound the step using the tile we
 /// came *from* (opposite of `direction`). Returns `(min_z, max_z)`.
 pub(super) fn calc_min_max_z(
-    world: &World,
+    scan: &TileScan,
     map: &mut MapData,
     multis: Option<&Multis>,
     x: i64,
@@ -347,7 +347,7 @@ pub(super) fn calc_min_max_z(
     let back = (direction ^ 4) & 7;
     let sx = x + OFF_X[back as usize];
     let sy = y + OFF_Y[back as usize];
-    let source = create_item_list(world, map, multis, sx, sy);
+    let source = create_item_list(scan, map, multis, sx, sy);
     // Only land can be "stretched" (sloped) — at most one land entry per tile,
     // so this is computed at most once, matching the original inline call site.
     let stretched_avg = if source.iter().any(|o| o.land_stretched) {
@@ -443,10 +443,47 @@ pub fn calculate_new_z(
     current_z: i32,
     direction: u8,
 ) -> Option<i32> {
+    calculate_new_z_scanned(
+        &TileScan::build(world, map),
+        map,
+        multis,
+        x,
+        y,
+        current_z,
+        direction,
+    )
+}
+
+/// [`calculate_new_z`] against a scan the caller already built — the tile loop
+/// resolves ~168 of these per frame and must not rebuild the index each time.
+#[allow(clippy::too_many_arguments)] // mirrors `calculate_new_z`
+pub(super) fn calculate_new_z_scanned(
+    scan: &TileScan,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    x: i64,
+    y: i64,
+    current_z: i32,
+    direction: u8,
+) -> Option<i32> {
     if x < 0 || y < 0 {
         return None;
     }
-    let (min_z, max_z) = calc_min_max_z(world, map, multis, x, y, current_z, direction);
-    let list = create_item_list(world, map, multis, x, y);
+    let (min_z, max_z) = calc_min_max_z(scan, map, multis, x, y, current_z, direction);
+    let list = create_item_list(scan, map, multis, x, y);
     resolve_standing_z(list, min_z, max_z, current_z)
+}
+
+/// See [`max_draw_z_scanned`]. Called once per scene build (and by tests), so
+/// it builds its own index.
+pub(super) fn max_draw_z(
+    world: &World,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    px: i64,
+    py: i64,
+    pz: i32,
+) -> i32 {
+    let scan = TileScan::build(world, map);
+    max_draw_z_scanned(&scan, map, multis, px, py, pz)
 }

@@ -37,6 +37,7 @@ pub(super) fn emit_tiles(
     lights: &mut Vec<Value>,
 ) -> TileEmission {
     let (px, py, pz) = center;
+    let scan = TileScan::build(world, map);
     let mut tiles = String::with_capacity(64 * 1024);
     let mut statics = String::with_capacity(16 * 1024);
     let mut n_statics = 0usize;
@@ -98,7 +99,7 @@ pub(super) fn emit_tiles(
                     continue;
                 };
                 if let Some(z) =
-                    calculate_new_z(world, map, multis, px + ddx, py + ddy, pz_hop, dir)
+                    calculate_new_z_scanned(&scan, map, multis, px + ddx, py + ddy, pz_hop, dir)
                 {
                     sz_chain[chain_idx(ddx, ddy)] = Some(z);
                 }
@@ -196,13 +197,14 @@ pub(super) fn emit_tiles(
             let walk = if dx.abs() <= CHAIN_RADIUS && dy.abs() <= CHAIN_RADIUS {
                 match sz_chain[chain_idx(dx, dy)] {
                     Some(z) => {
-                        let dyn_items = dynamic_statics_at(world, map, x, y);
-                        blocking_item_at(world, map, multis, x, y, z, &dyn_items, ghost).is_none()
+                        let dyn_items = dynamic_statics_at_scanned(&scan, x, y);
+                        blocking_item_at_scanned(&scan, map, multis, x, y, z, dyn_items, ghost)
+                            .is_none()
                     }
                     None => false,
                 }
             } else {
-                tile_walkable(world, map, multis, x, y, pz)
+                explain_tile_walkable_scanned(&scan, map, multis, x, y, pz).is_ok()
             };
             let land = map.land(x as u32, y as u32);
             let c = art
@@ -289,7 +291,7 @@ pub(super) fn emit_tiles(
             // browser's manual (keyboard) walking needs this serial to do
             // the same, instead of just stopping at the strict `w=0`.
             let door_to_open = if !walk && dx.abs() <= PATH_RADIUS && dy.abs() <= PATH_RADIUS {
-                explain_tile_walkable_for_planning(world, map, multis, x, y, pz).1
+                explain_tile_walkable_for_planning_scanned(&scan, map, multis, x, y, pz).1
             } else {
                 None
             };

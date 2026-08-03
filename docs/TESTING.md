@@ -341,6 +341,25 @@ With `ANIMA_DEBUG=1` set on the `play` process, watch its stderr for:
   ALLOW/DENY <reason>` for all 8 neighbors explains exactly why
   (`play_server/autowalk.rs`, `debug_probe_neighbors`).
 
+### Where the frame time goes
+
+`ANIMA_PROFILE=1` on the `play` bin prints a per-phase breakdown of every scene
+build to stderr:
+
+```
+[prof] house_tiles: 0.01ms
+[prof] max_draw_z: 0.18ms
+[prof] entities: 1.12ms
+[prof] emit_tiles: 16.00ms
+[prof] small_parts: 1.86ms
+```
+
+The build blocks the game loop (movement pacing + net pump), so a slow one
+shows up as stutter, not as a number — which is why `publish` also warns on
+stderr past 30ms. If that warning is firing every frame, start here rather
+than guessing: the last time it was, 30 of the 33ms turned out to be item
+scans and 2ms was the actual terrain math.
+
 Optionally enable the in-page HUD instead of/alongside stderr-watching:
 `python3 scripts/drive.py eval "settings.debugMove = true"` (Options panel's
 "Movement debug" checkbox, `web/main.js:182,2729` — shows predicted vs.
