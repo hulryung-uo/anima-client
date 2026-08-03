@@ -74,13 +74,16 @@
 //! a wall from open ground instead of delegating every route to the driver;
 //! `null` unless the driver surveyed it. Same version added `Say`'s optional
 //! `mode` (whisper/yell/emote/guild/alliance — absent still means plain
-//! speech) and the `StatLock` action.)
+//! speech) and the `StatLock` action. v18: journal lines gained `display` —
+//! the cliloc resolved to real words — plus 0xCC's `affix`/`affix_prepend`.
+//! A brain could previously be told "you have been added to the party" and
+//! receive `#1005445`; `text` still carries the raw args.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 17;
+pub const SCHEMA_VERSION: u32 = 18;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
@@ -207,10 +210,15 @@ fn gump_json(g: &GumpView) -> Value {
     })
 }
 
+/// A journal line. `text` stays the raw payload — plain speech, or a cliloc's
+/// tab-separated arguments — and `display` is the localized line a brain should
+/// actually read (see [`anima_core::world::JournalEntry::display`]); it is
+/// empty when the driver had no Cliloc table to resolve with.
 fn journal_json(j: &JournalEntry) -> Value {
     json!({
         "serial": j.serial, "name": j.name, "text": j.text,
         "msg_type": j.msg_type, "hue": j.hue, "cliloc": j.cliloc,
+        "display": j.display, "affix": j.affix, "affix_prepend": j.affix_prepend,
     })
 }
 
@@ -1210,8 +1218,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v17_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 17);
+    fn schema_v18_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 18);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,

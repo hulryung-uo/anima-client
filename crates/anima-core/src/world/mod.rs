@@ -181,7 +181,7 @@ pub struct PlayerStats {
 }
 
 /// One journal (chat/system) line.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JournalEntry {
     pub serial: u32,
     pub name: String,
@@ -189,9 +189,25 @@ pub struct JournalEntry {
     pub msg_type: u8,
     pub hue: u16,
     /// Cliloc id for localized messages (0xC1/0xCC); 0 for plain speech. For a
-    /// cliloc line, `text` holds the raw tab-separated args — the brain resolves
-    /// `(cliloc, text)` to display text via the client's Cliloc table.
+    /// cliloc line, `text` holds the raw tab-separated args.
     pub cliloc: u32,
+    /// 0xCC's affix: a literal fragment the server wants joined to the
+    /// *resolved* line, not to its arguments (ClassicUO
+    /// `PacketHandlers.DisplayClilocString`). Empty when there is none.
+    pub affix: String,
+    /// Whether `affix` goes before the resolved text rather than after
+    /// (`AffixType.Prepend`, flag `0x01`).
+    pub affix_prepend: bool,
+    /// The line as a human (or a brain) should read it: `cliloc` resolved
+    /// against the client's table, arguments substituted, affix joined on.
+    ///
+    /// **Empty unless something filled it.** The core has no Cliloc table by
+    /// design — the same split as [`crate::agent::Observation::terrain`] — so
+    /// `World` leaves this alone and a driver holding the assets fills it
+    /// (`anima_net::resolve_journal`). A consumer that finds it empty on a
+    /// `cliloc != 0` line is talking to a driver that never resolved it, and
+    /// should fall back to `(cliloc, text)`.
+    pub display: String,
 }
 
 /// One skill's standing. Values are in **tenths** (wire units): 500 == 50.0.
@@ -1984,6 +2000,9 @@ impl World {
             msg_type: 0,
             hue: 0,
             cliloc: 0,
+            affix: String::new(),
+            affix_prepend: false,
+            display: String::new(),
         });
     }
 

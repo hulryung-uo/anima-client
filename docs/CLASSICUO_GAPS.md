@@ -4,10 +4,12 @@ Working inventory for bringing `anima-client` toward ClassicUO feature coverage.
 A feature counts as complete only when its packet/state, native driver contract,
 scene/agent exposure, and user-facing behavior (where applicable) all exist.
 
-Closed since the audit (2026-08-02): the five Tier 1 rows marked **CLOSED**
+Closed since the audit (2026-08-02/03): the five Tier 1 rows marked **CLOSED**
 below (speech modes, stat locks, auto-walk speed tiers, shard list + relay
-address, login/character rejection reasons) and the Tier 4 terrain-perception
-row — the one the audit called out as cutting against the project's own thesis.
+address, login/character rejection reasons) and three of Tier 4's four —
+terrain perception (the row the audit called out as cutting against the
+project's own thesis), cliloc-resolved journal text, and the 0xCC affix bug.
+Tier 4's remaining row is the gump layout grammar.
 
 ## Audit baseline
 
@@ -256,11 +258,20 @@ This is the one that cuts against the project's own thesis.
   **Known limit, by design:** every tile is judged as a step from the player's
   current Z, so the far edge of the window is approximate on sharply sloped
   ground; exact multi-step reachability still means `find_path`.
-- Cliloc-localized messages reach brains as an unresolved id plus raw args, so a brain
-  cannot read most system messages.
-- 0xCC ClilocMessageAffix drops the affix-flags byte and concatenates the affix into
-  the cliloc *args* rather than the resolved text, so templates without a placeholder
-  discard it entirely (`game.rs:3310-3331`).
+- ~~Cliloc-localized messages reach brains as an unresolved id plus raw args~~ —
+  **CLOSED.** `JournalEntry::display` carries the resolved line, filled by
+  `anima_net::resolve_journal` — the driver, because the core has no Cliloc table
+  (the same split as `Observation::terrain`). Wired into both agent runners and the
+  JSON contract (schema **v18**); `text` still carries the raw args. Verified live
+  through the NDJSON bridge: a party invite now reaches the brain as
+  `display: "Who would you like to add to your party?"` instead of `cliloc 1005454`
+  with empty args.
+- ~~0xCC ClilocMessageAffix drops the affix-flags byte and concatenates the affix
+  into the cliloc *args*~~ — **CLOSED.** The affix is kept beside the arguments
+  (`JournalEntry::affix`/`affix_prepend`) and joined to the *resolved* text on the
+  side flag `0x01` asks for, matching ClassicUO `DisplayClilocString`/`AffixType`.
+  Folding it into the args had corrupted the argument list and lost the affix
+  entirely on any template without a placeholder.
 - Server-gump layout grammar: `tilepic`/`tilepichue`, `gumppictiled`, `checkertrans`,
   `tooltip`, `itemproperty`, `buttontileart`, `picinpic`, `textentrylimited`,
   `noclose`/`nodispose`/`nomove` are silently dropped, and radio buttons are never

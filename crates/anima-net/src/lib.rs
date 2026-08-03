@@ -17,7 +17,7 @@ pub mod regions;
 pub mod scene;
 pub mod uo_dir;
 
-use anima_assets::MapData;
+use anima_assets::{Cliloc, MapData};
 use anima_core::agent::{survey_terrain, Action, HouseDesignAction, Observation};
 use anima_core::net::outgoing::{
     build_ascii_prompt_response, build_attack, build_book_page_request, build_buy,
@@ -52,6 +52,39 @@ use crate::scene::{decide_blocked_step, BlockedStepAction, MapTerrain};
 
 /// Client version we report to the server (must match the login seed version).
 const CLIENT_VERSION: &str = "7.0.102.3";
+
+/// Fill every journal line's `display` — the localized text a brain (or a
+/// human) actually reads — by resolving its cliloc id and arguments against
+/// the client's table, then joining 0xCC's affix on the side the server asked
+/// for.
+///
+/// This lives in the driver for the same reason terrain perception does: the
+/// core has no assets, so it can only carry `(cliloc, args, affix)` and leave
+/// the words to whoever loaded `Cliloc.enu`. Without it a brain sees system
+/// messages as bare numbers — it can be told "you have been added to the
+/// party" and read `#1005445`.
+///
+/// Plain speech (`cliloc == 0`) is already text; it is copied through so a
+/// consumer can read `display` uniformly. With no table, a cliloc line falls
+/// back to `#<id>`, matching what the renderer shows.
+pub fn resolve_journal(obs: &mut Observation, cliloc: Option<&Cliloc>) {
+    for j in &mut obs.new_journal {
+        let base = if j.cliloc == 0 {
+            j.text.clone()
+        } else {
+            cliloc
+                .and_then(|c| c.format(j.cliloc, &j.text))
+                .unwrap_or_else(|| format!("#{}", j.cliloc))
+        };
+        j.display = if j.affix.is_empty() {
+            base
+        } else if j.affix_prepend {
+            format!("{}{base}", j.affix)
+        } else {
+            format!("{base}{}", j.affix)
+        };
+    }
+}
 
 /// A UO server address.
 #[derive(Debug, Clone)]

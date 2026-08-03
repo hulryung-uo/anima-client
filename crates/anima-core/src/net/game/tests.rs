@@ -4141,3 +4141,40 @@ fn chat_enable_transitions() {
     assert!(apply_packet(&mut w, &patch_len(q.into_vec())));
     assert_eq!(w.chat.enabled, ChatStatus::Enabled);
 }
+
+/// 0xCC's affix belongs to the *resolved* line, not to the argument list —
+/// folding it into the args both corrupts them and loses the affix entirely on
+/// a template with no placeholder. The prepend flag decides which side.
+#[test]
+fn cliloc_affix_is_kept_apart_from_the_arguments() {
+    fn packet(flags: u8, affix: &[u8], args: &str) -> Vec<u8> {
+        let mut p = PacketWriter::new();
+        p.u8(0xCC).u16(0); // id + length placeholder
+        p.u32(0x1234).u16(0x0190).u8(0).u16(0x3B2).u16(3); // serial, body, type, hue, font
+        p.u32(1_005_445).u8(flags); // cliloc + affix flags
+        p.fixed_ascii("System", 30);
+        p.bytes(affix).u8(0); // NUL-terminated affix
+        for u in args.encode_utf16() {
+            p.u16(u); // 0xCC arguments are big-endian UTF-16
+        }
+        let mut f = p.into_vec();
+        let n = f.len() as u16;
+        f[1] = (n >> 8) as u8;
+        f[2] = n as u8;
+        f
+    }
+
+    let mut w = World::new();
+    assert!(apply_packet(&mut w, &packet(0x00, b" (appended)", "Anima")));
+    let j = w.journal.last().expect("journal line");
+    assert_eq!(j.cliloc, 1_005_445);
+    assert_eq!(j.text, "Anima", "arguments must stay pure");
+    assert_eq!(j.affix, " (appended)");
+    assert!(!j.affix_prepend);
+
+    assert!(apply_packet(&mut w, &packet(0x01, b"[guild] ", "Anima")));
+    let j = w.journal.last().expect("journal line");
+    assert_eq!(j.text, "Anima");
+    assert_eq!(j.affix, "[guild] ");
+    assert!(j.affix_prepend, "flag 0x01 is AffixType.Prepend");
+}

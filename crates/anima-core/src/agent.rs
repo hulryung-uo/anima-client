@@ -1027,6 +1027,7 @@ mod tests {
             msg_type: 0,
             hue: 0,
             cliloc: 0,
+            ..Default::default()
         });
 
         let mut cursor = 0;

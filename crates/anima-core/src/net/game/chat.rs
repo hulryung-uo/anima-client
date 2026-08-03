@@ -299,7 +299,17 @@ pub(super) fn cliloc_message(world: &mut World, frame: &[u8]) -> PResult<()> {
     let cliloc = u32::from_be_bytes([frame[14], frame[15], frame[16], frame[17]]);
     let name = ascii_string(&frame[18..48]);
     let args = decode_unicode(&frame[48..], false); // 0xC1 args are little-endian
-    push_journal_cliloc(world, serial, name, args, msg_type, hue, cliloc);
+    push_journal_cliloc(
+        world,
+        serial,
+        name,
+        args,
+        msg_type,
+        hue,
+        cliloc,
+        String::new(),
+        false,
+    );
     Ok(())
 }
 
@@ -313,7 +323,8 @@ pub(super) fn cliloc_affix(world: &mut World, frame: &[u8]) -> PResult<()> {
     let msg_type = frame[9];
     let hue = u16::from_be_bytes([frame[10], frame[11]]);
     let cliloc = u32::from_be_bytes([frame[14], frame[15], frame[16], frame[17]]);
-    // frame[18] = affix flags (prepend/system) — not needed for a plain append.
+    // Affix flags (ClassicUO `AffixType`): 0x01 prepend, 0x02 system.
+    let affix_prepend = frame[18] & 0x01 != 0;
     let name = ascii_string(&frame[19..49]);
     let affix_start = 49;
     let nul = frame[affix_start..]
@@ -322,9 +333,21 @@ pub(super) fn cliloc_affix(world: &mut World, frame: &[u8]) -> PResult<()> {
         .map_or(frame.len(), |p| affix_start + p);
     let affix = ascii_string(&frame[affix_start..nul]);
     let args_start = (nul + 1).min(frame.len());
-    let mut text = decode_unicode(&frame[args_start..], true); // 0xCC args are big-endian
-    text.push_str(&affix);
-    push_journal_cliloc(world, serial, name, text, msg_type, hue, cliloc);
+    // The arguments stay pure: ClassicUO joins the affix to the *translated*
+    // line, so folding it in here both corrupts the argument list and loses
+    // the affix entirely on a template with no placeholder.
+    let text = decode_unicode(&frame[args_start..], true); // 0xCC args are big-endian
+    push_journal_cliloc(
+        world,
+        serial,
+        name,
+        text,
+        msg_type,
+        hue,
+        cliloc,
+        affix,
+        affix_prepend,
+    );
     Ok(())
 }
 
@@ -336,9 +359,20 @@ pub(super) fn push_journal(
     msg_type: u8,
     hue: u16,
 ) {
-    push_journal_cliloc(world, serial, name, text, msg_type, hue, 0);
+    push_journal_cliloc(
+        world,
+        serial,
+        name,
+        text,
+        msg_type,
+        hue,
+        0,
+        String::new(),
+        false,
+    );
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors 0xCC's flat field list
 pub(super) fn push_journal_cliloc(
     world: &mut World,
     serial: u32,
@@ -347,6 +381,8 @@ pub(super) fn push_journal_cliloc(
     msg_type: u8,
     hue: u16,
     cliloc: u32,
+    affix: String,
+    affix_prepend: bool,
 ) {
     // A cliloc line is kept even with empty args (the id alone is meaningful);
     // plain speech with empty text is dropped.
@@ -384,5 +420,9 @@ pub(super) fn push_journal_cliloc(
         msg_type,
         hue,
         cliloc,
+        affix,
+        affix_prepend,
+        // Resolved by whoever holds the Cliloc table — see the field's doc.
+        display: String::new(),
     });
 }

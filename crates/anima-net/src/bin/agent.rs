@@ -39,7 +39,7 @@
 use std::io::{BufRead, Write};
 use std::time::Duration;
 
-use anima_assets::MapData;
+use anima_assets::{Cliloc, MapData};
 use anima_core::agent::Action;
 use anima_core::net::LoginConfig;
 use anima_net::json::{action_from_json, observation_to_json, SCHEMA_VERSION};
@@ -84,6 +84,8 @@ fn main() {
     // it), it just never advances, so we log it loudly once here and again on
     // every `WalkTo` `act` while it's missing.
     let mut map = MapData::open(&data_dir).ok();
+    // Localizes the journal for the brain — see `resolve_journal`.
+    let cliloc = Cliloc::open(&data_dir).ok();
     eprintln!(
         "[anima-agent] map data {}",
         if map.is_some() {
@@ -149,7 +151,7 @@ fn main() {
         if line.trim().is_empty() {
             continue;
         }
-        let result = handle(&mut session, map.as_mut(), &line);
+        let result = handle(&mut session, map.as_mut(), cliloc.as_ref(), &line);
         // Refresh the spectator's view off the session the brain just advanced. Done
         // here, on the bridge's own thread, so the monitor never touches `Session`
         // concurrently with the brain and needs no lock around it.
@@ -183,6 +185,7 @@ fn ready_event(player: &Value) -> Value {
 fn handle(
     session: &mut Session,
     map: Option<&mut MapData>,
+    cliloc: Option<&Cliloc>,
     line: &str,
 ) -> Result<Option<Value>, String> {
     let msg: Value = serde_json::from_str(line).map_err(|e| format!("bad json: {e}"))?;
@@ -201,11 +204,12 @@ fn handle(
                 .get("terrain_radius")
                 .and_then(Value::as_u64)
                 .map_or(TERRAIN_RADIUS, |r| r.min(u64::from(u8::MAX)) as u8);
-            let obs = match (map, radius) {
+            let mut obs = match (map, radius) {
                 (Some(map), 1..) => session.observation_with_terrain(map, radius),
                 // No map files, or the brain explicitly asked for none.
                 _ => session.observation(),
             };
+            anima_net::resolve_journal(&mut obs, cliloc);
             Ok(Some(
                 json!({ "ok": true, "obs": observation_to_json(&obs) }),
             ))

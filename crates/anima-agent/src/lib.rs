@@ -288,6 +288,7 @@ mod tests {
             msg_type: 0,
             hue: 0,
             cliloc: 0,
+            ..Default::default()
         });
         let acts = b.decide(&o);
         assert!(acts.iter().any(|a| matches!(a, Action::Say { text, mode }

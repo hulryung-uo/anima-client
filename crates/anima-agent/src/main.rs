@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use anima_agent::WanderBrain;
-use anima_assets::MapData;
+use anima_assets::{Cliloc, MapData};
 use anima_core::net::LoginConfig;
 use anima_core::{Action, Brain};
 use anima_net::{Endpoint, Session};
@@ -35,6 +35,8 @@ fn main() {
     // game data just means WalkTo silently can't path, like any other missing
     // asset in this codebase.
     let mut map = MapData::open(&data_dir).ok();
+    // Without this a brain reads system messages as bare cliloc ids.
+    let cliloc = Cliloc::open(&data_dir).ok();
     println!(
         "agent: map data {}",
         if map.is_some() {
@@ -71,10 +73,11 @@ fn main() {
         // With map data loaded the brain also perceives the ground around it
         // (walls, water, height, doors) instead of discovering obstacles by
         // walking into them — see `Session::observation_with_terrain`.
-        let obs = match map.as_mut() {
+        let mut obs = match map.as_mut() {
             Some(map) => s.observation_with_terrain(map, TERRAIN_RADIUS),
             None => s.observation(),
         };
+        anima_net::resolve_journal(&mut obs, cliloc.as_ref());
         let actions = brain.decide(&obs);
 
         // Log a compact perception + decision line.
