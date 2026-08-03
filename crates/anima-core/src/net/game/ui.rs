@@ -6,6 +6,7 @@
 //! plane decoding, which share that compression.
 
 use super::*;
+use crate::world::Buff;
 
 /// 0x6C TargetCursor — the server asks us to pick a target.
 /// `[id][type:u8][cursorID:u32][flag:u8]...` (19 bytes). `flag == 3` means the
@@ -159,8 +160,46 @@ pub(super) fn buff(world: &mut World, frame: &[u8]) -> PResult<()> {
     r.skip(2)?; // queue_index
     r.skip(4)?; // padding
     let timer = r.u16()?; // duration in seconds (0 = no timer / permanent)
-    world.add_buff(icon, buff_name(icon), timer as u32);
+                          // The real name and description are clilocs (ClassicUO
+                          // `BuffDebuff`): a title id with its own argument string, then a
+                          // description id which reuses the title's arguments when its own are
+                          // empty. Both argument blocks are length-prefixed UTF-16 **little**-endian
+                          // (0xDF is the odd one out — 0xCC's are big-endian). The core has no
+                          // Cliloc table, so it carries the ids and args and leaves the words to a
+                          // driver — the same split as `JournalEntry::display`.
+    let mut b = Buff {
+        icon,
+        name: buff_name(icon),
+        dur: timer as u32,
+        ..Default::default()
+    };
+    if r.skip(3).is_ok() {
+        b.title_cliloc = r.u32().unwrap_or(0);
+        b.desc_cliloc = r.u32().unwrap_or(0);
+        let _wtf_cliloc = r.u32().unwrap_or(0);
+        b.title_args = read_buff_args(&mut r);
+        b.desc_args = read_buff_args(&mut r);
+        if b.desc_args.is_empty() {
+            b.desc_args = b.title_args.clone();
+        }
+    }
+    world.upsert_buff(b);
     Ok(())
+}
+
+/// One length-prefixed argument block of `0xDF`: a `u16` byte count followed
+/// by NUL-terminated UTF-16 **little**-endian. An absent or truncated block
+/// reads as empty rather than failing the packet — a buff with no arguments is
+/// ordinary, and the icon alone still identifies it.
+fn read_buff_args(r: &mut PacketReader) -> String {
+    let len = match r.u16() {
+        Ok(n) => n as usize,
+        Err(_) => return String::new(),
+    };
+    match r.bytes(len) {
+        Ok(b) => decode_unicode(b, false).trim_end_matches('\0').to_string(),
+        Err(_) => String::new(),
+    }
 }
 
 /// Map a raw `BuffIconType` id (off the wire) to a short display name. Ported

@@ -245,6 +245,18 @@ pub fn build_scene(
         "hits": p.hits, "hitsMax": p.hits_max, "mana": p.mana, "manaMax": p.mana_max,
         "stam": p.stam, "stamMax": p.stam_max,
         "str": st.strength, "dex": st.dexterity, "int": st.intelligence, "gold": st.gold,
+        // The rest of 0x11's status sheet. All of it was already parsed into
+        // `PlayerStats` and simply never left the server, so the client could
+        // only ever show HP/mana/stam/str/dex/int/gold.
+        "armor": st.armor, "resistFire": st.fire_resistance, "resistCold": st.cold_resistance,
+        "resistPoison": st.poison_resistance, "resistEnergy": st.energy_resistance,
+        "weight": st.weight, "weightMax": st.weight_max, "statsCap": st.stats_cap,
+        "followers": st.followers, "followersMax": st.followers_max,
+        "luck": st.luck, "damageMin": st.damage_min, "damageMax": st.damage_max,
+        "tithing": st.tithing_points,
+        // Stat training locks (0 up / 1 down / 2 locked) — the `statlock`
+        // command's other half, so the UI can show what it is toggling.
+        "strLock": st.str_lock, "dexLock": st.dex_lock, "intLock": st.int_lock,
         "equip": equip,
     });
     merge_obj(&mut player, hidden_field(p.hidden));
@@ -266,7 +278,7 @@ pub fn build_scene(
     // Current season (0xBC): the renderer may tint the scene per season. We do not
     // remap tree/foliage graphics (a much larger change).
     let season = s.world.season;
-    let buffs = json_array(&buffs_json(&s.world));
+    let buffs = json_array(&buffs_json(&s.world, cliloc));
     let skills = json_array(&skills_json(&s.world));
     let lights = json_array(&lights);
     let mobiles = json_array(&mobiles);

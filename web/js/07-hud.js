@@ -5,6 +5,11 @@
 // has pointer-events:none so it never blocks clicks.
 const buffSeen = new Map(); // icon -> { firstSeen: ms, dur: seconds, name }
 // Names hinting a debuff → red tint; everything else is a (green) buff.
+// Debuff tint. A heuristic over the buff's NAME, which is now the server's own
+// localized title rather than the 35-entry English table it used to be — so it
+// matches more of them, and mis-tints anything a shard names unusually. UO
+// itself carries no buff/debuff flag on 0xDF; ClassicUO hardcodes the split by
+// icon id instead.
 const DEBUFF_RE = /poison|curse|weaken|clumsy|feeble|strangle|bleed|mortal|corpse|pain|evil omen|paralyze|sleep|blood oath|dismount|death/i;
 
 // Buff-icon gump graphics, ported from ClassicUO BuffTable._defaultTable: indexed
@@ -60,6 +65,9 @@ function refreshBuffs(s) {
       el.appendChild(img);
     }
     const name = document.createElement("span"); name.className = "bn"; name.textContent = b.name;
+    // The server's own description (0xDF's description cliloc, resolved
+    // server-side) as a hover tooltip. Absent on shards that send none.
+    if (b.desc) el.title = b.desc.replace(/<[^>]*>/g, "");
     const time = document.createElement("span"); time.className = "bt"; time.textContent = buffTimeText(b.icon);
     el.append(name, time);
     bar.appendChild(el);

@@ -53,10 +53,14 @@ use crate::scene::{decide_blocked_step, BlockedStepAction, MapTerrain};
 /// Client version we report to the server (must match the login seed version).
 const CLIENT_VERSION: &str = "7.0.102.3";
 
-/// Fill every journal line's `display` — the localized text a brain (or a
-/// human) actually reads — by resolving its cliloc id and arguments against
-/// the client's table, then joining 0xCC's affix on the side the server asked
-/// for.
+/// Fill in every localized string an [`Observation`] carries but the core
+/// cannot resolve: journal lines and buff names/descriptions.
+///
+/// Journal lines get `display` — the cliloc resolved against the client's
+/// table with its arguments substituted, and 0xCC's affix joined on the side
+/// the server asked for. Buffs get `display`/`display_desc` the same way,
+/// falling back to the short English `name` table when the server sent no
+/// title cliloc.
 ///
 /// This lives in the driver for the same reason terrain perception does: the
 /// core has no assets, so it can only carry `(cliloc, args, affix)` and leave
@@ -67,7 +71,7 @@ const CLIENT_VERSION: &str = "7.0.102.3";
 /// Plain speech (`cliloc == 0`) is already text; it is copied through so a
 /// consumer can read `display` uniformly. With no table, a cliloc line falls
 /// back to `#<id>`, matching what the renderer shows.
-pub fn resolve_journal(obs: &mut Observation, cliloc: Option<&Cliloc>) {
+pub fn localize(obs: &mut Observation, cliloc: Option<&Cliloc>) {
     for j in &mut obs.new_journal {
         let base = if j.cliloc == 0 {
             j.text.clone()
@@ -82,6 +86,20 @@ pub fn resolve_journal(obs: &mut Observation, cliloc: Option<&Cliloc>) {
             format!("{}{base}", j.affix)
         } else {
             format!("{base}{}", j.affix)
+        };
+    }
+    for b in &mut obs.buffs {
+        b.display = match b.title_cliloc {
+            0 => b.name.clone(),
+            id => cliloc
+                .and_then(|c| c.format(id, &b.title_args))
+                .unwrap_or_else(|| b.name.clone()),
+        };
+        b.display_desc = match b.desc_cliloc {
+            0 => String::new(),
+            id => cliloc
+                .and_then(|c| c.format(id, &b.desc_args))
+                .unwrap_or_default(),
         };
     }
 }

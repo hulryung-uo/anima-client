@@ -150,13 +150,32 @@ pub(super) fn effects_json(world: &World, animdata: Option<&AnimData>) -> Vec<Va
         .collect()
 }
 
-/// Active buffs/debuffs (0xDF): icon (the upsert key), short name, duration in
-/// seconds.
-pub(super) fn buffs_json(world: &World) -> Vec<Value> {
+/// Active buffs/debuffs (0xDF): icon (the upsert key), name, duration in
+/// seconds, and the longer description when the server sent one.
+///
+/// The name is the server's own `title_cliloc` resolved here, falling back to
+/// the short English table keyed off the icon — which is all the client had
+/// before, and which covers 35 of the 189 icons, so most buffs used to show as
+/// `#1234`.
+pub(super) fn buffs_json(world: &World, cliloc: Option<&Cliloc>) -> Vec<Value> {
     world
         .buffs
         .iter()
-        .map(|b| json!({ "icon": b.icon, "name": b.name, "dur": b.dur }))
+        .map(|b| {
+            let name = match b.title_cliloc {
+                0 => b.name.clone(),
+                id => cliloc
+                    .and_then(|c| c.format(id, &b.title_args))
+                    .unwrap_or_else(|| b.name.clone()),
+            };
+            let desc = match b.desc_cliloc {
+                0 => String::new(),
+                id => cliloc
+                    .and_then(|c| c.format(id, &b.desc_args))
+                    .unwrap_or_default(),
+            };
+            json!({ "icon": b.icon, "name": name, "dur": b.dur, "desc": desc })
+        })
         .collect()
 }
 

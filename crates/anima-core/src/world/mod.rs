@@ -366,11 +366,27 @@ impl Default for Weather {
 /// from a cliloc we don't have a table for, so it's approximated). `dur` is the
 /// duration in seconds the server sent (0 = no timer / permanent); the client
 /// counts down from when it first saw the icon.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Buff {
     pub icon: u16,
+    /// Short English fallback keyed off `icon` — an approximation kept for
+    /// when nothing resolved `title_cliloc` (see [`Buff::display`]).
     pub name: String,
     pub dur: u32,
+    /// Cliloc id of the buff's real name, and the arguments to substitute
+    /// into it. 0 when the server sent none.
+    pub title_cliloc: u32,
+    pub title_args: String,
+    /// Cliloc id of the longer description, with its own arguments (falling
+    /// back to the title's when the server sends them empty, as ClassicUO does).
+    pub desc_cliloc: u32,
+    pub desc_args: String,
+    /// The resolved name, filled by a driver holding the Cliloc table
+    /// (`anima_net::localize`) — the core has no assets. Empty until then;
+    /// consumers fall back to [`Buff::name`].
+    pub display: String,
+    /// The resolved description, same deal.
+    pub display_desc: String,
 }
 
 /// A vendor's BUY window (from 0x74 OpenBuyWindow). `container` is the vendor's
@@ -2072,11 +2088,20 @@ impl World {
 
     /// Add or refresh a buff icon (0xDF action=add). Upserts by `icon`.
     pub fn add_buff(&mut self, icon: u16, name: String, dur: u32) {
-        if let Some(b) = self.buffs.iter_mut().find(|b| b.icon == icon) {
-            b.name = name;
-            b.dur = dur;
-        } else {
-            self.buffs.push(Buff { icon, name, dur });
+        self.upsert_buff(Buff {
+            icon,
+            name,
+            dur,
+            ..Default::default()
+        });
+    }
+
+    /// Add or replace a buff by icon — the icon is the identity the server
+    /// upserts on (0xDF sends the whole record again to refresh a timer).
+    pub fn upsert_buff(&mut self, buff: Buff) {
+        match self.buffs.iter_mut().find(|b| b.icon == buff.icon) {
+            Some(existing) => *existing = buff,
+            None => self.buffs.push(buff),
         }
     }
 

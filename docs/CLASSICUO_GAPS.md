@@ -212,9 +212,9 @@ The receive side is generally complete; there is no way to *act*.
 
 | Gap | Note | Effort |
 |---|---|---|
-| **Extended status sheet** | resistances, damage range, luck, followers, tithing, weight and stats-cap are all parsed into `World` but `scene/mod.rs`'s `build_scene` never emits them, so `refreshStatus` can only show HP/mana/stam/str/dex/int/gold | M |
+| ~~**Extended status sheet**~~ — **CLOSED** | all of it (armor + the four resistances, weight/max, stats-cap, followers/max, damage range, luck, tithing, and the three stat locks) now leaves `build_scene` and shows in the status panel. It had been parsed into `World` all along and simply never sent | M |
 | **0x11 `type >= 6` combat tail** | max resists, HCI/DCI/SSI/DI/LRC/SDI/FCR/FC/LMC are explicitly not parsed (`game.rs:2757`); no field of that family exists anywhere | M |
-| **Buff names** | 0xDF's title/description clilocs and their args are never read; names come from a hardcoded 35-entry English table against 189 icon graphics, so most buffs show as `#1234` and the buff/debuff tint is a regex over that name | M |
+| ~~**Buff names**~~ — **CLOSED** | 0xDF's title/description clilocs and their (little-endian) argument blocks are parsed into `Buff`; the renderer resolves the title for the bar and shows the description on hover, and `anima_net::localize` fills `display`/`display_desc` for brains. The 35-entry English table survives as the fallback when a shard sends no title cliloc. The debuff tint is still a regex over the name — UO carries no buff/debuff flag on 0xDF (ClassicUO hardcodes the split by icon id) | M |
 | Journal | works, but one flat colour, no message-type filter, no tabs, no timestamps, not its own resizable window | M |
 | Grid loot | corpses already open as a grid; the one-click loot workflow is what's missing | M |
 | Info bar | a fixed HUD readout exists; ClassicUO's user-configurable field set does not | M |

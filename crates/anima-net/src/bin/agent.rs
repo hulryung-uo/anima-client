@@ -209,7 +209,7 @@ fn handle(
                 // No map files, or the brain explicitly asked for none.
                 _ => session.observation(),
             };
-            anima_net::resolve_journal(&mut obs, cliloc);
+            anima_net::localize(&mut obs, cliloc);
             Ok(Some(
                 json!({ "ok": true, "obs": observation_to_json(&obs) }),
             ))

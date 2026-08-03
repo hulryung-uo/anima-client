@@ -4178,3 +4178,46 @@ fn cliloc_affix_is_kept_apart_from_the_arguments() {
     assert_eq!(j.affix, "[guild] ");
     assert!(j.affix_prepend, "flag 0x01 is AffixType.Prepend");
 }
+
+/// 0xDF carries the buff's real name as a cliloc with its own arguments; the
+/// 35-entry English table keyed off the icon is only a fallback. The argument
+/// blocks are length-prefixed UTF-16 **little**-endian here — 0xCC's are big.
+#[test]
+fn buff_carries_its_title_and_description_clilocs() {
+    let mut p = PacketWriter::new();
+    p.u8(0xDF).u16(0); // id + length placeholder
+    p.u32(0x1001).u16(0x03ED).u16(1); // serial, icon (Night Sight), count
+    p.u16(0).u16(0).u16(0x03ED).u16(0).u32(0); // source, pad, icon, queue, pad
+    p.u16(600); // timer, seconds
+    p.zeros(3);
+    p.u32(1_075_628).u32(1_075_629).u32(0); // title, description, "wtf"
+    let args: Vec<u8> = "Anima"
+        .encode_utf16()
+        .flat_map(|u| u.to_le_bytes())
+        .chain([0, 0])
+        .collect();
+    p.u16(args.len() as u16).bytes(&args);
+    p.u16(0); // no description arguments — the title's are reused
+    let mut f = p.into_vec();
+    let n = f.len() as u16;
+    f[1] = (n >> 8) as u8;
+    f[2] = n as u8;
+
+    let mut w = World::new();
+    assert!(apply_packet(&mut w, &f));
+    let b = w.buffs.first().expect("buff recorded");
+    assert_eq!(b.icon, 0x03ED);
+    assert_eq!(b.dur, 600);
+    assert_eq!(b.title_cliloc, 1_075_628);
+    assert_eq!(b.desc_cliloc, 1_075_629);
+    assert_eq!(b.title_args, "Anima");
+    assert_eq!(
+        b.desc_args, "Anima",
+        "an empty description argument block falls back to the title's"
+    );
+    assert_eq!(b.name, "Night Sight", "the English fallback still stands");
+    assert!(
+        b.display.is_empty(),
+        "words are the driver's job, not the core's"
+    );
+}

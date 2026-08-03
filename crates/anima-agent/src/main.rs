@@ -77,7 +77,7 @@ fn main() {
             Some(map) => s.observation_with_terrain(map, TERRAIN_RADIUS),
             None => s.observation(),
         };
-        anima_net::resolve_journal(&mut obs, cliloc.as_ref());
+        anima_net::localize(&mut obs, cliloc.as_ref());
         let actions = brain.decide(&obs);
 
         // Log a compact perception + decision line.

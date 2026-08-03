@@ -579,6 +579,20 @@ function refreshStatus(s) {
   set("st-stam-n", `${p.stam | 0} / ${p.stamMax | 0}`); bar("st-stam", p.stam, p.stamMax);
   set("st-str", p.str | 0); set("st-dex", p.dex | 0); set("st-int", p.int | 0);
   set("st-gold", p.gold | 0);
+  // The rest of the sheet. `statsCap`/`tithing` are AOS-era fields a pre-AOS
+  // shard simply leaves at 0 — shown as-is rather than hidden, so "0" reads as
+  // "this shard doesn't use it" instead of the row vanishing unpredictably.
+  set("st-weight", `${p.weight | 0} / ${p.weightMax | 0}`);
+  set("st-statscap", p.statsCap | 0);
+  set("st-followers", `${p.followers | 0} / ${p.followersMax | 0}`);
+  set("st-damage", `${p.damageMin | 0} - ${p.damageMax | 0}`);
+  set("st-luck", p.luck | 0);
+  set("st-tithing", p.tithing | 0);
+  set("st-armor", p.armor | 0);
+  set("st-rfire", p.resistFire | 0);
+  set("st-rcold", p.resistCold | 0);
+  set("st-rpoison", p.resistPoison | 0);
+  set("st-renergy", p.resistEnergy | 0);
 }
 function closeSkills() {
   skillsOn = false;
