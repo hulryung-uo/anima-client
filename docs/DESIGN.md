@@ -270,6 +270,8 @@ anima-client/
     │           ├── agent.rs   # `anima-agent`: NDJSON stdin/stdout bridge for the out-of-process Python brain
     │           ├── cmd.rs     # `cmd`: drive a running `play` server from the shell
     │           └── find_water.rs
+    ├── anima-relay/           # WebSocket↔TCP byte pump so a browser can reach a shard
+    │   └── src/main.rs · ws.rs  # allowlisted targets; RFC 6455 subset, no dependencies
     ├── anima-wasm/            # wasm-bindgen wrapper: WasmClient (feed bytes → Observation JSON)
     │   └── src/lib.rs         # build: `wasm-pack build crates/anima-wasm --target web`
     └── anima-agent/           # in-process autonomous brains on the contract
@@ -400,9 +402,14 @@ server-initiated bank/container windows and filtering vendor/spellbook overloads
 - ✅ PixiJS renderer (`web/`) draws a live minimap (walkability/Z) + mobiles/items +
   HUD from `Observation`, fed by `anima-net`'s `scene` bridge. Screenshot-verified.
 
-**Remaining tail (deferred):** wire `anima-wasm` into the browser via a
-WebSocket↔TCP relay (so the browser runs the core, not a JSON bridge); a Tauri
-shell for a true standalone desktop app.
+**Remaining tail:** the relay now exists (`crates/anima-relay`, verified
+carrying a real login handshake to ServUO), and the Tauri shell is done. What
+is left for a genuine browser client is the *page*: today `web/` renders from
+`scene.json`, which the play server builds **with the UO asset files** — art,
+animation, gump art, hues, cliloc. A browser running `anima-wasm` would own
+the protocol but still not own those, and browsers cannot read a local UO
+install except through the Chromium-only File System Access API (§4). So the
+honest shape of the remaining work is asset delivery, not transport.
 
 ### Phase 3 — AI brains + real art + human-playable polish. ✅ COMPLETE (incl. the tail).
 - ✅ `anima-agent`: `Brain` trait (`decide(&Observation)->Vec<Action>`) + `WanderBrain`
@@ -564,7 +571,16 @@ fix is to not write that construct, not to fight the formatter.
 - **Tauri vs Electron** for the desktop shell (renderer consistency vs binary size) — §4.
 - **WASM binding strategy** — `wasm-bindgen` + a JS API surface vs a message/snapshot protocol mirroring the Observation/Action contract.
 - **World model data structure at scale** — HashMap-by-serial now; move to `slotmap`/ECS (or Bevy ECS if Bevy becomes the renderer) if entity churn/perf demands.
-- **Relay implementation** — standalone tiny Rust/Go service, or bundle into the same dev server. Only needed for the browser path.
+- ~~**Relay implementation**~~ — **resolved: a standalone, zero-dependency Rust
+  crate** (`crates/anima-relay`). Standalone because the relay is the one piece
+  that must be reachable by a browser that may have nothing else of ours, and
+  because bundling it into `play_server` would have coupled the browser path to
+  the very server it is supposed to make unnecessary. Zero-dependency because
+  the only non-trivial thing in it is RFC 6455's handshake and framing (~200
+  lines of well-specified protocol, plus SHA-1 and base64 used solely to echo
+  the upgrade nonce) — a WebSocket stack and its async runtime would have been
+  most of a dependency tree for that. It never parses a UO packet: the protocol
+  runs in the browser, in `anima-core` via `anima-wasm`.
 - **How the AI brain attaches** — ~~in-process vs out-of-process~~ **resolved: both,
   not either/or.** In-process: `anima-agent` links `anima-core`/`anima-net` directly
   (`Brain` trait, `WanderBrain`, Rust). Out-of-process: `anima-net::json` +

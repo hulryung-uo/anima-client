@@ -120,5 +120,8 @@ the refreshed server list is displayed before any subsequent choice. **Back**
 cancels the pending game-server connection and restores the account form.
 
 WASM module: `cargo install wasm-pack && wasm-pack build crates/anima-wasm --target web`.
+Browser transport: `cargo run -p anima-relay -- 127.0.0.1:2595 127.0.0.1:2594`
+bridges a WebSocket to the shard's raw TCP (browsers cannot open sockets). It
+only dials targets named on its command line — never one the client picks.
 ClassicUO compatibility work is tracked in
 [`docs/CLASSICUO_GAPS.md`](docs/CLASSICUO_GAPS.md).

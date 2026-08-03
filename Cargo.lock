@@ -99,6 +99,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "anima-relay"
+version = "0.0.0"
+
+[[package]]
 name = "anima-wasm"
 version = "0.0.0"
 dependencies = [
