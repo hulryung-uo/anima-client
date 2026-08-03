@@ -419,6 +419,16 @@
         font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
       }
       .dlg-el input[type=checkbox], .dlg-el input[type=radio] { margin: 0; cursor: pointer; }
+      /* Gump element kinds the layout parser used to drop: item art
+         (tilepic), a tiled background (gumppictiled), a darkening overlay
+         (checkertrans), and a cropped region of a graphic (picinpic). */
+      .dlg-el.dlg-tile img { display: block; }
+      .dlg-el.dlg-tiled { background-repeat: repeat; }
+      .dlg-el.dlg-trans { background: rgba(0, 0, 0, 0.45); pointer-events: none; }
+      .dlg-el.dlg-crop { overflow: hidden; }
+      .dlg-el.dlg-crop img { position: absolute; }
+      /* Hairline above the resistance block in the status sheet. */
+      .gump-win .row.st-sep { border-top: 1px solid #2a3140; margin-top: 4px; padding-top: 4px; }
       #paperdoll { top: 60px; left: 210px; width: 280px; display: none; }
       #paperdoll.on { display: block; }
       #options { top: 80px; left: 50%; transform: translateX(-50%); width: 260px; display: none; }

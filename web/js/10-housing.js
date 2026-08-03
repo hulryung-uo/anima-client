@@ -886,6 +886,14 @@ function buildGumpWindow(g, { previous } = {}) {
   const win = { el, serial, gumpId, canvas, page, nodes: [] };
   for (const e of (g.elements || [])) {
     const node = buildGumpElement(win, e);
+    // A tooltip/itemproperty is not a box: UO attaches it to whatever element
+    // was added last, so it decorates the previous node instead of taking a
+    // slot of its own.
+    if (node && node.tooltip !== undefined) {
+      const prev = win.nodes[win.nodes.length - 1];
+      if (prev) prev.title = node.tooltip;
+      continue;
+    }
     node.dataset.page = e.page | 0;
     win.nodes.push(node);
     canvas.appendChild(node);
@@ -1116,6 +1124,11 @@ function buildGumpElement(win, e) {
     const input = document.createElement("input");
     input.type = e.t === "check" ? "checkbox" : "radio";
     input.dataset.swid = (e.id | 0);
+    // Radios are mutually exclusive only within their `{ group N }`. Without a
+    // per-group name the browser treats every radio in the window as one set,
+    // so a two-question gump can only ever hold one answer. Scoped by window
+    // too — two open gumps must not fight over a group number.
+    if (e.t === "radio") input.name = `g${serial >>> 0}-${e.g | 0}`;
     if (e.on) input.checked = true;
     node.appendChild(input);
   } else if (e.t === "entry") {
@@ -1124,8 +1137,58 @@ function buildGumpElement(win, e) {
     input.className = "dlg-entry";
     input.dataset.entryid = (e.id | 0);
     input.value = e.s || "";
+    // textentrylimited: the server will reject anything longer, so stop it here.
+    if (e.lim) input.maxLength = e.lim | 0;
     if (e.w) input.style.width = (e.w | 0) + "px";
     node.appendChild(input);
+  } else if (e.t === "tilepic") {
+    // Item ART, not gump art — a different endpoint. Craft menus and vendor
+    // gumps are mostly these, and they used to be dropped entirely.
+    node.classList.add("dlg-tile");
+    const img = document.createElement("img");
+    img.src = `art/static/${e.g | 0}.png` + ((e.hue | 0) ? `?hue=${e.hue | 0}` : "");
+    img.alt = "";
+    img.onerror = () => img.remove();
+    node.appendChild(img);
+  } else if (e.t === "tiled") {
+    // gumppictiled: one graphic repeated to fill the rectangle.
+    node.classList.add("dlg-tiled");
+    node.style.width = (e.w | 0) + "px";
+    node.style.height = (e.h | 0) + "px";
+    node.style.backgroundImage = `url(gump/${e.g | 0}.png)`;
+  } else if (e.t === "trans") {
+    node.classList.add("dlg-trans");
+    node.style.width = (e.w | 0) + "px";
+    node.style.height = (e.h | 0) + "px";
+  } else if (e.t === "picinpic") {
+    // A crop of a gump graphic: show the window, offset the image inside it.
+    node.classList.add("dlg-crop");
+    node.style.width = (e.w | 0) + "px";
+    node.style.height = (e.h | 0) + "px";
+    const img = document.createElement("img");
+    img.src = `gump/${e.g | 0}.png`;
+    img.alt = "";
+    img.style.left = `${-(e.sx | 0)}px`;
+    img.style.top = `${-(e.sy | 0)}px`;
+    img.onerror = () => img.remove();
+    node.appendChild(img);
+  } else if (e.t === "btnart") {
+    // buttontileart: an ordinary button whose face is item art.
+    node.classList.add("dlg-btn", "img");
+    const img = document.createElement("img");
+    img.src = `art/static/${e.art | 0}.png` + ((e.hue | 0) ? `?hue=${e.hue | 0}` : "");
+    img.alt = "";
+    img.onerror = () => img.remove();
+    node.appendChild(img);
+    if ((e.pf | 0) === 0) {
+      node.addEventListener("click", () => { win.page = e.param | 0; applyGumpPage(win); });
+    } else {
+      node.addEventListener("click", () => submitGump(serial, gumpId, e.id | 0));
+    }
+  } else if (e.t === "tip" || e.t === "oplTip") {
+    // Both attach to the element BEFORE them (UO tooltips decorate whatever was
+    // added last), so this contributes no box of its own — it just annotates.
+    return { tooltip: e.t === "tip" ? (e.text || "") : `opl:${e.serial >>> 0}` };
   }
   return node;
 }

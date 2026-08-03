@@ -10,11 +10,11 @@ use super::*;
 /// Convert a core-parsed [`GumpElement`] into the renderer's positioned JSON
 /// shape (`t`/`x`/`y`/…). The grammar itself now lives in
 /// [`anima_core::gump_layout`] (it's protocol data, not rendering); this is
-/// just the JSON shaping plus cliloc resolution (which needs
+/// just the JSON shaping plus cliloc_table resolution (which needs
 /// `anima_assets::Cliloc`, unavailable to the zero-dep core) — ported
 /// unchanged from the old inline `parse_gump_layout` so the scene JSON this
 /// produces is byte-for-byte identical to before the split.
-pub(super) fn gump_element_json(e: &GumpElement, cliloc: Option<&Cliloc>) -> Value {
+pub(super) fn gump_element_json(e: &GumpElement, cliloc_table: Option<&Cliloc>) -> Value {
     match e {
         GumpElement::Background { x, y, w, h, page } => {
             json!({"t":"bg","x":x,"y":y,"w":w,"h":h,"page":page})
@@ -73,10 +73,10 @@ pub(super) fn gump_element_json(e: &GumpElement, cliloc: Option<&Cliloc>) -> Val
                 HtmlText::Cliloc {
                     id,
                     args: Some(args),
-                } => cliloc
+                } => cliloc_table
                     .and_then(|c| c.format(*id, args))
                     .unwrap_or_else(|| format!("#{id}")),
-                HtmlText::Cliloc { id, args: None } => cliloc
+                HtmlText::Cliloc { id, args: None } => cliloc_table
                     .and_then(|c| c.get(*id).map(str::to_string))
                     .unwrap_or_else(|| format!("#{id}")),
             };
@@ -85,8 +85,17 @@ pub(super) fn gump_element_json(e: &GumpElement, cliloc: Option<&Cliloc>) -> Val
         GumpElement::Check { x, y, id, on, page } => {
             json!({"t":"check","x":x,"y":y,"id":id,"on":on,"page":page})
         }
-        GumpElement::Radio { x, y, id, on, page } => {
-            json!({"t":"radio","x":x,"y":y,"id":id,"on":on,"page":page})
+        // `g` (group): radios are mutually exclusive only within one, so the
+        // renderer needs it to keep two answers to one question apart.
+        GumpElement::Radio {
+            x,
+            y,
+            id,
+            on,
+            group,
+            page,
+        } => {
+            json!({"t":"radio","x":x,"y":y,"id":id,"on":on,"g":group,"page":page})
         }
         GumpElement::Entry {
             x,
@@ -94,11 +103,83 @@ pub(super) fn gump_element_json(e: &GumpElement, cliloc: Option<&Cliloc>) -> Val
             w,
             id,
             s,
+            limit,
             page,
         } => {
-            json!({"t":"entry","x":x,"y":y,"w":w,"id":id,"s":s,"page":page})
+            json!({"t":"entry","x":x,"y":y,"w":w,"id":id,"s":s,"lim":limit,"page":page})
+        }
+        GumpElement::TilePic {
+            x,
+            y,
+            graphic,
+            hue,
+            page,
+        } => {
+            json!({"t":"tilepic","x":x,"y":y,"g":graphic,"hue":hue,"page":page})
+        }
+        GumpElement::TiledImage {
+            x,
+            y,
+            w,
+            h,
+            graphic,
+            page,
+        } => {
+            json!({"t":"tiled","x":x,"y":y,"w":w,"h":h,"g":graphic,"page":page})
+        }
+        GumpElement::Translucent { x, y, w, h, page } => {
+            json!({"t":"trans","x":x,"y":y,"w":w,"h":h,"page":page})
+        }
+        GumpElement::PicInPic {
+            x,
+            y,
+            graphic,
+            sx,
+            sy,
+            w,
+            h,
+            page,
+        } => {
+            json!({"t":"picinpic","x":x,"y":y,"g":graphic,"sx":sx,"sy":sy,
+                   "w":w,"h":h,"page":page})
+        }
+        GumpElement::ButtonTileArt {
+            x,
+            y,
+            graphic,
+            reply_id,
+            pageflag,
+            param,
+            art,
+            hue,
+            tile_x,
+            tile_y,
+            page,
+        } => {
+            json!({"t":"btnart","x":x,"y":y,"g":graphic,"id":reply_id,
+                   "pf":pageflag,"param":param,"art":art,"hue":hue,
+                   "tx":tile_x,"ty":tile_y,"page":page})
+        }
+        // Both decorate the element before them — no position of their own.
+        GumpElement::Tooltip { cliloc, args, page } => {
+            let text = cliloc_text(cliloc, args.as_deref(), cliloc_table);
+            json!({"t":"tip","text":text,"page":page})
+        }
+        GumpElement::ItemProperty { serial, page } => {
+            json!({"t":"oplTip","serial":serial,"page":page})
         }
     }
+}
+
+/// Resolve a tooltip's cliloc_table the same way an `html` element's is — with args
+/// when the server sent them, plain otherwise (see [`HtmlText::Cliloc`]'s doc
+/// for why the distinction matters).
+fn cliloc_text(id: &u32, args: Option<&str>, table: Option<&Cliloc>) -> String {
+    let resolved = match args {
+        Some(a) => table.and_then(|c| c.format(*id, a)),
+        None => table.and_then(|c| c.get(*id)).map(str::to_string),
+    };
+    resolved.unwrap_or_else(|| format!("#{id}"))
 }
 
 /// Build the `gumps` array for the scene: each open server gump (0xB0/0xDD),

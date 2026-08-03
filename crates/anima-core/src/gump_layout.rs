@@ -83,23 +83,100 @@ pub enum GumpElement {
         page: i64,
     },
     /// A radio button (`radio`); `on` is the initial selected state (0/1).
+    /// `group` is the `{ group N }` in force when it was declared — radios
+    /// are mutually exclusive *within a group*, and a client that ignores this
+    /// lets the player select two answers to one question.
     Radio {
         x: i64,
         y: i64,
         id: i64,
         on: i64,
+        group: i64,
         page: i64,
     },
-    /// A text entry field (`textentry`), pre-filled with `s` from the gump's
-    /// local text table.
+    /// A text entry field (`textentry`/`textentrylimited`), pre-filled with `s`
+    /// from the gump's local text table. `limit` is the server's maximum input
+    /// length (`textentrylimited` only) — a client that ignores it lets the
+    /// player type a reply the server will reject.
     Entry {
         x: i64,
         y: i64,
         w: i64,
         id: i64,
         s: String,
+        limit: Option<i64>,
         page: i64,
     },
+    /// Item **ART** (`tilepic`/`tilepichue`) — the world/inventory sprite, not
+    /// gump art, so it resolves through a different asset than
+    /// [`GumpElement::Image`]. Craft menus and vendor gumps are mostly these.
+    TilePic {
+        x: i64,
+        y: i64,
+        graphic: i64,
+        hue: i64,
+        page: i64,
+    },
+    /// Gump art tiled to fill a rectangle (`gumppictiled`) — the usual way a
+    /// shard paints a panel background.
+    TiledImage {
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+        graphic: i64,
+        page: i64,
+    },
+    /// A translucent darkening rectangle (`checkertrans`).
+    Translucent {
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+        page: i64,
+    },
+    /// A cropped region of a gump graphic (`picinpic`): `(sx, sy)` is the
+    /// top-left of the source rectangle, `(w, h)` its size.
+    PicInPic {
+        x: i64,
+        y: i64,
+        graphic: i64,
+        sx: i64,
+        sy: i64,
+        w: i64,
+        h: i64,
+        page: i64,
+    },
+    /// A button whose face is item art rather than gump art
+    /// (`buttontileart`). The button half matches [`GumpElement::Button`];
+    /// `graphic`/`hue` are the item art drawn on it, offset by
+    /// `(tile_x, tile_y)`.
+    ButtonTileArt {
+        x: i64,
+        y: i64,
+        graphic: i64,
+        reply_id: i64,
+        pageflag: i64,
+        param: i64,
+        art: i64,
+        hue: i64,
+        tile_x: i64,
+        tile_y: i64,
+        page: i64,
+    },
+    /// Hover text for the **preceding** element (`tooltip`) — UO attaches it to
+    /// whatever was added last, so a consumer pairs this with the element
+    /// before it rather than positioning it. Cliloc-driven: unresolved here for
+    /// the same reason [`HtmlText::Cliloc`] is.
+    Tooltip {
+        cliloc: u32,
+        args: Option<String>,
+        page: i64,
+    },
+    /// The preceding element's hover text is an entity's Object Property List
+    /// (`itemproperty`) — i.e. "show this item's tooltip", resolved from
+    /// `World::opl` rather than from the layout.
+    ItemProperty { serial: u32, page: i64 },
 }
 
 /// The text of a [`GumpElement::Html`] block.
@@ -126,6 +203,12 @@ pub struct GumpLayout {
     pub elements: Vec<GumpElement>,
     pub width: i64,
     pub height: i64,
+    /// `noclose` — right-click must not dismiss this window.
+    pub no_close: bool,
+    /// `nodispose` — Escape must not dismiss it.
+    pub no_dispose: bool,
+    /// `nomove` — it is not draggable.
+    pub no_move: bool,
 }
 
 /// Parse a UO gump `layout` command string (as carried by
@@ -139,6 +222,8 @@ pub struct GumpLayout {
 pub fn parse(layout: &str, text: &[String]) -> GumpLayout {
     let mut elements: Vec<GumpElement> = Vec::new();
     let mut page = 0i64;
+    let mut radio_group = 0i64;
+    let (mut no_close, mut no_dispose, mut no_move) = (false, false, false);
     let mut win_w = 0i64; // from resizepic (x + w)
     let mut win_h = 0i64;
     let mut max_x = 0i64; // fallback extent from element positions
@@ -262,6 +347,94 @@ pub fn parse(layout: &str, text: &[String]) -> GumpLayout {
                 max_y = max_y.max(y + h.max(20));
             }
             // checkbox x y up down state id
+            // tilepic x y graphic  /  tilepichue x y graphic hue
+            "tilepic" | "tilepichue" => {
+                let (x, y, graphic) = (num(1), num(2), num(3));
+                elements.push(GumpElement::TilePic {
+                    x,
+                    y,
+                    graphic,
+                    hue: if cmd == "tilepichue" { num(4) } else { 0 },
+                    page,
+                });
+                max_x = max_x.max(x + 44);
+                max_y = max_y.max(y + 44);
+            }
+            // gumppictiled x y w h graphic
+            "gumppictiled" => {
+                let (x, y, w, h) = (num(1), num(2), num(3), num(4));
+                elements.push(GumpElement::TiledImage {
+                    x,
+                    y,
+                    w,
+                    h,
+                    graphic: num(5),
+                    page,
+                });
+                max_x = max_x.max(x + w);
+                max_y = max_y.max(y + h);
+            }
+            // checkertrans x y w h
+            "checkertrans" => {
+                let (x, y, w, h) = (num(1), num(2), num(3), num(4));
+                elements.push(GumpElement::Translucent { x, y, w, h, page });
+                max_x = max_x.max(x + w);
+                max_y = max_y.max(y + h);
+            }
+            // picinpic x y graphic sx sy w h [hue]
+            "picinpic" | "picinpichued" | "picinpicphued" => {
+                let (x, y, w, h) = (num(1), num(2), num(6), num(7));
+                elements.push(GumpElement::PicInPic {
+                    x,
+                    y,
+                    graphic: num(3),
+                    sx: num(4),
+                    sy: num(5),
+                    w,
+                    h,
+                    page,
+                });
+                max_x = max_x.max(x + w);
+                max_y = max_y.max(y + h);
+            }
+            // buttontileart x y up down pageflag param id art hue tileX tileY
+            "buttontileart" => {
+                let (x, y) = (num(1), num(2));
+                elements.push(GumpElement::ButtonTileArt {
+                    x,
+                    y,
+                    graphic: num(3),
+                    pageflag: num(5),
+                    param: num(6),
+                    reply_id: num(7),
+                    art: num(8),
+                    hue: num(9),
+                    tile_x: num(10),
+                    tile_y: num(11),
+                    page,
+                });
+                max_x = max_x.max(x + 44);
+                max_y = max_y.max(y + 44);
+            }
+            // tooltip cliloc [arg…] — decorates whatever came before it.
+            "tooltip" => {
+                let args = (toks.len() > 2).then(|| toks[2..].join("\t"));
+                elements.push(GumpElement::Tooltip {
+                    cliloc: num(1) as u32,
+                    args,
+                    page,
+                });
+            }
+            // itemproperty serial — the preceding element's tooltip is that
+            // entity's OPL.
+            "itemproperty" => elements.push(GumpElement::ItemProperty {
+                serial: num(1) as u32,
+                page,
+            }),
+            // Window behaviour flags, not elements.
+            "noclose" => no_close = true,
+            "nodispose" => no_dispose = true,
+            "nomove" => no_move = true,
             "checkbox" => {
                 let (x, y, state, id) = (num(1), num(2), num(5), num(6));
                 elements.push(GumpElement::Check {
@@ -274,6 +447,9 @@ pub fn parse(layout: &str, text: &[String]) -> GumpLayout {
                 max_x = max_x.max(x + 24);
                 max_y = max_y.max(y + 24);
             }
+            // group N — starts a new radio group; radios are mutually
+            // exclusive only within one (ClassicUO `RadioButton.GroupNumber`).
+            "group" => radio_group = num(1),
             // radio x y up down state id
             "radio" => {
                 let (x, y, state, id) = (num(1), num(2), num(5), num(6));
@@ -282,13 +458,14 @@ pub fn parse(layout: &str, text: &[String]) -> GumpLayout {
                     y,
                     id,
                     on: state,
+                    group: radio_group,
                     page,
                 });
                 max_x = max_x.max(x + 24);
                 max_y = max_y.max(y + 24);
             }
-            // textentry x y w h hue id textId
-            "textentry" => {
+            // textentry x y w h hue id textId [limit]
+            "textentry" | "textentrylimited" => {
                 let (x, y, w, h, id) = (num(1), num(2), num(3), num(4), num(6));
                 let s = get_text(7);
                 elements.push(GumpElement::Entry {
@@ -297,6 +474,7 @@ pub fn parse(layout: &str, text: &[String]) -> GumpLayout {
                     w,
                     id,
                     s,
+                    limit: (cmd == "textentrylimited").then(|| num(8)),
                     page,
                 });
                 max_x = max_x.max(x + w);
@@ -314,6 +492,9 @@ pub fn parse(layout: &str, text: &[String]) -> GumpLayout {
         elements,
         width,
         height,
+        no_close,
+        no_dispose,
+        no_move,
     }
 }
 
@@ -439,5 +620,116 @@ mod tests {
             }
             other => panic!("expected cliloc Html, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod grammar_tests {
+    use super::*;
+
+    /// The commands a complex shard gump leans on, which used to be dropped
+    /// silently — so the player saw a window missing its item art and the
+    /// brain saw a dialog it could not answer correctly.
+    #[test]
+    fn parses_the_element_kinds_that_used_to_be_dropped() {
+        let layout = concat!(
+            "{ tilepic 10 20 3823 }",
+            "{ tilepichue 30 20 3824 1157 }",
+            "{ gumppictiled 0 0 200 100 2624 }",
+            "{ checkertrans 5 5 190 90 }",
+            "{ picinpic 40 50 9350 8 16 60 30 }",
+            "{ textentrylimited 10 60 120 20 0 7 0 16 }",
+            "{ tooltip 1042971 mithril }",
+            "{ itemproperty 1073741824 }",
+            "{ noclose }{ nodispose }{ nomove }",
+        );
+        let g = parse(layout, &["".into()]);
+        assert!(g.no_close && g.no_dispose && g.no_move);
+        let mut it = g.elements.iter();
+        assert!(matches!(
+            it.next(),
+            Some(GumpElement::TilePic {
+                x: 10,
+                graphic: 3823,
+                hue: 0,
+                ..
+            })
+        ));
+        assert!(matches!(
+            it.next(),
+            Some(GumpElement::TilePic {
+                graphic: 3824,
+                hue: 1157,
+                ..
+            })
+        ));
+        assert!(matches!(
+            it.next(),
+            Some(GumpElement::TiledImage {
+                w: 200,
+                h: 100,
+                graphic: 2624,
+                ..
+            })
+        ));
+        assert!(matches!(
+            it.next(),
+            Some(GumpElement::Translucent { w: 190, h: 90, .. })
+        ));
+        // picinpic is `x y graphic sx sy w h` — the crop offset comes BEFORE
+        // the size, which is easy to get backwards.
+        assert!(matches!(
+            it.next(),
+            Some(GumpElement::PicInPic {
+                graphic: 9350,
+                sx: 8,
+                sy: 16,
+                w: 60,
+                h: 30,
+                ..
+            })
+        ));
+        assert!(matches!(
+            it.next(),
+            Some(GumpElement::Entry {
+                id: 7,
+                limit: Some(16),
+                ..
+            })
+        ));
+        match it.next() {
+            Some(GumpElement::Tooltip { cliloc, args, .. }) => {
+                assert_eq!(*cliloc, 1_042_971);
+                assert_eq!(args.as_deref(), Some("mithril"));
+            }
+            other => panic!("expected a tooltip, got {other:?}"),
+        }
+        assert!(matches!(
+            it.next(),
+            Some(GumpElement::ItemProperty {
+                serial: 1_073_741_824,
+                ..
+            })
+        ));
+    }
+
+    /// Radios are mutually exclusive only within their `{ group N }`; without
+    /// the group a two-question gump can only ever hold one answer.
+    #[test]
+    fn radios_carry_the_group_in_force() {
+        let g = parse(
+            "{ group 1 }{ radio 10 10 208 209 1 100 }{ radio 10 30 208 209 0 101 }\
+             { group 2 }{ radio 10 60 208 209 0 200 }",
+            &[],
+        );
+        let groups: Vec<i64> = g
+            .elements
+            .iter()
+            .filter_map(|e| match e {
+                GumpElement::Radio { group, .. } => Some(*group),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(groups, vec![1, 1, 2]);
     }
 }

@@ -8,8 +8,9 @@ Closed since the audit (2026-08-02/03): the five Tier 1 rows marked **CLOSED**
 below (speech modes, stat locks, auto-walk speed tiers, shard list + relay
 address, login/character rejection reasons) and three of Tier 4's four —
 terrain perception (the row the audit called out as cutting against the
-project's own thesis), cliloc-resolved journal text, and the 0xCC affix bug.
-Tier 4's remaining row is the gump layout grammar.
+project's own thesis), cliloc-resolved journal text, the 0xCC affix bug, and
+the gump layout grammar — plus both Tier 2 rows (status sheet, buff names).
+Tier 4 is now closed out entirely.
 
 ## Audit baseline
 
@@ -272,10 +273,17 @@ This is the one that cuts against the project's own thesis.
   side flag `0x01` asks for, matching ClassicUO `DisplayClilocString`/`AffixType`.
   Folding it into the args had corrupted the argument list and lost the affix
   entirely on any template without a placeholder.
-- Server-gump layout grammar: `tilepic`/`tilepichue`, `gumppictiled`, `checkertrans`,
-  `tooltip`, `itemproperty`, `buttontileart`, `picinpic`, `textentrylimited`,
-  `noclose`/`nodispose`/`nomove` are silently dropped, and radio buttons are never
-  grouped — so complex shard gumps are mis-rendered for both the player and the brain.
+- ~~Server-gump layout grammar~~ — **CLOSED.** All of `tilepic`/`tilepichue`,
+  `gumppictiled`, `checkertrans`, `tooltip`, `itemproperty`, `buttontileart`,
+  `picinpic`, `textentrylimited` and `noclose`/`nodispose`/`nomove` now parse into
+  typed elements (the window flags onto `GumpLayout` rather than the element list),
+  reach both the JSON contract and the renderer, and draw. `{ group N }` is tracked
+  so `Radio` carries its group — the renderer names each group separately, without
+  which a two-question gump could only ever hold one answer. `tooltip`/`itemproperty`
+  decorate the **preceding** element, as UO attaches them, rather than taking a slot.
+  Verified by parser tests plus a synthetic gump injected into the live renderer:
+  two radio groups each hold their own selection, `textentrylimited` caps input, and
+  the art/tiled/crop/translucent elements draw.
 
 ---
 

@@ -187,8 +187,18 @@ fn gump_element_json(e: &GumpElement) -> Value {
         GumpElement::Check { x, y, id, on, page } => {
             json!({"type": "check", "x": x, "y": y, "id": id, "on": on, "page": page})
         }
-        GumpElement::Radio { x, y, id, on, page } => {
-            json!({"type": "radio", "x": x, "y": y, "id": id, "on": on, "page": page})
+        // `group` matters: radios are mutually exclusive only within one, so a
+        // consumer that ignores it can answer one question twice.
+        GumpElement::Radio {
+            x,
+            y,
+            id,
+            on,
+            group,
+            page,
+        } => {
+            json!({"type": "radio", "x": x, "y": y, "id": id, "on": on,
+                   "group": group, "page": page})
         }
         GumpElement::Entry {
             x,
@@ -196,9 +206,74 @@ fn gump_element_json(e: &GumpElement) -> Value {
             w,
             id,
             s,
+            limit,
             page,
         } => {
-            json!({"type": "entry", "x": x, "y": y, "w": w, "id": id, "s": s, "page": page})
+            json!({"type": "entry", "x": x, "y": y, "w": w, "id": id, "s": s,
+                   "limit": limit, "page": page})
+        }
+        GumpElement::TilePic {
+            x,
+            y,
+            graphic,
+            hue,
+            page,
+        } => {
+            json!({"type": "tilepic", "x": x, "y": y, "graphic": graphic,
+                   "hue": hue, "page": page})
+        }
+        GumpElement::TiledImage {
+            x,
+            y,
+            w,
+            h,
+            graphic,
+            page,
+        } => {
+            json!({"type": "tiled", "x": x, "y": y, "w": w, "h": h,
+                   "graphic": graphic, "page": page})
+        }
+        GumpElement::Translucent { x, y, w, h, page } => {
+            json!({"type": "translucent", "x": x, "y": y, "w": w, "h": h, "page": page})
+        }
+        GumpElement::PicInPic {
+            x,
+            y,
+            graphic,
+            sx,
+            sy,
+            w,
+            h,
+            page,
+        } => {
+            json!({"type": "picinpic", "x": x, "y": y, "graphic": graphic,
+                   "sx": sx, "sy": sy, "w": w, "h": h, "page": page})
+        }
+        GumpElement::ButtonTileArt {
+            x,
+            y,
+            graphic,
+            reply_id,
+            pageflag,
+            param,
+            art,
+            hue,
+            tile_x,
+            tile_y,
+            page,
+        } => {
+            json!({"type": "buttontileart", "x": x, "y": y, "graphic": graphic,
+                   "reply_id": reply_id, "pageflag": pageflag, "param": param,
+                   "art": art, "hue": hue, "tileX": tile_x, "tileY": tile_y,
+                   "page": page})
+        }
+        // Both decorate the element *before* them (UO attaches a tooltip to
+        // whatever was added last), so they carry no position of their own.
+        GumpElement::Tooltip { cliloc, args, page } => {
+            json!({"type": "tooltip", "cliloc": cliloc, "args": args, "page": page})
+        }
+        GumpElement::ItemProperty { serial, page } => {
+            json!({"type": "itemproperty", "serial": serial, "page": page})
         }
     }
 }
