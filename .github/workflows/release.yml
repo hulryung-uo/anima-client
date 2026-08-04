@@ -49,6 +49,12 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Ad-hoc sign the bundle when no Developer ID is configured. Without
+          # it the .app has no Contents/_CodeSignature and `codesign --verify`
+          # calls it malformed rather than merely unsigned — see
+          # scripts/build-app.sh. A real identity (if the secret is ever set)
+          # wins; `-` claims nothing and does not get past Gatekeeper.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
           # --- macOS signing + notarization (OPT-IN) ---
           # Do NOT list the APPLE_* secrets here as plain passthroughs: when a
           # secret is unset it arrives as an EMPTY string, and Tauri treats an
@@ -57,7 +63,6 @@ jobs:
           # (adhoc) bundle, which is what we ship until a Developer ID exists.
           # To sign: add the secrets to the repo and UNCOMMENT these lines
           # (see docs/DISTRIBUTION.md).
-          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           # APPLE_ID: ${{ secrets.APPLE_ID }}

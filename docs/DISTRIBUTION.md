@@ -78,6 +78,16 @@ An **unsigned** `.app`/`.dmg` runs fine on the machine that built it, but on
 another Mac Gatekeeper blocks it ("Anima is damaged" / "unidentified developer")
 because the download carries a `com.apple.quarantine` xattr.
 
+What we ship is **ad-hoc signed** (`APPLE_SIGNING_IDENTITY=-`, the default in
+`scripts/build-app.sh` and in CI). That is not a step toward Gatekeeper — it
+claims no identity and gets you nothing with Apple. It exists because on arm64
+the linker signs the *executable* but nothing signs the *bundle*, and a bundle
+with no `Contents/_CodeSignature` makes `codesign --verify` say "code has no
+resources but signature indicates they must be present" — which reads like a
+corrupt download to anyone who checks. Ad-hoc signing makes the bundle
+self-consistent: `codesign --verify` passes, `spctl` still refuses it. Setting
+a real `APPLE_SIGNING_IDENTITY` overrides it.
+
 - **Quick, unsigned sharing** (testers): tell them to right-click the app →
   **Open** → **Open** (once), or run
   `xattr -dr com.apple.quarantine /Applications/Anima.app`. Fine for a handful

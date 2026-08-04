@@ -54,6 +54,17 @@ cleanup_stale_dmg() {
   rm -f target/release/bundle/macos/rw.*.dmg 2>/dev/null || true
 }
 
+# Ad-hoc sign the BUNDLE unless a real identity is configured. On arm64 the
+# linker already ad-hoc signs the executable (macOS will not run an unsigned
+# arm64 binary at all), but that leaves the .app itself unsigned — no
+# Contents/_CodeSignature — and `codesign --verify` then reports "code has no
+# resources but signature indicates they must be present", which reads like a
+# corrupt download. `-` costs nothing, makes the bundle self-consistent, and
+# claims no identity: Gatekeeper on another Mac still refuses it (see
+# docs/DISTRIBUTION.md) — that needs a Developer ID, not this.
+: "${APPLE_SIGNING_IDENTITY:=-}"
+export APPLE_SIGNING_IDENTITY
+
 # tauri reads crates/anima-desktop/tauri.conf.json; artifacts land in the shared
 # workspace target/ dir. `set -u`-safe empty-array expansion for bash 3.2 (macOS).
 run_build() { ( cd crates/anima-desktop && env "$@" cargo tauri build ${args[@]+"${args[@]}"} ); }
