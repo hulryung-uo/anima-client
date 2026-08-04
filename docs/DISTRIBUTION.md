@@ -57,9 +57,9 @@ Under the shared workspace `target/` (a per-target subdir when you pass
 | Platform | Path |
 |---|---|
 | macOS app | `…/release/bundle/macos/Anima.app` |
-| macOS disk image | `…/release/bundle/dmg/Anima_0.1.0_<arch>.dmg` |
-| Windows installer | `…/release/bundle/nsis/Anima_0.1.0_x64-setup.exe` |
-| Windows MSI | `…/release/bundle/msi/Anima_0.1.0_x64_en-US.msi` |
+| macOS disk image | `…/release/bundle/dmg/Anima_<ver>_<arch>.dmg` |
+| Windows installer | `…/release/bundle/nsis/Anima_<ver>_x64-setup.exe` |
+| Windows MSI | `…/release/bundle/msi/Anima_<ver>_x64_en-US.msi` (local builds only) |
 
 `<arch>` is `aarch64` / `x64` / `universal`. The version comes from
 `tauri.conf.json` `version` — bump it there for each release.
@@ -91,7 +91,7 @@ because the download carries a `com.apple.quarantine` xattr.
   export APPLE_ID="you@example.com"
   export APPLE_PASSWORD="app-specific-password"   # appleid.apple.com → App-Specific Passwords
   export APPLE_TEAM_ID="TEAMID"
-  scripts/build-app.sh --universal
+  scripts/build-app.sh --bundles app,dmg
   ```
 
   Tauri signs the app with a hardened runtime and submits it to Apple's
@@ -115,8 +115,23 @@ because the download carries a `com.apple.quarantine` xattr.
 The practical way to produce **both** macOS and Windows bundles is a CI matrix —
 you can't build a Windows installer on macOS. A ready-to-use GitHub Actions
 workflow is provided at [`.github/workflows/release.yml`](../.github/workflows/release.yml):
-push a `v*` tag and it builds `Anima.app`/`.dmg` on `macos-latest` and the
-`.exe`/`.msi` on `windows-latest`, then attaches them to a GitHub Release.
+push a `v*` tag and it builds the bundles and attaches them to a **draft**
+GitHub Release.
+
+**What it ships, and why only that:**
+
+| Platform | Artifact | Target |
+|---|---|---|
+| macOS | `Anima.app` + `Anima_<ver>_aarch64.dmg` | `aarch64-apple-darwin` |
+| Windows | `Anima_<ver>_x64-setup.exe` | MSVC x64, NSIS |
+
+- **Apple Silicon only.** A universal binary doubles the download for everyone
+  to serve the rare Intel Mac, which Rosetta covers anyway. Build
+  `--universal` locally if you ever need one.
+- **NSIS only on Windows.** The `.exe` is the installer that bootstraps the
+  WebView2 runtime; shipping an `.msi` beside it means two ways to install one
+  app, which is a support question rather than a feature. `scripts/build-app.sh`
+  still emits both locally if you ask for them.
 
 Signing in CI is opt-in: add the Apple / Windows secrets above as repository
 secrets **and uncomment the `APPLE_*` block** in `release.yml` (it is commented
@@ -127,7 +142,9 @@ testing.
 ## Release checklist
 
 1. Bump `version` in `crates/anima-desktop/tauri.conf.json`.
-2. `scripts/build-app.sh --universal` (macOS) and a Windows build (locally or CI).
+2. Push the tag and let CI build both (§ *Cross-platform releases*), or
+   locally: `scripts/build-app.sh --bundles app,dmg` on an Apple Silicon Mac —
+   a Windows installer cannot be built from macOS.
 3. Sign + notarize (macOS) / sign (Windows) if distributing publicly.
 4. Smoke-test the bundle on a clean machine: it should open the login page,
    auto-detect or prompt for the UO data dir, connect, and render.

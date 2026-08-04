@@ -19,20 +19,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Apple Silicon only. A universal binary would carry an x86_64 half
+          # nothing here targets, and Rosetta covers the rare Intel Mac at the
+          # cost of a download twice the size for everyone else.
           - os: macos-latest
-            args: "--target universal-apple-darwin" # one binary for Intel + Apple Silicon
+            args: "--target aarch64-apple-darwin --bundles app,dmg"
+          # NSIS gives the installable `…-setup.exe`. The MSI is dropped rather
+          # than shipped alongside: two installers for one app is a support
+          # question, and the `.exe` is the one that bootstraps WebView2.
           - os: windows-latest
-            args: ""
+            args: "--bundles nsis"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
+      # Installs the channel/components/targets `rust-toolchain.toml` pins.
       - name: Install pinned Rust toolchain
-        run: rustup show active-toolchain
+        run: rustup toolchain install && rustup show active-toolchain
 
-      - name: Add macOS universal targets
+      - name: Add the Apple Silicon target
         if: matrix.os == 'macos-latest'
-        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+        run: rustup target add aarch64-apple-darwin
 
       # tauri-action installs tauri-cli, runs `cargo tauri build`, and (given a
       # tagName) creates/updates the GitHub Release with the bundles attached.
