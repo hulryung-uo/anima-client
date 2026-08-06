@@ -977,6 +977,170 @@ fn mobile_incoming_frame(serial: u32, flags: u8) -> Vec<u8> {
     frame
 }
 
+/// The same frame plus a worn-item list — `(serial, graphic, layer, hue)` each,
+/// terminated by the zero serial the wire uses.
+fn mobile_incoming_frame_with_equipment(serial: u32, worn: &[(u32, u16, u8, u16)]) -> Vec<u8> {
+    let mut p = PacketWriter::new();
+    p.bytes(&mobile_incoming_frame(serial, 0x00));
+    for &(item, graphic, layer, hue) in worn {
+        p.u32(item).u16(graphic).u8(layer).u16(hue);
+    }
+    p.u32(0); // end-of-list terminator
+    let mut frame = p.into_vec();
+    let len = frame.len() as u16;
+    frame[1] = (len >> 8) as u8;
+    frame[2] = (len & 0xFF) as u8;
+    frame
+}
+
+#[test]
+fn mobile_incoming_drops_equipment_the_new_list_omits() {
+    // The list is the mobile's COMPLETE visible equipment, so gear it no longer
+    // names has been taken off. Before this, an unequipped item kept
+    // `container == Some(mobile)` forever and every consumer that asks "what is
+    // this mobile wearing" kept seeing it — a dismount out of view left the
+    // mount drawn under its rider.
+    const HELMET: u32 = 0x4000_0001;
+    const SWORD: u32 = 0x4000_0002;
+    const MOUNT: u32 = 0x4000_0003;
+    let mut w = World::new();
+    assert!(apply_packet(
+        &mut w,
+        &mobile_incoming_frame_with_equipment(
+            0xABCD,
+            &[
+                (HELMET, 0x140A, 0x06, 0),   // Helmet
+                (SWORD, 0x0F5E, 0x01, 0),    // OneHanded
+                (MOUNT, 0x3E9F, 0x19, 0x84), // Mount
+            ],
+        )
+    ));
+    assert_eq!(w.items[&HELMET].container, Some(0xABCD));
+    assert_eq!(w.items[&MOUNT].hue, 0x84);
+
+    // The rider dismounts and sheathes: a fresh 0x78 lists only the helmet.
+    assert!(apply_packet(
+        &mut w,
+        &mobile_incoming_frame_with_equipment(0xABCD, &[(HELMET, 0x140A, 0x06, 0)])
+    ));
+    assert_eq!(w.items[&HELMET].container, Some(0xABCD));
+    assert!(!w.items.contains_key(&SWORD), "sheathed weapon lingered");
+    assert!(!w.items.contains_key(&MOUNT), "ghost mount lingered");
+}
+
+#[test]
+fn mobile_incoming_keeps_the_backpack_and_the_container_layers() {
+    // The sweep must skip the layers a mobile does not *wear*. The backpack is
+    // never in the incoming list yet obviously survives; a vendor's shop
+    // containers (0x1A-0x1C) and the bank box (0x1D) hang off the mobile the
+    // same way, and dropping those would empty the buy window — see
+    // `recorrelate_shop_buy`, which resolves prices through exactly that link.
+    const BACKPACK: u32 = 0x4000_0010;
+    const SHOP_BUY: u32 = 0x4000_0011;
+    const BANK: u32 = 0x4000_0012;
+    const CLOAK: u32 = 0x4000_0013;
+    let mut w = World::new();
+    for (serial, layer) in [
+        (BACKPACK, 0x15),
+        (SHOP_BUY, 0x1B),
+        (BANK, 0x1D),
+        (CLOAK, 0x14),
+    ] {
+        let it = w.item_mut(serial);
+        it.layer = layer;
+        it.container = Some(0xABCD);
+    }
+    // A 0x78 naming no equipment at all — the strongest form of the sweep.
+    assert!(apply_packet(
+        &mut w,
+        &mobile_incoming_frame_with_equipment(0xABCD, &[])
+    ));
+    assert!(w.items.contains_key(&BACKPACK), "backpack was swept");
+    assert!(w.items.contains_key(&SHOP_BUY), "shop container was swept");
+    assert!(w.items.contains_key(&BANK), "bank box was swept");
+    assert!(
+        !w.items.contains_key(&CLOAK),
+        "worn cloak survived the sweep"
+    );
+}
+
+#[test]
+fn mobile_incoming_leaves_other_mobiles_equipment_alone() {
+    // The sweep is scoped to the mobile the packet is about. Two characters
+    // standing together must not undress each other.
+    const MINE: u32 = 0x4000_0020;
+    const THEIRS: u32 = 0x4000_0021;
+    let mut w = World::new();
+    for (serial, owner) in [(MINE, 0xABCD), (THEIRS, 0xBEEF)] {
+        let it = w.item_mut(serial);
+        it.layer = 0x14; // Cloak
+        it.container = Some(owner);
+    }
+    assert!(apply_packet(
+        &mut w,
+        &mobile_incoming_frame_with_equipment(0xABCD, &[])
+    ));
+    assert!(!w.items.contains_key(&MINE));
+    assert!(w.items.contains_key(&THEIRS));
+}
+
+#[test]
+fn mobile_incoming_withholds_the_sweep_on_a_truncated_list() {
+    // A record cut off mid-way is not the server saying "everything else came
+    // off" — it's a frame we could not finish reading. Before the sweep existed
+    // that distinction cost nothing (a short tail just meant some items went
+    // un-updated); now it decides whether real gear gets deleted.
+    const HELMET: u32 = 0x4000_0040;
+    const CLOAK: u32 = 0x4000_0041;
+    let mut w = World::new();
+    assert!(apply_packet(
+        &mut w,
+        &mobile_incoming_frame_with_equipment(
+            0xABCD,
+            &[(HELMET, 0x140A, 0x06, 0), (CLOAK, 0x1515, 0x14, 0)],
+        )
+    ));
+
+    // Same packet, but the second record is chopped after its serial.
+    let mut p = PacketWriter::new();
+    p.bytes(&mobile_incoming_frame(0xABCD, 0x00));
+    p.u32(HELMET).u16(0x140A).u8(0x06).u16(0);
+    p.u32(CLOAK).u16(0x1515); // …and then the frame ends mid-record
+    let mut frame = p.into_vec();
+    let len = frame.len() as u16;
+    frame[1] = (len >> 8) as u8;
+    frame[2] = (len & 0xFF) as u8;
+    assert!(apply_packet(&mut w, &frame));
+    assert!(
+        w.items.contains_key(&CLOAK),
+        "a truncated list must not be read as a removal"
+    );
+}
+
+#[test]
+fn mobile_incoming_keeps_opl_for_gear_that_never_came_off() {
+    // Why this departs from ClassicUO, which removes every non-backpack child
+    // and recreates the listed ones: recreating an item that never left drops
+    // its OPL, so ClassicUO silently invalidates the tooltip of every piece of
+    // gear each time its wearer walks back into view.
+    const SWORD: u32 = 0x4000_0030;
+    let mut w = World::new();
+    let worn = [(SWORD, 0x0F5E, 0x01, 0)];
+    assert!(apply_packet(
+        &mut w,
+        &mobile_incoming_frame_with_equipment(0xABCD, &worn)
+    ));
+    w.opl
+        .insert(SWORD, vec![(1_050_045, "\t\tLongsword".into())]);
+    w.opl_revision.insert(SWORD, 42);
+    assert!(apply_packet(
+        &mut w,
+        &mobile_incoming_frame_with_equipment(0xABCD, &worn)
+    ));
+    assert!(w.opl.contains_key(&SWORD), "tooltip was needlessly dropped");
+    assert_eq!(w.opl_revision.get(&SWORD), Some(&42));
+}
+
 #[test]
 fn mobile_incoming_hidden_flag_sets_and_clears() {
     let mut w = World::new();
@@ -1325,6 +1489,59 @@ fn general_info_new_damage_pushes_damage_event() {
     assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
     assert_eq!(w.recent_damage.last(), Some(&(1, 0x0000_1234, 17)));
     assert_eq!(w.damage_seq, 1);
+}
+
+#[test]
+fn general_info_clear_weapon_ability_disarms_the_armed_move() {
+    // The defect this closes: an arm was write-only. We set it optimistically
+    // when sending 0xD7 (nothing else can — the server never confirms an arm),
+    // and 0xBF/0x21 is the only message that takes it back, so without this
+    // handler the bar stayed highlighted for the rest of the session.
+    let mut w = World::new();
+    w.arm_ability(7); // Double Strike
+    assert_eq!(w.armed_ability, 7);
+    let mut p = PacketWriter::new();
+    p.u8(0xBF).u16(0).u16(0x0021); // payload-free (ServUO `ClearWeaponAbility`)
+    assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+    assert_eq!(w.armed_ability, 0);
+}
+
+#[test]
+fn arm_ability_toggles_off_when_the_same_move_is_re_armed() {
+    // ClassicUO `UsePrimaryAbility`: re-arming the armed move disarms it
+    // (`ability ^= 0x80`), and arming the other slot replaces rather than adds.
+    let mut w = World::new();
+    w.arm_ability(7);
+    w.arm_ability(7);
+    assert_eq!(w.armed_ability, 0, "re-arming the same move disarms");
+    w.arm_ability(7);
+    w.arm_ability(9);
+    assert_eq!(w.armed_ability, 9, "arming another move replaces it");
+    w.arm_ability(0);
+    assert_eq!(w.armed_ability, 0, "0 always disarms");
+}
+
+#[test]
+fn general_info_toggle_special_ability_tracks_active_spells() {
+    // 0xBF/0x25 — [abilityID:u16][active:u8]. ServUO sends `moveID + 1` /
+    // `spellID + 1`, so these are SPELL ids, not weapon-ability ids.
+    let toggle = |spell: u16, active: u8| {
+        let mut p = PacketWriter::new();
+        p.u8(0xBF).u16(0).u16(0x0025).u16(spell).u8(active);
+        patch_len(p.into_vec())
+    };
+    let mut w = World::new();
+    assert!(apply_packet(&mut w, &toggle(401, 1)));
+    assert!(apply_packet(&mut w, &toggle(402, 1)));
+    assert_eq!(w.active_spell_icons, vec![401, 402]);
+    // Re-asserting an already-active stance must not duplicate it.
+    assert!(apply_packet(&mut w, &toggle(401, 1)));
+    assert_eq!(w.active_spell_icons, vec![401, 402]);
+    assert!(apply_packet(&mut w, &toggle(401, 0)));
+    assert_eq!(w.active_spell_icons, vec![402]);
+    // Deactivating something that was never active is a harmless no-op.
+    assert!(apply_packet(&mut w, &toggle(999, 0)));
+    assert_eq!(w.active_spell_icons, vec![402]);
 }
 
 #[test]

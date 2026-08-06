@@ -12,6 +12,38 @@ project's own thesis), cliloc-resolved journal text, the 0xCC affix bug, and
 the gump layout grammar — plus both Tier 2 rows (status sheet, buff names).
 Tier 4 is now closed out entirely.
 
+Closed 2026-08-06 (the combat batch): three more Tier 1 rows — armed weapon
+ability state, pre-AOS stun/disarm, targeted bandage use — and the stale
+worn-item divergence recorded at the bottom of this file. Contract schema
+v18 → v19. That batch also found a real disagreement between the two reference
+implementations (ClassicUO swaps the stun and disarm subcommands relative to
+ServUO and Razor); see the Tier 1 row for which side we took and why.
+
+Closed 2026-08-07 (the party batch): both remaining party rows — loot flag /
+private message / leader kick, and non-self status request. Contract schema
+v19 → v20. Live-verified end to end by running **two `play` instances** against
+the shard (a GM leader on 8788, an ordinary account on 8789) and actually
+forming a party, which is the only way to test any of it. That pass also found
+the second row's stated premise wrong in two ways — see the row.
+
+**Know what the local shard can and cannot prove.** `Config/Expansion.cfg` on
+the ServUO at `127.0.0.1:2594` says `CurrentExpansion=T2A`, so `Core.AOS` is
+**false** there. That single fact splits this batch in half, and it is worth
+checking before writing off a live test as a failed feature:
+
+- It makes the shard the *ideal* rig for the pre-AOS rows. `Fists.cs`'s
+  disarm/stun handlers open with `if (Core.AOS) return;`, so on T2A they
+  actually run — which is how the ClassicUO subcommand divergence got settled
+  empirically rather than by reading three sources and picking a majority.
+- It makes 0xBF/0x21 and 0xBF/0x25 **unobservable** there. Both are gated:
+  `WeaponAbility.ClearCurrentAbility` sends its packet only
+  `if (Core.AOS && m.NetState != null)`, and 0x25's senders (`SpecialMove`,
+  `SamuraiSpell`) are AOS+/SE content that cannot be invoked at all. A live
+  session will therefore show an arm that never clears no matter how long you
+  swing — **that is the shard, not the client**, and it cost a confused
+  detour to work out. Those two rows rest on unit tests plus the ServUO
+  source; confirming them live needs a shard at AOS or later.
+
 ## Audit baseline
 
 - Audited: **2026-07-30** (supersedes the 2026-07-22 pass; 60 commits landed between
@@ -192,9 +224,9 @@ The receive side is generally complete; there is no way to *act*.
 |---|---|---|
 | ~~**Speech modes** (whisper / yell / emote / guild / alliance)~~ — **CLOSED** | `Action::Say` now carries a `SpeechMode` (`agent.rs`), the driver writes its `MessageType` byte, `play_server` gained `whisper:`/`yell:`/`emote:`/`guild:`/`alliance:` commands, and the chat bar routes `/w`, `/y`, `/e`, `/g`, `/a` prefixes. JSON `Say.mode` is optional, so pre-mode brains are unaffected | S |
 | ~~**Stat locks** (0xBF/0x1A)~~ — **CLOSED** | `build_stat_lock` + `Action::StatLock` + `statlock:<stat>:<lock>`, with the same optimistic local update the skill-lock twin does | S |
-| **Armed weapon ability state** (0xBF/0x21 clear, 0xBF/0x25 toggle) | send works, but the server's clear/toggle feedback is unhandled, so the bar's armed highlight goes stale after every use | S |
-| Pre-AOS stun / disarm (0xBF/0x09, 0x0A) | absent | S |
-| Targeted use (0xBF/0x2C) — bandage self/target in one packet | absent | S |
+| ~~**Armed weapon ability state** (0xBF/0x21 clear, 0xBF/0x25 toggle)~~ — **CLOSED** (unit-tested; not live-verifiable on a T2A shard — see the note under "Audit baseline") | Both directions now land. `World::armed_ability` is written optimistically by the driver on 0xD7 (an arm is *never* acknowledged — the only message about it is the one revoking it) and cleared by 0xBF/0x21; 0xBF/0x25 fills `World::active_spell_icons`, which despite the packet's name carries **spell** ids (ServUO sends `moveID + 1` / `spellID + 1`), so it lights up the spellbook, not the bar. Both reach `Observation` and `scene.json`. The renderer keeps a 500ms optimistic window before believing the server, because `scene.json` is polled every 150ms and the snapshot answering a click predates it (the D11 hazard); outside that window the server simply wins, since a swing can resolve before its own echo arrives | S |
+| ~~Pre-AOS stun / disarm (0xBF/0x09, 0x0A)~~ — **CLOSED, live-verified** | `build_disarm_request`/`build_stun_request` + `Action::DisarmRequest`/`StunRequest` + `disarm`/`stun` commands. **Watch the subcommand numbering:** ClassicUO has the two swapped — its `Send_StunRequest` writes 0x09 and `Send_DisarmRequest` writes 0x0A, while ServUO registers `RegisterExtended(0x09, DisarmRequest)`/`(0x0A, StunRequest)` and Razor (`Razor/Network/Packets.cs`) writes the same pairing as ServUO. **Settled empirically, not by majority vote:** the two handlers gate on *different* skills, so skills alone identify which one a subcommand reached. With hands free, ArmsLore+Wrestling 100 / Anatomy 0 → `disarm` answered "You get yourself ready to disarm your opponent" and `stun` answered "You are not skilled enough to stun your opponent"; inverting to ArmsLore 0 / Anatomy 100 inverted both replies exactly. ClassicUO's numbering would have swapped them. A byte-exact test pins it so the divergence can't be "corrected" back into a silent wrong-move bug | S |
+| ~~Targeted use (0xBF/0x2C) — bandage self/target in one packet~~ — **CLOSED, live-verified** | `build_bandage_target` + `Action::BandageTarget { bandage, target }` + `bandage:<serial>[:<target>]`. `target` 0 = self (the `PartyAccept` sentinel convention), which is the case worth the shortcut. Skips the double-click → 0x6C cursor → reply round-trip, which is what makes reliable self-healing under pressure possible. Live: `bandage:<serial>` with no target healed the player, with `scene.target.active == 0` throughout — **no cursor is ever raised**. Note ServUO still emits cliloc 500948 "Who will you use the bandages on?" from inside the 0x2C handler before invoking the target itself (`Bandage.cs BandageTargetRequest`), so that line in the journal is not evidence of a cursor. ServUO's siblings 0x2D TargetedSpell / 0x2E TargetedSkillUse / 0x30 TargetByResourceMacro are the same idea and still absent | S |
 | ~~**Auto-walk always runs at unmounted-walk speed**~~ — **CLOSED** | new `movement::walk_pacing(world, want_run)` returns `(run, ms)` from live state — ClassicUO `PlayerMobile.Walk`'s rules, including `SpeedMode >= CantRun`, spent stamina (ghosts exempt), and `FastUnmount` taking the mounted tier without a mount. Both auto-walkers (`Route::step_delay`, `play_server`'s loop) consult it per tick and now run | S |
 | ~~**Shard list**~~ — **CLOSED** | `parse_server_list` (0xA8) + `LoginMachine::servers()`; `cfg.server_index` names the shard's *own* index and an unlisted one fails with the shard names instead of hanging. 0x8C now yields a `GameServerAddress`, which the native driver dials first (5s timeout) before falling back to the login endpoint — ClassicUO's `IgnoreRelayIp`/`ip == 0` case, available as `Endpoint::ignore_relay_ip`. **Watch the byte order:** 0xA8's address is reversed, 0x8C's is not | M |
 | ~~**Login/character rejection reasons**~~ — **CLOSED** | 0x82 gained `account_denied_text`, 0x53 became `LoginError::CharacterLoginRejected` with `character_login_rejected_text`, and 0xFD's queue window is stored and quoted by 0x53 codes 13/14. `LoginError` now implements `Display`, so the browser login page and CLI show the server's stated reason instead of a Debug dump | S |
@@ -204,8 +236,8 @@ The receive side is generally complete; there is no way to *act*.
 | Bulletin board post/read/reply | state model decoded (0x71); no authoring surface | M |
 | Chat channels (0xB2/0xB3/0xB5) | **core is complete** — create/destroy/join/leave/lines all decoded — with no Action, scene field or UI above it | M |
 | Guild / quest menus (0xD7 sub 0x28 / 0x32), help+GM page (0x9B), rename (0x75), quest-arrow click (0xBF/0x07) | absent | S each |
-| Party: loot flag, private message, leader kick | partial | S |
-| Request another entity's status (0x34 non-self) → party mana/stam bars | absent | S |
+| ~~Party: loot flag, private message, leader kick~~ — **CLOSED, live-verified** | `build_party_can_loot` (0xBF/0x06/0x06), `build_party_private_message` (0x06/0x03) and `build_party_remove` (0x06/0x02) + `Action::PartySetCanLoot`/`PartyPrivateMessage`/`PartyKick` + `partyloot:<0\|1>`/`partytell:<member>:<text>`/`partykick:<member>`. **Kick and leave are one packet**, distinguished only by whose serial it names; ServUO's `PartyCommands.OnRemove` gates it on `p.Leader == from \|\| from == target` and ignores a non-leader silently — verified both ways live (a member's kick of the leader changed nothing; the leader's kick of the member disbanded the party on both clients). Loot flag answers cliloc 1005447/1005448 and is **never sent back**, so a UI must remember what it asked for. Private messages are clamped to 128 chars because ServUO *drops* longer ones rather than truncating | S |
+| ~~Request another entity's status (0x34 non-self) → party mana/stam bars~~ — **CLOSED, live-verified — and the row's premise was wrong twice** | `Action::StatusRequest { serial }` (0 = self) → 0x34 type 4; `party[].mana/manaMax/stam/stamMax` now leave `build_scene`. Two corrections worth keeping: **(a) it is a resync, not the only source.** ServUO pushes a member's mana/stam changes unprompted (`Party.OnManaChanged`/`OnStamChanged` → 0xA2/0xA3) — but only while they are in update range and visible, so a member you lost sight of freezes at the last value with nothing scheduled to fix it. That is the real gap this fills. **(b) The values are percentages, not points.** Every party-facing vitals packet goes through `AttributeNormalizer` (max written as a fixed 25, current as `cur * 25 / max`). Measured live: a member at a real 7/10 mana reached the leader as 17/25. Never compare another member's mana against a spell cost — our own vitals are un-normalized, theirs are not | S |
 
 ---
 
@@ -315,8 +347,30 @@ Add a ClassicUO source location and an end-to-end acceptance test when closing a
 When a row is closed, say so here rather than deleting it — the "wrongly reported as
 missing" list above exists because that history was not written down.
 
-Known minor divergence carried over from the previous audit: the mobile-incoming
-family (`0x78`, `0xD3`) does not clear a mobile's *stale* worn items before applying
-the incoming equipment list, so an unequipped item can linger in `World::items` until
-overwritten. ClassicUO removes non-backpack worn items first. Fold the fix into both
-when the equipment list is next touched.
+~~Known minor divergence carried over from the previous audit: the mobile-incoming
+family (`0x78`, `0xD3`) does not clear a mobile's *stale* worn items…~~ —
+**CLOSED.** Both handlers now share one `apply_worn_items`, which treats the
+list as authoritative and drops equipment it omits (symptom: a mount stayed
+drawn under a rider who dismounted out of view). Two deliberate departures from
+ClassicUO's `UpdateObject`, which removes every non-backpack child and recreates
+the listed ones: we remove only what the list omits, because recreating an item
+that never left drops its name and OPL — ClassicUO silently invalidates the
+tooltip of every worn piece each time its wearer walks back into view; and we
+skip the container pseudo-layers (0x1A-0x1D) rather than guard on ClassicUO's
+"is this container's gump open" flag, which is renderer state the core does not
+have (D3). That second point is load-bearing rather than cosmetic: a vendor's
+shop containers hang off the vendor mobile on 0x1A-0x1C (see
+`recorrelate_shop_buy`, which resolves buy-list prices through exactly that
+link) and the bank box on 0x1D, so a layer-blind sweep would empty the buy
+window. Five tests cover it, including the vendor/bank case, the OPL one, and a
+truncated-frame guard (a record cut off mid-way must not read as "everything
+else came off" now that omission deletes).
+
+**Live A/B against ServUO, same experiment both ways.** Spawn a vendor, note
+its worn layers, teleport out of view, `[Remove` one worn item server-side (so
+no 0x1D ever reaches us), teleport back and let its 0x78 resend:
+*old code* — the deleted item was still listed as worn. *new code* — gone,
+while layers 0x03/0x05/0x0B/0x15 and the shop containers 0x1A/0x1B survived,
+and the Buy window still opened with all four prices resolved to concrete
+serials through `cont: 0x400177C3` — the very layer-0x1A container the sweep
+had to leave alone.

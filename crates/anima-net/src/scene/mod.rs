@@ -348,6 +348,19 @@ pub fn build_scene(
     // AOS expansion (SupportedFeatures 0xB9): gates AOS-only UI like the weapon
     // special-ability bar. T2A servers don't advertise it → the client hides it.
     let aos = s.world.aos;
+    // The weapon special move armed for the next swing (0 = none). The bar used
+    // to track this purely client-side, which meant its highlight outlived every
+    // use: the server takes the arm away with 0xBF/0x21 and says nothing else.
+    let armed_ability = s.world.armed_ability;
+    // Spell ids the server has toggled on (0xBF/0x25) — Bushido/Ninjitsu stances
+    // and the like — so the spellbook can light up the ones actually running.
+    let active_spells = json_array(
+        &s.world
+            .active_spell_icons
+            .iter()
+            .map(|s| json!(s))
+            .collect::<Vec<_>>(),
+    );
     // An outstanding 0x9A ASCII / 0xC2 Unicode server prompt, or `{"active":0}`.
     // See [`prompt_json`]'s doc.
     let prompt =
@@ -423,6 +436,7 @@ pub fn build_scene(
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
          \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"logoutAck\":{logout_ack},\"boatMoves\":{boat_moves},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
+         \"armedAbility\":{armed_ability},\"activeSpells\":{active_spells},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
          \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps}{placement_field}{house_design_field},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",

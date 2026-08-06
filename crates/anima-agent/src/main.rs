@@ -136,6 +136,11 @@ fn main() {
                     format!("bookreq(0x{serial:08X}×{pages})")
                 }
                 Action::UseAbility { ability } => format!("ability({ability})"),
+                Action::DisarmRequest => "disarm".into(),
+                Action::StunRequest => "stun".into(),
+                Action::BandageTarget { bandage, target } => {
+                    format!("bandage(0x{bandage:08X}→0x{target:08X})")
+                }
                 Action::SkillLock { skill, lock } => format!("skilllock({skill}={lock})"),
                 Action::StatLock { stat, lock } => format!("statlock({stat}={lock})"),
                 Action::UseSkill { skill } => format!("useskill({skill})"),
@@ -144,6 +149,12 @@ fn main() {
                 Action::PartyAccept { leader } => format!("partyaccept(0x{leader:08X})"),
                 Action::PartyDecline { leader } => format!("partydecline(0x{leader:08X})"),
                 Action::PartyLeave => "partyleave".into(),
+                Action::PartyKick { member } => format!("partykick(0x{member:08X})"),
+                Action::PartyPrivateMessage { member, text } => {
+                    format!("partytell(0x{member:08X} {text:?})")
+                }
+                Action::PartySetCanLoot { can_loot } => format!("partyloot({can_loot})"),
+                Action::StatusRequest { serial } => format!("statusreq(0x{serial:08X})"),
                 Action::PromptResponse { text } => format!("prompt({text:?})"),
                 Action::PromptCancel => "promptcancel".into(),
                 Action::TipNavigate { seq, next } => {

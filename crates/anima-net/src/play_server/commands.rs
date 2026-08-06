@@ -92,10 +92,17 @@ pub(super) fn parse_house_design_command(body: &str) -> Option<Action> {
 /// `click:<serial>` · `attack:<serial>` · `pickup:<serial>[:<amount>]` ·
 /// `drop:<serial>:<x>:<y>:<z>[:<container>]` (container default 0xFFFFFFFF =
 /// ground) · `equip:<serial>[:<layer>]` (layer 0 = derive from tiledata) ·
-/// `war:<0|1>` · `cast:<spellId>` · `target:<serial>` · `targetxy:<x>:<y>:<z>:<graphic>` ·
+/// `war:<0|1>` · `cast:<spellId>` · `ability:<id>` (arm a weapon special move,
+/// 0 disarms) · `disarm` / `stun` (the pre-AOS wrestling specials, no argument) ·
+/// `bandage:<bandageSerial>[:<targetSerial>]` (target defaults to self) ·
+/// `target:<serial>` · `targetxy:<x>:<y>:<z>:<graphic>` ·
 /// `gump:<serial>:<gumpId>:<button>[:sw=1,2][:e=<id>=<text>,…]` (gump reply; text
 /// entries can't contain `:`, `,`, or `=`) · `menusel:<serial>:<index>` (legacy
 /// 0x7C menu; index 0 cancels) · `huepick:<serial>:<hue>` (0x95 dye picker) ·
+/// `partykick:<member>` (leader-only remove) · `partytell:<member>:<text>`
+/// (private party message) · `partyloot:<0|1>` (let the party loot our corpse) ·
+/// `statusreq[:<serial>]` (0x34 type 4; omitted = self, a party member's serial
+/// makes the server answer with their real mana/stam) ·
 /// `prompt:<text>` / `promptcancel`
 /// (answer/cancel a pending 0x9A ASCII / 0xC2 Unicode server text prompt) ·
 /// `tipnav:<seq>:<0|1>` / `tipclose:<seq>` (previous/next or dismiss an exact
@@ -197,6 +204,22 @@ pub(super) fn parse_command(body: &str) -> Option<Action> {
         "ability" => Some(Action::UseAbility {
             ability: arg.parse().ok()?,
         }),
+        // disarm / stun — the pre-AOS wrestling specials (0xBF/0x09, 0xBF/0x0A).
+        // Argument-free: each toggles its own readiness server-side. A trailing
+        // `:` is rejected rather than ignored, like `logout` below.
+        "disarm" => arg.is_empty().then_some(Action::DisarmRequest),
+        "stun" => arg.is_empty().then_some(Action::StunRequest),
+        // bandage:<bandage-serial>[:<target-serial>] — 0xBF/0x2C, apply bandages
+        // without the target-cursor round-trip. An omitted target means ourselves
+        // (the case worth a shortcut), carried as the serial-0 sentinel the
+        // driver resolves — see `Action::BandageTarget`.
+        "bandage" => {
+            let (bandage, target) = match arg.split_once(':') {
+                Some((b, t)) => (parse_serial(b)?, parse_serial(t)?),
+                None => (parse_serial(arg)?, 0),
+            };
+            Some(Action::BandageTarget { bandage, target })
+        }
         // buy:<vendor>:<serial>x<amt>,<serial>x<amt>,…  (amount defaults to 1)
         "buy" => {
             let (vendor, list) = arg.split_once(':')?;
@@ -256,6 +279,30 @@ pub(super) fn parse_command(body: &str) -> Option<Action> {
         "partyinvite" => Some(Action::PartyInvite),
         // partyleave — leave the party (0xBF/0x06/0x02, self serial filled by the driver).
         "partyleave" => Some(Action::PartyLeave),
+        // partykick:<member> — the SAME packet as partyleave naming someone else.
+        // Leader-only, enforced server-side and silently ignored otherwise.
+        "partykick" => Some(Action::PartyKick {
+            member: parse_serial(arg)?,
+        }),
+        // partytell:<member>:<text> — private message to one member (0xBF/0x06/0x03).
+        // `text` may contain colons; only the first two fields are split off.
+        "partytell" => {
+            let (member, text) = arg.split_once(':')?;
+            Some(Action::PartyPrivateMessage {
+                member: parse_serial(member)?,
+                text: text.to_string(),
+            })
+        }
+        // partyloot:<0|1> — allow/forbid the party looting our corpse (0xBF/0x06/0x06).
+        "partyloot" => Some(Action::PartySetCanLoot {
+            can_loot: arg == "1" || arg == "on",
+        }),
+        // statusreq[:<serial>] — 0x34 MobileQuery type 4. Omitted/0 = ourselves.
+        // For a fellow party member this is what makes the server answer with
+        // 0x2D full attributes, i.e. their real mana/stamina.
+        "statusreq" => Some(Action::StatusRequest {
+            serial: parse_serial(arg).unwrap_or(0),
+        }),
         // partyaccept[:<leader>] — accept an invite (0xBF/0x06/0x08). Defaults to the
         // pending inviter when no serial is given (the UI omits it).
         "partyaccept" => Some(Action::PartyAccept {
@@ -612,6 +659,69 @@ mod command_tests {
     fn logout_command_is_exact_and_argument_free() {
         assert_eq!(parse_command("logout"), Some(Action::Logout));
         assert!(parse_command("logout:anything").is_none());
+    }
+
+    #[test]
+    fn party_commands_parse() {
+        assert_eq!(
+            parse_command("partykick:0x1234"),
+            Some(Action::PartyKick { member: 0x1234 })
+        );
+        // The text may contain colons — only the member serial is split off.
+        assert_eq!(
+            parse_command("partytell:0x1234:meet me at 12:30"),
+            Some(Action::PartyPrivateMessage {
+                member: 0x1234,
+                text: "meet me at 12:30".into(),
+            })
+        );
+        assert_eq!(
+            parse_command("partyloot:1"),
+            Some(Action::PartySetCanLoot { can_loot: true })
+        );
+        assert_eq!(
+            parse_command("partyloot:0"),
+            Some(Action::PartySetCanLoot { can_loot: false })
+        );
+        // statusreq with no argument = the self sentinel the driver resolves.
+        assert_eq!(
+            parse_command("statusreq"),
+            Some(Action::StatusRequest { serial: 0 })
+        );
+        assert_eq!(
+            parse_command("statusreq:0x18A"),
+            Some(Action::StatusRequest { serial: 0x18A })
+        );
+        assert!(parse_command("partykick").is_none());
+        assert!(parse_command("partytell:0x1234").is_none());
+    }
+
+    #[test]
+    fn stun_and_disarm_commands_are_exact_and_argument_free() {
+        assert_eq!(parse_command("disarm"), Some(Action::DisarmRequest));
+        assert_eq!(parse_command("stun"), Some(Action::StunRequest));
+        assert!(parse_command("disarm:1").is_none());
+        assert!(parse_command("stun:1").is_none());
+    }
+
+    #[test]
+    fn bandage_command_defaults_its_target_to_self() {
+        assert_eq!(
+            parse_command("bandage:0x40001234:0xABCD"),
+            Some(Action::BandageTarget {
+                bandage: 0x4000_1234,
+                target: 0xABCD,
+            })
+        );
+        // No target = the serial-0 sentinel the driver resolves to the player.
+        assert_eq!(
+            parse_command("bandage:0x40001234"),
+            Some(Action::BandageTarget {
+                bandage: 0x4000_1234,
+                target: 0,
+            })
+        );
+        assert!(parse_command("bandage").is_none());
     }
 
     #[test]

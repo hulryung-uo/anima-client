@@ -439,6 +439,20 @@ fn party_json_reports_members_leader_and_pending_invite() {
     assert_eq!(members[1]["name"], "Alice");
     assert_eq!(members[1]["hits"], 80);
     assert_eq!(members[1]["hitsMax"], 100);
+    // Mana/stam are 0 until an `Action::StatusRequest` draws a 0x2D for them —
+    // nothing pushes another mobile's real values (see `party_json`'s comment).
+    assert_eq!(members[1]["mana"], 0);
+    assert_eq!(members[1]["stamMax"], 0);
+    w.mobile_mut(0x101).mana = 12;
+    w.mobile_mut(0x101).mana_max = 40;
+    w.mobile_mut(0x101).stam = 30;
+    w.mobile_mut(0x101).stam_max = 35;
+    let v = party_json(&w);
+    let members = v["members"].as_array().unwrap();
+    assert_eq!(members[1]["mana"], 12);
+    assert_eq!(members[1]["manaMax"], 40);
+    assert_eq!(members[1]["stam"], 30);
+    assert_eq!(members[1]["stamMax"], 35);
 }
 
 #[test]

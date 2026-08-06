@@ -512,6 +512,12 @@
       .sp-row.sp-missing { opacity: .35; }
       .sp-row.sp-missing .sp-icon { filter: grayscale(1); }
       .sp-row.sp-missing .sp-name { color: #9098a4; }
+      /* A stance the server reports as currently running (0xBF/0x25
+         ToggleSpecialAbility, scene.activeSpells) — Bushido/Ninjitsu and the
+         like, which stay on until re-cast or broken. Same amber as the armed
+         weapon ability (.abil-btn.armed): both mean "this is live right now". */
+      .sp-row.sp-active { background: rgba(58, 44, 16, .9); box-shadow: inset 0 0 0 1px #d9a441; }
+      .sp-row.sp-active .sp-name { color: #ffdf9e; }
       /* ---- skills window (0x3A) ---- */
       #skills { top: 60px; right: 16px; width: 280px; display: none; }
       #statusbar { top: 60px; left: 210px; width: 170px; display: none; }

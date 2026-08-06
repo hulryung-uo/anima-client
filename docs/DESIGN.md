@@ -215,7 +215,7 @@ anima-client/
     │       │   ├── framing.rs           # frame decoder + game-mode (Huffman) + StreamDecoder
     │       │   ├── huffman.rs           # server→client decompression
     │       │   ├── login.rs             # builders/parsers + LoginMachine (+ char create)
-    │       │   ├── game/                # game packet codec → World mutation (76 incoming ids, §8)
+    │       │   ├── game/                # game packet codec → World mutation (90 incoming ids, §8)
     │       │   │   ├── mod.rs           #   apply_packet + the id-ordered `dispatch` index
     │       │   │   ├── text.rs          #   shared decoding primitives (no World)
     │       │   │   ├── mobiles.rs · items.rs · combat.rs · effects.rs
@@ -358,7 +358,7 @@ The driver is the only code that knows about sockets — write it once for nativ
    `build_delete_character`, `CharacterAppearance`), including the browser's
    server-provided list and confirmation-gated deletion flow.
 5. ✅ Game packet codec → World mutation (`net/game/`): originally 0x20/0x77/0x78/
-   0x1A/0x1D/0x11/0xA1-3/0x1C/0xAE/0xBF; now **76 incoming ids** dispatched (count
+   0x1A/0x1D/0x11/0xA1-3/0x1C/0xAE/0xBF; now **90 incoming ids** dispatched (count
    the match arms in `dispatch()`) covering combat/damage/effects, full vitals,
    containers,
    gumps (incl. packed/compressed 0xDD), targeting, vendors, skills, books,
@@ -377,9 +377,18 @@ The driver is the only code that knows about sockets — write it once for nativ
    mobtypes.txt), art, gump art, hues, sound, cliloc, texmap, radar colors, mounts.
 8. ✅ Pathfinding (`path/`): A* + `Terrain` trait, Z-aware, diagonal-safe.
 9. ✅ Observation/Action contract (`agent.rs`) + `Session::apply_action` / `navigate_to`.
-   `agent.rs`'s `Action` enum now has 48 variants; `anima-contract-json` mirrors the
-   full `Observation`/`Action` surface as versioned JSON for the out-of-process
-   Python brain (`anima2`), table-tested for every variant.
+   `agent.rs`'s `Action` enum now has 55 variants; `anima-contract-json` mirrors the
+   full `Observation`/`Action` surface as versioned JSON (schema **v20**) for the
+   out-of-process Python brain (`anima2`), table-tested for every variant.
+   **Combat state a brain can act on** (v19): `armed_ability` — the weapon
+   special move armed for the next swing — is the one piece of state the arming
+   side of the contract had no readback for, because UO acknowledges an arm only
+   by *revoking* it (0xBF/0x21). A brain that sent `UseAbility` therefore could
+   not tell "armed and waiting" from "already spent", which is the difference
+   between opening with a special and wasting the mana. It is written
+   optimistically by the driver on send and cleared by the packet; the same
+   version added `active_spell_icons` (0xBF/0x25 stances) and the
+   `DisarmRequest`/`StunRequest`/`BandageTarget` actions.
    **`Observation.terrain`** (schema v17) is the one field that does not come from
    a packet: local walkability (walkable / standing Z / the serial of a closed door
    in the way), so a brain can tell a wall from open ground rather than delegating
@@ -500,7 +509,7 @@ Distilled from `anima/CLAUDE.md` — verify against ClassicUO/captures while imp
 - **Key packet ids** (login phase): `0x1B` EnterWorld, `0x55` LoginComplete.
   (Full incoming-packet handler list: ClassicUO `PacketHandlers.cs`.)
 - **Game-phase incoming coverage (current, verified by counting `net::game::dispatch`'s
-  match arms):** **76** packet ids handled in `net/game/` — `0x20` MobileUpdate,
+  match arms):** **90** packet ids handled in `net/game/` — `0x20` MobileUpdate,
   `0x77`/`0x78` mobile moving/incoming, `0x2E` EquipItem, `0x1A`/`0xF3` world item
   (legacy/HS), `0x1D` Delete, `0x11` CharacterStatus, `0xA1-3` vitals, `0x1C`/`0xAE`
   Talk/UnicodeTalk, `0xBF` general-info subcommands (facet change, party, …), `0x6C`
@@ -521,7 +530,13 @@ Distilled from `anima/CLAUDE.md` — verify against ClassicUO/captures while imp
   `0x88` paperdoll, `0x2F` swing, `0x90`/`0xF5` maps, `0x56` map commands, `0x99`
   multi target, `0xD8` custom houses, and `0xE5`/`0xE6` waypoints — plus
   `0x21`/`0x22` (confirm/deny walk), owned separately by `net::movement::Walker`,
-  for **78** total. Outgoing login-phase `0x83` delete-character is handled
+  for **92** total. (The named list above is illustrative, not exhaustive — the
+  count is authoritative and comes from `dispatch()`; it had drifted to 76,
+  fourteen ids stale, before the 2026-08-06 recount.) Notable `0xBF` subcommands
+  handled: `0x08` facet change, `0x06` party, `0x14` popup, `0x19` extended
+  stats, `0x1B` spellbook content, `0x1D`/`0x20` custom-house notice/designer,
+  `0x21` clear armed weapon ability, `0x22` new damage, `0x25` toggle special
+  ability, `0x26` speed mode. Outgoing login-phase `0x83` delete-character is handled
   separately. Remaining ClassicUO gaps are maintained in
   [`CLASSICUO_GAPS.md`](CLASSICUO_GAPS.md).
 

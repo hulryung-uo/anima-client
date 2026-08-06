@@ -1248,6 +1248,26 @@ pub struct World {
     /// can also change combatant on its own (e.g. it retargets who's actually
     /// swinging at us). `None` when combat has ended (wire serial 0).
     pub combatant: Option<u32>,
+    /// The weapon special move armed for the next swing (`Ability` id 1..=31, or
+    /// 0 = none). ClassicUO keeps this as the `0x80` bit on each of
+    /// `PlayerMobile.Abilities[2]`; we only ever arm one move at a time (arming
+    /// either slot disarms the other — `GameActions.UsePrimaryAbility` clears
+    /// `0x80` from *both* before sending), so one id is the whole state.
+    ///
+    /// Written from two directions, which is why it is not derivable from
+    /// packets alone: [`World::arm_ability`] on our own 0xD7 UseCombatAbility
+    /// (the server sends no acknowledgement, so the client owns the optimistic
+    /// arm — the same pattern as the skill/stat locks), and cleared by the
+    /// server's 0xBF/0x21 ClearWeaponAbility once the move is spent or refused.
+    pub armed_ability: u8,
+    /// Special moves / toggled spells the server says are currently active
+    /// (0xBF/0x25 ToggleSpecialAbility), newest last. These are **spell ids**,
+    /// not [`World::armed_ability`]'s `Ability` ids: ServUO sends `moveID + 1`
+    /// from `SpecialMove` (Bushido/Ninjitsu stances) and `spellID + 1` from
+    /// `SamuraiSpell`, which is the same id space `Action::CastSpell` takes.
+    /// ClassicUO calls this set `World.ActiveSpellIcons` and uses it to hue the
+    /// matching spellbook button.
+    pub active_spell_icons: Vec<u16>,
     /// The mobile the server last told us to follow (0x15 FollowR), or `None`
     /// once it sends a followed serial of 0. ServUO's `FollowMessage` carries
     /// two serials; ClassicUO reads and discards both (no client-side follow
@@ -2108,6 +2128,36 @@ impl World {
     /// Drop a buff icon (0xDF action=remove). No-op if not present.
     pub fn remove_buff(&mut self, icon: u16) {
         self.buffs.retain(|b| b.icon != icon);
+    }
+
+    /// Record that we armed weapon special move `ability` (0 = disarm), the
+    /// optimistic half of [`World::armed_ability`]. Called by the driver as it
+    /// sends 0xD7 UseCombatAbility, because the server acknowledges an *arm*
+    /// only by acting on it — the one message it does send is the 0xBF/0x21
+    /// that takes it away again.
+    ///
+    /// Re-arming the already-armed move disarms it, matching ClassicUO's
+    /// `UsePrimaryAbility`/`UseSecondaryAbility` toggle (`ability ^= 0x80`).
+    /// The caller still sends whatever it sent; this only tracks the result.
+    pub fn arm_ability(&mut self, ability: u8) {
+        self.armed_ability = if ability != 0 && ability == self.armed_ability {
+            0
+        } else {
+            ability
+        };
+    }
+
+    /// Mark a special move / toggled spell active or inactive (0xBF/0x25). The
+    /// set is small and order-preserving (a Vec, like [`World::buffs`]) — a
+    /// character can hold at most a handful of stances at once.
+    pub fn set_spell_icon_active(&mut self, spell: u16, active: bool) {
+        if active {
+            if !self.active_spell_icons.contains(&spell) {
+                self.active_spell_icons.push(spell);
+            }
+        } else {
+            self.active_spell_icons.retain(|s| *s != spell);
+        }
     }
 
     /// Add or replace a gump (0xB0/0xDD). Upserts by `serial` so a re-sent gump

@@ -90,12 +90,13 @@ async function poll() {
     drawMinimap(scene);
     updateGuardZones(scene); // guard-zone overlay: refetch on facet change, redraw clipped to view
     refreshBuffs(scene); // reconcile the buff/debuff bar with scene.buffs
+    syncArmedAbility(); // adopt the server's arm (0xBF/0x21 clears it after every use)
     refreshAbilities(); // keep the weapon special-ability bar in sync with the equipped weapon
     if (wmOn) drawWorldmap();  // keep the open world map tracking the player
     if (scene.player) hud(scene);
     updateMoveDebug(scene); // movement/Z debug HUD (Options → "Movement debug")
     refreshPaperdoll();   // keep the paperdoll live (equip/stats change)
-    if (spellbookOn) { refreshSpellMana(); refreshSpellbookContent(); } // keep the spellbook live (mana + book content)
+    if (spellbookOn) { refreshSpellMana(); refreshSpellbookContent(); refreshActiveSpells(); } // keep the spellbook live (mana + book content + active stances)
     if (skillsOn) refreshSkills();  // keep the skills window live (values/locks change)
     checkSkillGains(scene);  // announce skill base changes as journal system messages
     refreshParty();   // keep the party panel live + surface incoming invites (0xBF/0x06)

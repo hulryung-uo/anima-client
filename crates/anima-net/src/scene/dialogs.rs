@@ -409,11 +409,28 @@ pub(super) fn party_json(world: &World) -> Value {
                 .map(|m| m.name.clone())
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| "Member".to_string());
+            // Mana/stamina for the party bars. Two things about them that the
+            // field names do not convey:
+            //
+            // 1. **They are percentages, not points.** Everything the server
+            //    sends about *another* member's vitals goes through ServUO's
+            //    `AttributeNormalizer`: max is written as a fixed 25 and
+            //    current as `cur * 25 / max`. Measured live — a member at a
+            //    real 7/10 mana arrives here as 17/25. Draw them as a ratio;
+            //    never print them as numbers next to our own, which are real.
+            // 2. **They can be stale.** ServUO pushes a member's changes
+            //    (0xA2/0xA3) only while they are in update range and visible.
+            //    Out of range, nothing corrects our copy — that is what
+            //    `Action::StatusRequest` is for.
             json!({
                 "serial": serial,
                 "name": name,
                 "hits": m.map_or(0, |m| m.hits),
                 "hitsMax": m.map_or(0, |m| m.hits_max),
+                "mana": m.map_or(0, |m| m.mana),
+                "manaMax": m.map_or(0, |m| m.mana_max),
+                "stam": m.map_or(0, |m| m.stam),
+                "stamMax": m.map_or(0, |m| m.stam_max),
             })
         })
         .collect();

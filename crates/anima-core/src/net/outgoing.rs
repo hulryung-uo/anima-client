@@ -276,13 +276,64 @@ pub fn build_party_invite() -> Vec<u8> {
     finish_variable(w.into_vec())
 }
 
-/// Leave the party (remove ourself). GeneralInfo `0xBF`, subcommand `0x0006`,
-/// sub-sub `0x02`, then our own serial. Ported from ClassicUO
-/// `Send_PartyRemoveRequest`: `[0xBF][len u16][0x0006][0x02][self serial u32]`.
-pub fn build_party_leave(self_serial: u32) -> Vec<u8> {
+/// Remove `member` from the party. GeneralInfo `0xBF`, subcommand `0x0006`,
+/// sub-sub `0x02`, then the serial to drop. Ported from ClassicUO
+/// `Send_PartyRemoveRequest`: `[0xBF][len u16][0x0006][0x02][serial u32]`.
+///
+/// **Leaving and kicking are the same packet** — the only difference is whose
+/// serial you name, and ServUO enforces the distinction rather than the wire
+/// format doing it: `PartyCommands.OnRemove` accepts the request when
+/// `p.Leader == from || from == target`, so anyone may remove themselves and
+/// only the leader may remove anyone else. A non-leader naming someone else is
+/// silently ignored, not an error. See [`build_party_leave`] for the
+/// remove-yourself spelling.
+pub fn build_party_remove(member: u32) -> Vec<u8> {
     let mut w = PacketWriter::new();
     w.u8(0xBF).u16(0).u16(0x0006);
-    w.u8(0x02).u32(self_serial);
+    w.u8(0x02).u32(member);
+    finish_variable(w.into_vec())
+}
+
+/// Leave the party (remove ourself) — [`build_party_remove`] naming our own
+/// serial. Kept as its own name because "leave" is what the call sites mean.
+pub fn build_party_leave(self_serial: u32) -> Vec<u8> {
+    build_party_remove(self_serial)
+}
+
+/// Private party message to one member. GeneralInfo `0xBF`, subcommand
+/// `0x0006`, sub-sub `0x03`, then the recipient's serial and the text as
+/// UNICODE (UTF-16 BE) NUL-terminated — the same text encoding
+/// [`build_party_message`] uses for the to-all form.
+/// `[0xBF][len u16][0x0006][0x03][target serial u32][utf16-be…][0x0000]`.
+///
+/// ServUO's `PartyCommands.OnPrivateMessage` drops the message outright when
+/// the trimmed text is empty or longer than 128 characters, so clamp here
+/// rather than let a long line silently vanish (same rule and same clamp as
+/// the to-all builder).
+pub fn build_party_private_message(member: u32, text: &str) -> Vec<u8> {
+    let clamped: String = text.trim().chars().take(128).collect();
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x0006);
+    w.u8(0x03).u32(member);
+    for unit in clamped.encode_utf16() {
+        w.u16(unit);
+    }
+    w.u16(0x0000); // UNICODE NUL terminator
+    finish_variable(w.into_vec())
+}
+
+/// Allow or forbid the rest of the party looting our corpse. GeneralInfo
+/// `0xBF`, subcommand `0x0006`, sub-sub `0x06`, then a boolean byte.
+/// `[0xBF][len u16][0x0006][0x06][canLoot u8]`.
+///
+/// The flag is per-member and lives server-side on `PartyMemberInfo.CanLoot`;
+/// ServUO acknowledges it only as a journal line (cliloc 1005447 allow /
+/// 1005448 prevent) and never sends the state back, so a client that wants to
+/// show a checkbox has to remember what it asked for.
+pub fn build_party_can_loot(can_loot: bool) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x0006);
+    w.u8(0x06).u8(u8::from(can_loot));
     finish_variable(w.into_vec())
 }
 
@@ -498,6 +549,65 @@ pub fn build_use_ability(player_serial: u32, ability_id: u8) -> Vec<u8> {
     data[1] = (len >> 8) as u8;
     data[2] = (len & 0xFF) as u8;
     data
+}
+
+/// DisarmRequest — GeneralInfo `0xBF`, subcommand `0x0009`, no payload.
+///
+/// The **pre-AOS** twin of [`build_use_ability`]. Before weapon special moves
+/// existed, a Wrestling character armed the next punch with the Disarm or Stun
+/// special; ClassicUO still routes the ability bar to these when the shard did
+/// not advertise AOS (`GameActions.SendAbility`: `if AOS flag is clear` →
+/// `Send_StunRequest`/`Send_DisarmRequest`). ServUO's handler toggles
+/// `Mobile.DisarmReady` and answers with cliloc 1019013/1019014, so the client
+/// gets its feedback through the journal rather than a dedicated packet.
+///
+/// **The subcommand numbering here departs from ClassicUO, deliberately.**
+/// ClassicUO's `Send_StunRequest` writes `0x09` and its `Send_DisarmRequest`
+/// writes `0x0A` — the two are swapped relative to the servers. ServUO
+/// registers `RegisterExtended(0x09, true, DisarmRequest)` /
+/// `RegisterExtended(0x0A, true, StunRequest)`
+/// (`Server/Network/PacketHandlers.cs`), and Razor — an assistant with two
+/// decades of use against production shards — writes the same pairing
+/// (`Razor/Network/Packets.cs`: `DisarmRequest` → `0x09`, `StunRequest` →
+/// `0x0A`). Two independent implementations of the *receiving* side agree, so
+/// ClassicUO is the outlier; sending its way would silently arm the wrong
+/// special. Layout: `[0xBF][len:u16=0x0005][0x0009]`.
+pub fn build_disarm_request() -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x0009);
+    finish_variable(w.into_vec())
+}
+
+/// StunRequest — GeneralInfo `0xBF`, subcommand `0x000A`, no payload. The Stun
+/// half of the pre-AOS pair; see [`build_disarm_request`] for why the
+/// subcommand is `0x0A` and not ClassicUO's `0x09`. ServUO gates it on
+/// Anatomy + Wrestling ≥ 80 and toggles `Mobile.StunReady`.
+/// Layout: `[0xBF][len:u16=0x0005][0x000A]`.
+pub fn build_stun_request() -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x000A);
+    finish_variable(w.into_vec())
+}
+
+/// BandageTarget — GeneralInfo `0xBF`, subcommand `0x002C`: apply `bandage` to
+/// `target` in a single packet, with no target cursor round-trip.
+///
+/// This is the whole point of the subcommand. The ordinary path is
+/// double-click the bandages → server sends 0x6C asking for a target → reply
+/// 0x6C — three messages and a cursor the player (or brain) has to hold. ServUO
+/// `BandageTarget` instead takes both serials at once and raises
+/// `BandageTargetRequest` directly, which is what makes reliable self-healing
+/// under pressure possible. It is still rate-limited server-side by
+/// `Mobile.NextActionTime`, so spamming it just draws "You must wait…".
+///
+/// `target` may be our own serial (bandage self). Ported from ClassicUO
+/// `Send_TargetSelectedObject`:
+/// `[0xBF][len:u16=0x000D][0x002C][bandage:u32][target:u32]`.
+pub fn build_bandage_target(bandage: u32, target: u32) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x002C);
+    w.u32(bandage).u32(target);
+    finish_variable(w.into_vec())
 }
 
 /// Shared framing for CustomHouse design-editor commands: `0xD7` GenericAOS
@@ -1245,6 +1355,83 @@ mod tests {
             d,
             vec![0xD7, 0x00, 0x0F, 0, 0, 0, 1, 0x00, 0x19, 0, 0, 0, 0, 0, 0x0A]
         );
+    }
+
+    #[test]
+    fn party_remove_and_leave_are_the_same_packet() {
+        // Not an accident worth hiding: the wire has one "remove member"
+        // message and ServUO decides leave-vs-kick from whose serial it names
+        // (`PartyCommands.OnRemove`: `p.Leader == from || from == target`).
+        assert_eq!(
+            build_party_remove(0xDEAD_BEEF),
+            vec![0xBF, 0x00, 0x0A, 0x00, 0x06, 0x02, 0xDE, 0xAD, 0xBE, 0xEF]
+        );
+        assert_eq!(build_party_leave(0x1234), build_party_remove(0x1234));
+    }
+
+    #[test]
+    fn party_private_message_layout_and_clamp() {
+        let p = build_party_private_message(0x0000_ABCD, "hi");
+        assert_eq!(p[0], 0xBF);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(u16::from_be_bytes([p[3], p[4]]), 0x0006); // subcommand
+        assert_eq!(p[5], 0x03); // sub-sub: private message
+        assert_eq!(u32::from_be_bytes([p[6], p[7], p[8], p[9]]), 0x0000_ABCD);
+        // UTF-16 BE text then a UNICODE NUL, like the to-all builder.
+        assert_eq!(&p[10..], &[0x00, b'h', 0x00, b'i', 0x00, 0x00]);
+
+        // ServUO DROPS an over-long or empty message rather than truncating it
+        // (`OnPrivateMessage`: `if (text.Length > 128 || trimmed.Length == 0) return`),
+        // so clamping here is what keeps a long line from vanishing silently.
+        let long = build_party_private_message(1, &"x".repeat(200));
+        assert_eq!(long.len(), 10 + 128 * 2 + 2);
+    }
+
+    #[test]
+    fn party_can_loot_layout() {
+        assert_eq!(
+            build_party_can_loot(true),
+            vec![0xBF, 0x00, 0x07, 0x00, 0x06, 0x06, 0x01]
+        );
+        assert_eq!(
+            build_party_can_loot(false),
+            vec![0xBF, 0x00, 0x07, 0x00, 0x06, 0x06, 0x00]
+        );
+    }
+
+    #[test]
+    fn status_request_is_the_fixed_ten_byte_query() {
+        // ServUO registers 0x34 with a FIXED length of 10, so any drift here
+        // desynchronizes the whole stream rather than failing locally.
+        let p = build_status_request(4, 0x0000_018A);
+        assert_eq!(p.len(), 10);
+        assert_eq!(
+            p,
+            vec![0x34, 0xED, 0xED, 0xED, 0xED, 0x04, 0x00, 0x00, 0x01, 0x8A]
+        );
+    }
+
+    #[test]
+    fn stun_and_disarm_use_the_servers_subcommand_numbering() {
+        // Exact bytes, because the numbering is the whole point: ClassicUO's
+        // `Send_StunRequest` writes 0x09 and its `Send_DisarmRequest` writes
+        // 0x0A, the reverse of what ServUO registers and what Razor sends. If
+        // these ever get "corrected" toward ClassicUO, the client silently arms
+        // the wrong special — no error, just the other move.
+        assert_eq!(build_disarm_request(), vec![0xBF, 0x00, 0x05, 0x00, 0x09]);
+        assert_eq!(build_stun_request(), vec![0xBF, 0x00, 0x05, 0x00, 0x0A]);
+    }
+
+    #[test]
+    fn bandage_target_layout() {
+        // 0xBF/0x2C: bandage serial then target serial, both BE.
+        let p = build_bandage_target(0x4000_1234, 0x0000_ABCD);
+        assert_eq!(p[0], 0xBF);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(p.len(), 13);
+        assert_eq!(u16::from_be_bytes([p[3], p[4]]), 0x002C); // subcommand
+        assert_eq!(u32::from_be_bytes([p[5], p[6], p[7], p[8]]), 0x4000_1234);
+        assert_eq!(u32::from_be_bytes([p[9], p[10], p[11], p[12]]), 0x0000_ABCD);
     }
 
     #[test]

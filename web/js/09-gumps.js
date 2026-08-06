@@ -126,7 +126,31 @@ const WEAPON_ABILITIES = {
   0xAED1:[7,13],
 };
 const WEAPON_LAYERS = [1, 2]; // right hand / left hand (two-handed weapons sit on 1)
-let armedAbility = 0; // the locally-armed ability id (0 = none); mirrors the server arm
+let armedAbility = 0;    // the ability id armed right now (0 = none)
+let armedLocalUntil = 0; // trust our own value, not the server's, until this timestamp
+// How long a click's optimistic highlight outranks `scene.armedAbility`.
+// `scene.json` is POLLED every 150ms (see `poll`), and the snapshot answering a
+// click was very likely BUILT BEFORE that click reached the server — the exact
+// hazard `web/dialogs.js` handles for dialog windows (DESIGN.md D11). Reading
+// the server value unconditionally would therefore blank the highlight for one
+// poll on every arm. Three polls is a generous round trip and still an upper
+// bound on how long a genuine server clear can be hidden.
+const ARM_ECHO_GRACE_MS = 500;
+// Reconcile the bar with the server's arm (`scene.armedAbility`, driven by the
+// 0xBF/0x21 ClearWeaponAbility the server sends once the move is spent, missed,
+// refused for mana, or invalidated by a weapon change).
+//
+// Outside the grace window the server is simply believed — no change detection,
+// no "did we cause this". That matters because a swing can resolve inside a
+// single poll interval: an arm that is spent before its own echo ever lands
+// would leave a diff-based reconciler showing a move the player no longer has.
+function syncArmedAbility() {
+  if (performance.now() < armedLocalUntil) return;
+  const served = (scene && scene.armedAbility) | 0;
+  if (served === armedAbility) return;
+  armedAbility = served;
+  refreshAbilities(true);
+}
 // Find the equipped weapon's [primaryId, secondaryId], or null if none/unmapped.
 function equippedWeaponAbilities() {
   const p = scene && scene.player;
@@ -142,6 +166,7 @@ function clickAbility(id) {
   // ClassicUO toggle: clicking the armed move disarms (send 0), else arm it.
   if (armedAbility === id) { armedAbility = 0; sendInput("ability:0"); }
   else { armedAbility = id; sendInput("ability:" + id); }
+  armedLocalUntil = performance.now() + ARM_ECHO_GRACE_MS;
   refreshAbilities(true);
 }
 // Rebuild the two-button bar from the equipped weapon (called each poll).
@@ -443,6 +468,10 @@ function renderSpellSchool() {
   book.innerHTML = html;
   for (const t of document.querySelectorAll("#sb-tabs .sb-tab"))
     t.classList.toggle("sel", t.dataset.school === spellSchool);
+  // Rebuilding the list dropped every `sp-active` class with the old nodes, so
+  // clear the signature that would otherwise make the next refresh a no-op.
+  sbActiveSig = null;
+  refreshActiveSpells();
 }
 // Re-render the current school once new spellbook content arrives (scene.
 // spellbooks changed) so the K window doesn't stay frozen at whatever it knew
@@ -477,6 +506,23 @@ function buildSpellbook() {
   });
   wireSpellDragOut();   // dragging a spell icon out spawns a quick-cast button
   renderSpellSchool();
+}
+// Light up the spells the server says are currently running (`scene.activeSpells`,
+// from 0xBF/0x25 ToggleSpecialAbility): Bushido/Ninjitsu stances and the like,
+// which stay on until re-cast or broken. Toggled as a class on rows already in
+// the DOM rather than by re-rendering, so it costs nothing per poll and cannot
+// reset the book's scroll position (the reason `refreshSpellbookContent` is
+// signature-gated). Unlike the ability bar this needs no optimistic echo: the
+// server decides when a stance is on, and nothing here anticipates it.
+let sbActiveSig = null;
+function refreshActiveSpells() {
+  const active = (scene && scene.activeSpells) || [];
+  const sig = active.join(",");
+  if (sig === sbActiveSig) return;
+  sbActiveSig = sig;
+  const on = new Set(active.map(Number));
+  for (const row of document.querySelectorAll("#sb-book .sp-row"))
+    row.classList.toggle("sp-active", on.has(Number(row.dataset.id)));
 }
 function refreshSpellMana() {
   const p = scene && scene.player;

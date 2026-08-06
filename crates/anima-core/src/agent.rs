@@ -241,6 +241,16 @@ pub struct Observation {
     /// ([`World::aos`]) — gates AOS-only mechanics (e.g. weapon special moves
     /// via [`Action::UseAbility`]).
     pub aos: bool,
+    /// The weapon special move armed for the next swing ([`World::armed_ability`]),
+    /// or 0 for none. A brain that arms a move must read this to know whether it
+    /// is still armed: the server never confirms an arm, only revokes one
+    /// (0xBF/0x21), so "I sent it, therefore it holds" is wrong after the first
+    /// swing.
+    pub armed_ability: u8,
+    /// Special moves / toggled spells currently active
+    /// ([`World::active_spell_icons`], 0xBF/0x25), sorted. **Spell** ids, the
+    /// same space [`Action::CastSpell`] takes — not [`Observation::armed_ability`]'s.
+    pub active_spell_icons: Vec<u16>,
     /// Object Property Lists (0xD6 MegaCliloc) answering an [`Action::OplRequest`],
     /// each `(serial, [(cliloc id, args), …])`, sorted by serial. Raw — the core
     /// has no Cliloc table, so a brain wanting display text resolves it itself
@@ -577,6 +587,23 @@ pub enum Action {
     /// the player's serial. Which moves a weapon offers depends on its graphic
     /// (see ClassicUO `Abilities.cs` weapon→ability table).
     UseAbility { ability: u8 },
+    /// Arm the pre-AOS Disarm special (UO 0xBF/0x09). The Wrestling-era
+    /// predecessor of [`Action::UseAbility`], for shards where
+    /// [`Observation::aos`] is false — on an AOS shard ServUO's handler returns
+    /// immediately and nothing happens. Needs both hands free and Arms Lore +
+    /// Wrestling ≥ 80; the server answers in the journal, not with a packet.
+    DisarmRequest,
+    /// Arm the pre-AOS Stun special (UO 0xBF/0x0A). The Stun half of the pair
+    /// described on [`Action::DisarmRequest`]; gated on Anatomy + Wrestling ≥ 80.
+    StunRequest,
+    /// Apply bandage item `bandage` to mobile `target` in one packet (UO
+    /// 0xBF/0x2C), skipping the double-click → 0x6C target-cursor round-trip.
+    /// `target` 0 means the player themselves — the same "the driver fills in
+    /// the obvious serial" sentinel [`Action::PartyAccept`] uses, and healing
+    /// yourself is the case that most wants the shortcut. Rate-limited by the
+    /// server's `NextActionTime`, so a brain should pace it rather than retry
+    /// on silence.
+    BandageTarget { bandage: u32, target: u32 },
     /// Change a skill's lock state (UO 0x3A SkillStatusChangeRequest). `lock` is
     /// 0 = up (raise on gain), 1 = down (lower on gain), 2 = locked. The driver
     /// optimistically updates the world's skill lock so the UI reflects it at once.
@@ -603,6 +630,45 @@ pub enum Action {
     PartyDecline { leader: u32 },
     /// Leave the current party (0xBF/0x06/0x02); the driver fills our own serial.
     PartyLeave,
+    /// Remove `member` from the party (0xBF/0x06/0x02) — the same packet as
+    /// [`Action::PartyLeave`], naming someone else. **Leader-only**, enforced
+    /// by the server: ServUO's `PartyCommands.OnRemove` ignores the request
+    /// unless we are the leader (or the member is ourselves), silently. A brain
+    /// that wants certainty should re-read `Observation::party` afterwards
+    /// rather than assume the kick took.
+    PartyKick { member: u32 },
+    /// Send `text` to one party member only (0xBF/0x06/0x03), rather than
+    /// [`Action::PartySay`]'s to-all. Trimmed and clamped to 128 characters,
+    /// because ServUO drops anything longer or empty instead of truncating it.
+    PartyPrivateMessage { member: u32, text: String },
+    /// Allow or forbid the rest of the party looting our corpse
+    /// (0xBF/0x06/0x06). Server-side per-member state that is **never sent
+    /// back** — ServUO answers with a journal line only (cliloc 1005447 /
+    /// 1005448), so nothing in [`Observation`] reflects it and a consumer that
+    /// cares must track what it last asked for.
+    PartySetCanLoot { can_loot: bool },
+    /// Ask the server for `serial`'s attributes (0x34 MobileQuery type 0x04).
+    /// `serial` 0 means ourselves (the same sentinel
+    /// [`Action::BandageTarget`] uses).
+    ///
+    /// For ourselves this is the ordinary status refresh. For **another party
+    /// member** it is a *resync*, not the only source: ServUO pushes a
+    /// member's mana/stam changes on its own (`Party.OnManaChanged`/
+    /// `OnStamChanged` → 0xA2/0xA3), but **only while that member is in update
+    /// range and visible**. Miss that window — you were out of range, they
+    /// just came back into view, you joined mid-session — and your copy stays
+    /// at whatever you last saw, with nothing scheduled to correct it. This
+    /// asks; `Party.OnStatsQuery` answers with 0x2D `MobileAttributesN`.
+    ///
+    /// **What comes back is a percentage, not points.** Every party-facing
+    /// variant (`MobileAttributesN`, `MobileManaN`, `MobileStamN`) runs
+    /// through ServUO's `AttributeNormalizer`, which writes max as a fixed 25
+    /// and current as `cur * 25 / max`. Measured live: a member whose real
+    /// mana was 7/10 reached the leader as 17/25. So a brain can compare
+    /// members' *fractions* but must never read another player's mana as an
+    /// absolute number, and must not compare it against a spell's mana cost.
+    /// Our own vitals are exempt — those arrive un-normalized.
+    StatusRequest { serial: u32 },
     /// Answer a pending 0x9A ASCII or 0xC2 Unicode server text prompt (pet rename,
     /// house sign, guild abbreviation, …) with typed `text`. The driver selects
     /// the prompt kind's matching packet/text encoding and echoes the
@@ -908,6 +974,15 @@ impl World {
             corpse_equip,
             map_index: self.map_index,
             aos: self.aos,
+            armed_ability: self.armed_ability,
+            // Sorted, not in arrival order: an observation is a snapshot a brain
+            // may diff against the last one, and two identical sets must compare
+            // equal regardless of the order the toggles arrived in.
+            active_spell_icons: {
+                let mut icons = self.active_spell_icons.clone();
+                icons.sort_unstable();
+                icons
+            },
             opl,
             recent_damage: self.recent_damage.clone(),
             spellbooks,

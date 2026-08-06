@@ -21,6 +21,94 @@ pub(super) const FLAG_WARMODE: u8 = 0x40;
 
 pub(super) const FLAG_PARALYZED: u8 = 0x01;
 
+/// Wear layer of the backpack (ClassicUO `Layer.Backpack`). Excluded from the
+/// stale-equipment sweep in [`apply_worn_items`] — see that function.
+const LAYER_BACKPACK: u8 = 0x15;
+
+/// Highest layer a mobile actually *wears* (`Layer.Mount`). Above it are the
+/// four container pseudo-layers — `ShopBuyRestock`/`ShopBuy`/`ShopSell` (0x1A-
+/// 0x1C) and `Bank` (0x1D) — which are never in a mobile-incoming equipment
+/// list, so the sweep must leave them alone or opening your bank and then
+/// walking past an NPC would empty it.
+const LAYER_MAX_WORN: u8 = 0x19;
+
+/// Apply the worn-item list that tails 0x78 MobileIncoming / 0xD3 UpdateObject:
+/// fixed records of `serial(u32) graphic(u16) layer(u8) hue(u16)`, terminated by
+/// a zero serial or the end of the frame. (CV_70331 `NewMobileIncoming` format —
+/// hue always present, no `0x8000` graphic flag.)
+///
+/// The list is **authoritative**: it is the mobile's complete visible equipment,
+/// so anything we still have worn by `owner` that the server did not just name
+/// has been taken off, and must go. Without that sweep an unequipped item keeps
+/// `container == Some(owner)` forever and every consumer that asks "what is this
+/// mobile wearing" — paperdoll, worn-equipment sprites, a brain's inventory
+/// view — keeps seeing it. The classic symptom is a mount that stays drawn under
+/// a rider who dismounted out of view.
+///
+/// Two deliberate departures from ClassicUO's `UpdateObject`, which does the
+/// same sweep by removing every non-backpack child and then recreating the
+/// listed ones from scratch:
+/// - **We remove only what the list omits**, instead of removing all and
+///   re-adding. Recreating an item that never left drops its name and its OPL
+///   (`World::remove` clears both), so ClassicUO's version silently invalidates
+///   the tooltip of every piece of gear each time its wearer walks back into
+///   view. Same end state, no churn.
+/// - **We skip the container pseudo-layers** (see [`LAYER_MAX_WORN`]) rather
+///   than guard on ClassicUO's "is this container's gump open" flag, which is
+///   renderer state the core does not have (D3). The layers it protects are
+///   exactly the ones a mobile cannot wear, so the narrower rule needs no
+///   knowledge of open windows.
+fn apply_worn_items(world: &mut World, owner: u32, r: &mut PacketReader) -> PResult<()> {
+    let mut worn = Vec::new();
+    // Did the list end the way a complete list ends — the zero terminator, or
+    // exactly running out of frame? A record cut off mid-way did not, and the
+    // difference matters now that omission *deletes*: a truncated frame would
+    // otherwise read as "the server says all the rest came off" and strip gear
+    // the mobile is still wearing. Parsing stays lenient (a short tail is not a
+    // framing error, as before); only the sweep is withheld.
+    let mut complete = true;
+    while r.remaining() >= 4 {
+        let item_serial = r.u32()?;
+        if item_serial == 0 {
+            break;
+        }
+        if r.remaining() < 5 {
+            complete = false;
+            break;
+        }
+        let graphic = r.u16()?;
+        let layer = r.u8()?;
+        let hue = r.u16()?;
+        worn.push((item_serial, graphic, layer, hue));
+    }
+
+    if complete {
+        let stale: Vec<u32> = world
+            .items
+            .values()
+            .filter(|it| {
+                it.container == Some(owner)
+                    && it.layer != LAYER_BACKPACK
+                    && it.layer <= LAYER_MAX_WORN
+                    && !worn.iter().any(|(serial, ..)| *serial == it.serial)
+            })
+            .map(|it| it.serial)
+            .collect();
+        for serial in stale {
+            world.remove(serial);
+        }
+    }
+
+    for (item_serial, graphic, layer, hue) in worn {
+        let it = world.item_mut(item_serial);
+        it.graphic = graphic;
+        it.layer = layer;
+        it.hue = hue;
+        it.container = Some(owner);
+    }
+    Ok(())
+}
+
 /// 0x20 MobileUpdate — position/appearance reset. This is always about OUR
 /// OWN mobile (ServUO sends it only to the mobile itself), so its flags byte
 /// is the self-hidden feedback path: e.g. right after the Hiding skill
@@ -288,26 +376,7 @@ pub(super) fn mobile_incoming(world: &mut World, frame: &[u8]) -> PResult<()> {
         world.on_player_body_changed(old_body, body);
     }
 
-    // Worn items follow as fixed records: serial(u32) graphic(u16) layer(u8) hue(u16).
-    // (NewMobileIncoming / CV_70331 format — hue always present, no 0x8000 flag.)
-    while r.remaining() >= 4 {
-        let item_serial = r.u32()?;
-        if item_serial == 0 {
-            break;
-        }
-        if r.remaining() < 5 {
-            break;
-        }
-        let graphic = r.u16()?;
-        let layer = r.u8()?;
-        let ihue = r.u16()?;
-        let it = world.item_mut(item_serial);
-        it.graphic = graphic;
-        it.layer = layer;
-        it.hue = ihue;
-        it.container = Some(serial);
-    }
-    Ok(())
+    apply_worn_items(world, serial, &mut r)
 }
 
 /// 0xD3 UpdateObject — the legacy sibling of 0x78 MobileIncoming. ClassicUO
@@ -354,25 +423,7 @@ pub(super) fn update_object(world: &mut World, frame: &[u8]) -> PResult<()> {
         world.on_player_body_changed(old_body, body);
     }
 
-    // Worn items follow as fixed records: serial(u32) graphic(u16) layer(u8) hue(u16).
-    while r.remaining() >= 4 {
-        let item_serial = r.u32()?;
-        if item_serial == 0 {
-            break;
-        }
-        if r.remaining() < 5 {
-            break;
-        }
-        let graphic = r.u16()?;
-        let layer = r.u8()?;
-        let ihue = r.u16()?;
-        let it = world.item_mut(item_serial);
-        it.graphic = graphic;
-        it.layer = layer;
-        it.hue = ihue;
-        it.container = Some(serial);
-    }
-    Ok(())
+    apply_worn_items(world, serial, &mut r)
 }
 
 /// 0x97 MovePlayer — `[id][direction:u8]` (2 bytes). ClassicUO forces

@@ -11,8 +11,10 @@ use super::*;
 /// close-gump-by-type (sub 0x04), party (sub 0x06), the facet switch (sub
 /// 0x08), the popup menu (sub 0x14), extended stats (sub 0x19: bonded-pet
 /// death / stat-training locks), spellbook content (sub 0x1B), the custom
-/// house notification (sub 0x1D), house-designer enter/leave (sub 0x20), New
-/// Damage (sub 0x22), and speed mode (sub 0x26).
+/// house notification (sub 0x1D), house-designer enter/leave (sub 0x20), the
+/// armed weapon special move being cleared (sub 0x21), New Damage (sub 0x22),
+/// a special move / toggled spell going active or inactive (sub 0x25), and
+/// speed mode (sub 0x26).
 ///
 /// Deliberately NOT wired: sub 0x16 CloseUserInterfaceWindows. ClassicUO does
 /// handle it client-side (`ExtendedCommand` case 0x16: paperdoll/statusbar/
@@ -107,6 +109,19 @@ pub(super) fn general_info(world: &mut World, frame: &[u8]) -> PResult<()> {
                 _ => {}
             }
         }
+        // 0x21 ClearWeaponAbility — payload-free (ServUO `ClearWeaponAbility`
+        // is a 5-byte packet that is nothing but the subcommand). The server
+        // sends it when the armed special move stops being armed *for reasons
+        // we cannot see*: ServUO's `WeaponAbility.ClearCurrentAbility` fires it
+        // when the move lands, when the swing misses, when mana runs short, and
+        // when a weapon change invalidates it. Without this the arm is
+        // write-only — we set it optimistically on our own 0xD7 and never learn
+        // it's gone, so the bar's highlight survives every use.
+        //
+        // ClassicUO clears the `0x80` armed bit on both `Abilities[]` slots;
+        // our single [`World::armed_ability`] holds only the armed move, so
+        // zeroing it is the same thing (see that field's doc).
+        0x21 => world.armed_ability = 0,
         // 0x22 New Damage — the AOS-era twin of 0x0B Damage (see [`damage`]'s
         // doc): some ServUO client/version combos emit this instead of 0x0B.
         // `[unk:u8][serial:u32][damage:u8]` (ClassicUO `ExtendedCommand` case
@@ -121,6 +136,19 @@ pub(super) fn general_info(world: &mut World, frame: &[u8]) -> PResult<()> {
             if dmg > 0 {
                 world.push_damage(serial, dmg);
             }
+        }
+        // 0x25 ToggleSpecialAbility — `[abilityID:u16][active:u8]` (ServUO
+        // `ToggleSpecialAbility(int abilityID, bool active)`). Despite the
+        // name this is NOT the weapon-ability family: ServUO sends it from
+        // `SpecialMove` (`moveID + 1`) and `SamuraiSpell` (`spellID + 1`), so
+        // the id is a **spell** id — the same space `Action::CastSpell` takes.
+        // ClassicUO keeps these in `World.ActiveSpellIcons` and hues the
+        // matching spellbook button; so do we (see
+        // [`World::active_spell_icons`]).
+        0x25 => {
+            let spell = r.u16()?;
+            let active = r.u8()? != 0;
+            world.set_spell_icon_active(spell, active);
         }
         // 0x26 SpeedMode — `[val:u8]` (ClassicUO `CharacterSpeedType`;
         // `ExtendedCommand` case 0x26 resets an out-of-range value to 0/Normal

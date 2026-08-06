@@ -20,21 +20,23 @@ pub mod uo_dir;
 use anima_assets::{Cliloc, MapData};
 use anima_core::agent::{survey_terrain, Action, HouseDesignAction, Observation};
 use anima_core::net::outgoing::{
-    build_ascii_prompt_response, build_attack, build_book_page_request, build_buy,
-    build_cast_spell, build_client_view_range, build_double_click, build_drop, build_equip,
-    build_gump_response, build_house_design_add_item, build_house_design_add_roof,
-    build_house_design_add_stair, build_house_design_backup, build_house_design_clear,
-    build_house_design_close, build_house_design_commit, build_house_design_delete_item,
-    build_house_design_delete_roof, build_house_design_go_to_floor, build_house_design_request,
-    build_house_design_restore, build_house_design_revert, build_house_design_sync,
-    build_hue_picker_response, build_legacy_menu_response, build_logout_request, build_opl_request,
-    build_party_accept, build_party_decline, build_party_invite, build_party_leave,
-    build_party_message, build_pick_up, build_ping, build_popup_request, build_popup_select,
-    build_profile_request, build_profile_update, build_prompt_response, build_say, build_sell,
-    build_single_click, build_skill_lock, build_stat_lock, build_status_request,
-    build_target_response, build_text_entry_dialog_response, build_tip_request, build_trade_accept,
-    build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability, build_use_skill,
-    build_war_mode, OPL_REQUEST_BATCH,
+    build_ascii_prompt_response, build_attack, build_bandage_target, build_book_page_request,
+    build_buy, build_cast_spell, build_client_view_range, build_disarm_request, build_double_click,
+    build_drop, build_equip, build_gump_response, build_house_design_add_item,
+    build_house_design_add_roof, build_house_design_add_stair, build_house_design_backup,
+    build_house_design_clear, build_house_design_close, build_house_design_commit,
+    build_house_design_delete_item, build_house_design_delete_roof, build_house_design_go_to_floor,
+    build_house_design_request, build_house_design_restore, build_house_design_revert,
+    build_house_design_sync, build_hue_picker_response, build_legacy_menu_response,
+    build_logout_request, build_opl_request, build_party_accept, build_party_can_loot,
+    build_party_decline, build_party_invite, build_party_leave, build_party_message,
+    build_party_private_message, build_party_remove, build_pick_up, build_ping,
+    build_popup_request, build_popup_select, build_profile_request, build_profile_update,
+    build_prompt_response, build_say, build_sell, build_single_click, build_skill_lock,
+    build_stat_lock, build_status_request, build_stun_request, build_target_response,
+    build_text_entry_dialog_response, build_tip_request, build_trade_accept, build_trade_cancel,
+    build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
+    OPL_REQUEST_BATCH,
 };
 use anima_core::net::{
     apply_packet, build_client_version, walk_pacing, CharacterChoice, CharacterPrompt,
@@ -753,6 +755,22 @@ impl Session {
             Action::UseAbility { ability } => {
                 let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
                 self.send(&build_use_ability(serial, *ability))?;
+                // The optimistic half of `World::armed_ability`: an arm is never
+                // acknowledged, only revoked (0xBF/0x21), so if we don't record
+                // it here nothing ever will. Same shape as the skill/stat locks
+                // above, and `arm_ability` applies ClassicUO's re-arm toggle.
+                self.world.arm_ability(*ability);
+            }
+            Action::DisarmRequest => self.send(&build_disarm_request())?,
+            Action::StunRequest => self.send(&build_stun_request())?,
+            Action::BandageTarget { bandage, target } => {
+                // target 0 = "myself" (see the Action's doc).
+                let target = if *target != 0 {
+                    *target
+                } else {
+                    self.world.player_mobile().map(|p| p.serial).unwrap_or(0)
+                };
+                self.send(&build_bandage_target(*bandage, target))?;
             }
             Action::SkillLock { skill, lock } => {
                 self.send(&build_skill_lock(*skill, *lock))?;
@@ -801,6 +819,22 @@ impl Session {
             Action::PartyLeave => {
                 let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
                 self.send(&build_party_leave(serial))?;
+            }
+            Action::PartyKick { member } => self.send(&build_party_remove(*member))?,
+            Action::PartyPrivateMessage { member, text } => {
+                self.send(&build_party_private_message(*member, text))?;
+            }
+            Action::PartySetCanLoot { can_loot } => {
+                self.send(&build_party_can_loot(*can_loot))?;
+            }
+            Action::StatusRequest { serial } => {
+                // serial 0 = ourselves, the same sentinel `BandageTarget` uses.
+                let serial = if *serial != 0 {
+                    *serial
+                } else {
+                    self.world.player_mobile().map(|p| p.serial).unwrap_or(0)
+                };
+                self.send(&build_status_request(4, serial))?;
             }
             Action::PromptResponse { text } => self.respond_prompt(text, false)?,
             Action::PromptCancel => self.respond_prompt("", true)?,

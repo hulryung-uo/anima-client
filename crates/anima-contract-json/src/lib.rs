@@ -77,13 +77,29 @@
 //! speech) and the `StatLock` action. v18: journal lines gained `display` —
 //! the cliloc resolved to real words — plus 0xCC's `affix`/`affix_prepend`.
 //! A brain could previously be told "you have been added to the party" and
-//! receive `#1005445`; `text` still carries the raw args.)
+//! receive `#1005445`; `text` still carries the raw args. v19: added
+//! `armed_ability` and `active_spell_icons` — the combat state the arming
+//! side of the contract had no readback for. A brain that sent `UseAbility`
+//! previously had no way to learn the move had been spent (the server
+//! acknowledges an arm only by revoking it, 0xBF/0x21), so it could not tell
+//! "armed and waiting" from "already used". Same version added the
+//! `DisarmRequest`/`StunRequest` (pre-AOS specials) and `BandageTarget`
+//! (one-packet heal, no target cursor) actions. v20: added the actions that
+//! finish the party surface — `PartyKick`, `PartyPrivateMessage`,
+//! `PartySetCanLoot` — plus `StatusRequest`, which resyncs a party member's
+//! vitals: ServUO pushes their mana/stam changes only while they are in
+//! update range and visible, so a member you lost sight of stays frozen at
+//! whatever you last saw until something asks. Note that every party-facing
+//! vitals packet is run through ServUO's `AttributeNormalizer` (max fixed at
+//! 25, current scaled) — a brain reads another member's mana as a fraction,
+//! never as spendable points. No new observation fields; `party` already
+//! carries the roster.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 18;
+pub const SCHEMA_VERSION: u32 = 20;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
@@ -558,6 +574,8 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "corpse_equip": corpse_equip,
         "map_index": obs.map_index,
         "aos": obs.aos,
+        "armed_ability": obs.armed_ability,
+        "active_spell_icons": obs.active_spell_icons,
         "opl": opl,
         "recent_damage": recent_damage,
         "spellbooks": obs.spellbooks.iter().map(spellbook_json).collect::<Vec<_>>(),
@@ -754,6 +772,12 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         "UseAbility" => Ok(Action::UseAbility {
             ability: v.get("ability").and_then(Value::as_u64).unwrap_or(0) as u8,
         }),
+        "DisarmRequest" => Ok(Action::DisarmRequest),
+        "StunRequest" => Ok(Action::StunRequest),
+        "BandageTarget" => Ok(Action::BandageTarget {
+            bandage: req_u32("bandage")?,
+            target: req_u32("target")?,
+        }),
         "StatLock" => Ok(Action::StatLock {
             stat: v.get("stat").and_then(Value::as_u64).unwrap_or(0) as u8,
             lock: v.get("lock").and_then(Value::as_u64).unwrap_or(0) as u8,
@@ -770,6 +794,22 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         }),
         "PartyInvite" => Ok(Action::PartyInvite),
         "PartyLeave" => Ok(Action::PartyLeave),
+        "PartyKick" => Ok(Action::PartyKick {
+            member: req_u32("member")?,
+        }),
+        "PartyPrivateMessage" => Ok(Action::PartyPrivateMessage {
+            member: req_u32("member")?,
+            text: text("text"),
+        }),
+        "PartySetCanLoot" => Ok(Action::PartySetCanLoot {
+            can_loot: v
+                .get("can_loot")
+                .and_then(Value::as_bool)
+                .unwrap_or_default(),
+        }),
+        "StatusRequest" => Ok(Action::StatusRequest {
+            serial: req_u32("serial")?,
+        }),
         "PartyAccept" => Ok(Action::PartyAccept {
             leader: req_u32("leader")?,
         }),
@@ -1031,6 +1071,15 @@ mod tests {
                 json!({"type": "UseAbility", "ability": 4}),
                 Action::UseAbility { ability: 4 },
             ),
+            (json!({"type": "DisarmRequest"}), Action::DisarmRequest),
+            (json!({"type": "StunRequest"}), Action::StunRequest),
+            (
+                json!({"type": "BandageTarget", "bandage": 12, "target": 34}),
+                Action::BandageTarget {
+                    bandage: 12,
+                    target: 34,
+                },
+            ),
             (
                 json!({"type": "SkillLock", "skill": 10, "lock": 2}),
                 Action::SkillLock { skill: 10, lock: 2 },
@@ -1045,6 +1094,25 @@ mod tests {
             ),
             (json!({"type": "PartyInvite"}), Action::PartyInvite),
             (json!({"type": "PartyLeave"}), Action::PartyLeave),
+            (
+                json!({"type": "PartyKick", "member": 42}),
+                Action::PartyKick { member: 42 },
+            ),
+            (
+                json!({"type": "PartyPrivateMessage", "member": 42, "text": "on me"}),
+                Action::PartyPrivateMessage {
+                    member: 42,
+                    text: "on me".into(),
+                },
+            ),
+            (
+                json!({"type": "PartySetCanLoot", "can_loot": true}),
+                Action::PartySetCanLoot { can_loot: true },
+            ),
+            (
+                json!({"type": "StatusRequest", "serial": 42}),
+                Action::StatusRequest { serial: 42 },
+            ),
             (
                 json!({"type": "PartyAccept", "leader": 11}),
                 Action::PartyAccept { leader: 11 },
@@ -1293,8 +1361,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v18_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 18);
+    fn schema_v20_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 20);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,
@@ -1606,6 +1674,8 @@ mod tests {
             "corpse_equip",
             "map_index",
             "aos",
+            "armed_ability",
+            "active_spell_icons",
             "opl",
             "recent_damage",
             "spellbooks",
