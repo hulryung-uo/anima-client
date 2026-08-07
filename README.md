@@ -125,3 +125,17 @@ bridges a WebSocket to the shard's raw TCP (browsers cannot open sockets). It
 only dials targets named on its command line — never one the client picks.
 ClassicUO compatibility work is tracked in
 [`docs/CLASSICUO_GAPS.md`](docs/CLASSICUO_GAPS.md).
+
+## License
+
+Dual-licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE),
+at your option — the Rust ecosystem's usual pairing, and what every crate here
+has declared since the initial commit. The license *files* only arrived later,
+which is why GitHub reported this repository as unlicensed for a while; the
+declaration was never the missing part.
+
+**This covers the code in this repository and nothing else.** Ultima Online's
+data files (`.mul`/`.uop` — art, maps, animation, sound, clilocs) are
+copyrighted by Broadsword/EA and are neither included nor redistributable: you
+supply your own UO installation and point the tools at it (see the `play`
+binary's `data_dir` argument). Nothing here grants any right to that content.
