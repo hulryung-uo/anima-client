@@ -610,6 +610,87 @@ pub fn build_bandage_target(bandage: u32, target: u32) -> Vec<u8> {
     finish_variable(w.into_vec())
 }
 
+/// MapCommand `0x56` (fixed 11 bytes) — edit the pins on map item `serial`.
+/// `[0x56][serial:u32][command:u8][number:u8][x:i16][y:i16]`.
+///
+/// **The same packet id and shape travel both ways with different command
+/// meanings**, the trap OpenShard's `findings.md` names for `0x22`. Here
+/// client command `5` is ClearPins while the server's `5` is "display this
+/// map"; our incoming decoder ([`crate::world::World::apply_map_command`]) owns
+/// the server's reading and these builders own the client's. Ports ServUO
+/// `MapItem.OnMapCommand`'s dispatch.
+///
+/// `x`/`y` are in the map's own pixel space (`MapView::width`/`height`), not
+/// world coordinates; ServUO clamps them into range with `Validate(ref x, ref
+/// y)`, so an out-of-bounds pin lands on the edge rather than being refused.
+fn build_map_command(serial: u32, command: u8, number: u8, x: u16, y: u16) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x56).u32(serial).u8(command).u8(number).u16(x).u16(y);
+    w.into_vec()
+}
+
+/// Toggle map `serial` between view and edit mode (command `6`).
+///
+/// **Required before any other pin edit.** ServUO gates all five mutators on
+/// `ValidateEdit`, which is `m_Editable && Validate(from)`, and `m_Editable`
+/// starts false — so an add/remove sent to a map still in view mode is
+/// discarded without a reply. This command is the only thing that flips it.
+///
+/// Unlike the mutators, it *is* answered: the server replies with a `0x56`
+/// command `7` (`MapSetEditable`) carrying the resulting state, which is why
+/// the driver applies the others optimistically but leaves this one to the
+/// echo. Note ServUO also re-sends `7` whenever the map is displayed, and its
+/// `Validate(from)` refuses a map that is not in reach, is protected, or
+/// belongs to somebody else — so a toggle can legitimately answer "still not
+/// editable".
+pub fn build_map_toggle_editable(serial: u32) -> Vec<u8> {
+    build_map_command(serial, 6, 0, 0, 0)
+}
+
+/// Append a pin at `(x, y)` (command `1`). ServUO caps a map at
+/// `MaxUserPins = 50` and silently ignores the request past that.
+pub fn build_map_add_pin(serial: u32, x: u16, y: u16) -> Vec<u8> {
+    build_map_command(serial, 1, 0, x, y)
+}
+
+/// Insert a pin at `index` (command `2`). ServUO's `InsertPin` **appends**
+/// when the index is out of range rather than refusing, so this can never fail
+/// on a bad index — it just moves the pin to the end.
+pub fn build_map_insert_pin(serial: u32, index: u8, x: u16, y: u16) -> Vec<u8> {
+    build_map_command(serial, 2, index, x, y)
+}
+
+/// Move the pin at `index` to `(x, y)` (command `3`). Out-of-range indices are
+/// ignored server-side.
+pub fn build_map_change_pin(serial: u32, index: u8, x: u16, y: u16) -> Vec<u8> {
+    build_map_command(serial, 3, index, x, y)
+}
+
+/// Remove the pin at `index` (command `4`).
+///
+/// **Index 0 cannot be removed this way**: ServUO's `RemovePin` guards with
+/// `index > 0`, which on a decoded treasure map protects the chest pin — the
+/// one pin that is the point of the map. [`build_map_clear_pins`] has no such
+/// guard and *will* take it, so "clear" is not "remove each in turn".
+pub fn build_map_remove_pin(serial: u32, index: u8) -> Vec<u8> {
+    build_map_command(serial, 4, index, 0, 0)
+}
+
+/// Remove every pin (command `5`), including index 0 — `ClearPins` carries no
+/// `index > 0` guard, so this is genuinely not "remove each in turn" (see
+/// [`build_map_remove_pin`]).
+///
+/// **On a treasure map the clear does not survive the next open.**
+/// `TreasureMap.DisplayTo` ends with `if (Pins.Count == 0)
+/// AddWorldPin(ChestLocation)`, so a pinless treasure map re-grows its chest
+/// pin the moment it is displayed again — the map refuses to forget where the
+/// treasure is. Measured live: the pin list read `[]` right after the clear and
+/// `[[169, 184]]` after re-opening the same map. An ordinary `MapItem` has no
+/// such rule and stays empty.
+pub fn build_map_clear_pins(serial: u32) -> Vec<u8> {
+    build_map_command(serial, 5, 0, 0, 0)
+}
+
 /// HelpRequest `0x9B` (fixed 258 bytes) — open the shard's help / GM-page
 /// menu. The 257-byte payload is **entirely ignored**: ServUO's handler reads
 /// nothing at all and just raises `HelpRequest`, and ClassicUO writes 257
@@ -1406,6 +1487,30 @@ mod tests {
             d,
             vec![0xD7, 0x00, 0x0F, 0, 0, 0, 1, 0x00, 0x19, 0, 0, 0, 0, 0, 0x0A]
         );
+    }
+
+    #[test]
+    fn map_commands_are_the_fixed_eleven_byte_packet() {
+        let p = build_map_add_pin(0xDEAD_BEEF, 0x0102, 0x0304);
+        assert_eq!(p.len(), 11, "ServUO registers 0x56 at a fixed 11");
+        assert_eq!(
+            p,
+            vec![0x56, 0xDE, 0xAD, 0xBE, 0xEF, 1, 0, 0x01, 0x02, 0x03, 0x04]
+        );
+        // Command ids, per ServUO `MapItem.OnMapCommand`'s dispatch.
+        assert_eq!(build_map_add_pin(1, 0, 0)[5], 1);
+        assert_eq!(build_map_insert_pin(1, 2, 0, 0)[5], 2);
+        assert_eq!(build_map_change_pin(1, 2, 0, 0)[5], 3);
+        assert_eq!(build_map_remove_pin(1, 2)[5], 4);
+        assert_eq!(build_map_clear_pins(1)[5], 5);
+        assert_eq!(build_map_toggle_editable(1)[5], 6);
+        // The index rides in `number`, and change/insert must carry coordinates
+        // — dropping them is an easy slip that only shows as pins snapping to
+        // the map's top-left corner.
+        let c = build_map_change_pin(1, 7, 0x1122, 0x3344);
+        assert_eq!(c[6], 7);
+        assert_eq!(u16::from_be_bytes([c[7], c[8]]), 0x1122);
+        assert_eq!(u16::from_be_bytes([c[9], c[10]]), 0x3344);
     }
 
     #[test]

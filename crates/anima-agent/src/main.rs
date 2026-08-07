@@ -155,6 +155,18 @@ fn main() {
                 }
                 Action::PartySetCanLoot { can_loot } => format!("partyloot({can_loot})"),
                 Action::StatusRequest { serial } => format!("statusreq(0x{serial:08X})"),
+                Action::MapToggleEditable { serial } => format!("mapedit(0x{serial:08X})"),
+                Action::MapAddPin { serial, x, y } => format!("mappin+(0x{serial:08X} {x},{y})"),
+                Action::MapInsertPin { serial, index, .. } => {
+                    format!("mappinins(0x{serial:08X} #{index})")
+                }
+                Action::MapChangePin { serial, index, .. } => {
+                    format!("mappinmv(0x{serial:08X} #{index})")
+                }
+                Action::MapRemovePin { serial, index } => {
+                    format!("mappin-(0x{serial:08X} #{index})")
+                }
+                Action::MapClearPins { serial } => format!("mappinclr(0x{serial:08X})"),
                 Action::ChatOpen => "chatopen".into(),
                 Action::ChatJoin { channel, .. } => format!("chatjoin({channel:?})"),
                 Action::ChatCreate { channel, .. } => format!("chatcreate({channel:?})"),

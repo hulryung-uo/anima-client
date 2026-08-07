@@ -109,13 +109,18 @@
 //! and `chat_messages` (a seq-stamped ring, dedupe like `recent_damage`),
 //! plus the `ChatOpen`/`ChatJoin`/`ChatCreate`/`ChatLeave`/`ChatSay` actions.
 //! `ChatOpen` must come first: ServUO drops every other chat action from a
-//! sender it has not registered as a chat user, silently.)
+//! sender it has not registered as a chat user, silently. v23: map pins became
+//! writable — `MapToggleEditable`, `MapAddPin`, `MapInsertPin`,
+//! `MapChangePin`, `MapRemovePin`, `MapClearPins` (0x56). `MapToggleEditable`
+//! must come first for the same kind of reason `ChatOpen` does: ServUO gates
+//! every mutator on the map being in edit mode and drops the rest silently.
+//! No new observation fields — `map_gumps` already carried the pins.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 22;
+pub const SCHEMA_VERSION: u32 = 23;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
@@ -826,6 +831,33 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         "OplRequest" => Ok(Action::OplRequest {
             serial: req_u32("serial")?,
         }),
+        "MapToggleEditable" => Ok(Action::MapToggleEditable {
+            serial: req_u32("serial")?,
+        }),
+        "MapAddPin" => Ok(Action::MapAddPin {
+            serial: req_u32("serial")?,
+            x: req_u32("x")? as u16,
+            y: req_u32("y")? as u16,
+        }),
+        "MapInsertPin" => Ok(Action::MapInsertPin {
+            serial: req_u32("serial")?,
+            index: req_u32("index")? as u8,
+            x: req_u32("x")? as u16,
+            y: req_u32("y")? as u16,
+        }),
+        "MapChangePin" => Ok(Action::MapChangePin {
+            serial: req_u32("serial")?,
+            index: req_u32("index")? as u8,
+            x: req_u32("x")? as u16,
+            y: req_u32("y")? as u16,
+        }),
+        "MapRemovePin" => Ok(Action::MapRemovePin {
+            serial: req_u32("serial")?,
+            index: req_u32("index")? as u8,
+        }),
+        "MapClearPins" => Ok(Action::MapClearPins {
+            serial: req_u32("serial")?,
+        }),
         "ChatOpen" => Ok(Action::ChatOpen),
         "ChatJoin" => Ok(Action::ChatJoin {
             channel: text("channel"),
@@ -1150,6 +1182,47 @@ mod tests {
                 json!({"type": "OplRequest", "serial": 8}),
                 Action::OplRequest { serial: 8 },
             ),
+            (
+                json!({"type": "MapToggleEditable", "serial": 9}),
+                Action::MapToggleEditable { serial: 9 },
+            ),
+            (
+                json!({"type": "MapAddPin", "serial": 9, "x": 12, "y": 34}),
+                Action::MapAddPin {
+                    serial: 9,
+                    x: 12,
+                    y: 34,
+                },
+            ),
+            (
+                json!({"type": "MapInsertPin", "serial": 9, "index": 2, "x": 1, "y": 2}),
+                Action::MapInsertPin {
+                    serial: 9,
+                    index: 2,
+                    x: 1,
+                    y: 2,
+                },
+            ),
+            (
+                json!({"type": "MapChangePin", "serial": 9, "index": 2, "x": 3, "y": 4}),
+                Action::MapChangePin {
+                    serial: 9,
+                    index: 2,
+                    x: 3,
+                    y: 4,
+                },
+            ),
+            (
+                json!({"type": "MapRemovePin", "serial": 9, "index": 3}),
+                Action::MapRemovePin {
+                    serial: 9,
+                    index: 3,
+                },
+            ),
+            (
+                json!({"type": "MapClearPins", "serial": 9}),
+                Action::MapClearPins { serial: 9 },
+            ),
             (json!({"type": "ChatOpen"}), Action::ChatOpen),
             (
                 json!({"type": "ChatJoin", "channel": "General", "password": ""}),
@@ -1455,8 +1528,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v22_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 22);
+    fn schema_v23_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 23);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,

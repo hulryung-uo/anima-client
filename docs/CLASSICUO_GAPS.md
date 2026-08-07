@@ -48,6 +48,28 @@ faithful ports rather than defects:
   keeps the raw values (the serial is how a consumer links a line to a mobile)
   and only the journal tidies them, which is the one deliberate departure here.
 
+Closed 2026-08-07 (map pins): the map-pin-editing Tier 1 row. Contract schema
+v22 → v23. Three things the wire does not tell you, all measured live:
+
+- **A pin edit is never acknowledged**, so the client must apply it locally —
+  and therefore must apply the server's *gate* locally too. The first cut
+  applied unconditionally and invented pins: against a decoded treasure map
+  still in view mode the window showed `[[169,184],[50,50]]` where the server
+  held only `[[169,184]]`. `Session::apply_map_edit` now mirrors the
+  `m_Editable` half of `ValidateEdit`. The rest of that check (in reach, not
+  protected, not someone else's) is invisible from the client, so a refusal for
+  one of those still desyncs — self-healing on the next display, because
+  `DisplayTo` re-sends the whole pin list.
+- **`RemovePin` refuses index 0 but `ClearPins` does not.** "Clear" is not
+  "remove each in turn"; the guard that protects a treasure map's chest pin
+  exists on only one of the two.
+- **…and yet a treasure map cannot be left pinless.** `TreasureMap.DisplayTo`
+  ends with `if (Pins.Count == 0) AddWorldPin(ChestLocation)`, so the chest pin
+  regrows on the next open. Measured: `[]` immediately after the clear,
+  `[[169,184]]` after reopening. An ordinary `MapItem` stays empty. This one
+  refuted a conclusion drawn from the first read of the live output — the clear
+  *had* worked, and the reopen put the pin back.
+
 **Know what the local shard can and cannot prove.** `Config/Expansion.cfg` on
 the ServUO at `127.0.0.1:2594` says `CurrentExpansion=T2A`, so `Core.AOS` is
 **false** there. That single fact splits this batch in half, and it is worth
@@ -330,7 +352,7 @@ The receive side is generally complete; there is no way to *act*.
 | ~~**Shard list**~~ — **CLOSED** | `parse_server_list` (0xA8) + `LoginMachine::servers()`; `cfg.server_index` names the shard's *own* index and an unlisted one fails with the shard names instead of hanging. 0x8C now yields a `GameServerAddress`, which the native driver dials first (5s timeout) before falling back to the login endpoint — ClassicUO's `IgnoreRelayIp`/`ip == 0` case, available as `Endpoint::ignore_relay_ip`. **Watch the byte order:** 0xA8's address is reversed, 0x8C's is not | M |
 | ~~**Login/character rejection reasons**~~ — **CLOSED** | 0x82 gained `account_denied_text`, 0x53 became `LoginError::CharacterLoginRejected` with `character_login_rejected_text`, and 0xFD's queue window is stored and quoted by 0x53 codes 13/14. `LoginError` now implements `Display`, so the browser login page and CLI show the server's stated reason instead of a Debug dump | S |
 | Book authoring (title/author + page text) | 0x93/0xD4 header edit and page write builders exist as round-trip stubs; no UI drives them | M |
-| Map pin editing (0x56) | read-only | S |
+| ~~Map pin editing (0x56)~~ — **CLOSED, live-verified** | `MapToggleEditable`/`MapAddPin`/`MapInsertPin`/`MapChangePin`/`MapRemovePin`/`MapClearPins` + `mapedit`/`mappin`/`mappinins`/`mappinmv`/`mappindel`/`mappinclr`, and the map window gained an Edit toggle, a Clear button, click-to-add and click-a-pin-to-remove. **`MapToggleEditable` must come first** — ServUO gates every mutator on `ValidateEdit` = `m_Editable && Validate(from)` and drops the rest silently, the same shape of trap as `ChatOpen`. Note `0x56` is bidirectional with *different* command meanings per direction (client `5` = ClearPins, server `5` = display), the `0x22` trap from OpenShard's findings | S |
 | Boat helm control (0xBF/0x33) | absent | M |
 | Bulletin board post/read/reply | state model decoded (0x71); no authoring surface | M |
 | ~~Chat channels (0xB2/0xB3/0xB5)~~ — **CLOSED, live-verified** | The receive half *and* every outgoing builder already existed with no caller — only the Action/scene/UI layer was missing, which is the second time this audit's "absent" has meant "written but unreachable" (see rename). Added `ChatOpen`/`ChatJoin`/`ChatCreate`/`ChatLeave`/`ChatSay`, a `chat` scene object (status, channel, channels, and a seq-stamped `lines` ring), `Observation::chat`/`chat_messages`, `chatopen`/`chatjoin`/`chatcreate`/`chatleave`/`chatsay` commands, and `/c`, `/cjoin`, `/ccreate`, `/chatopen`, `/cleave` in the chat bar; lines print into the journal. **`ChatOpen` must come first** — ServUO's `ChatAction` drops any action from a sender `ChatUser.GetChatUser` does not know, silently, so a brain that jumps straight to joining sees nothing and gets no error. Verified with two live sessions: register → 4 channels advertised → both join `General` → messages cross in both directions | M |

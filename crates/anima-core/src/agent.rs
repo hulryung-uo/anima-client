@@ -692,6 +692,46 @@ pub enum Action {
     /// absolute number, and must not compare it against a spell's mana cost.
     /// Our own vitals are exempt — those arrive un-normalized.
     StatusRequest { serial: u32 },
+    /// Turn map item `serial` between view and edit mode (0x56 command 6).
+    ///
+    /// **Required before any other map-pin action.** ServUO gates every pin
+    /// mutator on `ValidateEdit` = `m_Editable && Validate(from)`, and
+    /// `m_Editable` starts false, so edits sent to a map in view mode are
+    /// discarded with no reply. The server answers this one with its own
+    /// 0x56 command 7 carrying the resulting state — which may still be "not
+    /// editable" if the map is out of reach, protected, or someone else's.
+    MapToggleEditable { serial: u32 },
+    /// Append a pin to map `serial` at `(x, y)` in the map's own pixel space
+    /// ([`crate::world::MapView::width`]/`height`), not world coordinates.
+    /// ServUO clamps out-of-range coordinates onto the edge and caps a map at
+    /// 50 pins.
+    MapAddPin { serial: u32, x: u16, y: u16 },
+    /// Insert a pin at `index`. An out-of-range index appends rather than
+    /// failing (ServUO `InsertPin`).
+    MapInsertPin {
+        serial: u32,
+        index: u8,
+        x: u16,
+        y: u16,
+    },
+    /// Move the pin at `index` to `(x, y)`. An out-of-range index is ignored.
+    MapChangePin {
+        serial: u32,
+        index: u8,
+        x: u16,
+        y: u16,
+    },
+    /// Remove the pin at `index`. **Index 0 is refused server-side**
+    /// (`RemovePin` guards on `index > 0`), which is what protects the chest
+    /// pin on a decoded treasure map.
+    MapRemovePin { serial: u32, index: u8 },
+    /// Remove every pin — including index 0, unlike [`Action::MapRemovePin`];
+    /// "clear" is genuinely not "remove each in turn" here.
+    ///
+    /// On a *treasure* map the effect is undone by the next display:
+    /// `TreasureMap.DisplayTo` re-adds the chest pin whenever the list is
+    /// empty, so the map will not stay pinless. Ordinary maps do stay cleared.
+    MapClearPins { serial: u32 },
     /// Register with the server's chat system (0xB5). **Required first**:
     /// ServUO's `ChatAction` looks the sender up with `ChatUser.GetChatUser`
     /// and returns silently when there is none, so every other chat action is

@@ -99,6 +99,10 @@ pub(super) fn parse_house_design_command(body: &str) -> Option<Action> {
 /// `gump:<serial>:<gumpId>:<button>[:sw=1,2][:e=<id>=<text>,…]` (gump reply; text
 /// entries can't contain `:`, `,`, or `=`) · `menusel:<serial>:<index>` (legacy
 /// 0x7C menu; index 0 cancels) · `huepick:<serial>:<hue>` (0x95 dye picker) ·
+/// `mapedit:<serial>` (toggle a map into edit mode — required before any pin
+/// edit) · `mappin:<serial>:<x>:<y>` · `mappinins`/`mappinmv:<serial>:<index>:<x>:<y>` ·
+/// `mappindel:<serial>:<index>` (index 0 refused) · `mappinclr:<serial>` (clears
+/// index 0 too) ·
 /// `chatopen` (register with the server chat system — required before any
 /// other chat verb) · `chatjoin:<channel>[:<password>]` /
 /// `chatcreate:<channel>[:<password>]` / `chatleave` / `chatsay:<text>` ·
@@ -279,6 +283,56 @@ pub(super) fn parse_command(body: &str) -> Option<Action> {
         }
         // oplreq:<serial> — request an entity's Object Property List / tooltip (0xD6).
         "oplreq" => Some(Action::OplRequest {
+            serial: parse_serial(arg)?,
+        }),
+        // mapedit:<serial> — toggle a map between view and edit mode (0x56 cmd 6).
+        // Must precede every other map-pin verb; ServUO drops edits to a map in
+        // view mode without a reply.
+        "mapedit" => Some(Action::MapToggleEditable {
+            serial: parse_serial(arg)?,
+        }),
+        // mappin:<serial>:<x>:<y> — append a pin, in the MAP's pixel space.
+        "mappin" => {
+            let mut p = arg.split(':');
+            Some(Action::MapAddPin {
+                serial: parse_serial(p.next()?)?,
+                x: p.next()?.parse().ok()?,
+                y: p.next()?.parse().ok()?,
+            })
+        }
+        // mappinins:<serial>:<index>:<x>:<y> / mappinmv:<serial>:<index>:<x>:<y>
+        "mappinins" | "mappinmv" => {
+            let mut p = arg.split(':');
+            let serial = parse_serial(p.next()?)?;
+            let index = p.next()?.parse().ok()?;
+            let x = p.next()?.parse().ok()?;
+            let y = p.next()?.parse().ok()?;
+            if cmd == "mappinins" {
+                Some(Action::MapInsertPin {
+                    serial,
+                    index,
+                    x,
+                    y,
+                })
+            } else {
+                Some(Action::MapChangePin {
+                    serial,
+                    index,
+                    x,
+                    y,
+                })
+            }
+        }
+        // mappindel:<serial>:<index> — index 0 is refused server-side.
+        "mappindel" => {
+            let (serial, index) = arg.split_once(':')?;
+            Some(Action::MapRemovePin {
+                serial: parse_serial(serial)?,
+                index: index.parse().ok()?,
+            })
+        }
+        // mappinclr:<serial> — clears ALL pins, index 0 included.
+        "mappinclr" => Some(Action::MapClearPins {
             serial: parse_serial(arg)?,
         }),
         // chatopen — register with the server chat system (0xB5). MUST precede
@@ -710,6 +764,49 @@ mod command_tests {
     fn logout_command_is_exact_and_argument_free() {
         assert_eq!(parse_command("logout"), Some(Action::Logout));
         assert!(parse_command("logout:anything").is_none());
+    }
+
+    #[test]
+    fn map_pin_commands_parse() {
+        assert_eq!(
+            parse_command("mapedit:0x40001111"),
+            Some(Action::MapToggleEditable {
+                serial: 0x4000_1111
+            })
+        );
+        assert_eq!(
+            parse_command("mappin:0x40001111:12:34"),
+            Some(Action::MapAddPin {
+                serial: 0x4000_1111,
+                x: 12,
+                y: 34
+            })
+        );
+        assert_eq!(
+            parse_command("mappinmv:0x40001111:2:5:6"),
+            Some(Action::MapChangePin {
+                serial: 0x4000_1111,
+                index: 2,
+                x: 5,
+                y: 6
+            })
+        );
+        assert_eq!(
+            parse_command("mappindel:0x40001111:3"),
+            Some(Action::MapRemovePin {
+                serial: 0x4000_1111,
+                index: 3
+            })
+        );
+        assert_eq!(
+            parse_command("mappinclr:0x40001111"),
+            Some(Action::MapClearPins {
+                serial: 0x4000_1111
+            })
+        );
+        // Missing coordinates must not silently become a pin at the origin.
+        assert!(parse_command("mappin:0x40001111:12").is_none());
+        assert!(parse_command("mappindel:0x40001111").is_none());
     }
 
     #[test]

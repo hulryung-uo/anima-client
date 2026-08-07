@@ -1192,13 +1192,45 @@ function closeMapWindow(serial) {
   // this window — only a fresh 0x90/0xF5 (a higher openSeq) can.
   closeDialog("maps", serial);
 }
+// Pin editing (0x56). ServUO gates EVERY mutator on the map being in edit
+// mode (`ValidateEdit` = `m_Editable && Validate(from)`, and `m_Editable`
+// starts false), so the Edit button is not a local view state — it sends
+// command 6 and the server answers with its own command 7 carrying the
+// verdict, which can be "still not editable" for a map that is out of reach,
+// protected, or someone else's. That is why `editable` is read from the scene
+// rather than tracked here.
 function buildMapWindow(serial) {
   const { el, body } = makeWindowFrame({
     cls: "map-win", title: "Map", cascade: mapCascade,
     onClose: () => closeMapWindow(serial),
   });
-  body.innerHTML = '<div class="map-canvas"></div>';
-  return { el, canvas: el.querySelector(".map-canvas") };
+  body.innerHTML = '<div class="map-tools">'
+    + '<button class="map-edit">Edit</button>'
+    + '<button class="map-clear">Clear pins</button>'
+    + '<span class="map-hint"></span></div>'
+    + '<div class="map-canvas"></div>';
+  const canvas = el.querySelector(".map-canvas");
+  el.querySelector(".map-edit").addEventListener("click", () => sendInput("mapedit:" + serial));
+  el.querySelector(".map-clear").addEventListener("click", () => sendInput("mappinclr:" + serial));
+  // Click empty parchment to drop a pin; click a pin to remove it. Coordinates
+  // are the map's own pixel space, which is exactly what the canvas is sized
+  // to — see `renderMapWindow` for why no rescale is involved.
+  canvas.addEventListener("click", (e) => {
+    if (!canvas._editable) return;
+    const pin = e.target.closest(".map-pin");
+    if (pin) {
+      const i = pin.dataset.index | 0;
+      // Index 0 is the chest on a decoded treasure map and ServUO's
+      // `RemovePin` refuses it; say so instead of sending a silent no-op.
+      if (i === 0) { addSysMessage("The treasure pin cannot be removed."); return; }
+      sendInput(`mappindel:${serial}:${i}`);
+      return;
+    }
+    const r = canvas.getBoundingClientRect();
+    const x = Math.round(e.clientX - r.left), y = Math.round(e.clientY - r.top);
+    sendInput(`mappin:${serial}:${x}:${y}`);
+  });
+  return { el, canvas };
 }
 // Rebuild a map window's art/pins only when its content signature changed.
 // Bounds/size never change for a given serial in practice, but PINS do via
@@ -1220,11 +1252,21 @@ function renderMapWindow(win, m) {
   const c = win.canvas;
   c.style.width = w + "px";
   c.style.height = h + "px";
+  c._editable = !!m.editable;
+  c.classList.toggle("editing", !!m.editable);
+  const tools = win.el.querySelector(".map-tools");
+  if (tools) {
+    tools.querySelector(".map-edit").classList.toggle("on", !!m.editable);
+    tools.querySelector(".map-hint").textContent = m.editable
+      ? "click to add a pin · click a pin to remove"
+      : "";
+  }
   c.innerHTML = `<img class="map-bg" src="gump/${m.gumpArt | 0}.png" alt=""`
     + ` onerror="this.onerror=null;this.style.display='none'">`;
   (m.pins || []).forEach((p, i) => {
     const pin = document.createElement("div");
     pin.className = "map-pin" + (i === 0 ? " chest" : "");
+    pin.dataset.index = i;
     pin.style.left = (p[0] | 0) + "px";
     pin.style.top = (p[1] | 0) + "px";
     pin.title = i === 0 ? "treasure" : ("pin " + i);

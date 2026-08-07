@@ -29,13 +29,15 @@ use anima_core::net::outgoing::{
     build_house_design_close, build_house_design_commit, build_house_design_delete_item,
     build_house_design_delete_roof, build_house_design_go_to_floor, build_house_design_request,
     build_house_design_restore, build_house_design_revert, build_house_design_sync,
-    build_hue_picker_response, build_legacy_menu_response, build_logout_request, build_opl_request,
-    build_party_accept, build_party_can_loot, build_party_decline, build_party_invite,
-    build_party_leave, build_party_message, build_party_private_message, build_party_remove,
-    build_pick_up, build_ping, build_popup_request, build_popup_select, build_profile_request,
-    build_profile_update, build_prompt_response, build_quest_arrow_click, build_quest_menu_request,
-    build_rename_request, build_say, build_sell, build_single_click, build_skill_lock,
-    build_stat_lock, build_status_request, build_stun_request, build_target_response,
+    build_hue_picker_response, build_legacy_menu_response, build_logout_request, build_map_add_pin,
+    build_map_change_pin, build_map_clear_pins, build_map_insert_pin, build_map_remove_pin,
+    build_map_toggle_editable, build_opl_request, build_party_accept, build_party_can_loot,
+    build_party_decline, build_party_invite, build_party_leave, build_party_message,
+    build_party_private_message, build_party_remove, build_pick_up, build_ping,
+    build_popup_request, build_popup_select, build_profile_request, build_profile_update,
+    build_prompt_response, build_quest_arrow_click, build_quest_menu_request, build_rename_request,
+    build_say, build_sell, build_single_click, build_skill_lock, build_stat_lock,
+    build_status_request, build_stun_request, build_target_response,
     build_text_entry_dialog_response, build_tip_request, build_trade_accept, build_trade_cancel,
     build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
     OPL_REQUEST_BATCH,
@@ -838,6 +840,44 @@ impl Session {
                 };
                 self.send(&build_status_request(4, serial))?;
             }
+            // `MapToggleEditable` is answered (0x56 command 7) and the
+            // server's verdict can differ from a plain flip, so it is left to
+            // the echo. The pin edits are NOT answered — ServUO records them
+            // and sends nothing — so the local view only changes if we change
+            // it; `apply_map_edit` is why that has to be conditional.
+            Action::MapToggleEditable { serial } => {
+                self.send(&build_map_toggle_editable(*serial))?;
+            }
+            Action::MapAddPin { serial, x, y } => {
+                self.send(&build_map_add_pin(*serial, *x, *y))?;
+                self.apply_map_edit(*serial, 1, 0, *x, *y);
+            }
+            Action::MapInsertPin {
+                serial,
+                index,
+                x,
+                y,
+            } => {
+                self.send(&build_map_insert_pin(*serial, *index, *x, *y))?;
+                self.apply_map_edit(*serial, 2, *index, *x, *y);
+            }
+            Action::MapChangePin {
+                serial,
+                index,
+                x,
+                y,
+            } => {
+                self.send(&build_map_change_pin(*serial, *index, *x, *y))?;
+                self.apply_map_edit(*serial, 3, *index, *x, *y);
+            }
+            Action::MapRemovePin { serial, index } => {
+                self.send(&build_map_remove_pin(*serial, *index))?;
+                self.apply_map_edit(*serial, 4, *index, 0, 0);
+            }
+            Action::MapClearPins { serial } => {
+                self.send(&build_map_clear_pins(*serial))?;
+                self.apply_map_edit(*serial, 5, 0, 0, 0);
+            }
             Action::ChatOpen => {
                 // ServUO ignores the name and uses `from.Name`; send ours anyway
                 // for wire parity with ClassicUO (see `build_chat_open`).
@@ -1372,6 +1412,33 @@ impl Session {
             }
         }
         Ok(())
+    }
+
+    /// Apply a pin edit to our own [`anima_core::world::MapView`] — but only
+    /// when the map is in edit mode, because that is the gate the server
+    /// applies and a pin edit is never acknowledged.
+    ///
+    /// ServUO checks `ValidateEdit` (= `m_Editable && Validate(from)`) on every
+    /// mutator and, when it fails, drops the request in silence. Applying
+    /// unconditionally therefore invents pins: measured live against a decoded
+    /// treasure map still in view mode, our window showed
+    /// `[[169,184],[50,50]]` where the server held only `[[169,184]]`.
+    ///
+    /// `editable` is the part of that gate we can see. The rest of `Validate` —
+    /// in reach, not protected, not someone else's — is not visible from here,
+    /// so a refusal for one of those still desyncs. That self-heals on the next
+    /// display: ServUO re-sends the full pin list on every `DisplayTo` and the
+    /// decoder rebuilds from it (verified live — reopening the map restored
+    /// the single real pin).
+    fn apply_map_edit(&mut self, serial: u32, command: u8, number: u8, x: u16, y: u16) {
+        if self
+            .world
+            .map_gumps
+            .get(&serial)
+            .is_some_and(|mv| mv.editable)
+        {
+            self.world.apply_map_command(serial, command, number, x, y);
+        }
     }
 
     /// Request one step in `dir` (UO direction 0..7). Sends the walk packet if
