@@ -347,6 +347,22 @@ pub fn build_scene(
     let combatant = s.world.combatant.unwrap_or(0);
     // AOS expansion (SupportedFeatures 0xB9): gates AOS-only UI like the weapon
     // special-ability bar. T2A servers don't advertise it → the client hides it.
+    // Server chat system (0xB2): status, the channel we are in, the channels it
+    // has advertised, and the received lines. The lines are a seq-stamped ring
+    // like `sounds`/`damage`, NOT a delta — the renderer keeps the highest seq
+    // it has printed. Everything here was decoded from the day the codec landed
+    // and had no consumer until the chat verbs existed.
+    let chat = serde_json::to_string(&json!({
+        "enabled": s.world.chat.enabled as u8,
+        "channel": s.world.chat.current_channel,
+        "channels": s.world.chat.channels.iter()
+            .map(|c| json!({ "name": c.name, "hasPassword": c.has_password }))
+            .collect::<Vec<_>>(),
+        "lines": s.world.chat_messages.iter()
+            .map(|m| json!({ "seq": m.seq, "sender": m.sender, "text": m.text }))
+            .collect::<Vec<_>>(),
+    }))
+    .unwrap_or_else(|_| "null".into());
     let aos = s.world.aos;
     // The weapon special move armed for the next swing (0 = none). The bar used
     // to track this purely client-side, which meant its highlight outlived every
@@ -436,7 +452,7 @@ pub fn build_scene(
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
          \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"logoutAck\":{logout_ack},\"boatMoves\":{boat_moves},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
-         \"armedAbility\":{armed_ability},\"activeSpells\":{active_spells},\
+         \"armedAbility\":{armed_ability},\"activeSpells\":{active_spells},\"chat\":{chat},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
          \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps}{placement_field}{house_design_field},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",

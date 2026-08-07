@@ -99,6 +99,9 @@ pub(super) fn parse_house_design_command(body: &str) -> Option<Action> {
 /// `gump:<serial>:<gumpId>:<button>[:sw=1,2][:e=<id>=<text>,…]` (gump reply; text
 /// entries can't contain `:`, `,`, or `=`) · `menusel:<serial>:<index>` (legacy
 /// 0x7C menu; index 0 cancels) · `huepick:<serial>:<hue>` (0x95 dye picker) ·
+/// `chatopen` (register with the server chat system — required before any
+/// other chat verb) · `chatjoin:<channel>[:<password>]` /
+/// `chatcreate:<channel>[:<password>]` / `chatleave` / `chatsay:<text>` ·
 /// `rename:<serial>:<name>` (0x75, in practice a pet) · `questarrow[:<0|1>]`
 /// (click the server's quest arrow) · `help` / `guildmenu` / `questmenu`
 /// (argument-free menu requests answered with an ordinary gump) ·
@@ -277,6 +280,33 @@ pub(super) fn parse_command(body: &str) -> Option<Action> {
         // oplreq:<serial> — request an entity's Object Property List / tooltip (0xD6).
         "oplreq" => Some(Action::OplRequest {
             serial: parse_serial(arg)?,
+        }),
+        // chatopen — register with the server chat system (0xB5). MUST precede
+        // every other chat verb: ServUO drops a chat action from an
+        // unregistered sender without a word.
+        "chatopen" => arg.is_empty().then_some(Action::ChatOpen),
+        // chatjoin:<channel>[:<password>] / chatcreate:<channel>[:<password>]
+        // (0xB3 actions 0x62 / 0x63). A channel name may contain colons, so
+        // only a trailing `:password` is split off — see the builders for why
+        // the two spell the same argument differently on the wire.
+        "chatjoin" | "chatcreate" => {
+            let (channel, password) = match arg.rsplit_once(':') {
+                Some((c, p)) if !c.is_empty() => (c.to_string(), p.to_string()),
+                _ => (arg.to_string(), String::new()),
+            };
+            if channel.is_empty() {
+                return None;
+            }
+            if cmd == "chatjoin" {
+                Some(Action::ChatJoin { channel, password })
+            } else {
+                Some(Action::ChatCreate { channel, password })
+            }
+        }
+        "chatleave" => arg.is_empty().then_some(Action::ChatLeave),
+        // chatsay:<text> — 0xB3 action 0x61, the current channel only.
+        "chatsay" => (!arg.is_empty()).then(|| Action::ChatSay {
+            text: arg.to_string(),
         }),
         // rename:<serial>:<name> — 0x75. Shards accept it only for a creature we
         // control; the name may contain colons, so only the serial is split off.
@@ -680,6 +710,51 @@ mod command_tests {
     fn logout_command_is_exact_and_argument_free() {
         assert_eq!(parse_command("logout"), Some(Action::Logout));
         assert!(parse_command("logout:anything").is_none());
+    }
+
+    #[test]
+    fn chat_commands_parse() {
+        assert_eq!(parse_command("chatopen"), Some(Action::ChatOpen));
+        assert_eq!(parse_command("chatleave"), Some(Action::ChatLeave));
+        assert!(parse_command("chatopen:x").is_none());
+        assert_eq!(
+            parse_command("chatjoin:General"),
+            Some(Action::ChatJoin {
+                channel: "General".into(),
+                password: String::new(),
+            })
+        );
+        assert_eq!(
+            parse_command("chatjoin:General:hunter2"),
+            Some(Action::ChatJoin {
+                channel: "General".into(),
+                password: "hunter2".into(),
+            })
+        );
+        assert_eq!(
+            parse_command("chatcreate:anima"),
+            Some(Action::ChatCreate {
+                channel: "anima".into(),
+                password: String::new(),
+            })
+        );
+        // Only a TRAILING `:password` is split off, so a colon inside the name
+        // survives — `rsplit_once`, not `split_once`.
+        assert_eq!(
+            parse_command("chatjoin:a:b:c"),
+            Some(Action::ChatJoin {
+                channel: "a:b".into(),
+                password: "c".into(),
+            })
+        );
+        assert_eq!(
+            parse_command("chatsay:hello there"),
+            Some(Action::ChatSay {
+                text: "hello there".into()
+            })
+        );
+        assert!(parse_command("chatsay").is_none());
+        assert!(parse_command("chatjoin").is_none());
     }
 
     #[test]

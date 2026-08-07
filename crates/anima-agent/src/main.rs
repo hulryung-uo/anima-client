@@ -155,6 +155,11 @@ fn main() {
                 }
                 Action::PartySetCanLoot { can_loot } => format!("partyloot({can_loot})"),
                 Action::StatusRequest { serial } => format!("statusreq(0x{serial:08X})"),
+                Action::ChatOpen => "chatopen".into(),
+                Action::ChatJoin { channel, .. } => format!("chatjoin({channel:?})"),
+                Action::ChatCreate { channel, .. } => format!("chatcreate({channel:?})"),
+                Action::ChatLeave => "chatleave".into(),
+                Action::ChatSay { text } => format!("chatsay({text:?})"),
                 Action::Rename { serial, name } => format!("rename(0x{serial:08X} {name:?})"),
                 Action::QuestArrowClick { right_click } => {
                     format!(

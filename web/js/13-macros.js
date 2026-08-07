@@ -611,6 +611,17 @@ const CHAT_PREFIXES = [
   { keys: ["e", "em", "emote", "me"], cmd: "emote" },
   { keys: ["g", "guild"], cmd: "guild" },
   { keys: ["a", "alliance", "ally"], cmd: "alliance" },
+  // Server chat system (0xB2). `/c hello` talks in the joined channel; the
+  // channel verbs take a name. `chatopen` first — see `parse_command`.
+  { keys: ["c", "chat"], cmd: "chatsay" },
+  { keys: ["cjoin", "chatjoin"], cmd: "chatjoin" },
+  { keys: ["ccreate", "chatcreate"], cmd: "chatcreate" },
+];
+// The same table for verbs that take NO argument: `submitChat`'s pattern
+// requires a trailing word, so these would otherwise be spoken out loud.
+const CHAT_BARE_PREFIXES = [
+  { keys: ["chatopen"], cmd: "chatopen" },
+  { keys: ["cleave", "chatleave"], cmd: "chatleave" },
 ];
 function openChat() {
   if (chatting) return;
@@ -629,11 +640,14 @@ function submitChat() {
   const bar = document.getElementById("chatbar");
   const text = bar.value.trim();
   if (text) {
+    const bare = /^\/([a-z]+)$/i.exec(text);
+    const bareRoute = bare && CHAT_BARE_PREFIXES.find((p) => p.keys.includes(bare[1].toLowerCase()));
     const m = /^\/([a-z]+)\s+(.+)$/i.exec(text);
     const route = m && CHAT_PREFIXES.find((p) => p.keys.includes(m[1].toLowerCase()));
     // An unrecognized "/word" is spoken verbatim rather than swallowed — the
     // shard may well define it as a server command (e.g. "/help").
-    if (route) sendInput(route.cmd + ":" + m[2].trim());
+    if (bareRoute) sendInput(bareRoute.cmd);
+    else if (route) sendInput(route.cmd + ":" + m[2].trim());
     else sendInput("say:" + text);
   }
   closeChat();

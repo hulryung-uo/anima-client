@@ -1,3 +1,9 @@
+// `observation_to_json`'s literal has one key per Observation field, and
+// `json!` expands recursively once per key — so the object outgrew rustc's
+// default 128-frame limit purely by growing, not by nesting. serde_json
+// documents raising it as the fix.
+#![recursion_limit = "512"]
+
 //! Versioned JSON wire format for the brain↔body contract.
 //!
 //! `anima-core` stays serde-free, so the JSON shapes for its
@@ -97,13 +103,19 @@
 //! `QuestArrowClick`, `HelpRequest` (the GM-page entry point) and the
 //! `GuildMenu`/`QuestMenu` requests. All five answer with an ordinary server
 //! gump or a journal line, so nothing new is needed to *read* the result —
-//! these were purely missing outgoing verbs.)
+//! these were purely missing outgoing verbs. v22: exposed the server chat
+//! system, whose receive half (0xB2) had been fully decoded since the codec
+//! landed with nothing above it — `chat` (enabled/current channel/channels)
+//! and `chat_messages` (a seq-stamped ring, dedupe like `recent_damage`),
+//! plus the `ChatOpen`/`ChatJoin`/`ChatCreate`/`ChatLeave`/`ChatSay` actions.
+//! `ChatOpen` must come first: ServUO drops every other chat action from a
+//! sender it has not registered as a chat user, silently.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 21;
+pub const SCHEMA_VERSION: u32 = 22;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
@@ -543,6 +555,22 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         .iter()
         .map(|&(seq, serial, amount)| json!({ "seq": seq, "serial": serial, "amount": amount }))
         .collect();
+    let chat_channels: Vec<Value> = obs
+        .chat
+        .channels
+        .iter()
+        .map(|c| json!({ "name": c.name, "hasPassword": c.has_password }))
+        .collect();
+    let chat = json!({
+        "enabled": obs.chat.enabled as u8,
+        "channel": obs.chat.current_channel,
+        "channels": chat_channels,
+    });
+    let chat_messages: Vec<Value> = obs
+        .chat_messages
+        .iter()
+        .map(|m| json!({ "seq": m.seq, "sender": m.sender, "text": m.text }))
+        .collect();
     json!({
         "player": player_json(&obs.player),
         "mobiles": obs.mobiles.iter().map(mobile_json).collect::<Vec<_>>(),
@@ -577,6 +605,8 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "corpse_of": corpse_of,
         "corpse_equip": corpse_equip,
         "map_index": obs.map_index,
+        "chat": chat,
+        "chat_messages": chat_messages,
         "aos": obs.aos,
         "armed_ability": obs.armed_ability,
         "active_spell_icons": obs.active_spell_icons,
@@ -796,6 +826,17 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         "OplRequest" => Ok(Action::OplRequest {
             serial: req_u32("serial")?,
         }),
+        "ChatOpen" => Ok(Action::ChatOpen),
+        "ChatJoin" => Ok(Action::ChatJoin {
+            channel: text("channel"),
+            password: text("password"),
+        }),
+        "ChatCreate" => Ok(Action::ChatCreate {
+            channel: text("channel"),
+            password: text("password"),
+        }),
+        "ChatLeave" => Ok(Action::ChatLeave),
+        "ChatSay" => Ok(Action::ChatSay { text: text("text") }),
         "Rename" => Ok(Action::Rename {
             serial: req_u32("serial")?,
             name: text("name"),
@@ -1109,6 +1150,28 @@ mod tests {
                 json!({"type": "OplRequest", "serial": 8}),
                 Action::OplRequest { serial: 8 },
             ),
+            (json!({"type": "ChatOpen"}), Action::ChatOpen),
+            (
+                json!({"type": "ChatJoin", "channel": "General", "password": ""}),
+                Action::ChatJoin {
+                    channel: "General".into(),
+                    password: String::new(),
+                },
+            ),
+            (
+                json!({"type": "ChatCreate", "channel": "anima", "password": ""}),
+                Action::ChatCreate {
+                    channel: "anima".into(),
+                    password: String::new(),
+                },
+            ),
+            (json!({"type": "ChatLeave"}), Action::ChatLeave),
+            (
+                json!({"type": "ChatSay", "text": "hello"}),
+                Action::ChatSay {
+                    text: "hello".into(),
+                },
+            ),
             (
                 json!({"type": "Rename", "serial": 7, "name": "Fluffy"}),
                 Action::Rename {
@@ -1392,8 +1455,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v21_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 21);
+    fn schema_v22_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 22);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,
@@ -1704,6 +1767,8 @@ mod tests {
             "corpse_of",
             "corpse_equip",
             "map_index",
+            "chat",
+            "chat_messages",
             "aos",
             "armed_ability",
             "active_spell_icons",

@@ -237,6 +237,29 @@ pub struct Observation {
     /// Current facet/map index (0xBF/0x08 MapChange): 0=Felucca, 1=Trammel,
     /// 2=Ilshenar, 3=Malas, 4=Tokuno, 5=TerMur.
     pub map_index: u8,
+    /// The server chat system's state ([`World::chat`]): whether it is
+    /// enabled, the channels it has advertised, and `current_channel`.
+    /// A brain must send [`Action::ChatOpen`] before any of it becomes live.
+    ///
+    /// **`current_channel` is "the channel the server last named", not always
+    /// "the channel you are in".** The advertisement burst that follows
+    /// `ChatOpen` is a series of create-conference commands (0x03E8), and each
+    /// one overwrites it — so before any join it holds whichever channel was
+    /// advertised last. An actual join (0x03F1) sets it too, so it becomes
+    /// truthful the moment [`Action::ChatJoin`] succeeds. ClassicUO's
+    /// `ChatManager.CurrentChannelName` behaves identically; this is the
+    /// protocol's shape, not a decoding slip. Verified live: after `ChatOpen`
+    /// against ServUO it read `Looking For Group` — merely the last of the four
+    /// channels advertised.
+    pub chat: crate::world::ChatState,
+    /// Retained server-chat lines ([`World::chat_messages`]), oldest first.
+    /// A **seq-stamped ring, not a delta** — the same treatment
+    /// [`Observation::recent_damage`] gets, so a consumer keeps the highest
+    /// `seq` it has acted on and ignores the rest. `new_journal` is a delta
+    /// instead only because `observe` already threads a journal cursor;
+    /// adding a second cursor for this would change the signature every caller
+    /// uses to buy nothing.
+    pub chat_messages: Vec<crate::world::ChatLine>,
     /// Whether the server advertised the AOS expansion during login
     /// ([`World::aos`]) — gates AOS-only mechanics (e.g. weapon special moves
     /// via [`Action::UseAbility`]).
@@ -669,6 +692,36 @@ pub enum Action {
     /// absolute number, and must not compare it against a spell's mana cost.
     /// Our own vitals are exempt — those arrive un-normalized.
     StatusRequest { serial: u32 },
+    /// Register with the server's chat system (0xB5). **Required first**:
+    /// ServUO's `ChatAction` looks the sender up with `ChatUser.GetChatUser`
+    /// and returns silently when there is none, so every other chat action is
+    /// a no-op until this has been sent. The driver fills our own name.
+    ChatOpen,
+    /// Join chat channel `channel` (0xB3 action 0x62). `password` may be empty.
+    ///
+    /// Note the password cannot actually arrive on a ServUO: ClassicUO's
+    /// `WriteUnicodeBE` NUL-terminates the name, and ServUO reads the whole
+    /// parameter with `ReadUnicodeString()`, which stops there. The channel
+    /// name still resolves — its quote parser falls back to "everything after
+    /// the opening quote" — so joining works and only password-protected
+    /// channels are unreachable. We send ClassicUO's bytes rather than guess at
+    /// a fix, since a shard that expects the standard client's stream is the
+    /// thing being talked to.
+    ChatJoin { channel: String, password: String },
+    /// Create channel `channel` and join it (0xB3 action 0x63).
+    ///
+    /// `password` is carried for wire parity but ServUO cannot use it: its
+    /// `CreateChannel` passes the whole parameter through as the channel
+    /// *name*, so a non-empty password yields a channel called
+    /// `channel{password}`. Leave it empty against ServUO.
+    ChatCreate { channel: String, password: String },
+    /// Leave the current chat channel (0xB3 action 0x43). Conference-gated
+    /// server-side: with no channel joined the server says so in the journal.
+    ChatLeave,
+    /// Say `text` in the current chat channel (0xB3 action 0x61) — distinct
+    /// from [`Action::Say`] (local speech) and [`Action::PartySay`]. Also
+    /// conference-gated.
+    ChatSay { text: String },
     /// Rename the mobile `serial` (0x75). Shards accept this only for a
     /// creature we control — a pet — and ignore it otherwise. There is no
     /// acknowledgement packet, so confirm by re-reading the mobile's name
@@ -966,6 +1019,8 @@ impl World {
             player,
             mobiles,
             items,
+            chat: self.chat.clone(),
+            chat_messages: self.chat_messages.clone(),
             new_journal,
             pending_target: self.pending_target,
             skills,

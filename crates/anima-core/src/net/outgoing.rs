@@ -1409,6 +1409,45 @@ mod tests {
     }
 
     #[test]
+    fn chat_open_is_the_fixed_64_byte_packet() {
+        let p = build_chat_open("Anima");
+        assert_eq!(p.len(), 64);
+        assert_eq!(&p[..2], &[0xB5, 0x00]);
+        // UTF-16 BE name, then zero padding out to the fixed length.
+        assert_eq!(&p[2..12], &[0, b'A', 0, b'n', 0, b'i', 0, b'm', 0, b'a']);
+        assert!(p[12..].iter().all(|&b| b == 0));
+        // A long name is truncated rather than overflowing the fixed packet.
+        assert_eq!(build_chat_open(&"x".repeat(80)).len(), 64);
+    }
+
+    #[test]
+    fn chat_join_and_create_spell_the_same_argument_differently() {
+        // Not a copy-paste slip: ServUO's `JoinChannel` parses quotes out of the
+        // parameter while `CreateChannel` uses it verbatim as the channel name,
+        // so one convention for both would either lose the join or create a
+        // channel called `"foo"`.
+        let j = build_chat_join("foo", "");
+        assert_eq!(j[0], 0xB3);
+        assert_eq!(u16::from_be_bytes([j[1], j[2]]) as usize, j.len());
+        assert_eq!(&j[3..7], b"ENU\0"); // language tag
+        assert_eq!(u16::from_be_bytes([j[7], j[8]]), 0x0062); // action: join
+        assert_eq!(u16::from_be_bytes([j[9], j[10]]), 0x0022); // opening quote
+
+        let c = build_chat_create_channel("foo", "");
+        assert_eq!(u16::from_be_bytes([c[7], c[8]]), 0x0063); // action: create
+        assert_eq!(u16::from_be_bytes([c[9], c[10]]), 0x0066); // 'f' — unquoted
+    }
+
+    #[test]
+    fn chat_leave_and_say_carry_their_action_ids() {
+        let l = build_chat_leave();
+        assert_eq!(u16::from_be_bytes([l[7], l[8]]), 0x0043);
+        assert_eq!(l.len(), 9, "leave takes no parameter");
+        let m = build_chat_message("hi");
+        assert_eq!(u16::from_be_bytes([m[7], m[8]]), 0x0061);
+    }
+
+    #[test]
     fn help_request_is_the_fixed_258_byte_packet() {
         // ServUO registers 0x9B at a FIXED 258 and reads none of it; the 257
         // zero bytes exist only so the stream stays in sync. Trimming them

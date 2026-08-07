@@ -32,6 +32,22 @@ menus, help+GM page, rename, quest-arrow click. Contract schema v20 → v21.
 gump requests want byte-identical framing, so the house designer is the
 biggest user of that shape, not the only one.
 
+Closed 2026-08-07 (the chat batch): the chat-channels Tier 1 row. Contract
+schema v21 → v22. Two quirks worth knowing before touching it again, both
+faithful ports rather than defects:
+
+- **`chat.current_channel` is "the channel the server last named".** The
+  advertisement burst after `ChatOpen` is a run of create-conference commands
+  (0x03E8) and each overwrites it, so before any join it holds whichever
+  channel came last — measured as `Looking For Group` against ServUO. A real
+  join (0x03F1) sets it too, so it becomes truthful from then on. ClassicUO's
+  `ChatManager.CurrentChannelName` does exactly the same.
+- **A chat sender arrives as `<serial>Name`** — ServUO builds it that way in
+  `ChatUser.Username` — and the text keeps a leading space where the colour tag
+  `{...}` was stripped. ClassicUO prints both warts verbatim. `scene.chat`
+  keeps the raw values (the serial is how a consumer links a line to a mobile)
+  and only the journal tidies them, which is the one deliberate departure here.
+
 **Know what the local shard can and cannot prove.** `Config/Expansion.cfg` on
 the ServUO at `127.0.0.1:2594` says `CurrentExpansion=T2A`, so `Core.AOS` is
 **false** there. That single fact splits this batch in half, and it is worth
@@ -317,7 +333,7 @@ The receive side is generally complete; there is no way to *act*.
 | Map pin editing (0x56) | read-only | S |
 | Boat helm control (0xBF/0x33) | absent | M |
 | Bulletin board post/read/reply | state model decoded (0x71); no authoring surface | M |
-| Chat channels (0xB2/0xB3/0xB5) | **core is complete** — create/destroy/join/leave/lines all decoded — with no Action, scene field or UI above it | M |
+| ~~Chat channels (0xB2/0xB3/0xB5)~~ — **CLOSED, live-verified** | The receive half *and* every outgoing builder already existed with no caller — only the Action/scene/UI layer was missing, which is the second time this audit's "absent" has meant "written but unreachable" (see rename). Added `ChatOpen`/`ChatJoin`/`ChatCreate`/`ChatLeave`/`ChatSay`, a `chat` scene object (status, channel, channels, and a seq-stamped `lines` ring), `Observation::chat`/`chat_messages`, `chatopen`/`chatjoin`/`chatcreate`/`chatleave`/`chatsay` commands, and `/c`, `/cjoin`, `/ccreate`, `/chatopen`, `/cleave` in the chat bar; lines print into the journal. **`ChatOpen` must come first** — ServUO's `ChatAction` drops any action from a sender `ChatUser.GetChatUser` does not know, silently, so a brain that jumps straight to joining sees nothing and gets no error. Verified with two live sessions: register → 4 channels advertised → both join `General` → messages cross in both directions | M |
 | ~~Guild / quest menus (0xD7 sub 0x28 / 0x32), help+GM page (0x9B), rename (0x75), quest-arrow click (0xBF/0x07)~~ — **CLOSED** (4 of 5 live-verified) | `Action::GuildMenu`/`QuestMenu`/`HelpRequest`/`Rename`/`QuestArrowClick` + `guildmenu`/`questmenu`/`help`/`rename:<serial>:<name>`/`questarrow[:<0\|1>]`. All five answer with an ordinary gump or journal line, so nothing new was needed to *read* the result — these were purely missing outgoing verbs. **"Absent" was wrong about rename:** `build_rename_request` already existed, CP1252-encoded and correct, with no caller anywhere — only the Action and command were missing. Live: `help` → the "Ultima Online Help Menu" gump; `questmenu` → the "Quest Log" gump; `rename` turned "a horse" into "Bucephalus", cross-confirmed by the Tracking skill's own list showing the new name; `questarrow` discriminated by button — a **left** click left the arrow up and a **right** click cleared it, which is exactly `TrackArrow.OnClick`'s asymmetry, so the boolean byte demonstrably arrives intact. Only `guildmenu` is unverified here: ServUO gates it on `Guild.NewGuildSystem => Core.SE`, above this shard's T2A (see the shard note above) | S each |
 | ~~Party: loot flag, private message, leader kick~~ — **CLOSED, live-verified** | `build_party_can_loot` (0xBF/0x06/0x06), `build_party_private_message` (0x06/0x03) and `build_party_remove` (0x06/0x02) + `Action::PartySetCanLoot`/`PartyPrivateMessage`/`PartyKick` + `partyloot:<0\|1>`/`partytell:<member>:<text>`/`partykick:<member>`. **Kick and leave are one packet**, distinguished only by whose serial it names; ServUO's `PartyCommands.OnRemove` gates it on `p.Leader == from \|\| from == target` and ignores a non-leader silently — verified both ways live (a member's kick of the leader changed nothing; the leader's kick of the member disbanded the party on both clients). Loot flag answers cliloc 1005447/1005448 and is **never sent back**, so a UI must remember what it asked for. Private messages are clamped to 128 chars because ServUO *drops* longer ones rather than truncating | S |
 | ~~Request another entity's status (0x34 non-self) → party mana/stam bars~~ — **CLOSED, live-verified — and the row's premise was wrong twice** | `Action::StatusRequest { serial }` (0 = self) → 0x34 type 4; `party[].mana/manaMax/stam/stamMax` now leave `build_scene`. Two corrections worth keeping: **(a) it is a resync, not the only source.** ServUO pushes a member's mana/stam changes unprompted (`Party.OnManaChanged`/`OnStamChanged` → 0xA2/0xA3) — but only while they are in update range and visible, so a member you lost sight of freezes at the last value with nothing scheduled to fix it. That is the real gap this fills. **(b) The values are percentages, not points.** Every party-facing vitals packet goes through `AttributeNormalizer` (max written as a fixed 25, current as `cur * 25 / max`). Measured live: a member at a real 7/10 mana reached the leader as 17/25. Never compare another member's mana against a spell cost — our own vitals are un-normalized, theirs are not | S |

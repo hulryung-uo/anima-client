@@ -17,6 +17,42 @@ function addSysMessage(text) {
   localJournalSeq++;
   while (localJournal.length > LOCAL_JOURNAL_MAX) localJournal.shift();
 }
+// Server chat system (0xB2): show each new line in the journal once.
+//
+// `scene.chat.lines` is a seq-stamped ring, not a delta — the same contract as
+// sounds/damage — so the cursor is what makes a line appear exactly once even
+// though the whole ring is re-sent every poll. Primed on the first scene like
+// `primeSeqRings`, so a reload does not replay the backlog.
+//
+// A line with an empty `sender` is server status text (the 0xB2 commands with
+// no template table behind them — see `chat_message`'s default arm), so it is
+// printed bare rather than as "': text".
+//
+// Two cosmetics are cleaned up HERE and not in the scene, because the raw
+// values carry information a consumer may want and the tidying is display
+// policy:
+//   * ServUO builds a chat username as `String.Format("<{0}>{1}", serial,
+//     name)` (`ChatUser.Username`), so the speaker's serial rides in the
+//     sender. `scene.chat.lines[].sender` keeps it — that is how a brain links
+//     a chat line to a mobile — and only the journal drops it.
+//   * The text arrives with a leading space, left behind when the colour tag
+//     `{...}` in front of it is removed (the core does that strip, matching
+//     ClassicUO).
+// ClassicUO prints `$"{username}: {msgSent}"` and therefore shows both warts;
+// this is a deliberate, cosmetic-only departure.
+let lastChatSeq = 0;           // highest chat line seq we've already printed
+function ingestChat(s) {
+  const lines = (s.chat && s.chat.lines) || [];
+  for (const l of lines) {
+    const seq = l.seq | 0;
+    if (seq <= lastChatSeq) continue;
+    lastChatSeq = seq;
+    const who = (l.sender || "").replace(/^<\d+>/, "");
+    const text = (l.text || "").trim();
+    if (!text) continue;
+    addSysMessage(who ? `[chat] ${who}: ${text}` : `[chat] ${text}`);
+  }
+}
 // Scan the journal for new lines and float each above its speaker once.
 let journalPrimed = false;
 function ingestSpeech(s) {

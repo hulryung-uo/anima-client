@@ -21,17 +21,18 @@ use anima_assets::{Cliloc, MapData};
 use anima_core::agent::{survey_terrain, Action, HouseDesignAction, Observation};
 use anima_core::net::outgoing::{
     build_ascii_prompt_response, build_attack, build_bandage_target, build_book_page_request,
-    build_buy, build_cast_spell, build_client_view_range, build_disarm_request, build_double_click,
-    build_drop, build_equip, build_guild_menu_request, build_gump_response, build_help_request,
-    build_house_design_add_item, build_house_design_add_roof, build_house_design_add_stair,
-    build_house_design_backup, build_house_design_clear, build_house_design_close,
-    build_house_design_commit, build_house_design_delete_item, build_house_design_delete_roof,
-    build_house_design_go_to_floor, build_house_design_request, build_house_design_restore,
-    build_house_design_revert, build_house_design_sync, build_hue_picker_response,
-    build_legacy_menu_response, build_logout_request, build_opl_request, build_party_accept,
-    build_party_can_loot, build_party_decline, build_party_invite, build_party_leave,
-    build_party_message, build_party_private_message, build_party_remove, build_pick_up,
-    build_ping, build_popup_request, build_popup_select, build_profile_request,
+    build_buy, build_cast_spell, build_chat_create_channel, build_chat_join, build_chat_leave,
+    build_chat_message, build_chat_open, build_client_view_range, build_disarm_request,
+    build_double_click, build_drop, build_equip, build_guild_menu_request, build_gump_response,
+    build_help_request, build_house_design_add_item, build_house_design_add_roof,
+    build_house_design_add_stair, build_house_design_backup, build_house_design_clear,
+    build_house_design_close, build_house_design_commit, build_house_design_delete_item,
+    build_house_design_delete_roof, build_house_design_go_to_floor, build_house_design_request,
+    build_house_design_restore, build_house_design_revert, build_house_design_sync,
+    build_hue_picker_response, build_legacy_menu_response, build_logout_request, build_opl_request,
+    build_party_accept, build_party_can_loot, build_party_decline, build_party_invite,
+    build_party_leave, build_party_message, build_party_private_message, build_party_remove,
+    build_pick_up, build_ping, build_popup_request, build_popup_select, build_profile_request,
     build_profile_update, build_prompt_response, build_quest_arrow_click, build_quest_menu_request,
     build_rename_request, build_say, build_sell, build_single_click, build_skill_lock,
     build_stat_lock, build_status_request, build_stun_request, build_target_response,
@@ -837,6 +838,24 @@ impl Session {
                 };
                 self.send(&build_status_request(4, serial))?;
             }
+            Action::ChatOpen => {
+                // ServUO ignores the name and uses `from.Name`; send ours anyway
+                // for wire parity with ClassicUO (see `build_chat_open`).
+                let name = self
+                    .world
+                    .player_mobile()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                self.send(&build_chat_open(&name))?;
+            }
+            Action::ChatJoin { channel, password } => {
+                self.send(&build_chat_join(channel, password))?;
+            }
+            Action::ChatCreate { channel, password } => {
+                self.send(&build_chat_create_channel(channel, password))?;
+            }
+            Action::ChatLeave => self.send(&build_chat_leave())?,
+            Action::ChatSay { text } => self.send(&build_chat_message(text))?,
             Action::Rename { serial, name } => self.send(&build_rename_request(*serial, name))?,
             Action::QuestArrowClick { right_click } => {
                 self.send(&build_quest_arrow_click(*right_click))?;

@@ -1,7 +1,8 @@
 // ---- seq-ring priming (skip a stale backlog replay on page reload) ----
 // Every event "ring" above (character anims 0x6E/0xE2, damage 0x0B, effects
 // 0x70/0xC0/0xC7, lift-rejects 0x27, container-opens 0x24, swings 0x2F,
-// paperdoll 0x88, external URLs 0xA5, tips/notices 0xA6, sounds 0x54) is keyed
+// paperdoll 0x88, external URLs 0xA5, tips/notices 0xA6, sounds 0x54,
+// server-chat lines 0xB2) is keyed
 // by a monotonic `seq` that lives in the
 // anima-net play server's `World`, NOT on this page: reloading the browser
 // resets every `lastXSeq` variable above to 0, but the live ServUO session
@@ -39,6 +40,7 @@ function primeSeqRings(s) {
   lastTipNoticeSeq = Math.max(lastTipNoticeSeq, maxSeq(s.tips));
   if (s.logoutAck) lastLogoutAckSeq = Math.max(lastLogoutAckSeq, s.logoutAck.seq | 0);
   lastBoatMoveSeq = Math.max(lastBoatMoveSeq, maxSeq(s.boatMoves));
+  lastChatSeq = Math.max(lastChatSeq, maxSeq(s.chat && s.chat.lines));
   // Per-key open-counters live in the dialog families, not in a ring here.
   primeDialogSeqs(s);
 }
@@ -69,6 +71,7 @@ async function poll() {
     diag.sync = performance.now() - ts;
     markDirty(); // a fresh poll may change tiles/entities → redraw once
     ingestSpeech(scene); // float new speech above its speaker
+    ingestChat(scene); // print new server-chat lines (0xB2) into the journal
     ingestAnims(scene); // play new character animations (0x6E: combat swings, bows…)
     ingestTypedAnims(scene); // play new typed animations (0xE2: emotes, gestures, alerts…)
     ingestDamage(scene); // float new combat damage numbers (0x0B)

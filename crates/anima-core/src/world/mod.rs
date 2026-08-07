@@ -903,7 +903,7 @@ pub struct TradeState {
 /// ClassicUO's `ChatStatus`: `Disabled` (no chat), `EnabledUserRequest` (the
 /// server asked us to display the enter-username window, 0x03EB), `Enabled`
 /// (our username was accepted and chat is live, 0x03ED).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ChatStatus {
     #[default]
     Disabled,
