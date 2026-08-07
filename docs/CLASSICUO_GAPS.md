@@ -99,14 +99,33 @@ now performs the repair on any self-0x20, gated on `walking_failed` so an
 unrelated 0x20 (the hiding-flag path) cannot drop live pending steps. A full
 reset is correct there because `Resynchronize` also does `state.Sequence = 0`.
 
-**Known divergence, deliberate, not fixed.** ClassicUO refuses to stretch a
-land tile whose texmap entry is empty (`Land.ApplyStretch` bails and draws a
-flat diamond, seams and all); we stretch the tile's own art instead. Measured:
-**23 of 2724 land graphics have `TexID == 0`, and all 23 are `Wet`** — so the
-whole footprint is "water at a slope", which ClassicUO deliberately never
-stretches (`IsStretched = TexID == 0 && IsWet`). Ours is arguably the better
-picture (no seams) and is certainly not a crash; recorded here so the next
-person meets a decision rather than a discrepancy.
+**Fixed — a tile with no texmap was stretched anyway.** ClassicUO refuses:
+`Land.ApplyStretch` bails the moment the texmap entry is empty and sets
+`AverageZ = MinZ = z`, so the tile is drawn as a flat diamond however the ground
+around it stands. We stretched the tile's own 44x44 art onto the quad instead —
+seamless, but smearing the diamond over a steep slope, which is the very thing
+texmaps exist to avoid. Measured: **23 of 2724 land graphics have `TexID == 0`
+and all 23 are `Wet`**, so the whole footprint is water at a shoreline —
+precisely what ClassicUO pre-seeds `IsStretched = TexID == 0 && IsWet` to
+refuse. Aligned, which also made `makeStretchedTile`'s land-art UV branch dead
+code and removed it: the quad now has exactly one texture source.
+
+**Do not oversell this one.** Sampling the live shard at open ocean
+(1250,3780), coast (1420,1720) and inland (1500,1560), the tiles whose drawing
+actually changes number **zero** in all three: water without a texmap turns out
+to be uniformly flat, so it already took the `!sloped` path. The value here is
+parity plus a deleted branch, not a visible fix — worth having if a facet or a
+custom map ever does slope water, and worth writing down so nobody re-measures
+it hoping for a screenshot difference.
+
+**Checked and does not apply: the half-texel UV inset.** ClassicUO's
+`CalculateHalfPixelUVs` exists because its terrain lives in a texture atlas, so
+a vertex at a region's edge samples the first texel of whatever was packed next
+door. Every texmap here is loaded as its own standalone texture
+(`PIXI.Assets.load` per URL; there is no `Spritesheet` in the tree), so there is
+no neighbour to bleed in. Recorded because the symptom — a one-texel fringe of
+foreign terrain along two edges of every stretched tile — would be baffling
+without the atlas half of the explanation.
 
 ## Audit baseline
 

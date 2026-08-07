@@ -394,20 +394,26 @@ function syncWorld(s) {
         // this branch never touches texFor and never sets `fallback`.
         const L = Math.min(255, Math.round((0.3 * t.c[0] + 0.59 * t.c[1] + 0.11 * t.c[2]) * 0.65 + 50));
         sp = makeColorTile(x, y, z0, z1, z2, z3, [L, L, L]);
-      } else if (!sloped) {
+      } else if (!sloped || !(t.tx > 0)) {
+        // Flat 44x44 diamond at this tile's own Z — either the ground really is
+        // level, or there is no texmap and ClassicUO refuses to stretch at all.
+        // `Land.ApplyStretch` bails the moment the texmap entry is empty and
+        // sets `AverageZ = MinZ = z`, so such a tile is drawn flat however the
+        // ground around it stands, seams and all. We used to stretch the tile's
+        // own 44x44 art onto the quad instead, which is seamless but smears the
+        // diamond over a steep slope — the reason texmaps exist. Measured
+        // against the real tiledata this is 23 of 2724 land graphics and every
+        // one of them is Wet, i.e. the whole footprint is water at a shoreline,
+        // which ClassicUO deliberately never stretches (`IsStretched` is
+        // pre-seeded to `TexID == 0 && IsWet` purely to refuse it).
         texUrl = `art/land/${t.g}.png`;
         const tex = texFor(texUrl);
         if (tex) sp = makeFlatTile(x, y, z0, tex);
         else { sp = makeColorTile(x, y, z0, z0, z0, z0, t.c); fallback = true; }
-      } else if (t.tx > 0) {
+      } else {
         texUrl = `texmap/${t.tx}.png`; // seamless texture for slopes
         const tex = texFor(texUrl);
-        if (tex) sp = makeStretchedTile(x, y, z0, z1, z2, z3, tex, true);
-        else { sp = makeColorTile(x, y, z0, z1, z2, z3, t.c); fallback = true; }
-      } else {
-        texUrl = `art/land/${t.g}.png`; // no texmap → stretch the art
-        const tex = texFor(texUrl);
-        if (tex) sp = makeStretchedTile(x, y, z0, z1, z2, z3, tex, false);
+        if (tex) sp = makeStretchedTile(x, y, z0, z1, z2, z3, tex);
         else { sp = makeColorTile(x, y, z0, z1, z2, z3, t.c); fallback = true; }
       }
       if (e) { world.removeChild(e.sp); e.sp.destroy(); }
@@ -649,8 +655,20 @@ function makeFlatTile(x, y, z, tex) {
 
 // A sloped land tile: a 4-corner quad whose vertices follow the corner heights
 // (top=this, right=(x+1,y), bottom=(x+1,y+1), left=(x,y+1)), per ClassicUO.
-// `square` UVs map a seamless texmap; otherwise the diamond art's edge points.
-function makeStretchedTile(x, y, z0, z1, z2, z3, tex, square) {
+//
+// The texture is always a seamless texmap, so the UVs are the unit square
+// mapped corner to corner — ClassicUO's `_cornerOffsetX/Y` identity in
+// `DrawStretchedLand`. There is no land-art variant: a tile without a texmap is
+// never stretched at all (see the caller), which is exactly why one texture
+// source suffices here.
+//
+// No half-texel inset on those UVs, deliberately. The inset ClassicUO applies
+// in `CalculateHalfPixelUVs` exists because its terrain lives in an atlas, so a
+// vertex at the region's edge samples the first texel of whatever was packed
+// next door — a fringe of foreign terrain. Every texmap here is loaded as its
+// own standalone texture (`PIXI.Assets.load` per URL, no Spritesheet anywhere),
+// so there is no neighbour to bleed in and clamping handles the edge.
+function makeStretchedTile(x, y, z0, z1, z2, z3, tex) {
   const Bx = (x - y) * HALF, By = (x + y) * HALF;
   const aPosition = [
     Bx,        By - HALF - z0 * ZSTEP, // top
@@ -658,7 +676,7 @@ function makeStretchedTile(x, y, z0, z1, z2, z3, tex, square) {
     Bx,        By + HALF - z2 * ZSTEP, // bottom
     Bx - HALF, By        - z3 * ZSTEP, // left
   ];
-  const aUV = square ? [0, 0, 1, 0, 1, 1, 0, 1] : [0.5, 0, 1, 0.5, 0.5, 1, 0, 0.5];
+  const aUV = [0, 0, 1, 0, 1, 1, 0, 1];
   const geometry = new PIXI.Geometry({ attributes: { aPosition, aUV }, indexBuffer: [0, 1, 2, 0, 2, 3] });
   const mesh = new PIXI.Mesh({ geometry, texture: tex });
   // Sort a sloped tile by its AverageZ (ClassicUO Land.CalculateAverageZ: the mean
