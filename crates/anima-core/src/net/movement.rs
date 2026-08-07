@@ -299,6 +299,33 @@ impl Walker {
         self.resync_out = false;
     }
 
+    /// The repair leg of the walk handshake: a 0x20 MobileUpdate naming the
+    /// player is the server's **answer to our Resync**, and the only thing that
+    /// unfreezes walking. Call it from the driver on every self-0x20; a no-op
+    /// unless we are actually gated.
+    ///
+    /// Why this exists as its own entry point rather than riding the driver's
+    /// teleport detection: that detection fires on a position delta greater
+    /// than one tile, and a resync answer usually carries a position we are
+    /// **already at or one step from** — the desync is a sequence disagreement,
+    /// not a displacement. So the delta test misses precisely the case the
+    /// freeze depends on, and `walking_failed` never clears: one bad confirm
+    /// and the character cannot walk again for the rest of the session, with
+    /// `resend_resync` latched so we never even ask twice.
+    ///
+    /// The full [`Walker::reset`] is right here, not just clearing the flag:
+    /// ServUO's `Resynchronize` answers with `MobileUpdate` + `SendEverything`
+    /// **and** `state.Sequence = 0`, so the sequence has to restart on our side
+    /// too or every following step is denied. `Resynchronize` only ever runs in
+    /// reply to the 0x22 we sent from [`Walker::bad_step`], which is why gating
+    /// on `walking_failed` cannot swallow an unrelated 0x20 (a hiding-flag
+    /// update mid-walk, say) and drop live pending steps.
+    pub fn on_player_update(&mut self) {
+        if self.walking_failed {
+            self.reset();
+        }
+    }
+
     /// Take a pending Resync packet to send, if any (driver pumps this each loop).
     pub fn take_resync(&mut self) -> Option<Vec<u8>> {
         if self.resync_out {
@@ -439,6 +466,50 @@ mod tests {
         walker.on_deny(&mut w, 0, 50, 60, 0, 4);
         assert!(!walker.walking_failed());
         assert!(walker.can_step());
+    }
+
+    #[test]
+    fn a_resync_answer_unfreezes_walking_even_without_moving_us() {
+        // The repair leg ServUO actually performs: our bad confirm sends 0x22,
+        // and `Resynchronize` answers with 0x20 MobileUpdate — NOT a 0x21 deny.
+        // The position it carries is the server's truth, which in an ordinary
+        // sequence desync is where we already are. Nothing else ever clears
+        // `walking_failed`, so if this leg is missed the character is frozen
+        // for the rest of the session.
+        let mut w = world_at(100, 100, 2);
+        let mut walker = Walker::new();
+        walker.step(&mut w, 2, false);
+        walker.on_confirm(&mut w, 42); // unknown seq → bad step
+        assert!(walker.walking_failed());
+        assert!(!walker.can_step());
+        assert!(walker.take_resync().is_some());
+
+        // The answer arrives without displacing us at all.
+        walker.on_player_update();
+        assert!(
+            !walker.walking_failed(),
+            "the resync answer must unfreeze us"
+        );
+        assert!(walker.can_step());
+        // And the sequence restarted, matching ServUO's `state.Sequence = 0`.
+        assert_eq!(walker.walk_sequence, 0);
+    }
+
+    #[test]
+    fn a_plain_player_update_while_healthy_keeps_pending_steps() {
+        // 0x20 also arrives for unrelated reasons (the hiding-flag feedback
+        // path). Resetting on those would drop live pending steps and restart a
+        // sequence the server did not restart, so the repair is gated.
+        let mut w = world_at(100, 100, 2);
+        let mut walker = Walker::new();
+        walker.step(&mut w, 2, false);
+        let seq_before = walker.walk_sequence;
+        walker.on_player_update();
+        assert!(!walker.walking_failed());
+        assert_eq!(
+            walker.walk_sequence, seq_before,
+            "an unrelated 0x20 must not reset"
+        );
     }
 
     #[test]

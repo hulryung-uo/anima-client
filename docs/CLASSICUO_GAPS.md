@@ -56,6 +56,58 @@ checking before writing off a live test as a failed feature:
   expansion is the reason — a live test that produces silence here is not
   evidence of a bug.
 
+## Cross-check against OpenShard's `docs/findings.md` (2026-08-07)
+
+A second opinion from a *server* that speaks the same protocol (see DESIGN.md
+§7). Twelve of its claims are checkable against this tree; ten confirmed what
+we already do, and the two that did not were both real defects.
+
+**Confirmed, no change needed:** `Equipconv.def` is an override table and a
+worn item with no entry draws from its own tiledata `AnimID` (`Look::equip_conv`
+already falls back — this is the defect that silently dropped every piece of
+plain clothing over there, and we also read the `mobtypes.txt` they note they
+do not); the texmap id sits in the two bytes after the land entry's 8-byte flags
+and its size is `len == 0x2000 ? 64 : 128`; land is preferred out of the `.uop`;
+distance is Chebyshev; `0x8C`/`0xA8` carry the address in opposite orders; a
+declared frame length is validated before anything is reserved; `0x22` means
+opposite things per direction and our incoming table / outgoing builders
+already keep the two apart; sloped land is drawn as a four-corner quad whose
+vertices come from the neighbours' z, not as a flat diamond at its own.
+
+**Fixed — land art read a black pixel as a hole.** Land and statics decode the
+same 16-bit colour and disagree about zero: a static carries transparency as
+`0x0000`, but a land tile's shape is the diamond and nothing else, so a zero
+inside it is a genuinely black pixel. ClassicUO makes the split explicit —
+`LoadLand` writes `Color16To32(...) | 0xFF_00_00_00` with no test at all, while
+`LoadArt` guards every run with `if (val != 0)`. Ours ran both through the
+transparent-on-zero path. Measured against the real `artLegacyMUL.uop`:
+**361 of 851 land tiles (42.4%) are affected, 25,877 pixels**, three to six on
+an ordinary grass tile — small enough to read as dark speckle in the texture
+rather than as holes, which is why it survived every screenshot. Now
+`argb1555_land` vs `argb1555`, pinned by a test on an all-zero tile.
+
+**Fixed — one bad walk confirm froze movement for the whole session.** The
+repair leg is a request/response: a confirm we cannot place sets
+`walking_failed` (gating every further step) and sends one 0x22 Resync, and
+ServUO's `Resynchronize` answers with **0x20 MobileUpdate** — not a 0x21 deny.
+Only `Walker::reset` cleared the gate, and the driver called it solely on a
+position jump greater than one tile. But a sequence desync is a disagreement
+about *count*, not *place*: the resync answer normally carries the position we
+already hold, so the jump is zero tiles, the reset never fired, and
+`resend_resync` stayed latched so we never asked again. `Walker::on_player_update`
+now performs the repair on any self-0x20, gated on `walking_failed` so an
+unrelated 0x20 (the hiding-flag path) cannot drop live pending steps. A full
+reset is correct there because `Resynchronize` also does `state.Sequence = 0`.
+
+**Known divergence, deliberate, not fixed.** ClassicUO refuses to stretch a
+land tile whose texmap entry is empty (`Land.ApplyStretch` bails and draws a
+flat diamond, seams and all); we stretch the tile's own art instead. Measured:
+**23 of 2724 land graphics have `TexID == 0`, and all 23 are `Wet`** — so the
+whole footprint is "water at a slope", which ClassicUO deliberately never
+stretches (`IsStretched = TexID == 0 && IsWet`). Ours is arguably the better
+picture (no seams) and is certainly not a crash; recorded here so the next
+person meets a decision rather than a discrepancy.
+
 ## Audit baseline
 
 - Audited: **2026-07-30** (supersedes the 2026-07-22 pass; 60 commits landed between

@@ -37,7 +37,29 @@ impl Image {
     }
 }
 
-/// ARGB1555 (UO 16-bit) → RGBA8. Color 0 is transparent.
+/// ARGB1555 (UO 16-bit) → RGBA8, **always opaque** — the rule for *land*.
+///
+/// Land and statics decode the same 16-bit colour but disagree about zero, and
+/// getting that backwards is invisible in the obvious places. A static carries
+/// its transparency as `0x0000` pixels; a land tile's shape is the diamond and
+/// nothing else, so a zero inside the diamond is a genuinely **black pixel**.
+/// ClassicUO makes the split explicit — `LoadLand` writes
+/// `Color16To32(...) | 0xFF_00_00_00`, forcing alpha on with no test at all,
+/// while `LoadArt` guards each run with `if (val != 0)`.
+///
+/// Treating land's zeros as transparent punches pinholes through the ground.
+/// Measured against the real `artLegacyMUL.uop`: **361 of 851 land tiles
+/// (42.4%) contain at least one**, 25,877 pixels in total — three to six on an
+/// ordinary grass tile (0x0003, 0x0004, 0x0005). At that size they read as
+/// dark speckle in the texture rather than as holes, which is why this
+/// survives a screenshot.
+fn argb1555_land(c: u16) -> [u8; 4] {
+    let [r, g, b, _] = argb1555(c);
+    [r, g, b, 255]
+}
+
+/// ARGB1555 (UO 16-bit) → RGBA8. Color 0 is transparent — the rule for
+/// *statics*; land uses [`argb1555_land`], and the difference is load-bearing.
 fn argb1555(c: u16) -> [u8; 4] {
     if c == 0 {
         return [0, 0, 0, 0];
@@ -78,7 +100,10 @@ impl Art {
         let mut rgba = vec![0u8; LAND_DIM * LAND_DIM * 4];
         let mut p = 0usize;
         let put = |x: usize, y: usize, c: u16, rgba: &mut [u8]| {
-            let px = argb1555(c);
+            // Opaque, always — see `argb1555_land`. Pixels the loops below never
+            // visit stay at the buffer's initial zero, which is what makes the
+            // four corners *outside* the diamond transparent.
+            let px = argb1555_land(c);
             let o = (y * LAND_DIM + x) * 4;
             rgba[o..o + 4].copy_from_slice(&px);
         };
@@ -205,6 +230,53 @@ fn average_opaque(rgba: &[u8]) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn land_diamond_is_opaque_and_only_its_corners_are_not() {
+        // A synthetic 44x44 land tile is 1012 pixels of colour, and this one is
+        // ALL zeros — the worst case for the bug this pins. Every pixel inside
+        // the diamond must come out opaque black; only the four corners outside
+        // it stay transparent. Reading zero as transparency instead puts holes
+        // through the ground (see `argb1555_land`).
+        let mut rgba = vec![0u8; 44 * 44 * 4];
+        let put = |x: usize, y: usize, c: u16, rgba: &mut [u8]| {
+            let px = argb1555_land(c);
+            let o = (y * 44 + x) * 4;
+            rgba[o..o + 4].copy_from_slice(&px);
+        };
+        let mut inside = 0usize;
+        for i in 0..22usize {
+            let (count, start) = ((i + 1) * 2, 22 - (i + 1));
+            for j in 0..count {
+                put(start + j, i, 0, &mut rgba);
+                inside += 1;
+            }
+        }
+        for i in 0..22usize {
+            let (count, start) = ((22 - i) * 2, i);
+            for j in 0..count {
+                put(start + j, 22 + i, 0, &mut rgba);
+                inside += 1;
+            }
+        }
+        assert_eq!(inside, 1012, "the diamond covers 1012 of 1936 pixels");
+        let opaque = rgba.chunks_exact(4).filter(|p| p[3] == 255).count();
+        assert_eq!(
+            opaque, inside,
+            "every pixel inside the diamond must be opaque"
+        );
+        // And the colour really is black, not some accidental fill.
+        assert_eq!(&rgba[(22 * 44 + 22) * 4..][..4], &[0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn static_zero_stays_transparent() {
+        // The other half of the split: statics DO carry transparency as zero.
+        assert_eq!(argb1555(0), [0, 0, 0, 0]);
+        assert_eq!(argb1555_land(0), [0, 0, 0, 255]);
+        // Non-zero colours are identical either way.
+        assert_eq!(argb1555(0x7FFF), argb1555_land(0x7FFF));
+    }
 
     #[test]
     #[ignore] // needs ~/dev/uo/uo-resource

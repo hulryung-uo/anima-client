@@ -483,6 +483,25 @@ All present on the same machine under `~/dev/uo/`:
 - **`~/dev/uo/classicuo`** — the C# reference client (your fork, `.NET 10`). Authoritative for packet handlers (`Network/PacketHandlers.cs` ~119 handlers, `Network/OutgoingPackets.cs` ~80), world model (`Game/World.cs`, `Game/GameObjects/`), file formats (`ClassicUO.Assets`, `ClassicUO.IO`), pathfinding (`Game/Pathfinder.cs`), and the login flow (`Game/Scenes/LoginScene.cs`). **Read these when implementing the equivalent Rust.**
 - **ServUO** (`~/dev/uo/servuo`) and **ModernUO** — server-side view of the protocol for cross-checking. ModernUO is a clean modern .NET rewrite, good for world-model reference.
 - **`~/dev/uo/uowiki`** — companion knowledge base (game facts). Also exposed as an MCP server (`wiki_search`, `wiki_read_page`) in sessions here.
+- **Two independent Rust UO projects**, surfaced by their authors on issue #1
+  (2026-08-07) and both permissively licensed, so their code is usable and not
+  merely readable: **[`ungine7`](https://github.com/broker0/ungine7)** (MIT, a
+  protocol/tooling workspace — its live typed packet inspector and session
+  record/replay are better versions of what `uo_proxy` captures give us) and
+  **[`OpenShard`](https://github.com/enomado/OpenShard)** (MIT OR Apache-2.0, a
+  *server* engine, so it holds the opposite end of every packet we send).
+  Note `ungine7`'s README carries an "Educational Use Only" paragraph: it is a
+  non-binding statement of intent ("the maintainers do not endorse…"), not a
+  licence condition, and its `LICENSE` is plain MIT.
+
+  **Why they earn a place beside ClassicUO/ServUO/Razor:** this codebase has
+  twice settled a question by finding ClassicUO wrong, and both times the tie
+  was broken by having *two* independent implementations of the other side.
+  Four sources is materially better than three. OpenShard's
+  [`docs/findings.md`](https://github.com/enomado/OpenShard/blob/main/docs/findings.md)
+  is the highest-value single artifact — the same genre as §8 here, written
+  from the server's side. Auditing our tree against it found two real defects
+  (land-art alpha, and the walk repair leg); see CLASSICUO_GAPS.md.
 
 ---
 

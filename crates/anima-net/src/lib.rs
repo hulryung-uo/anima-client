@@ -1340,6 +1340,16 @@ impl Session {
                         self.walker.reset();
                     }
                 }
+                // The other reason a 0x20 arrives: it is ServUO `Resynchronize`
+                // answering the 0x22 we sent after a bad confirm — the repair
+                // leg, and the ONLY thing that unfreezes walking. The delta test
+                // above cannot stand in for it, because a sequence desync
+                // normally leaves us where the server already thinks we are, so
+                // the jump is zero tiles and the reset never fires. Missing this
+                // costs the whole session's movement, not one step.
+                if frame.first() == Some(&0x20) {
+                    self.walker.on_player_update();
+                }
             }
         }
         Ok(())
