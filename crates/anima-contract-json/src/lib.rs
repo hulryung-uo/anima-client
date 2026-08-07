@@ -93,13 +93,17 @@
 //! vitals packet is run through ServUO's `AttributeNormalizer` (max fixed at
 //! 25, current scaled) — a brain reads another member's mana as a fraction,
 //! never as spendable points. No new observation fields; `party` already
-//! carries the roster.)
+//! carries the roster. v21: added `Rename` (0x75, in practice pet naming),
+//! `QuestArrowClick`, `HelpRequest` (the GM-page entry point) and the
+//! `GuildMenu`/`QuestMenu` requests. All five answer with an ordinary server
+//! gump or a journal line, so nothing new is needed to *read* the result —
+//! these were purely missing outgoing verbs.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 20;
+pub const SCHEMA_VERSION: u32 = 21;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
@@ -792,6 +796,19 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         "OplRequest" => Ok(Action::OplRequest {
             serial: req_u32("serial")?,
         }),
+        "Rename" => Ok(Action::Rename {
+            serial: req_u32("serial")?,
+            name: text("name"),
+        }),
+        "QuestArrowClick" => Ok(Action::QuestArrowClick {
+            right_click: v
+                .get("right_click")
+                .and_then(Value::as_bool)
+                .unwrap_or_default(),
+        }),
+        "HelpRequest" => Ok(Action::HelpRequest),
+        "GuildMenu" => Ok(Action::GuildMenu),
+        "QuestMenu" => Ok(Action::QuestMenu),
         "PartyInvite" => Ok(Action::PartyInvite),
         "PartyLeave" => Ok(Action::PartyLeave),
         "PartyKick" => Ok(Action::PartyKick {
@@ -1092,6 +1109,20 @@ mod tests {
                 json!({"type": "OplRequest", "serial": 8}),
                 Action::OplRequest { serial: 8 },
             ),
+            (
+                json!({"type": "Rename", "serial": 7, "name": "Fluffy"}),
+                Action::Rename {
+                    serial: 7,
+                    name: "Fluffy".into(),
+                },
+            ),
+            (
+                json!({"type": "QuestArrowClick", "right_click": true}),
+                Action::QuestArrowClick { right_click: true },
+            ),
+            (json!({"type": "HelpRequest"}), Action::HelpRequest),
+            (json!({"type": "GuildMenu"}), Action::GuildMenu),
+            (json!({"type": "QuestMenu"}), Action::QuestMenu),
             (json!({"type": "PartyInvite"}), Action::PartyInvite),
             (json!({"type": "PartyLeave"}), Action::PartyLeave),
             (
@@ -1361,8 +1392,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v20_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 20);
+    fn schema_v21_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 21);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,

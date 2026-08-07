@@ -610,17 +610,68 @@ pub fn build_bandage_target(bandage: u32, target: u32) -> Vec<u8> {
     finish_variable(w.into_vec())
 }
 
-/// Shared framing for CustomHouse design-editor commands: `0xD7` GenericAOS
-/// (same packet id as [`build_use_ability`] above, just a different
-/// sub-command space) carrying zero or more encoded `Int32` arguments.
+/// HelpRequest `0x9B` (fixed 258 bytes) — open the shard's help / GM-page
+/// menu. The 257-byte payload is **entirely ignored**: ServUO's handler reads
+/// nothing at all and just raises `HelpRequest`, and ClassicUO writes 257
+/// zeros. Kept as zeros for wire parity rather than trimmed, because the
+/// packet's registered length is fixed and a short one desynchronizes the
+/// stream. Layout: `[0x9B][0x00 × 257]`.
+pub fn build_help_request() -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x9B).zeros(257);
+    w.into_vec()
+}
+
+/// Click the on-screen quest arrow — GeneralInfo `0xBF`, subcommand `0x0007`,
+/// then a boolean: `false` = left click, `true` = right click.
+///
+/// The arrow is server-owned state (0xBA sets and clears it); this reports
+/// that we clicked it, and ServUO forwards the click to whatever placed it
+/// (`Mobile.QuestArrow.OnClick`), which is typically what dismisses it.
+/// A click with no arrow outstanding is a harmless no-op server-side.
+/// Layout: `[0xBF][len:u16=0x0006][0x0007][rightClick:u8]`. Ported from
+/// ClassicUO `Send_ClickQuestArrow`.
+pub fn build_quest_arrow_click(right_click: bool) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x0007);
+    w.u8(u8::from(right_click));
+    finish_variable(w.into_vec())
+}
+
+/// Ask the server to open the guild menu — `0xD7` subcommand `0x28`, no
+/// arguments (ServUO `GuildGumpRequest`). The reply is an ordinary server
+/// gump, so nothing new is needed to *read* it.
+pub fn build_guild_menu_request(player_serial: u32) -> Vec<u8> {
+    build_encoded_command(player_serial, 0x28, &[])
+}
+
+/// Ask the server to open the quest menu — `0xD7` subcommand `0x32`, no
+/// arguments (ServUO `QuestGumpRequest`), answered with an ordinary gump.
+///
+/// Note a harmless divergence: ClassicUO's `Send_QuestMenuRequest` ends this
+/// one with `0x00` where its own guild twin (and every other `0xD7` it sends)
+/// ends with `0x0A`. We write `0x0A` for both, because ServUO's
+/// `EncodedCommand` dispatches on the subcommand and hands the rest to a
+/// handler that reads nothing — neither byte is ever looked at.
+pub fn build_quest_menu_request(player_serial: u32) -> Vec<u8> {
+    build_encoded_command(player_serial, 0x32, &[])
+}
+
+/// Shared framing for the `0xD7` GenericAOS family — ServUO's `RegisterEncoded`
+/// table (same packet id as [`build_use_ability`] above, one subcommand space
+/// per feature) — carrying zero or more encoded `Int32` arguments.
+///
+/// Was `build_house_design`, and renamed when the guild/quest gump requests
+/// turned out to want the identical framing: the house designer is the biggest
+/// user of this shape, not the only one.
 ///
 /// ServUO's `EncodedReader::ReadInt32` (used by every `HouseFoundation`
 /// designer handler) requires a type byte of `0` before the 4-byte
 /// big-endian value; the other encoded types it defines (`2` = string, `3` =
-/// `Point3D`) are never used by the house designer, so this only needs to
+/// `Point3D`) are never used by anything we send, so this only needs to
 /// emit the `Int32` shape. Layout:
 /// `[0xD7][len:u16][playerSerial:u32][subcmd:u16]([0x00][arg:u32])*[0x0A]`.
-fn build_house_design(player_serial: u32, subcmd: u16, args: &[u32]) -> Vec<u8> {
+fn build_encoded_command(player_serial: u32, subcmd: u16, args: &[u32]) -> Vec<u8> {
     let mut w = PacketWriter::new();
     w.u8(0xD7).u16(0); // id + length placeholder
     w.u32(player_serial).u16(subcmd);
@@ -639,19 +690,19 @@ fn build_house_design(player_serial: u32, subcmd: u16, args: &[u32]) -> Vec<u8> 
 /// of ServUO's `HouseFoundation.RegisterEncoded` table; no arguments. Ports
 /// ClassicUO `Send_CustomHouseBackup`.
 pub fn build_house_design_backup(player_serial: u32) -> Vec<u8> {
-    build_house_design(player_serial, 0x02, &[])
+    build_encoded_command(player_serial, 0x02, &[])
 }
 
 /// CustomHouse designer: Restore the last backed-up design. Sub-command
 /// `0x03`; no arguments. Ports ClassicUO `Send_CustomHouseRestore`.
 pub fn build_house_design_restore(player_serial: u32) -> Vec<u8> {
-    build_house_design(player_serial, 0x03, &[])
+    build_encoded_command(player_serial, 0x03, &[])
 }
 
 /// CustomHouse designer: Commit the design (finalize and leave edit mode).
 /// Sub-command `0x04`; no arguments. Ports ClassicUO `Send_CustomHouseCommit`.
 pub fn build_house_design_commit(player_serial: u32) -> Vec<u8> {
-    build_house_design(player_serial, 0x04, &[])
+    build_encoded_command(player_serial, 0x04, &[])
 }
 
 /// CustomHouse designer: delete a placed component at `(x, y, z)`. Sub-command
@@ -664,7 +715,7 @@ pub fn build_house_design_delete_item(
     y: i32,
     z: i32,
 ) -> Vec<u8> {
-    build_house_design(
+    build_encoded_command(
         player_serial,
         0x05,
         &[graphic as u32, x as u32, y as u32, z as u32],
@@ -676,7 +727,7 @@ pub fn build_house_design_delete_item(
 /// (`ServUO Designer_Build`) — the canonical 0xD7 example this file's
 /// house-designer builders are modeled on.
 pub fn build_house_design_add_item(player_serial: u32, graphic: u16, x: i32, y: i32) -> Vec<u8> {
-    build_house_design(player_serial, 0x06, &[graphic as u32, x as u32, y as u32])
+    build_encoded_command(player_serial, 0x06, &[graphic as u32, x as u32, y as u32])
 }
 
 /// CustomHouse designer: response/acknowledge. Sub-command `0x0A`; no
@@ -684,39 +735,39 @@ pub fn build_house_design_add_item(player_serial: u32, graphic: u16, x: i32, y: 
 /// as `Designer_Action` with the comment "WTF does this do?" — included here
 /// for completeness since it is part of the same designer flow.
 pub fn build_house_design_response(player_serial: u32) -> Vec<u8> {
-    build_house_design(player_serial, 0x0A, &[])
+    build_encoded_command(player_serial, 0x0A, &[])
 }
 
 /// CustomHouse designer: close the designer / exit the building. Sub-command
 /// `0x0C`; no arguments. Ports ClassicUO `Send_CustomHouseBuildingExit`.
 pub fn build_house_design_close(player_serial: u32) -> Vec<u8> {
-    build_house_design(player_serial, 0x0C, &[])
+    build_encoded_command(player_serial, 0x0C, &[])
 }
 
 /// CustomHouse designer: add a stair component at `(x, y)`. Sub-command
 /// `0x0D`, args `[graphic, x, y]`. Ports ClassicUO `Send_CustomHouseAddStair`
 /// (`ServUO Designer_Stairs`).
 pub fn build_house_design_add_stair(player_serial: u32, graphic: u16, x: i32, y: i32) -> Vec<u8> {
-    build_house_design(player_serial, 0x0D, &[graphic as u32, x as u32, y as u32])
+    build_encoded_command(player_serial, 0x0D, &[graphic as u32, x as u32, y as u32])
 }
 
 /// CustomHouse designer: request a full state re-sync. Sub-command `0x0E`;
 /// no arguments. Ports ClassicUO `Send_CustomHouseSync`.
 pub fn build_house_design_sync(player_serial: u32) -> Vec<u8> {
-    build_house_design(player_serial, 0x0E, &[])
+    build_encoded_command(player_serial, 0x0E, &[])
 }
 
 /// CustomHouse designer: clear the entire design back to the foundation.
 /// Sub-command `0x10`; no arguments. Ports ClassicUO `Send_CustomHouseClear`.
 pub fn build_house_design_clear(player_serial: u32) -> Vec<u8> {
-    build_house_design(player_serial, 0x10, &[])
+    build_encoded_command(player_serial, 0x10, &[])
 }
 
 /// CustomHouse designer: switch the editor's active floor. Sub-command
 /// `0x12`, arg `[floor]`. Ports ClassicUO `Send_CustomHouseGoToFloor`
 /// (`ServUO Designer_Level`, which clamps `newLevel` to `1..=MaxLevels`).
 pub fn build_house_design_go_to_floor(player_serial: u32, floor: u8) -> Vec<u8> {
-    build_house_design(player_serial, 0x12, &[floor as u32])
+    build_encoded_command(player_serial, 0x12, &[floor as u32])
 }
 
 /// CustomHouse designer: add a roof component at `(x, y, z)` (Samurai Empire
@@ -729,7 +780,7 @@ pub fn build_house_design_add_roof(
     y: i32,
     z: i32,
 ) -> Vec<u8> {
-    build_house_design(
+    build_encoded_command(
         player_serial,
         0x13,
         &[graphic as u32, x as u32, y as u32, z as u32],
@@ -746,7 +797,7 @@ pub fn build_house_design_delete_roof(
     y: i32,
     z: i32,
 ) -> Vec<u8> {
-    build_house_design(
+    build_encoded_command(
         player_serial,
         0x14,
         &[graphic as u32, x as u32, y as u32, z as u32],
@@ -757,7 +808,7 @@ pub fn build_house_design_delete_roof(
 /// commit). Sub-command `0x1A`; no arguments. Ports ClassicUO
 /// `Send_CustomHouseRevert`.
 pub fn build_house_design_revert(player_serial: u32) -> Vec<u8> {
-    build_house_design(player_serial, 0x1A, &[])
+    build_encoded_command(player_serial, 0x1A, &[])
 }
 
 /// SkillLock `0x3A` (variable) — change a skill's lock state (up/down/locked).
@@ -1354,6 +1405,44 @@ mod tests {
         assert_eq!(
             d,
             vec![0xD7, 0x00, 0x0F, 0, 0, 0, 1, 0x00, 0x19, 0, 0, 0, 0, 0, 0x0A]
+        );
+    }
+
+    #[test]
+    fn help_request_is_the_fixed_258_byte_packet() {
+        // ServUO registers 0x9B at a FIXED 258 and reads none of it; the 257
+        // zero bytes exist only so the stream stays in sync. Trimming them
+        // would desynchronize everything after this packet, not fail locally.
+        let p = build_help_request();
+        assert_eq!(p.len(), 258);
+        assert_eq!(p[0], 0x9B);
+        assert!(p[1..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn quest_arrow_click_carries_the_button() {
+        assert_eq!(
+            build_quest_arrow_click(false),
+            vec![0xBF, 0x00, 0x06, 0x00, 0x07, 0x00]
+        );
+        assert_eq!(
+            build_quest_arrow_click(true),
+            vec![0xBF, 0x00, 0x06, 0x00, 0x07, 0x01]
+        );
+    }
+
+    #[test]
+    fn guild_and_quest_menu_requests_are_bare_encoded_commands() {
+        // `[0xD7][len:u16][playerSerial:u32][subcmd:u16][0x0A]` = 10 bytes.
+        assert_eq!(
+            build_guild_menu_request(0xDEAD_BEEF),
+            vec![0xD7, 0x00, 0x0A, 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x28, 0x0A]
+        );
+        // ClassicUO ends its quest variant with 0x00 instead of 0x0A; ServUO
+        // reads neither, so we stay consistent with every other 0xD7 we send.
+        assert_eq!(
+            build_quest_menu_request(0xDEAD_BEEF),
+            vec![0xD7, 0x00, 0x0A, 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x32, 0x0A]
         );
     }
 

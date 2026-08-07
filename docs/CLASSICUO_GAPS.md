@@ -26,6 +26,12 @@ the shard (a GM leader on 8788, an ordinary account on 8789) and actually
 forming a party, which is the only way to test any of it. That pass also found
 the second row's stated premise wrong in two ways — see the row.
 
+Closed 2026-08-07 (the menus batch): the last "S each" Tier 1 row — guild/quest
+menus, help+GM page, rename, quest-arrow click. Contract schema v20 → v21.
+`build_house_design` was renamed `build_encoded_command`: the guild and quest
+gump requests want byte-identical framing, so the house designer is the
+biggest user of that shape, not the only one.
+
 **Know what the local shard can and cannot prove.** `Config/Expansion.cfg` on
 the ServUO at `127.0.0.1:2594` says `CurrentExpansion=T2A`, so `Core.AOS` is
 **false** there. That single fact splits this batch in half, and it is worth
@@ -43,6 +49,12 @@ checking before writing off a live test as a failed feature:
   swing — **that is the shard, not the client**, and it cost a confused
   detour to work out. Those two rows rest on unit tests plus the ServUO
   source; confirming them live needs a shard at AOS or later.
+- The same gate has now caught three separate features, so check it *first*
+  when something reaches ServUO and nothing happens: `0x11 type >= 6` needs
+  `Core.ML` (the shard sends type 3), and the guild menu needs
+  `Guild.NewGuildSystem => Core.SE`. In each case the client is fine and the
+  expansion is the reason — a live test that produces silence here is not
+  evidence of a bug.
 
 ## Audit baseline
 
@@ -235,7 +247,7 @@ The receive side is generally complete; there is no way to *act*.
 | Boat helm control (0xBF/0x33) | absent | M |
 | Bulletin board post/read/reply | state model decoded (0x71); no authoring surface | M |
 | Chat channels (0xB2/0xB3/0xB5) | **core is complete** — create/destroy/join/leave/lines all decoded — with no Action, scene field or UI above it | M |
-| Guild / quest menus (0xD7 sub 0x28 / 0x32), help+GM page (0x9B), rename (0x75), quest-arrow click (0xBF/0x07) | absent | S each |
+| ~~Guild / quest menus (0xD7 sub 0x28 / 0x32), help+GM page (0x9B), rename (0x75), quest-arrow click (0xBF/0x07)~~ — **CLOSED** (4 of 5 live-verified) | `Action::GuildMenu`/`QuestMenu`/`HelpRequest`/`Rename`/`QuestArrowClick` + `guildmenu`/`questmenu`/`help`/`rename:<serial>:<name>`/`questarrow[:<0\|1>]`. All five answer with an ordinary gump or journal line, so nothing new was needed to *read* the result — these were purely missing outgoing verbs. **"Absent" was wrong about rename:** `build_rename_request` already existed, CP1252-encoded and correct, with no caller anywhere — only the Action and command were missing. Live: `help` → the "Ultima Online Help Menu" gump; `questmenu` → the "Quest Log" gump; `rename` turned "a horse" into "Bucephalus", cross-confirmed by the Tracking skill's own list showing the new name; `questarrow` discriminated by button — a **left** click left the arrow up and a **right** click cleared it, which is exactly `TrackArrow.OnClick`'s asymmetry, so the boolean byte demonstrably arrives intact. Only `guildmenu` is unverified here: ServUO gates it on `Guild.NewGuildSystem => Core.SE`, above this shard's T2A (see the shard note above) | S each |
 | ~~Party: loot flag, private message, leader kick~~ — **CLOSED, live-verified** | `build_party_can_loot` (0xBF/0x06/0x06), `build_party_private_message` (0x06/0x03) and `build_party_remove` (0x06/0x02) + `Action::PartySetCanLoot`/`PartyPrivateMessage`/`PartyKick` + `partyloot:<0\|1>`/`partytell:<member>:<text>`/`partykick:<member>`. **Kick and leave are one packet**, distinguished only by whose serial it names; ServUO's `PartyCommands.OnRemove` gates it on `p.Leader == from \|\| from == target` and ignores a non-leader silently — verified both ways live (a member's kick of the leader changed nothing; the leader's kick of the member disbanded the party on both clients). Loot flag answers cliloc 1005447/1005448 and is **never sent back**, so a UI must remember what it asked for. Private messages are clamped to 128 chars because ServUO *drops* longer ones rather than truncating | S |
 | ~~Request another entity's status (0x34 non-self) → party mana/stam bars~~ — **CLOSED, live-verified — and the row's premise was wrong twice** | `Action::StatusRequest { serial }` (0 = self) → 0x34 type 4; `party[].mana/manaMax/stam/stamMax` now leave `build_scene`. Two corrections worth keeping: **(a) it is a resync, not the only source.** ServUO pushes a member's mana/stam changes unprompted (`Party.OnManaChanged`/`OnStamChanged` → 0xA2/0xA3) — but only while they are in update range and visible, so a member you lost sight of freezes at the last value with nothing scheduled to fix it. That is the real gap this fills. **(b) The values are percentages, not points.** Every party-facing vitals packet goes through `AttributeNormalizer` (max written as a fixed 25, current as `cur * 25 / max`). Measured live: a member at a real 7/10 mana reached the leader as 17/25. Never compare another member's mana against a spell cost — our own vitals are un-normalized, theirs are not | S |
 

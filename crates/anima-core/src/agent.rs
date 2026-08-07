@@ -669,6 +669,29 @@ pub enum Action {
     /// absolute number, and must not compare it against a spell's mana cost.
     /// Our own vitals are exempt — those arrive un-normalized.
     StatusRequest { serial: u32 },
+    /// Rename the mobile `serial` (0x75). Shards accept this only for a
+    /// creature we control — a pet — and ignore it otherwise. There is no
+    /// acknowledgement packet, so confirm by re-reading the mobile's name
+    /// rather than assuming it took. `name` is truncated to 30 ASCII bytes,
+    /// the fixed field the packet carries.
+    Rename { serial: u32, name: String },
+    /// Click the server's on-screen quest arrow (0xBF/0x07); `right_click`
+    /// picks the button. The arrow itself is server-owned state (0xBA sets and
+    /// clears it, surfaced as [`Observation::quest_arrow`]) — this reports the
+    /// click, which is usually what makes the server take it away. A no-op
+    /// when no arrow is outstanding.
+    QuestArrowClick { right_click: bool },
+    /// Open the shard's help / GM-page menu (0x9B). The reply is an ordinary
+    /// server gump, answered with [`Action::GumpResponse`] like any other —
+    /// which is what makes this worth having for a brain: it is the entry
+    /// point to paging a GM when something is stuck.
+    HelpRequest,
+    /// Ask the server to open the guild menu (0xD7/0x28); the driver fills our
+    /// own serial. Answered with an ordinary gump.
+    GuildMenu,
+    /// Ask the server to open the quest menu (0xD7/0x32); the driver fills our
+    /// own serial. Answered with an ordinary gump.
+    QuestMenu,
     /// Answer a pending 0x9A ASCII or 0xC2 Unicode server text prompt (pet rename,
     /// house sign, guild abbreviation, …) with typed `text`. The driver selects
     /// the prompt kind's matching packet/text encoding and echoes the

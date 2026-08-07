@@ -99,6 +99,9 @@ pub(super) fn parse_house_design_command(body: &str) -> Option<Action> {
 /// `gump:<serial>:<gumpId>:<button>[:sw=1,2][:e=<id>=<text>,…]` (gump reply; text
 /// entries can't contain `:`, `,`, or `=`) · `menusel:<serial>:<index>` (legacy
 /// 0x7C menu; index 0 cancels) · `huepick:<serial>:<hue>` (0x95 dye picker) ·
+/// `rename:<serial>:<name>` (0x75, in practice a pet) · `questarrow[:<0|1>]`
+/// (click the server's quest arrow) · `help` / `guildmenu` / `questmenu`
+/// (argument-free menu requests answered with an ordinary gump) ·
 /// `partykick:<member>` (leader-only remove) · `partytell:<member>:<text>`
 /// (private party message) · `partyloot:<0|1>` (let the party loot our corpse) ·
 /// `statusreq[:<serial>]` (0x34 type 4; omitted = self, a party member's serial
@@ -275,6 +278,24 @@ pub(super) fn parse_command(body: &str) -> Option<Action> {
         "oplreq" => Some(Action::OplRequest {
             serial: parse_serial(arg)?,
         }),
+        // rename:<serial>:<name> — 0x75. Shards accept it only for a creature we
+        // control; the name may contain colons, so only the serial is split off.
+        "rename" => {
+            let (serial, name) = arg.split_once(':')?;
+            Some(Action::Rename {
+                serial: parse_serial(serial)?,
+                name: name.to_string(),
+            })
+        }
+        // questarrow[:<0|1>] — click the server's quest arrow (0xBF/0x07); 1 = right click.
+        "questarrow" => Some(Action::QuestArrowClick {
+            right_click: arg == "1" || arg == "right",
+        }),
+        // help / guildmenu / questmenu — argument-free menu requests answered with
+        // an ordinary gump (0x9B, 0xD7/0x28, 0xD7/0x32).
+        "help" => arg.is_empty().then_some(Action::HelpRequest),
+        "guildmenu" => arg.is_empty().then_some(Action::GuildMenu),
+        "questmenu" => arg.is_empty().then_some(Action::QuestMenu),
         // partyinvite — invite a player (0xBF/0x06/0x01); the server opens a target cursor.
         "partyinvite" => Some(Action::PartyInvite),
         // partyleave — leave the party (0xBF/0x06/0x02, self serial filled by the driver).
@@ -659,6 +680,32 @@ mod command_tests {
     fn logout_command_is_exact_and_argument_free() {
         assert_eq!(parse_command("logout"), Some(Action::Logout));
         assert!(parse_command("logout:anything").is_none());
+    }
+
+    #[test]
+    fn menu_and_rename_commands_parse() {
+        // The name may contain colons — only the serial is split off.
+        assert_eq!(
+            parse_command("rename:0x67f:Sir Reginald: the Third"),
+            Some(Action::Rename {
+                serial: 0x67F,
+                name: "Sir Reginald: the Third".into(),
+            })
+        );
+        assert_eq!(
+            parse_command("questarrow:1"),
+            Some(Action::QuestArrowClick { right_click: true })
+        );
+        assert_eq!(
+            parse_command("questarrow"),
+            Some(Action::QuestArrowClick { right_click: false })
+        );
+        assert_eq!(parse_command("help"), Some(Action::HelpRequest));
+        assert_eq!(parse_command("guildmenu"), Some(Action::GuildMenu));
+        assert_eq!(parse_command("questmenu"), Some(Action::QuestMenu));
+        // Argument-free verbs reject a trailing `:`, like `logout`.
+        assert!(parse_command("help:1").is_none());
+        assert!(parse_command("rename:0x67f").is_none());
     }
 
     #[test]

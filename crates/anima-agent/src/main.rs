@@ -155,6 +155,16 @@ fn main() {
                 }
                 Action::PartySetCanLoot { can_loot } => format!("partyloot({can_loot})"),
                 Action::StatusRequest { serial } => format!("statusreq(0x{serial:08X})"),
+                Action::Rename { serial, name } => format!("rename(0x{serial:08X} {name:?})"),
+                Action::QuestArrowClick { right_click } => {
+                    format!(
+                        "questarrow({})",
+                        if *right_click { "right" } else { "left" }
+                    )
+                }
+                Action::HelpRequest => "help".into(),
+                Action::GuildMenu => "guildmenu".into(),
+                Action::QuestMenu => "questmenu".into(),
                 Action::PromptResponse { text } => format!("prompt({text:?})"),
                 Action::PromptCancel => "promptcancel".into(),
                 Action::TipNavigate { seq, next } => {

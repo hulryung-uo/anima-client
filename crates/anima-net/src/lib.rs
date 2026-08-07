@@ -22,17 +22,18 @@ use anima_core::agent::{survey_terrain, Action, HouseDesignAction, Observation};
 use anima_core::net::outgoing::{
     build_ascii_prompt_response, build_attack, build_bandage_target, build_book_page_request,
     build_buy, build_cast_spell, build_client_view_range, build_disarm_request, build_double_click,
-    build_drop, build_equip, build_gump_response, build_house_design_add_item,
-    build_house_design_add_roof, build_house_design_add_stair, build_house_design_backup,
-    build_house_design_clear, build_house_design_close, build_house_design_commit,
-    build_house_design_delete_item, build_house_design_delete_roof, build_house_design_go_to_floor,
-    build_house_design_request, build_house_design_restore, build_house_design_revert,
-    build_house_design_sync, build_hue_picker_response, build_legacy_menu_response,
-    build_logout_request, build_opl_request, build_party_accept, build_party_can_loot,
-    build_party_decline, build_party_invite, build_party_leave, build_party_message,
-    build_party_private_message, build_party_remove, build_pick_up, build_ping,
-    build_popup_request, build_popup_select, build_profile_request, build_profile_update,
-    build_prompt_response, build_say, build_sell, build_single_click, build_skill_lock,
+    build_drop, build_equip, build_guild_menu_request, build_gump_response, build_help_request,
+    build_house_design_add_item, build_house_design_add_roof, build_house_design_add_stair,
+    build_house_design_backup, build_house_design_clear, build_house_design_close,
+    build_house_design_commit, build_house_design_delete_item, build_house_design_delete_roof,
+    build_house_design_go_to_floor, build_house_design_request, build_house_design_restore,
+    build_house_design_revert, build_house_design_sync, build_hue_picker_response,
+    build_legacy_menu_response, build_logout_request, build_opl_request, build_party_accept,
+    build_party_can_loot, build_party_decline, build_party_invite, build_party_leave,
+    build_party_message, build_party_private_message, build_party_remove, build_pick_up,
+    build_ping, build_popup_request, build_popup_select, build_profile_request,
+    build_profile_update, build_prompt_response, build_quest_arrow_click, build_quest_menu_request,
+    build_rename_request, build_say, build_sell, build_single_click, build_skill_lock,
     build_stat_lock, build_status_request, build_stun_request, build_target_response,
     build_text_entry_dialog_response, build_tip_request, build_trade_accept, build_trade_cancel,
     build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
@@ -835,6 +836,19 @@ impl Session {
                     self.world.player_mobile().map(|p| p.serial).unwrap_or(0)
                 };
                 self.send(&build_status_request(4, serial))?;
+            }
+            Action::Rename { serial, name } => self.send(&build_rename_request(*serial, name))?,
+            Action::QuestArrowClick { right_click } => {
+                self.send(&build_quest_arrow_click(*right_click))?;
+            }
+            Action::HelpRequest => self.send(&build_help_request())?,
+            Action::GuildMenu => {
+                let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                self.send(&build_guild_menu_request(serial))?;
+            }
+            Action::QuestMenu => {
+                let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                self.send(&build_quest_menu_request(serial))?;
             }
             Action::PromptResponse { text } => self.respond_prompt(text, false)?,
             Action::PromptCancel => self.respond_prompt("", true)?,
