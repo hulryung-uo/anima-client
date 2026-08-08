@@ -237,6 +237,13 @@ pub struct Observation {
     /// Current facet/map index (0xBF/0x08 MapChange): 0=Felucca, 1=Trammel,
     /// 2=Ilshenar, 3=Malas, 4=Tokuno, 5=TerMur.
     pub map_index: u8,
+    /// The open bulletin board ([`World::bulletin_board`]) — its serial, name
+    /// and the summary lines received so far — or `None` when none is open.
+    pub bulletin_board: Option<crate::world::BulletinBoard>,
+    /// The most recently fetched full message body
+    /// ([`World::bulletin_message`]), answering
+    /// [`Action::BulletinRequestMessage`].
+    pub bulletin_message: Option<crate::world::BulletinMessage>,
     /// The server chat system's state ([`World::chat`]): whether it is
     /// enabled, the channels it has advertised, and `current_channel`.
     /// A brain must send [`Action::ChatOpen`] before any of it becomes live.
@@ -692,6 +699,30 @@ pub enum Action {
     /// absolute number, and must not compare it against a spell's mana cost.
     /// Our own vitals are exempt — those arrive un-normalized.
     StatusRequest { serial: u32 },
+    /// Ask an open bulletin board for a message's full body (0x71 sub 3).
+    /// The reply fills [`Observation::bulletin_message`]; a summary line alone
+    /// carries no text.
+    BulletinRequestMessage { board: u32, message: u32 },
+    /// Ask for one message's summary line again (0x71 sub 4) — how a newly
+    /// posted thread's header is fetched without reopening the board.
+    BulletinRequestSummary { board: u32, message: u32 },
+    /// Post a thread, or a reply when `reply_to` names an existing message
+    /// (0x71 sub 5).
+    ///
+    /// ServUO refuses an empty subject or an empty body outright, and
+    /// rate-limits both new threads and replies (`ThreadCreateTime` /
+    /// `ThreadReplyTime`) with a journal line rather than a packet. It also
+    /// requires us to be in range of the board. Confirm by re-reading
+    /// [`Observation::bulletin_board`] rather than assuming.
+    BulletinPost {
+        board: u32,
+        reply_to: u32,
+        subject: String,
+        lines: Vec<String>,
+    },
+    /// Delete message `message` from `board` (0x71 sub 6). ServUO silently
+    /// ignores this unless we posted it or are a GameMaster.
+    BulletinRemove { board: u32, message: u32 },
     /// Steer the boat we are piloting in absolute direction `dir` (0..7),
     /// walking or running (0xBF/0x33). The driver fills our own serial —
     /// ServUO looks the *player* up and reaches the ship through `mob.Mount`.
@@ -1103,6 +1134,8 @@ impl World {
             player,
             mobiles,
             items,
+            bulletin_board: self.bulletin_board.clone(),
+            bulletin_message: self.bulletin_message.clone(),
             chat: self.chat.clone(),
             chat_messages: self.chat_messages.clone(),
             new_journal,

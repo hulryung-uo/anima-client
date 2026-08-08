@@ -155,6 +155,16 @@ fn main() {
                 }
                 Action::PartySetCanLoot { can_loot } => format!("partyloot({can_loot})"),
                 Action::StatusRequest { serial } => format!("statusreq(0x{serial:08X})"),
+                Action::BulletinRequestMessage { message, .. } => {
+                    format!("bbmsg(0x{message:08X})")
+                }
+                Action::BulletinRequestSummary { message, .. } => {
+                    format!("bbsum(0x{message:08X})")
+                }
+                Action::BulletinPost { subject, lines, .. } => {
+                    format!("bbpost({subject:?} x{})", lines.len())
+                }
+                Action::BulletinRemove { message, .. } => format!("bbdel(0x{message:08X})"),
                 Action::BoatMove { dir, run } => {
                     format!("boat(d{dir}{})", if *run { ",run" } else { "" })
                 }

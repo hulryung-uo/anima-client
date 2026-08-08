@@ -347,6 +347,27 @@ pub fn build_scene(
     let combatant = s.world.combatant.unwrap_or(0);
     // AOS expansion (SupportedFeatures 0xB9): gates AOS-only UI like the weapon
     // special-ability bar. T2A servers don't advertise it → the client hides it.
+    // Bulletin boards (0x71): the open board with its summary lines, and the
+    // most recently fetched full body. Decoded since the codec landed with no
+    // consumer until the posting verbs existed.
+    let bboard = serde_json::to_string(&match s.world.bulletin_board.as_ref() {
+        Some(b) => json!({
+            "serial": b.serial, "name": b.name,
+            "summaries": b.summaries.iter().map(|m| json!({
+                "serial": m.serial, "parent": m.parent, "poster": m.poster,
+                "subject": m.subject, "datetime": m.datetime,
+            })).collect::<Vec<_>>(),
+            "message": match s.world.bulletin_message.as_ref() {
+                Some(m) => json!({
+                    "serial": m.serial, "poster": m.poster, "subject": m.subject,
+                    "datetime": m.datetime, "body": m.body,
+                }),
+                None => Value::Null,
+            },
+        }),
+        None => Value::Null,
+    })
+    .unwrap_or_else(|_| "null".into());
     // Server chat system (0xB2): status, the channel we are in, the channels it
     // has advertised, and the received lines. The lines are a seq-stamped ring
     // like `sounds`/`damage`, NOT a delta — the renderer keeps the highest seq
@@ -452,7 +473,7 @@ pub fn build_scene(
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
          \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"logoutAck\":{logout_ack},\"boatMoves\":{boat_moves},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
-         \"armedAbility\":{armed_ability},\"activeSpells\":{active_spells},\"chat\":{chat},\
+         \"armedAbility\":{armed_ability},\"activeSpells\":{active_spells},\"chat\":{chat},\"bboard\":{bboard},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
          \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps}{placement_field}{house_design_field},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",

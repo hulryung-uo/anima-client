@@ -1545,6 +1545,40 @@ fn general_info_toggle_special_ability_tracks_active_spells() {
 }
 
 #[test]
+fn bulletin_summary_upserts_instead_of_duplicating() {
+    // A header can be asked for twice — a re-open clears the list and any
+    // consumer re-asks — so a blind push showed the same message twice in the
+    // board listing.
+    let mut w = World::new();
+    let board = |name: &str| {
+        let mut p = PacketWriter::new();
+        p.u8(0x71).u16(0).u8(0).u32(0x4000_0001);
+        p.zeros(4); // unused
+        p.bytes(name.as_bytes()).zeros(30 - name.len());
+        patch_len(p.into_vec())
+    };
+    assert!(apply_packet(&mut w, &board("a board")));
+    let summary = |subject: &str| {
+        let mut p = PacketWriter::new();
+        p.u8(0x71)
+            .u16(0)
+            .u8(1)
+            .u32(0x4000_0001)
+            .u32(0x4000_0002)
+            .u32(0);
+        p.u8(3).bytes(b"Bob");
+        p.u8(subject.len() as u8).bytes(subject.as_bytes());
+        p.u8(3).bytes(b"now");
+        patch_len(p.into_vec())
+    };
+    assert!(apply_packet(&mut w, &summary("first")));
+    assert!(apply_packet(&mut w, &summary("edited")));
+    let b = w.bulletin_board.as_ref().unwrap();
+    assert_eq!(b.summaries.len(), 1, "same serial must not duplicate");
+    assert_eq!(b.summaries[0].subject, "edited");
+}
+
+#[test]
 fn play_sound_queues_event() {
     let mut w = World::new();
     let mut p = PacketWriter::new();

@@ -102,6 +102,7 @@ async function poll() {
     if (spellbookOn) { refreshSpellMana(); refreshSpellbookContent(); refreshActiveSpells(); } // keep the spellbook live (mana + book content + active stances)
     if (skillsOn) refreshSkills();  // keep the skills window live (values/locks change)
     checkSkillGains(scene);  // announce skill base changes as journal system messages
+    if (scene.bboard) requestMissingBBSummaries(scene, scene.bboard); // 0x71 headers
     refreshParty();   // keep the party panel live + surface incoming invites (0xBF/0x06)
     refreshTipNotices(scene); // pageable tips / close-only notices (0xA6)
     refreshLogoutAck(scene); // restore UI if the server denied a 0xD1 logout

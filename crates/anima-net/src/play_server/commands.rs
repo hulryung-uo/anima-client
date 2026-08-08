@@ -99,6 +99,9 @@ pub(super) fn parse_house_design_command(body: &str) -> Option<Action> {
 /// `gump:<serial>:<gumpId>:<button>[:sw=1,2][:e=<id>=<text>,…]` (gump reply; text
 /// entries can't contain `:`, `,`, or `=`) · `menusel:<serial>:<index>` (legacy
 /// 0x7C menu; index 0 cancels) · `huepick:<serial>:<hue>` (0x95 dye picker) ·
+/// `bbmsg`/`bbsum:<board>:<message>` (fetch a bulletin body / summary) ·
+/// `bbpost:<board>:<replyTo>:<subject>|<line>…` (replyTo 0 = new thread) ·
+/// `bbdel:<board>:<message>` ·
 /// `boat:<dir>[:<0|1>]` / `boatstop` (steer a piloted ship; double-click the
 /// tiller man first) · `bookhdr:<serial>:<title>|<author>` · `bookpage:<serial>:<page>:<line>|<line>…`
 /// (1-based page; both clamped to what ServUO accepts) ·
@@ -288,6 +291,45 @@ pub(super) fn parse_command(body: &str) -> Option<Action> {
         "oplreq" => Some(Action::OplRequest {
             serial: parse_serial(arg)?,
         }),
+        // bbmsg / bbsum:<board>:<message> — fetch a full body / one summary line.
+        "bbmsg" | "bbsum" => {
+            let (board, message) = arg.split_once(':')?;
+            let (board, message) = (parse_serial(board)?, parse_serial(message)?);
+            if cmd == "bbmsg" {
+                Some(Action::BulletinRequestMessage { board, message })
+            } else {
+                Some(Action::BulletinRequestSummary { board, message })
+            }
+        }
+        // bbpost:<board>:<replyTo>:<subject>|<line>|<line>… — 0 replyTo = a new
+        // thread. `|` separates so subject and lines may contain colons; ServUO
+        // refuses an empty subject or an empty body outright.
+        "bbpost" => {
+            let mut p = arg.splitn(3, ':');
+            let board = parse_serial(p.next()?)?;
+            let reply_to = parse_serial(p.next()?)?;
+            let rest = p.next()?;
+            let mut parts = rest.split('|');
+            let subject = parts.next()?.to_string();
+            let lines: Vec<String> = parts.map(str::to_string).collect();
+            if subject.is_empty() || lines.is_empty() {
+                return None;
+            }
+            Some(Action::BulletinPost {
+                board,
+                reply_to,
+                subject,
+                lines,
+            })
+        }
+        // bbdel:<board>:<message> — only the poster or a GM succeeds.
+        "bbdel" => {
+            let (board, message) = arg.split_once(':')?;
+            Some(Action::BulletinRemove {
+                board: parse_serial(board)?,
+                message: parse_serial(message)?,
+            })
+        }
         // boat:<dir>[:<0|1 run>] / boatstop — steer a piloted ship (0xBF/0x33).
         // Double-click the tiller man first; without the pilot lock ServUO
         // drops these without a word.
@@ -846,6 +888,37 @@ mod command_tests {
         // Missing coordinates must not silently become a pin at the origin.
         assert!(parse_command("mappin:0x40001111:12").is_none());
         assert!(parse_command("mappindel:0x40001111").is_none());
+    }
+
+    #[test]
+    fn bulletin_commands_parse() {
+        assert_eq!(
+            parse_command("bbmsg:0x4001:0x4002"),
+            Some(Action::BulletinRequestMessage {
+                board: 0x4001,
+                message: 0x4002
+            })
+        );
+        assert_eq!(
+            parse_command("bbpost:0x4001:0:Ahoy|line one|line two"),
+            Some(Action::BulletinPost {
+                board: 0x4001,
+                reply_to: 0,
+                subject: "Ahoy".into(),
+                lines: vec!["line one".into(), "line two".into()],
+            })
+        );
+        // ServUO refuses an empty subject or an empty body, so neither is worth
+        // a round trip.
+        assert!(parse_command("bbpost:0x4001:0:|line").is_none());
+        assert!(parse_command("bbpost:0x4001:0:Subject").is_none());
+        assert_eq!(
+            parse_command("bbdel:0x4001:0x4002"),
+            Some(Action::BulletinRemove {
+                board: 0x4001,
+                message: 0x4002
+            })
+        );
     }
 
     #[test]

@@ -1406,12 +1406,19 @@ pub fn build_bulletin_request_summary(board: u32, msg: u32) -> Vec<u8> {
 ///
 /// Ports ClassicUO `Send_BulletinBoardPostMessage`, which is called with the
 /// caller's *unsplit* body text and splits it on `\n` itself; here the caller
-/// passes the already-split `lines` directly. Preserves one ClassicUO quirk
-/// verbatim: the subject's length-prefix byte is `subject.Length + 1` — the
-/// .NET **UTF-16 code-unit** count (mirrored here via `encode_utf16().count()`)
-/// — even though the bytes that follow are UTF-8, so a non-ASCII subject's
-/// declared length does not actually match its encoded byte count. Each
-/// line's length-prefix, by contrast, correctly uses its own UTF-8 byte count.
+/// passes the already-split `lines` directly.
+///
+/// **One deliberate departure: the subject's length prefix is its UTF-8 byte
+/// count, not ClassicUO's UTF-16 code-unit count.** ClassicUO writes
+/// `subject.Length + 1` — .NET's char count — ahead of UTF-8 bytes, which
+/// agrees only for ASCII. ServUO reads it with
+/// `ReadUTF8StringSafe(pvSrc.ReadByte())`, a **byte** count, so a non-ASCII
+/// subject is both truncated and desynchronizes everything after it: measured
+/// live, `항해일지` (4 characters, 12 bytes, declared as 5) came back from the
+/// board as `항` plus half a character. This builder already used the byte
+/// count for each *line*, so following ClassicUO here made one field disagree
+/// with its own neighbours for no reason. The server defines the format; a
+/// client that cannot post a non-ASCII subject is simply broken.
 /// Layout: `[0x71][len:u16][0x05][board:u32][replyTo:u32]
 /// [subjectLen:u8][subject:utf8][0x00][lineCount:u8]
 /// {[lineLen:u8][line:utf8][0x00]}…`.
@@ -1425,11 +1432,11 @@ pub fn build_bulletin_post_message(
     w.u8(0x71).u16(0); // id + length placeholder
     w.u8(0x05).u32(board).u32(reply_to);
 
-    // Faithful quirk: length-prefixed by UTF-16 unit count, not UTF-8 byte
-    // count (see doc comment above).
-    let subject_units = subject.encode_utf16().count();
-    w.u8((subject_units + 1) as u8);
-    w.bytes(subject.as_bytes()).u8(0);
+    // UTF-8 byte count + the NUL, matching what ServUO's `ReadUTF8StringSafe`
+    // consumes — and matching the per-line prefixes below (see the doc).
+    let subject = subject.as_bytes();
+    w.u8((subject.len() + 1) as u8);
+    w.bytes(subject).u8(0);
 
     w.u8(lines.len() as u8);
     for line in lines {
@@ -2395,7 +2402,7 @@ mod tests {
         assert_eq!(p[3], 0x05); // sub-command: post
         assert_eq!(&p[4..8], &[1, 2, 3, 4]); // board (BE)
         assert_eq!(&p[8..12], &[5, 6, 7, 8]); // replyTo (BE)
-        assert_eq!(p[12], 3); // subjectLen = utf16-units("Hi") + 1
+        assert_eq!(p[12], 3); // subjectLen = utf8-bytes("Hi") + 1
         assert_eq!(&p[13..15], b"Hi");
         assert_eq!(p[15], 0); // subject NUL
         assert_eq!(p[16], 2); // lineCount
@@ -2407,17 +2414,26 @@ mod tests {
         assert_eq!(p[30], 0);
         assert_eq!(p.len(), 31);
 
-        // Non-ASCII subject exercises ClassicUO's faithfully-ported quirk: the
-        // length prefix counts UTF-16 units ("é" = 1 unit → prefix 2), but the
-        // bytes that follow are UTF-8 (2 bytes for "é"), so the declared
-        // length does not match the actual encoded byte count. No lines →
-        // lineCount 0 and nothing further.
+        // A non-ASCII subject is where ClassicUO's version breaks and ours must
+        // not: it declares .NET's char count ahead of UTF-8 bytes, so ServUO's
+        // `ReadUTF8StringSafe(byteCount)` reads too few and every field after
+        // the subject shifts. Measured live before the fix: `항해일지` came back
+        // from the board as `항` plus half a character.
         let q = build_bulletin_post_message(1, 0, "é", &[]);
-        assert_eq!(q[12], 2); // 1 UTF-16 unit + 1, not 1 UTF-8-byte-count(2) + 1
+        assert_eq!(q[12], 3, "2 UTF-8 bytes + the NUL, not 1 UTF-16 unit + 1");
         assert_eq!(&q[13..15], "é".as_bytes());
         assert_eq!(q[15], 0);
         assert_eq!(q[16], 0); // lineCount
         assert_eq!(q.len(), 17);
+
+        // The prefix must equal exactly the bytes ServUO will consume, for a
+        // subject of any width — the property the old code only held for ASCII.
+        for subject in ["ascii", "é", "항해일지", "mixed 한글 abc"] {
+            let r = build_bulletin_post_message(1, 0, subject, &[]);
+            assert_eq!(r[12] as usize, subject.len() + 1, "{subject:?}");
+            assert_eq!(&r[13..13 + subject.len()], subject.as_bytes());
+            assert_eq!(r[13 + subject.len()], 0);
+        }
     }
 
     #[test]

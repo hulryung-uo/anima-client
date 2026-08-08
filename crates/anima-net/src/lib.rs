@@ -21,24 +21,25 @@ use anima_assets::{Cliloc, MapData};
 use anima_core::agent::{survey_terrain, Action, HouseDesignAction, Observation};
 use anima_core::net::outgoing::{
     build_ascii_prompt_response, build_attack, build_bandage_target, build_boat_move_request,
-    build_book_header_change, build_book_page_request, build_book_page_write, build_buy,
-    build_cast_spell, build_chat_create_channel, build_chat_join, build_chat_leave,
-    build_chat_message, build_chat_open, build_client_view_range, build_disarm_request,
-    build_double_click, build_drop, build_equip, build_guild_menu_request, build_gump_response,
-    build_help_request, build_house_design_add_item, build_house_design_add_roof,
-    build_house_design_add_stair, build_house_design_backup, build_house_design_clear,
-    build_house_design_close, build_house_design_commit, build_house_design_delete_item,
-    build_house_design_delete_roof, build_house_design_go_to_floor, build_house_design_request,
-    build_house_design_restore, build_house_design_revert, build_house_design_sync,
-    build_hue_picker_response, build_legacy_menu_response, build_logout_request, build_map_add_pin,
-    build_map_change_pin, build_map_clear_pins, build_map_insert_pin, build_map_remove_pin,
-    build_map_toggle_editable, build_opl_request, build_party_accept, build_party_can_loot,
-    build_party_decline, build_party_invite, build_party_leave, build_party_message,
-    build_party_private_message, build_party_remove, build_pick_up, build_ping,
-    build_popup_request, build_popup_select, build_profile_request, build_profile_update,
-    build_prompt_response, build_quest_arrow_click, build_quest_menu_request, build_rename_request,
-    build_say, build_sell, build_single_click, build_skill_lock, build_stat_lock,
-    build_status_request, build_stun_request, build_target_response,
+    build_book_header_change, build_book_page_request, build_book_page_write,
+    build_bulletin_post_message, build_bulletin_remove_message, build_bulletin_request_message,
+    build_bulletin_request_summary, build_buy, build_cast_spell, build_chat_create_channel,
+    build_chat_join, build_chat_leave, build_chat_message, build_chat_open,
+    build_client_view_range, build_disarm_request, build_double_click, build_drop, build_equip,
+    build_guild_menu_request, build_gump_response, build_help_request, build_house_design_add_item,
+    build_house_design_add_roof, build_house_design_add_stair, build_house_design_backup,
+    build_house_design_clear, build_house_design_close, build_house_design_commit,
+    build_house_design_delete_item, build_house_design_delete_roof, build_house_design_go_to_floor,
+    build_house_design_request, build_house_design_restore, build_house_design_revert,
+    build_house_design_sync, build_hue_picker_response, build_legacy_menu_response,
+    build_logout_request, build_map_add_pin, build_map_change_pin, build_map_clear_pins,
+    build_map_insert_pin, build_map_remove_pin, build_map_toggle_editable, build_opl_request,
+    build_party_accept, build_party_can_loot, build_party_decline, build_party_invite,
+    build_party_leave, build_party_message, build_party_private_message, build_party_remove,
+    build_pick_up, build_ping, build_popup_request, build_popup_select, build_profile_request,
+    build_profile_update, build_prompt_response, build_quest_arrow_click, build_quest_menu_request,
+    build_rename_request, build_say, build_sell, build_single_click, build_skill_lock,
+    build_stat_lock, build_status_request, build_stun_request, build_target_response,
     build_text_entry_dialog_response, build_tip_request, build_trade_accept, build_trade_cancel,
     build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
     BOAT_SPEED_FAST, BOAT_SPEED_SLOW, BOAT_SPEED_STOP, OPL_REQUEST_BATCH,
@@ -840,6 +841,26 @@ impl Session {
                     self.world.player_mobile().map(|p| p.serial).unwrap_or(0)
                 };
                 self.send(&build_status_request(4, serial))?;
+            }
+            Action::BulletinRequestMessage { board, message } => {
+                self.send(&build_bulletin_request_message(*board, *message))?;
+            }
+            Action::BulletinRequestSummary { board, message } => {
+                self.send(&build_bulletin_request_summary(*board, *message))?;
+            }
+            Action::BulletinPost {
+                board,
+                reply_to,
+                subject,
+                lines,
+            } => {
+                let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+                self.send(&build_bulletin_post_message(
+                    *board, *reply_to, subject, &refs,
+                ))?;
+            }
+            Action::BulletinRemove { board, message } => {
+                self.send(&build_bulletin_remove_message(*board, *message))?;
             }
             Action::BoatMove { dir, run } => {
                 let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);

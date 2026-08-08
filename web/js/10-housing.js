@@ -1377,6 +1377,125 @@ function saveBookPageIfDirty(force) {
   sendInput(`bookpage:${bookSerial}:${bookPage + 1}:${lines.join("|")}`);
 }
 
+// --- bulletin board (0x71) -----------------------------------------------
+// scene.bboard = { serial, name, summaries:[{serial,parent,poster,subject,
+// datetime}], message:{serial,poster,subject,datetime,body}|null } | null.
+//
+// A summary line carries no text, so clicking one asks for the body (sub 3) and
+// the reply lands in `.message`. Posting takes a subject and at least one line —
+// ServUO refuses either empty — and is rate-limited per thread/reply with a
+// journal line rather than a packet, so the confirmation is the board itself
+// re-listing.
+let bbWin = null, bbSerial = 0, bbSelected = 0;
+const bbSummaryAsked = new Map();   // message serial -> ms we last asked for its header
+// Opening a board sends the message list as CONTAINER CONTENTS (0x3C), not as
+// summaries — ServUO's `OnDoubleClick` follows `BBDisplayBoard` with a
+// `ContainerContent`. The subject/poster/date of each message arrives only in
+// answer to a per-message header request (sub 4), so without this the board
+// shows nothing at all however many threads it holds.
+//
+// Throttled by TIME rather than asked once per serial, which was the first cut
+// and deadlocked: re-opening a board makes the server resend sub 0, and our
+// decoder treats that as a fresh board and clears the summaries — so a
+// once-ever guard leaves every message permanently unasked and the list
+// permanently empty. Re-asking at most once a second per missing message
+// recovers from that and from a dropped reply, and an arrival drops the entry.
+//
+// Driven from the poll rather than the dialog's `update`: `update` only runs
+// when the board's own signature changes, and the container contents naming
+// the messages are not part of that signature — so the very first board, whose
+// contents arrive without changing it, would never be asked about.
+const BB_SUMMARY_RETRY_MS = 1000;
+function requestMissingBBSummaries(scene, board) {
+  const have = new Set((board.summaries || []).map((m) => m.serial >>> 0));
+  const now = performance.now();
+  for (const it of scene.contItems || []) {
+    if ((it.cont >>> 0) !== (board.serial >>> 0)) continue;
+    const serial = it.serial >>> 0;
+    if (have.has(serial)) { bbSummaryAsked.delete(serial); continue; }
+    if (now - (bbSummaryAsked.get(serial) || 0) < BB_SUMMARY_RETRY_MS) continue;
+    bbSummaryAsked.set(serial, now);
+    sendInput(`bbsum:${board.serial >>> 0}:${serial}`);
+  }
+}
+function closeBBoard() {
+  if (bbSerial) dismissDialog("bboard", bbSerial);
+}
+function buildBBoardWindow(b) {
+  const { el, body } = makeWindowFrame({
+    cls: "bboard-win", title: b.name || "Bulletin Board",
+    cascade: { n: 0, left: 300, top: 100 },
+    onClose: closeBBoard,
+  });
+  body.innerHTML = '<div class="bb-list"></div><div class="bb-body"></div>'
+    + '<div class="bb-compose">'
+    + '<input class="bb-subject" placeholder="subject">'
+    + '<textarea class="bb-lines" rows="3" placeholder="message"></textarea>'
+    + '<div class="bb-actions">'
+    + '<button class="bb-post">Post</button>'
+    + '<button class="bb-reply">Reply to selected</button>'
+    + '<button class="bb-del">Delete selected</button></div></div>';
+  const q = (c) => el.querySelector(c);
+  q(".bb-list").addEventListener("click", (e) => {
+    const row = e.target.closest(".bb-row");
+    if (!row) return;
+    bbSelected = row.dataset.serial >>> 0;
+    sendInput(`bbmsg:${bbSerial}:${bbSelected}`);
+    for (const r of el.querySelectorAll(".bb-row")) r.classList.toggle("sel", r === row);
+  });
+  const post = (replyTo) => {
+    const subject = q(".bb-subject").value.trim();
+    const lines = q(".bb-lines").value.split("\n").filter((l) => l.length);
+    if (!subject || !lines.length) {
+      addSysMessage("A bulletin post needs both a subject and a message.");
+      return;
+    }
+    sendInput(`bbpost:${bbSerial}:${replyTo}:${subject}|${lines.join("|")}`);
+    q(".bb-subject").value = ""; q(".bb-lines").value = "";
+  };
+  q(".bb-post").addEventListener("click", () => post(0));
+  q(".bb-reply").addEventListener("click", () => {
+    if (!bbSelected) { addSysMessage("Select a message to reply to first."); return; }
+    post(bbSelected);
+  });
+  q(".bb-del").addEventListener("click", () => {
+    if (!bbSelected) { addSysMessage("Select a message to delete first."); return; }
+    sendInput(`bbdel:${bbSerial}:${bbSelected}`);
+  });
+  return { el };
+}
+function renderBBoard(win, b) {
+  const el = win.el;
+  const list = el.querySelector(".bb-list");
+  list.innerHTML = (b.summaries || []).map((m) => {
+    // A reply is indented under whatever it answers; the wire gives us the
+    // parent serial, not a tree, so one level of indent is all it supports.
+    const reply = (m.parent >>> 0) !== 0;
+    return `<div class="bb-row${reply ? " reply" : ""}${(m.serial >>> 0) === bbSelected ? " sel" : ""}"`
+      + ` data-serial="${m.serial >>> 0}">`
+      + `<span class="bb-subj">${reply ? "↳ " : ""}${m.subject || "(no subject)"}</span>`
+      + `<span class="bb-meta">${m.poster || ""} · ${m.datetime || ""}</span></div>`;
+  }).join("") || '<div class="bb-empty">(no messages)</div>';
+  const bodyEl = el.querySelector(".bb-body");
+  const msg = b.message;
+  bodyEl.textContent = msg
+    ? `${msg.subject}\n${msg.poster} · ${msg.datetime}\n\n${msg.body}`
+    : "(select a message)";
+}
+registerDialog({
+  id: "bboard",
+  source: (scene) => (scene && scene.bboard ? [scene.bboard] : []),
+  key: (b) => b.serial >>> 0,
+  sig: (b) => JSON.stringify([b.name, b.summaries, b.message]),
+  dismiss: "session",
+  build: (b, { key }) => { bbSerial = key; bbSelected = 0; return buildBBoardWindow(b); },
+  update: (win, b) => renderBBoard(win, b),
+  close: (win) => {
+    win.el.remove();
+    bbWin = null; bbSerial = 0; bbSelected = 0; bbSummaryAsked.clear();
+  },
+});
+
 // --- vendor shop window (BUY + SELL) -------------------------------------
 // Auto-opens when scene.shop arrives (a vendor was double-clicked). BUY lists the
 // vendor's stock (its container's contItems matched to scene.shop.buy.prices by

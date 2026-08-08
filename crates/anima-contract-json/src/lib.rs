@@ -121,13 +121,17 @@
 //! so the builders clamp and a caller confirms by re-reading `book`. v25:
 //! `BoatMove`/`BoatStop` (0xBF/0x33) steer a piloted ship. The player must be
 //! piloting first — double-click the tiller man — and nothing reports the
-//! omission; `player.mounted` turning true is the signal it took.)
+//! omission; `player.mounted` turning true is the signal it took. v26: bulletin
+//! boards gained `bulletin_board`/`bulletin_message` plus
+//! `BulletinRequestMessage`/`BulletinRequestSummary`/`BulletinPost`/
+//! `BulletinRemove` (0x71). The decode and all four builders already existed
+//! with no caller; only this layer was missing.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 25;
+pub const SCHEMA_VERSION: u32 = 26;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
@@ -567,6 +571,21 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         .iter()
         .map(|&(seq, serial, amount)| json!({ "seq": seq, "serial": serial, "amount": amount }))
         .collect();
+    let bulletin_board = obs.bulletin_board.as_ref().map_or(Value::Null, |b| {
+        let summaries: Vec<Value> = b
+            .summaries
+            .iter()
+            .map(|m| {
+                json!({ "serial": m.serial, "parent": m.parent, "poster": m.poster,
+                        "subject": m.subject, "datetime": m.datetime })
+            })
+            .collect();
+        json!({ "serial": b.serial, "name": b.name, "summaries": summaries })
+    });
+    let bulletin_message = obs.bulletin_message.as_ref().map_or(Value::Null, |m| {
+        json!({ "board": m.board, "serial": m.serial, "poster": m.poster,
+                "subject": m.subject, "datetime": m.datetime, "body": m.body })
+    });
     let chat_channels: Vec<Value> = obs
         .chat
         .channels
@@ -617,6 +636,8 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "corpse_of": corpse_of,
         "corpse_equip": corpse_equip,
         "map_index": obs.map_index,
+        "bulletin_board": bulletin_board,
+        "bulletin_message": bulletin_message,
         "chat": chat,
         "chat_messages": chat_messages,
         "aos": obs.aos,
@@ -837,6 +858,32 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         }),
         "OplRequest" => Ok(Action::OplRequest {
             serial: req_u32("serial")?,
+        }),
+        "BulletinRequestMessage" => Ok(Action::BulletinRequestMessage {
+            board: req_u32("board")?,
+            message: req_u32("message")?,
+        }),
+        "BulletinRequestSummary" => Ok(Action::BulletinRequestSummary {
+            board: req_u32("board")?,
+            message: req_u32("message")?,
+        }),
+        "BulletinPost" => Ok(Action::BulletinPost {
+            board: req_u32("board")?,
+            reply_to: v.get("reply_to").and_then(Value::as_u64).unwrap_or(0) as u32,
+            subject: text("subject"),
+            lines: v
+                .get("lines")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|l| l.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }),
+        "BulletinRemove" => Ok(Action::BulletinRemove {
+            board: req_u32("board")?,
+            message: req_u32("message")?,
         }),
         "BoatMove" => Ok(Action::BoatMove {
             dir: req_u32("dir")? as u8,
@@ -1213,6 +1260,37 @@ mod tests {
                 Action::OplRequest { serial: 8 },
             ),
             (
+                json!({"type": "BulletinRequestMessage", "board": 4, "message": 5}),
+                Action::BulletinRequestMessage {
+                    board: 4,
+                    message: 5,
+                },
+            ),
+            (
+                json!({"type": "BulletinRequestSummary", "board": 4, "message": 5}),
+                Action::BulletinRequestSummary {
+                    board: 4,
+                    message: 5,
+                },
+            ),
+            (
+                json!({"type": "BulletinPost", "board": 4, "reply_to": 0,
+                       "subject": "Hi", "lines": ["a"]}),
+                Action::BulletinPost {
+                    board: 4,
+                    reply_to: 0,
+                    subject: "Hi".into(),
+                    lines: vec!["a".into()],
+                },
+            ),
+            (
+                json!({"type": "BulletinRemove", "board": 4, "message": 5}),
+                Action::BulletinRemove {
+                    board: 4,
+                    message: 5,
+                },
+            ),
+            (
                 json!({"type": "BoatMove", "dir": 2, "run": true}),
                 Action::BoatMove { dir: 2, run: true },
             ),
@@ -1579,8 +1657,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v25_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 25);
+    fn schema_v26_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 26);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,
@@ -1891,6 +1969,8 @@ mod tests {
             "corpse_of",
             "corpse_equip",
             "map_index",
+            "bulletin_board",
+            "bulletin_message",
             "chat",
             "chat_messages",
             "aos",

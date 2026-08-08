@@ -57,13 +57,23 @@ pub(super) fn bulletin_board_data(world: &mut World, frame: &[u8]) -> PResult<()
                 .as_mut()
                 .filter(|b| b.serial == board_serial)
             {
-                board.summaries.push(BulletinSummary {
+                // Upsert by serial rather than append: a header can legitimately
+                // be requested more than once for the same message — a re-open
+                // clears the list and any consumer re-asks, and two consumers
+                // can ask at once — and a blind push turned that into duplicate
+                // rows in the board listing (observed live, the same subject
+                // twice).
+                let summary = BulletinSummary {
                     serial,
                     parent,
                     poster,
                     subject,
                     datetime,
-                });
+                };
+                match board.summaries.iter_mut().find(|m| m.serial == serial) {
+                    Some(existing) => *existing = summary,
+                    None => board.summaries.push(summary),
+                }
             }
         }
         2 => {
