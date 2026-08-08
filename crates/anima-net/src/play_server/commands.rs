@@ -99,6 +99,8 @@ pub(super) fn parse_house_design_command(body: &str) -> Option<Action> {
 /// `gump:<serial>:<gumpId>:<button>[:sw=1,2][:e=<id>=<text>,…]` (gump reply; text
 /// entries can't contain `:`, `,`, or `=`) · `menusel:<serial>:<index>` (legacy
 /// 0x7C menu; index 0 cancels) · `huepick:<serial>:<hue>` (0x95 dye picker) ·
+/// `bookhdr:<serial>:<title>|<author>` · `bookpage:<serial>:<page>:<line>|<line>…`
+/// (1-based page; both clamped to what ServUO accepts) ·
 /// `mapedit:<serial>` (toggle a map into edit mode — required before any pin
 /// edit) · `mappin:<serial>:<x>:<y>` · `mappinins`/`mappinmv:<serial>:<index>:<x>:<y>` ·
 /// `mappindel:<serial>:<index>` (index 0 refused) · `mappinclr:<serial>` (clears
@@ -285,6 +287,31 @@ pub(super) fn parse_command(body: &str) -> Option<Action> {
         "oplreq" => Some(Action::OplRequest {
             serial: parse_serial(arg)?,
         }),
+        // bookhdr:<serial>:<title>|<author> — 0xD4. `|` separates the two so a
+        // title may contain colons; both are clamped by the builder.
+        "bookhdr" => {
+            let (serial, rest) = arg.split_once(':')?;
+            let (title, author) = rest.split_once('|').unwrap_or((rest, ""));
+            Some(Action::BookHeaderChange {
+                serial: parse_serial(serial)?,
+                title: title.to_string(),
+                author: author.to_string(),
+            })
+        }
+        // bookpage:<serial>:<page>:<line>|<line>|… — 0x66, page is 1-based.
+        // An empty trailing field is a blank line, which is how a page is
+        // shortened; `|` is the separator because a line may contain colons.
+        "bookpage" => {
+            let mut p = arg.splitn(3, ':');
+            let serial = parse_serial(p.next()?)?;
+            let page = p.next()?.parse().ok()?;
+            let lines = p.next().unwrap_or("");
+            Some(Action::BookPageWrite {
+                serial,
+                page,
+                lines: lines.split('|').map(str::to_string).collect(),
+            })
+        }
         // mapedit:<serial> — toggle a map between view and edit mode (0x56 cmd 6).
         // Must precede every other map-pin verb; ServUO drops edits to a map in
         // view mode without a reply.

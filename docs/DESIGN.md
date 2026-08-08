@@ -377,8 +377,8 @@ The driver is the only code that knows about sockets — write it once for nativ
    mobtypes.txt), art, gump art, hues, sound, cliloc, texmap, radar colors, mounts.
 8. ✅ Pathfinding (`path/`): A* + `Terrain` trait, Z-aware, diagonal-safe.
 9. ✅ Observation/Action contract (`agent.rs`) + `Session::apply_action` / `navigate_to`.
-   `agent.rs`'s `Action` enum now has 71 variants; `anima-contract-json` mirrors the
-   full `Observation`/`Action` surface as versioned JSON (schema **v23**) for the
+   `agent.rs`'s `Action` enum now has 73 variants; `anima-contract-json` mirrors the
+   full `Observation`/`Action` surface as versioned JSON (schema **v24**) for the
    out-of-process Python brain (`anima2`), table-tested for every variant.
    **Combat state a brain can act on** (v19): `armed_ability` — the weapon
    special move armed for the next swing — is the one piece of state the arming

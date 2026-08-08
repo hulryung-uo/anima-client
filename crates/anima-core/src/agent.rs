@@ -692,6 +692,30 @@ pub enum Action {
     /// absolute number, and must not compare it against a spell's mana cost.
     /// Our own vitals are exempt — those arrive un-normalized.
     StatusRequest { serial: u32 },
+    /// Rewrite an open book's title and author (0xD4).
+    ///
+    /// Silent all-or-nothing on the server: ServUO discards the whole packet
+    /// if the title exceeds 60 UTF-8 bytes or the author 30, and refuses the
+    /// edit entirely unless the book is writable, within one tile, and
+    /// accessible — never saying so. Both strings are clamped by the builder;
+    /// confirm the rest by re-reading [`Observation::book`].
+    BookHeaderChange {
+        serial: u32,
+        title: String,
+        author: String,
+    },
+    /// Replace the text of one page (0x66). `page` is **1-based**.
+    ///
+    /// Clamped to 8 lines of at most 79 characters, because ServUO drops the
+    /// entire packet — not just the offending line — on `lineCount > 8` or a
+    /// line whose length reaches 80. Newlines inside a line are stripped: the
+    /// wire list is NUL-terminated, so an embedded break would desynchronize
+    /// it.
+    BookPageWrite {
+        serial: u32,
+        page: u16,
+        lines: Vec<String>,
+    },
     /// Turn map item `serial` between view and edit mode (0x56 command 6).
     ///
     /// **Required before any other map-pin action.** ServUO gates every pin

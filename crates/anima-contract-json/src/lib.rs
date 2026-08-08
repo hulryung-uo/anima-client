@@ -114,13 +114,17 @@
 //! `MapChangePin`, `MapRemovePin`, `MapClearPins` (0x56). `MapToggleEditable`
 //! must come first for the same kind of reason `ChatOpen` does: ServUO gates
 //! every mutator on the map being in edit mode and drops the rest silently.
-//! No new observation fields — `map_gumps` already carried the pins.)
+//! No new observation fields — `map_gumps` already carried the pins. v24:
+//! books became writable — `BookHeaderChange` (0xD4) and `BookPageWrite`
+//! (0x66). Both are silently all-or-nothing server-side: an over-long title,
+//! a ninth line or an 80-character line makes ServUO discard the whole packet,
+//! so the builders clamp and a caller confirms by re-reading `book`.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 23;
+pub const SCHEMA_VERSION: u32 = 24;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
@@ -831,6 +835,24 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         "OplRequest" => Ok(Action::OplRequest {
             serial: req_u32("serial")?,
         }),
+        "BookHeaderChange" => Ok(Action::BookHeaderChange {
+            serial: req_u32("serial")?,
+            title: text("title"),
+            author: text("author"),
+        }),
+        "BookPageWrite" => Ok(Action::BookPageWrite {
+            serial: req_u32("serial")?,
+            page: req_u32("page")? as u16,
+            lines: v
+                .get("lines")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|l| l.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }),
         "MapToggleEditable" => Ok(Action::MapToggleEditable {
             serial: req_u32("serial")?,
         }),
@@ -1183,6 +1205,22 @@ mod tests {
                 Action::OplRequest { serial: 8 },
             ),
             (
+                json!({"type": "BookHeaderChange", "serial": 9, "title": "T", "author": "A"}),
+                Action::BookHeaderChange {
+                    serial: 9,
+                    title: "T".into(),
+                    author: "A".into(),
+                },
+            ),
+            (
+                json!({"type": "BookPageWrite", "serial": 9, "page": 2, "lines": ["a", "b"]}),
+                Action::BookPageWrite {
+                    serial: 9,
+                    page: 2,
+                    lines: vec!["a".into(), "b".into()],
+                },
+            ),
+            (
                 json!({"type": "MapToggleEditable", "serial": 9}),
                 Action::MapToggleEditable { serial: 9 },
             ),
@@ -1528,8 +1566,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v23_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 23);
+    fn schema_v24_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 24);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,

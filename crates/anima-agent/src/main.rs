@@ -155,6 +155,16 @@ fn main() {
                 }
                 Action::PartySetCanLoot { can_loot } => format!("partyloot({can_loot})"),
                 Action::StatusRequest { serial } => format!("statusreq(0x{serial:08X})"),
+                Action::BookHeaderChange { serial, title, .. } => {
+                    format!("bookhdr(0x{serial:08X} {title:?})")
+                }
+                Action::BookPageWrite {
+                    serial,
+                    page,
+                    lines,
+                } => {
+                    format!("bookpage(0x{serial:08X} p{page} x{})", lines.len())
+                }
                 Action::MapToggleEditable { serial } => format!("mapedit(0x{serial:08X})"),
                 Action::MapAddPin { serial, x, y } => format!("mappin+(0x{serial:08X} {x},{y})"),
                 Action::MapInsertPin { serial, index, .. } => {

@@ -70,6 +70,21 @@ v22 → v23. Three things the wire does not tell you, all measured live:
   refuted a conclusion drawn from the first read of the live output — the clear
   *had* worked, and the reopen put the pin back.
 
+Closed 2026-08-08 (book authoring): the book-authoring Tier 1 row. Contract
+schema v23 → v24. Two things to carry forward:
+
+- **This row was *overstated*, not understated.** It claimed "0x93/0xD4 header
+  edit and page write builders exist as round-trip stubs"; only
+  `build_book_page_request` existed. Rename and chat were the opposite error
+  ("absent" for code that was written but uncalled), so the audit's two failure
+  modes both show up in this file — check the tree, not the row.
+- **0x66 means two different things by shape alone**, and the *request* form is
+  inert against ServUO: it registers 0x66 to `ContentChange` only, where the
+  request's `0xFFFF` line count fails `lineCount <= 8` and the packet is
+  dropped. Nothing is lost, because `BaseBook.OnDoubleClick` sends the header
+  *and* every page unprompted — but `Action::BookRequest` does nothing on this
+  server, which is now said on the builder.
+
 **Know what the local shard can and cannot prove.** `Config/Expansion.cfg` on
 the ServUO at `127.0.0.1:2594` says `CurrentExpansion=T2A`, so `Core.AOS` is
 **false** there. That single fact splits this batch in half, and it is worth
@@ -351,7 +366,7 @@ The receive side is generally complete; there is no way to *act*.
 | ~~**Auto-walk always runs at unmounted-walk speed**~~ — **CLOSED** | new `movement::walk_pacing(world, want_run)` returns `(run, ms)` from live state — ClassicUO `PlayerMobile.Walk`'s rules, including `SpeedMode >= CantRun`, spent stamina (ghosts exempt), and `FastUnmount` taking the mounted tier without a mount. Both auto-walkers (`Route::step_delay`, `play_server`'s loop) consult it per tick and now run | S |
 | ~~**Shard list**~~ — **CLOSED** | `parse_server_list` (0xA8) + `LoginMachine::servers()`; `cfg.server_index` names the shard's *own* index and an unlisted one fails with the shard names instead of hanging. 0x8C now yields a `GameServerAddress`, which the native driver dials first (5s timeout) before falling back to the login endpoint — ClassicUO's `IgnoreRelayIp`/`ip == 0` case, available as `Endpoint::ignore_relay_ip`. **Watch the byte order:** 0xA8's address is reversed, 0x8C's is not | M |
 | ~~**Login/character rejection reasons**~~ — **CLOSED** | 0x82 gained `account_denied_text`, 0x53 became `LoginError::CharacterLoginRejected` with `character_login_rejected_text`, and 0xFD's queue window is stored and quoted by 0x53 codes 13/14. `LoginError` now implements `Display`, so the browser login page and CLI show the server's stated reason instead of a Debug dump | S |
-| Book authoring (title/author + page text) | 0x93/0xD4 header edit and page write builders exist as round-trip stubs; no UI drives them | M |
+| ~~Book authoring (title/author + page text)~~ — **CLOSED, live-verified** | **The row was overstated**: no write builder existed at all, only the 0x66 page *request*. Added `build_book_header_change` (0xD4) and `build_book_page_write` (0x66) + `BookHeaderChange`/`BookPageWrite` + `bookhdr`/`bookpage`, and the reader now turns into an editor on a writable book (title/author inputs, a per-page textarea, Save, and a page turn that saves first). Both writes are **silently all-or-nothing** server-side — a title over 60 UTF-8 bytes, a ninth line, or a line reaching 80 characters makes ServUO discard the whole packet, so the builders clamp. Verified live: title/author and two pages persisted and read back exactly, and the three clamps were accepted at 60 / 8 / 79 where unclamped input would have lost everything | M |
 | ~~Map pin editing (0x56)~~ — **CLOSED, live-verified** | `MapToggleEditable`/`MapAddPin`/`MapInsertPin`/`MapChangePin`/`MapRemovePin`/`MapClearPins` + `mapedit`/`mappin`/`mappinins`/`mappinmv`/`mappindel`/`mappinclr`, and the map window gained an Edit toggle, a Clear button, click-to-add and click-a-pin-to-remove. **`MapToggleEditable` must come first** — ServUO gates every mutator on `ValidateEdit` = `m_Editable && Validate(from)` and drops the rest silently, the same shape of trap as `ChatOpen`. Note `0x56` is bidirectional with *different* command meanings per direction (client `5` = ClearPins, server `5` = display), the `0x22` trap from OpenShard's findings | S |
 | Boat helm control (0xBF/0x33) | absent | M |
 | Bulletin board post/read/reply | state model decoded (0x71); no authoring surface | M |

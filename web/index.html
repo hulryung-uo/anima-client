@@ -607,6 +607,21 @@
         white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5;
         color: #e8e0cf; font-size: 13px; padding: 4px 2px;
       }
+      /* Authoring: same parchment palette as .book-text so an editable page
+         reads as the page, not as a form dropped on top of it. */
+      .book-edit {
+        display: block; width: 100%; box-sizing: border-box; resize: vertical;
+        min-height: 150px; padding: 10px 12px; border: 0; outline: none;
+        font: inherit; line-height: 1.5; white-space: pre-wrap;
+        background: rgba(20, 26, 34, .6); color: #d7cfa8;
+      }
+      .book-hdr { display: flex; gap: 6px; padding: 6px 8px 0; }
+      .book-hdr input {
+        flex: 1; min-width: 0; font: inherit; font-size: 12px; padding: 3px 6px;
+        border-radius: 4px; border: 1px solid #34404f;
+        background: rgba(20, 26, 34, .6); color: #d7cfa8;
+      }
+      .book-hdr input:focus { outline: none; border-color: #4a90d9; }
       .book-nav {
         display: flex; align-items: center; justify-content: space-between; gap: 8px;
         margin-top: 8px; border-top: 1px solid #2a2f37; padding-top: 8px;

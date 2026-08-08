@@ -515,6 +515,14 @@ pub fn build_tip_request(tip: u32, next: bool) -> Vec<u8> {
 /// each page `1..=N`, `[pageNum:u16][lineCount:u16=0xFFFF]` — the `0xFFFF` line
 /// count is the "send me this page" sentinel (ClassicUO `Send_BookPageDataRequest`).
 /// The server replies with one or more 0x66 BookData packets.
+///
+/// **Inert against ServUO**, which registers 0x66 to `ContentChange` alone: the
+/// request's `0xFFFF` line count fails that handler's `lineCount <= 8` check
+/// and the packet is dropped. Nothing is lost, because ServUO never needs
+/// asking — `BaseBook.OnDoubleClick` sends `BookHeader` *and*
+/// `BookPageDetails` for every page unprompted. Kept for shards that do honour
+/// the request form; see [`build_book_page_write`] for the same id's other
+/// meaning.
 pub fn build_book_page_request(serial: u32, page_count: u16) -> Vec<u8> {
     let mut w = PacketWriter::new();
     w.u8(0x66).u16(0); // id + length placeholder
@@ -607,6 +615,97 @@ pub fn build_bandage_target(bandage: u32, target: u32) -> Vec<u8> {
     let mut w = PacketWriter::new();
     w.u8(0xBF).u16(0).u16(0x002C);
     w.u32(bandage).u32(target);
+    finish_variable(w.into_vec())
+}
+
+/// Longest title ServUO will accept, in UTF-8 **bytes** (`HeaderChange`:
+/// `if (titleLength > 60) return`).
+const BOOK_TITLE_MAX: usize = 60;
+/// Longest author, same units and the same all-or-nothing check.
+const BOOK_AUTHOR_MAX: usize = 30;
+/// Lines per page ServUO accepts (`if (lineCount <= 8)`, else the page — and
+/// with it the rest of the packet — is dropped).
+pub const BOOK_LINES_PER_PAGE: usize = 8;
+/// Longest line, in UTF-16 code units as ServUO counts `string.Length`
+/// (`if (...).Length >= 80) return` — note `>=`, so 79 is the real maximum).
+const BOOK_LINE_MAX: usize = 79;
+
+/// Truncate `s` to at most `max` UTF-8 bytes without splitting a character.
+fn truncate_utf8(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// BookHeaderChange `0xD4` (variable) — rewrite an open book's title/author.
+///
+/// Layout: `[0xD4][len:u16][serial:u32][0x00][0x00][0x0000][titleLen:u16]
+/// [title UTF-8][authorLen:u16][author UTF-8]`. The four bytes after the serial
+/// are the flags/page-count field ServUO seeks straight past
+/// (`pvSrc.Seek(4, SeekOrigin.Current)`), so their value is irrelevant; we
+/// write ClassicUO's zeros. Neither string is NUL-terminated — each is read
+/// back with `ReadUTF8StringSafe(len)` using the length that precedes it.
+///
+/// **The lengths are byte counts and over-long is fatal, not truncating**:
+/// ServUO answers `titleLength > 60` (or `authorLength > 30`) with a bare
+/// `return`, discarding the whole packet, so a caller who sends a long title
+/// loses the author edit too and hears nothing about it. Both are clamped here
+/// on character boundaries. ServUO also refuses the edit outright unless the
+/// book is `Writable`, within 1 tile, and accessible — none of which is
+/// reported back either.
+pub fn build_book_header_change(serial: u32, title: &str, author: &str) -> Vec<u8> {
+    let title = truncate_utf8(title, BOOK_TITLE_MAX);
+    let author = truncate_utf8(author, BOOK_AUTHOR_MAX);
+    let mut w = PacketWriter::new();
+    w.u8(0xD4).u16(0); // id + length placeholder
+    w.u32(serial);
+    w.u8(0x00).u8(0x00).u16(0x0000); // flags + page count: skipped server-side
+    w.u16(title.len() as u16).bytes(title.as_bytes());
+    w.u16(author.len() as u16).bytes(author.as_bytes());
+    finish_variable(w.into_vec())
+}
+
+/// BookPageWrite `0x66` (variable) — send the edited text of ONE page.
+///
+/// Layout: `[0x66][len:u16][serial:u32][0x0001][page:u16][lineCount:u16]` then
+/// each line as NUL-terminated UTF-8, then one trailing `0x00`. `page` is
+/// 1-based (ServUO checks `index >= 1 && index <= PagesCount` before
+/// decrementing). The leading `0x0001` is a page *count* — the wire can carry
+/// several pages per packet, and ClassicUO always sends exactly one, so this
+/// does too.
+///
+/// **Same all-or-nothing validation as the header.** ServUO drops the entire
+/// packet if a page carries more than 8 lines, if any line's `.Length` reaches
+/// 80, or if the page index is out of range — always silently. Lines are
+/// clamped to [`BOOK_LINES_PER_PAGE`] and [`BOOK_LINE_MAX`] here so a long
+/// paragraph costs its own tail rather than the whole page. Embedded newlines
+/// are stripped, as ClassicUO does, because a line break inside a line would
+/// desynchronize the NUL-terminated list.
+///
+/// **This is the same packet id as [`build_book_page_request`]**, distinguished
+/// only by the line count — see that builder's note.
+pub fn build_book_page_write(serial: u32, page: u16, lines: &[String]) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x66).u16(0); // id + length placeholder
+    w.u32(serial).u16(1).u16(page);
+    let lines: Vec<String> = lines
+        .iter()
+        .take(BOOK_LINES_PER_PAGE)
+        .map(|l| {
+            let flat: String = l.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+            flat.chars().take(BOOK_LINE_MAX).collect()
+        })
+        .collect();
+    w.u16(lines.len() as u16);
+    for line in &lines {
+        w.bytes(line.as_bytes()).u8(0); // NUL-terminated UTF-8
+    }
+    w.u8(0); // ClassicUO's trailing byte; ServUO stops after `lineCount` lines
     finish_variable(w.into_vec())
 }
 
@@ -1487,6 +1586,58 @@ mod tests {
             d,
             vec![0xD7, 0x00, 0x0F, 0, 0, 0, 1, 0x00, 0x19, 0, 0, 0, 0, 0, 0x0A]
         );
+    }
+
+    #[test]
+    fn book_header_change_layout_and_clamps() {
+        let p = build_book_header_change(0xDEAD_BEEF, "Title", "Me");
+        assert_eq!(p[0], 0xD4);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(&p[3..7], &[0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(&p[7..11], &[0, 0, 0, 0]); // flags + page count, skipped
+        assert_eq!(u16::from_be_bytes([p[11], p[12]]), 5); // titleLen (bytes)
+        assert_eq!(&p[13..18], b"Title"); // no NUL — the length precedes it
+        assert_eq!(u16::from_be_bytes([p[18], p[19]]), 2);
+        assert_eq!(&p[20..22], b"Me");
+
+        // Over-long is FATAL server-side (`if (titleLength > 60) return`), so
+        // the clamp is what keeps a long title from also losing the author.
+        let long = build_book_header_change(1, &"x".repeat(200), &"y".repeat(200));
+        assert_eq!(u16::from_be_bytes([long[11], long[12]]), 60);
+        assert_eq!(u16::from_be_bytes([long[73], long[74]]), 30);
+
+        // Clamping counts BYTES but must not split a character: 'é' is 2 bytes,
+        // so 60 bytes holds 30 of them and never a half.
+        let multi = build_book_header_change(1, &"é".repeat(100), "");
+        let n = u16::from_be_bytes([multi[11], multi[12]]) as usize;
+        assert_eq!(n, 60);
+        assert!(std::str::from_utf8(&multi[13..13 + n]).is_ok());
+    }
+
+    #[test]
+    fn book_page_write_layout_and_clamps() {
+        let lines = vec!["one".to_string(), "two".to_string()];
+        let p = build_book_page_write(0x0000_ABCD, 3, &lines);
+        assert_eq!(p[0], 0x66);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(u32::from_be_bytes([p[3], p[4], p[5], p[6]]), 0x0000_ABCD);
+        assert_eq!(u16::from_be_bytes([p[7], p[8]]), 1); // one page per packet
+        assert_eq!(u16::from_be_bytes([p[9], p[10]]), 3); // 1-based page
+        assert_eq!(u16::from_be_bytes([p[11], p[12]]), 2); // line count
+        assert_eq!(&p[13..], b"one\0two\0\0"); // NUL-terminated + trailer
+
+        // A ninth line or an 80-character line makes ServUO drop the WHOLE
+        // packet, so both are clamped rather than passed through.
+        let many: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        let p = build_book_page_write(1, 1, &many);
+        assert_eq!(u16::from_be_bytes([p[11], p[12]]), 8);
+        let long = vec!["z".repeat(200)];
+        let p = build_book_page_write(1, 1, &long);
+        assert_eq!(p.len() - 15, 79, "line clamped to 79 chars + its NUL");
+
+        // An embedded newline would desynchronize the NUL-terminated list.
+        let p = build_book_page_write(1, 1, &["a\nb".to_string()]);
+        assert_eq!(&p[13..], b"ab\0\0");
     }
 
     #[test]

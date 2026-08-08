@@ -1215,8 +1215,20 @@ function closeGump(serial) {
 // ── book reader (0x93/0xD4 header + 0x66 pages) ────────────────────────────
 // scene.book = { serial, title, author, writable, pageCount, pages:[[line,…],…] }
 // | null. A dark gump opens when a book appears; if its pages are still empty we
-// auto-request them (outgoing 0x66 via `bookreq`). Read-only — page editing for a
-// writable book is not implemented (noted as a limitation). ✕ closes the reader.
+// auto-request them (outgoing 0x66 via `bookreq`). ✕ closes the reader.
+//
+// A `writable` book is editable in place: the page becomes a textarea and the
+// title/author become inputs. Neither edit is acknowledged by the server — it
+// applies them and says nothing — and ServUO validates all-or-nothing, so an
+// over-long title or a ninth line silently discards the whole packet. The
+// builders clamp to what it accepts; see `build_book_header_change` /
+// `build_book_page_write`.
+//
+// Editing is safe against the poll because `registerDialog` only calls
+// `update` when the signature changes (`sig` covers title/author/pages), and
+// the server sends no new book data in response to our writes. A page turn
+// saves first when the text differs from the server's, so an edit is not lost
+// to a stray click on Next.
 let bookWin = null;        // the live reader element (null = closed)
 let bookSerial = 0;        // serial of the book being shown
 let bookPage = 0;          // current page index (0-based)
@@ -1245,6 +1257,7 @@ registerDialog({
     renderBookPage(b);
   },
   close: (win) => {
+    saveBookPageIfDirty();   // don't lose an edit to a stray ✕
     win.el.remove();
     bookWin = null; bookSerial = 0; bookRequested = 0; bookPage = 0;
   },
@@ -1267,9 +1280,28 @@ function buildBookWindow(b) {
 
   const body = document.createElement("div");
   body.className = "gump-body";
+  // Title/author editor — only meaningful on a writable book, and hidden
+  // otherwise so a read-only book looks exactly as it did.
+  const hdr = document.createElement("div");
+  hdr.className = "book-hdr";
+  const titleIn = document.createElement("input");
+  titleIn.className = "book-title-in"; titleIn.placeholder = "title"; titleIn.maxLength = 60;
+  const authorIn = document.createElement("input");
+  authorIn.className = "book-author-in"; authorIn.placeholder = "author"; authorIn.maxLength = 30;
+  const hdrSave = document.createElement("button");
+  hdrSave.type = "button"; hdrSave.className = "book-btn"; hdrSave.textContent = "Save title";
+  hdrSave.addEventListener("click", () => {
+    if (!bookSerial) return;
+    sendInput(`bookhdr:${bookSerial}:${titleIn.value}|${authorIn.value}`);
+  });
+  hdr.appendChild(titleIn); hdr.appendChild(authorIn); hdr.appendChild(hdrSave);
+  body.appendChild(hdr);
   const text = document.createElement("div");
   text.className = "book-text";
   body.appendChild(text);
+  const edit = document.createElement("textarea");
+  edit.className = "book-edit"; edit.rows = 8; edit.spellcheck = false;
+  body.appendChild(edit);
   const nav = document.createElement("div");
   nav.className = "book-nav";
   const prev = document.createElement("button");
@@ -1278,16 +1310,24 @@ function buildBookWindow(b) {
   label.className = "book-pageno";
   const next = document.createElement("button");
   next.type = "button"; next.className = "book-btn"; next.textContent = "Next ›";
-  prev.addEventListener("click", () => { if (bookPage > 0) { bookPage--; renderBookPage(scene && scene.book); } });
+  prev.addEventListener("click", () => {
+    if (bookPage > 0) { saveBookPageIfDirty(); bookPage--; renderBookPage(scene && scene.book); }
+  });
   next.addEventListener("click", () => {
     const bk = scene && scene.book;
     const last = bk ? (bk.pageCount | 0) - 1 : 0;
-    if (bookPage < last) { bookPage++; renderBookPage(bk); }
+    if (bookPage < last) { saveBookPageIfDirty(); bookPage++; renderBookPage(bk); }
   });
   nav.appendChild(prev); nav.appendChild(label); nav.appendChild(next);
+  const save = document.createElement("button");
+  save.type = "button"; save.className = "book-btn book-save"; save.textContent = "Save page";
+  save.addEventListener("click", () => saveBookPageIfDirty(true));
+  nav.appendChild(save);
   body.appendChild(nav);
   el.appendChild(body);
   el._text = text; el._label = label; el._prev = prev; el._next = next;
+  el._edit = edit; el._hdr = hdr; el._titleIn = titleIn; el._authorIn = authorIn;
+  el._save = save; el._name = t;
 
   makeDraggable(el, title);
   document.body.appendChild(el);
@@ -1299,10 +1339,42 @@ function renderBookPage(b) {
   const count = b.pageCount | 0;
   if (bookPage > count - 1) bookPage = Math.max(0, count - 1);
   const lines = (b.pages && b.pages[bookPage]) || [];
-  bookWin._text.textContent = lines.length ? lines.join("\n") : "(blank page)";
+  const rw = !!b.writable;
+  // The title bar is built once but the book can be renamed under it — a
+  // writable book's whole point — so refresh it here rather than leaving the
+  // name the book happened to have when the window opened.
+  bookWin._name.textContent = (b.title || "Book") + (b.author ? " · " + b.author : "");
+  bookWin._hdr.style.display = rw ? "flex" : "none";
+  bookWin._save.style.display = rw ? "" : "none";
+  bookWin._text.style.display = rw ? "none" : "";
+  bookWin._edit.style.display = rw ? "" : "none";
+  if (rw) {
+    bookWin._edit.value = lines.join("\n");
+    // Remember what the server gave us, so a page turn can tell a real edit
+    // from an untouched page and not send a pointless write.
+    bookWin._edit._server = bookWin._edit.value;
+    bookWin._titleIn.value = b.title || "";
+    bookWin._authorIn.value = b.author || "";
+  } else {
+    bookWin._text.textContent = lines.length ? lines.join("\n") : "(blank page)";
+  }
   bookWin._label.textContent = "page " + (bookPage + 1) + " / " + Math.max(1, count);
   bookWin._prev.disabled = bookPage <= 0;
   bookWin._next.disabled = bookPage >= count - 1;
+}
+// Write the current page back if the text differs from what the server sent.
+// `force` (the Save button) sends regardless, which is the escape hatch when a
+// write was silently refused and the local text now matches a stale copy.
+function saveBookPageIfDirty(force) {
+  const b = scene && scene.book;
+  if (!bookWin || !b || !b.writable || !bookSerial) return;
+  const ta = bookWin._edit;
+  if (!force && ta.value === ta._server) return;
+  ta._server = ta.value;
+  // The page is 1-based on the wire; an empty textarea still sends one blank
+  // line, which is how a page gets cleared.
+  const lines = ta.value.split("\n");
+  sendInput(`bookpage:${bookSerial}:${bookPage + 1}:${lines.join("|")}`);
 }
 
 // --- vendor shop window (BUY + SELL) -------------------------------------
