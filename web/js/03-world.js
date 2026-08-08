@@ -71,7 +71,16 @@ function hueHex(hue) {
   if (!hueHexCache.has("r" + id)) {
     hueHexCache.set("r" + id, 1);
     fetch(`hue/${id}.json`).then((r) => r.json())
-      .then((j) => { hueHexCache.set(id, j.rgb); renderEquipTip(); applyHueSwatches(); applyWizHueSwatches(); }).catch(() => {});
+      .then((j) => {
+        hueHexCache.set(id, j.rgb);
+        renderEquipTip(); applyHueSwatches(); applyWizHueSwatches();
+        // The journal paints each line with the server's hue, but its render is
+        // signature-gated and this table resolves one hue at a time, well after
+        // the line was drawn. Without this the line keeps the per-type fallback
+        // colour for good — observed live: speech that should have been
+        // #9c9c00 stayed white because the fetch landed after the only render.
+        invalidateJournal();
+      }).catch(() => {});
   }
   return null;
 }

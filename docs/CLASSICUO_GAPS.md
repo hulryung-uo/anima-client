@@ -147,6 +147,29 @@ Tier 2 is **not** finished — still open: the 0x11 `type >= 6` combat tail
 filters/tabs/timestamps, grid loot, the info bar, the counter bar and friends,
 and window management.
 
+Closed 2026-08-08 (journal): the second Tier 2 row. No contract change — `type`,
+`hue` and `serial` were all already on the wire and in `scene.journal`. Two
+things worth keeping:
+
+- **Filtering the journal by message type alone is wrong**, and looks right
+  until you try it. ServUO sends "Welcome, …" and "The page queue is empty." as
+  MessageType **Regular** with serial `0xFFFFFFFF` and the name "System" — so a
+  type-only filter files them under Speech and leaves the System tab empty,
+  which is exactly what the first cut did. ClassicUO does not filter on the
+  type either: it derives a separate `TextType`, SYSTEM when
+  `type == System || serial == 0xFFFFFFFF || serial == 0 || (name == "system"
+  && no entity)` and OBJECT only when a real speaker exists. That is what is
+  ported.
+- **A signature-gated render and a lazily-fetched hue table do not mix.**
+  `hueHex` fetches one hue at a time and returns null until it lands, so every
+  line was painted with its per-type fallback and never repainted — speech that
+  should have been `#9c9c00` stayed white. The hue callback now invalidates the
+  journal's signature, the same way it already refreshed the equip tip and the
+  dye swatches.
+
+Tier 2 still open: the 0x11 `type >= 6` combat tail (unobservable here), grid
+loot, the info bar, the counter bar and friends, and window management.
+
 **Know what the local shard can and cannot prove.** `Config/Expansion.cfg` on
 the ServUO at `127.0.0.1:2594` says `CurrentExpansion=T2A`, so `Core.AOS` is
 **false** there. That single fact splits this batch in half, and it is worth
@@ -446,7 +469,7 @@ The receive side is generally complete; there is no way to *act*.
 | ~~**Extended status sheet**~~ — **CLOSED** | all of it (armor + the four resistances, weight/max, stats-cap, followers/max, damage range, luck, tithing, and the three stat locks) now leaves `build_scene` and shows in the status panel. It had been parsed into `World` all along and simply never sent | M |
 | **0x11 `type >= 6` combat tail** | max resists, HCI/DCI/SSI/DI/LRC/SDI/FCR/FC/LMC are explicitly not parsed (`game.rs:2757`); no field of that family exists anywhere | M |
 | ~~**Buff names**~~ — **CLOSED** | 0xDF's title/description clilocs and their (little-endian) argument blocks are parsed into `Buff`; the renderer resolves the title for the bar and shows the description on hover, and `anima_net::localize` fills `display`/`display_desc` for brains. The 35-entry English table survives as the fallback when a shard sends no title cliloc. The debuff tint is still a regex over the name — UO carries no buff/debuff flag on 0xDF (ClassicUO hardcodes the split by icon id) | M |
-| Journal | works, but one flat colour, no message-type filter, no tabs, no timestamps, not its own resizable window | M |
+| ~~Journal~~ — **CLOSED, live-verified** | All five: lines take the **server hue** through the same `msgColor` the floating overheads already used (per-type colour only as the fallback, ClassicUO's rule) plus per-type styling — a yell bold, a whisper dim, an emote italic; **All/Speech/Guild/System tabs**; an arrival **timestamp**, stamped client-side because UO sends none; and the log is `resize: vertical` with its height remembered. The tab rule is a port of ClassicUO's `TextType` decision, **not** a filter on message type — see the note above for why the obvious version puts every system line under Speech | M |
 | Grid loot | corpses already open as a grid; the one-click loot workflow is what's missing | M |
 | Info bar | a fixed HUD readout exists; ClassicUO's user-configurable field set does not | M |
 | Counter bar, ignore list, combat-book gump, racial-abilities book, network-stats and inspector windows | absent | S–M |

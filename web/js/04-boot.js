@@ -68,6 +68,8 @@ async function main() {
   }
   requestAnimationFrame(frame);
   setupInput();
+  buildJournalTabs();   // filter chips above the log (All / Speech / Guild / System)
+  restoreJournalHeight();
   setupItemDnD();
   initFx();
 }

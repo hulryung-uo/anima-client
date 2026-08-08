@@ -598,7 +598,10 @@ function closeStatus() {
 let hudHidden = false, journalHidden = false;
 function applyHudVisibility() {
   const hud = document.getElementById("hud"); if (hud) hud.style.display = hudHidden ? "none" : "";
-  const jr = document.getElementById("journal"); if (jr) jr.style.display = journalHidden ? "none" : "";
+  const jr = document.getElementById("journal");
+  if (jr) jr.style.display = journalHidden ? "none" : "";
+  const jt = document.getElementById("jrnl-tabs");
+  if (jt) jt.style.display = journalHidden ? "none" : "";
 }
 function loadHudVisibility() {
   hudHidden = localStorage.getItem("anima.hudHidden") === "1";

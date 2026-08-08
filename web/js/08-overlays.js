@@ -680,6 +680,110 @@ function updateMoveDebug(s) {
   for (const n of notes) html += `<div class="mdbg-note">${n.text}</div>`;
   el.innerHTML = html;
 }
+// ---- journal tabs, colour and timestamps ----
+//
+// Message types are ClassicUO's `MessageType` (0 Regular, 1 System, 2 Emote,
+// 3 Limit3Spell, 6 Label, 7 Focus, 8 Whisper, 9 Yell, 10 Spell, 13 Guild,
+// 14 Alliance, 15 Command). Two notes before editing these sets:
+//   * **7 is Focus on the wire but party speech here** — `parse_party` in the
+//     core stamps party lines with 7 because 6 would be read as a name label.
+//     ServUO never sends a real Focus line (no `MessageType.Focus` anywhere in
+//     its tree), so the overload is unambiguous against it; ClassicUO instead
+//     uses a client-only 0xFF for party.
+//   * Client-side notices (skill gains, our own warnings) have no wire type at
+//     all, so they get one of their own, outside the byte the server can send.
+const JRNL_LOCAL_TYPE = 256;
+const JRNL_TABS = [
+  { key: "all", label: "All" },
+  { key: "speech", label: "Speech" },
+  { key: "guild", label: "Guild" },
+  { key: "system", label: "System" },
+];
+let journalTab = localStorage.getItem("anima.journalTab") || "all";
+// Which tab a line belongs to — a port of ClassicUO's `TextType` decision
+// (`PacketHandlers.cs`, the 0x1C/0xAE handlers), NOT a filter on the message
+// type alone.
+//
+// The type by itself gets this wrong, and visibly: ServUO sends "Welcome,
+// FoundryGM!" and "The page queue is empty." as MessageType **Regular** with
+// the speaker serial set to 0xFFFFFFFF and the name "System" — so a type-only
+// filter files them under Speech and leaves the System tab empty, which is
+// exactly what the first cut did. ClassicUO decides SYSTEM on
+// `type == System || serial == 0xFFFFFFFF || serial == 0 ||
+// (name == "system" && no entity)`, and OBJECT only when a real speaker
+// exists. That is the rule here.
+function journalClass(line, local) {
+  if (local) return "system";                       // our own client notices
+  const type = line.type | 0;
+  const serial = line.serial >>> 0;
+  if (type === 13 || type === 14 || type === 7) return "guild"; // Guild/Alliance/party
+  if (type === 1 || serial === 0xFFFFFFFF || serial === 0) return "system";
+  if ((line.name || "").toLowerCase() === "system") return "system";
+  return "speech";
+}
+function journalTabAccepts(key, line, local) {
+  return key === "all" || journalClass(line, local) === key;
+}
+// Arrival time, stamped locally the first time a line is seen.
+//
+// Nothing on the wire carries one — UO simply does not send it — so this is
+// when the client learnt of the line, which is also what ClassicUO shows. Keyed
+// by `seq` so a re-render never re-stamps, and bounded by the same ring the
+// journal itself is.
+const journalTimes = new Map();
+function journalStamp(line) {
+  const key = line.seq != null ? line.seq : line.text;
+  let t = journalTimes.get(key);
+  if (t == null) {
+    t = new Date();
+    journalTimes.set(key, t);
+    if (journalTimes.size > 400) journalTimes.delete(journalTimes.keys().next().value);
+  }
+  return `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")} `;
+}
+function buildJournalTabs() {
+  const bar = document.getElementById("jrnl-tabs");
+  if (!bar || bar.childElementCount) return;
+  for (const t of JRNL_TABS) {
+    const b = document.createElement("span");
+    b.className = "jrnl-tab" + (t.key === journalTab ? " sel" : "");
+    b.textContent = t.label;
+    b.dataset.key = t.key;
+    b.addEventListener("click", () => {
+      journalTab = t.key;
+      localStorage.setItem("anima.journalTab", journalTab);
+      for (const x of bar.children) x.classList.toggle("sel", x.dataset.key === journalTab);
+      const j = document.getElementById("journal");
+      if (j) j._sig = null;              // force a rebuild under the new filter
+      if (scene) hud(scene);
+    });
+    bar.appendChild(b);
+  }
+}
+
+// Force the next `hud()` to rebuild the log. Used when something the render
+// depends on resolved asynchronously — the hue table, chiefly.
+function invalidateJournal() {
+  const j = document.getElementById("journal");
+  if (j) j._sig = null;
+}
+// The log is `resize: vertical`, and a size the user chose should outlive the
+// tab. `ResizeObserver` rather than a mouseup handler because the drag is the
+// browser's own — there is no event of ours to hang it on.
+function restoreJournalHeight() {
+  const j = document.getElementById("journal");
+  if (!j) return;
+  const saved = parseInt(localStorage.getItem("anima.journalH") || "", 10);
+  if (saved > 0) j.style.height = saved + "px";
+  if (typeof ResizeObserver === "undefined") return;
+  new ResizeObserver(() => {
+    // offsetHeight, not the observed box: `resize` writes an inline height and
+    // that is what we want to restore verbatim next launch.
+    const h = j.offsetHeight;
+    if (h > 0) localStorage.setItem("anima.journalH", String(h));
+  }).observe(j);
+}
+
 function hud(s) {
   const p = s.player;
   // Show the *predicted* tile (what the avatar is visually standing on) so the
@@ -719,24 +823,39 @@ function hud(s) {
   // Local half: a monotonic counter (bumped in addSysMessage, not derived from
   // length/newest-text) so a repeated-text line, or the ring hitting its own cap,
   // still registers as a change.
-  const jSig = `${jLen}:${jTail}:${localJournalSeq}`;
+  const jSig = `${jLen}:${jTail}:${localJournalSeq}:${journalTab}`;
   if (j._sig !== jSig) {
     j._sig = jSig;
     // Keep following the newest line only if already scrolled to the bottom (don't
     // yank the view while the user is reading back).
     const atBottom = j.scrollHeight - j.scrollTop - j.clientHeight < 24;
     j.innerHTML = "";
-    for (const line of jSrc) {
-      if (!line.text) continue;
+    const put = (line, local) => {
+      const type = local ? JRNL_LOCAL_TYPE : (line.type | 0);
+      if (!journalTabAccepts(journalTab, line, local)) return;
       const d = document.createElement("div");
-      d.textContent = line.name ? `${line.name}: ${line.text}` : line.text;
+      const cls = MSG_CLASS[type];
+      if (cls) d.className = cls;
+      // Same rule the floating overheads use: the server's hue wins, the
+      // per-type default fills in when it sent 0. The journal was the one
+      // surface still painting every line the same grey.
+      d.style.color = local ? "" : msgColor(type, line.hue | 0);
+      if (local) d.classList.add("jrnl-sys");
+      const stamp = document.createElement("span");
+      stamp.className = "jrnl-time";
+      stamp.textContent = journalStamp(line);
+      d.appendChild(stamp);
+      d.appendChild(document.createTextNode(
+        line.name ? `${line.name}: ${line.text}` : line.text));
       j.appendChild(d);
-    }
+    };
+    for (const line of jSrc) { if (line.text) put(line, false); }
     // Client-side system notices (skill gains/losses) after the server lines.
-    for (const line of localJournal) {
+    for (const line of localJournal) put(line, true);
+    if (!j.childElementCount) {
       const d = document.createElement("div");
-      d.className = "jrnl-sys";
-      d.textContent = line.text;
+      d.className = "jrnl-none";
+      d.textContent = "(nothing on this tab)";
       j.appendChild(d);
     }
     if (atBottom) j.scrollTop = j.scrollHeight;

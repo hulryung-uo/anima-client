@@ -305,11 +305,33 @@
       .hp > span { background: #e5484d; } .mana > span { background: #4f8cf7; } .stam > span { background: #46a758; }
       .k { color: #6b7280; }
       #journal {
-        margin-top: 12px; border-top: 1px solid #222; padding-top: 8px;
-        max-height: 34vh; overflow-y: auto;          /* scrolls when it grows */
+        margin-top: 6px; padding-top: 6px;
+        /* Resizable: the row asked for its own window, and `resize` on the log
+           itself is what a user actually wants — drag the corner to trade map
+           for text. The height is remembered in localStorage. */
+        height: 34vh; min-height: 60px; max-height: 70vh;
+        overflow: auto; resize: vertical;
       }
       #journal div { margin: 2px 0; color: #b6bcc6; white-space: normal; overflow-wrap: anywhere; }
       #journal div.jrnl-sys { color: #6fb6ff; }   /* client system notices (skill gains, …) */
+      #journal div.jrnl-none { color: #4b5563; font-style: italic; }
+      /* Per-type styling, the same set the floating overheads use: a yell reads
+         loud, a whisper quiet, an emote italic. */
+      #journal div.oh-emote { font-style: italic; }
+      #journal div.oh-whisper { opacity: .75; font-size: 11px; }
+      #journal div.oh-yell { font-weight: 700; }
+      #journal div.oh-spell { letter-spacing: .3px; }
+      .jrnl-time { color: #4b5563; font-size: 10px; margin-right: 4px; }
+      #jrnl-tabs {
+        margin-top: 12px; border-top: 1px solid #222; padding-top: 8px;
+        display: flex; gap: 4px;
+      }
+      .jrnl-tab {
+        font-size: 10px; padding: 1px 7px; border-radius: 3px; cursor: pointer;
+        color: #6b7280; border: 1px solid transparent;
+      }
+      .jrnl-tab:hover { color: #c7d0dc; }
+      .jrnl-tab.sel { color: #e6e9ee; border-color: #34404f; background: rgba(22, 28, 38, .9); }
       #status { margin-top: 10px; color: #6b7280; font-size: 11px; }
       .legend { margin-top: 10px; font-size: 11px; color: #6b7280; }
       .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin: 0 4px -1px 8px; }
@@ -1099,6 +1121,7 @@
         <span class="sw" style="background:#e5484d;border-radius:50%"></span>mob
         <span class="sw" style="background:#e2b340"></span>item
       </div>
+      <div id="jrnl-tabs"></div>
       <div id="journal"></div>
       <div id="status">connecting…</div>
       <div id="diag" class="legend" style="margin-top:6px; color:#6b7280"></div>
