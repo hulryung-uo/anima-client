@@ -135,12 +135,16 @@ Two things it surfaced rather than caused:
   to a flat 150x120. Harmless while the body was a uniform grid; wrong the
   moment the art defines the coordinate space. It measures the body and its
   real size now.
-- **"Return to backpack" sends (0, 0)**, so anything put back that way piles
-  into the bag's top-left corner — invisible in a grid, obvious now. Left
-  alone deliberately: there is no wire value that asks the server to choose
-  (`Container.DropItem`'s randomiser is an internal path the drop packet never
-  reaches), so picking a position here means inventing one. Worth revisiting
-  with ClassicUO's bounds table, which is what would give a sensible default.
+- **"Return to backpack" sent (0, 0)**, piling anything put back that way into
+  the bag's top-left corner — invisible in a grid, obvious once the window drew
+  the real bag. ~~Left alone because there is no wire value that asks the
+  server to choose.~~ **That was wrong, and the grid-loot batch found the
+  value:** `Item.DropToItem` routes `x == -1 && y == -1` — 0xFFFF on the wire,
+  read as `Int16` — to `OnDroppedOnto` → `Container.DropItem`, which is exactly
+  the randomiser inside the bag's bounds. ServUO uses the same sentinel itself
+  (`DropToItem(from, pack, new Point3D(-1, -1, 0))`) and ClassicUO's
+  `GrabItem` sends it. Fixed; measured live, a return now lands at a
+  server-chosen (98, 66) instead of (0, 0). No bounds table needed after all.
 
 Tier 2 is **not** finished — still open: the 0x11 `type >= 6` combat tail
 (unobservable on this shard, see the expansion note below), journal
@@ -169,6 +173,20 @@ things worth keeping:
 
 Tier 2 still open: the 0x11 `type >= 6` combat tail (unobservable here), grid
 loot, the info bar, the counter bar and friends, and window management.
+
+Closed 2026-08-09 (grid loot): the third Tier 2 row. No contract change — the
+one-click take is two packets we already had. Two notes:
+
+- **`0xFFFF/0xFFFF` on a drop means "you place it".** Written up under the
+  container row above, because it corrects a conclusion recorded there.
+- **A refused loot looks identical to a broken one.** The first live click on a
+  war hammer left it on the corpse with nothing in the journal; the cause was
+  carry weight (99/75 on a STR-10 character), and ServUO simply bounces the
+  item back. Raising STR made the same click work. Worth knowing before
+  debugging the client: the server refuses silently here too.
+
+Tier 2 still open: the 0x11 `type >= 6` combat tail (unobservable here), the
+info bar, the counter bar and friends, and window management.
 
 **Know what the local shard can and cannot prove.** `Config/Expansion.cfg` on
 the ServUO at `127.0.0.1:2594` says `CurrentExpansion=T2A`, so `Core.AOS` is
@@ -470,7 +488,7 @@ The receive side is generally complete; there is no way to *act*.
 | **0x11 `type >= 6` combat tail** | max resists, HCI/DCI/SSI/DI/LRC/SDI/FCR/FC/LMC are explicitly not parsed (`game.rs:2757`); no field of that family exists anywhere | M |
 | ~~**Buff names**~~ — **CLOSED** | 0xDF's title/description clilocs and their (little-endian) argument blocks are parsed into `Buff`; the renderer resolves the title for the bar and shows the description on hover, and `anima_net::localize` fills `display`/`display_desc` for brains. The 35-entry English table survives as the fallback when a shard sends no title cliloc. The debuff tint is still a regex over the name — UO carries no buff/debuff flag on 0xDF (ClassicUO hardcodes the split by icon id) | M |
 | ~~Journal~~ — **CLOSED, live-verified** | All five: lines take the **server hue** through the same `msgColor` the floating overheads already used (per-type colour only as the fallback, ClassicUO's rule) plus per-type styling — a yell bold, a whisper dim, an emote italic; **All/Speech/Guild/System tabs**; an arrival **timestamp**, stamped client-side because UO sends none; and the log is `resize: vertical` with its height remembered. The tab rule is a port of ClassicUO's `TextType` decision, **not** a filter on message type — see the note above for why the obvious version puts every system line under Speech | M |
-| Grid loot | corpses already open as a grid; the one-click loot workflow is what's missing | M |
+| ~~Grid loot~~ — **CLOSED, live-verified** | A corpse (identified by its gump id `9`, which `scene.contGumps` already carries) opens the uniform grid rather than the authentic corpse art, with **click-an-item-to-take** and **Loot all** — the split ClassicUO's separate `GridLootGump` exists to make, since a body's scattered layout is the wrong shape for looting. Off in Options for anyone who wants the real corpse gump. One click is ClassicUO's `GameActions.GrabItem`: a lift, then a drop with **no position**. Verified live on an orc corpse | M |
 | Info bar | a fixed HUD readout exists; ClassicUO's user-configurable field set does not | M |
 | Counter bar, ignore list, combat-book gump, racial-abilities book, network-stats and inspector windows | absent | S–M |
 | ~~Container gumps ignore real container art and each item's stored (x,y)~~ — **CLOSED, live-verified** | Both halves were already on the wire and discarded: 0x3C carries a position per item, and 0x24 names the container's gump. The gump id is now **retained** (`World::container_gumps`) rather than read from the open-event ring, which ages out while the window stays open, and reaches the renderer as `scene.contGumps`. The window draws that art and places each item at its raw (x, y), read **signed** as ClassicUO does (`(short)item.X`). ClassicUO additionally clamps into a per-gump bounds table (78 entries); we clip with `overflow: hidden` instead, which needs no table and cannot disagree with the server about where an item actually is. Verified live on a real backpack (gump 60, 230×204) with a dozen items at their stored positions | M |

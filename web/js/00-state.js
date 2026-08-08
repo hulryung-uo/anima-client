@@ -238,6 +238,7 @@ const SETTINGS_DEFAULTS = {
   guardZones: false,             // guard-zone (guard line) boundary overlay — off by default
   debugMove: false,               // movement/Z debug HUD (WalkTo rejects, predicted vs server pos)
   autoOpenDoors: true,            // walking into a closed door opens it (ClassicUO TryOpenDoors) — on by default
+  gridLoot: true,                 // corpses open a click-to-loot grid instead of the authentic corpse gump
 };
 let settings = Object.assign({}, SETTINGS_DEFAULTS);
 try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}")); } catch (e) {}
@@ -264,6 +265,7 @@ function renderOptions() {
     + cb("guardZones", "Guard-zone lines (R)")
     + cb("debugMove", "Movement debug")
     + cb("autoOpenDoors", "Auto-open doors")
+    + cb("gridLoot", "Click-to-loot corpses")
     + '<div class="opt-sect">Session</div>'
     + `<button type="button" class="dlg-btn opt-logout"${logoutPending ? " disabled" : ""}>`
     + (logoutPending ? "LOGGING OUT…" : "LOG OUT") + "</button>";

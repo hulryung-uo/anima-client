@@ -449,6 +449,29 @@ function hueQuery(hue) {
   return (hue | 0) ? `?hue=${hue | 0}` : "";
 }
 
+// ClassicUO's corpse gump id. The container's own art is what identifies it —
+// `scene.contGumps` carries the id ServUO named on 0x24 — rather than the
+// corpse item's graphic, which we may not have in view.
+const CORPSE_GUMP = 9;
+function isCorpseContainer(serial) {
+  return ((scene && scene.contGumps && scene.contGumps[String(serial >>> 0)]) | 0) === CORPSE_GUMP;
+}
+// One-click loot: pick the item up and drop it into the pack with **no
+// position**, which is a real wire value and not a guess — ServUO's
+// `Item.DropToItem` reads `x == -1 && y == -1` (0xFFFF on the wire, as Int16)
+// as "onto the container" and routes to `Container.DropItem`, which places it
+// itself. ServUO uses the same sentinel internally
+// (`DropToItem(from, pack, new Point3D(-1, -1, 0))`), and ClassicUO's
+// `GameActions.GrabItem` is exactly this pair of packets.
+//
+// The lift is required: a drop with nothing held is discarded server-side.
+function grabItem(serial) {
+  const bp = backpackSerial();
+  if (bp == null) { addSysMessage("No backpack to loot into."); return; }
+  sendInput("pickup:" + (serial >>> 0));
+  sendPlacement(`drop:${serial >>> 0}:65535:65535:0:${bp}`, serial >>> 0);
+}
+
 function openContainer(serial) {
   serial = serial >>> 0;
   const existing = dialogWindow("containers", serial);
@@ -504,7 +527,31 @@ function refreshContainer(serial) {
   // 78-entry table to be ported and cannot disagree with the server about
   // where the item actually is.
   const gump = (scene && scene.contGumps && scene.contGumps[String(serial)]) | 0;
-  const authentic = gump > 0;
+  // Grid loot: a corpse's authentic layout is exactly the wrong shape for
+  // looting — items scattered under a body sprite, each needing a drag. So a
+  // corpse falls back to the uniform grid and gains click-to-take, which is
+  // what ClassicUO's separate `GridLootGump` exists to do. Switchable in
+  // Options for anyone who wants the real corpse art back.
+  const loot = settings.gridLoot && isCorpseContainer(serial);
+  const authentic = gump > 0 && !loot;
+  body.classList.toggle("cont-loot", loot);
+  if (loot) {
+    const bar = document.createElement("div");
+    bar.className = "loot-bar";
+    const all = document.createElement("button");
+    all.type = "button"; all.className = "loot-all"; all.textContent = "Loot all";
+    all.addEventListener("click", () => {
+      // Snapshot first: `grabItem` mutates the container we are iterating (each
+      // reply removes an item), and the pack can fill part-way through, which
+      // simply leaves the rest on the corpse.
+      for (const it of items) grabItem(it.serial >>> 0);
+    });
+    bar.appendChild(all);
+    const hint = document.createElement("span");
+    hint.className = "loot-hint"; hint.textContent = "click an item to take it";
+    bar.appendChild(hint);
+    body.appendChild(bar);
+  }
   body.classList.toggle("cont-art", authentic);
   body.classList.toggle("cont-grid", !authentic);
   if (authentic) {
@@ -552,6 +599,12 @@ function refreshContainer(serial) {
       const a = document.createElement("span");
       a.className = "cont-amt"; a.textContent = it.amount;
       cell.appendChild(a);
+    }
+    if (loot) {
+      // Single click takes it. Safe to add alongside the drag machinery below:
+      // a click that became a drag never fires `click`, so dragging an item off
+      // a corpse still works for anyone who wants to place it precisely.
+      cell.addEventListener("click", () => grabItem(itemSerial));
     }
     cell.addEventListener("dblclick", () => {
       // Belt and braces: a completed double-click on this cell means the press

@@ -691,6 +691,19 @@
          positions the server stores. Sized by the art itself; `overflow:hidden`
          is what keeps a stray position inside the bag (ClassicUO clamps against
          a per-gump bounds table instead). */
+      .cont-loot .loot-bar {
+        width: 100%; display: flex; align-items: center; gap: 8px;
+        margin: -4px 0 4px; padding-bottom: 5px; border-bottom: 1px solid #2a3442;
+      }
+      .loot-all {
+        font: inherit; font-size: 11px; padding: 2px 8px; border-radius: 4px;
+        border: 1px solid #34404f; background: rgba(22, 28, 38, .88); color: #c7d0dc;
+        cursor: pointer;
+      }
+      .loot-all:hover { border-color: #4a90d9; color: #e6e9ee; }
+      .loot-hint { font-size: 10px; color: #6b7280; }
+      .cont-loot .cont-item { cursor: pointer; }
+      .cont-loot .cont-item:hover { border-color: #d9a441; }
       .cont-art { position: relative; padding: 0; overflow: hidden; line-height: 0; }
       .cont-art .cont-bg { display: block; max-width: none; }
       .cont-art .cont-item { border: 0; background: none; width: auto; height: auto; }

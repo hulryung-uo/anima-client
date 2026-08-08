@@ -178,7 +178,14 @@ function returnCursorItem() {
   const serial = cursorItem.serial;
   const bp = backpackSerial();
   if (bp != null) {
-    sendPlacement("drop:" + serial + ":0:0:0:" + bp, serial);
+    // 0xFFFF/0xFFFF is "no position — you place it", not a guess: ServUO's
+    // `Item.DropToItem` routes `x == -1 && y == -1` (Int16 of 0xFFFF) to
+    // `OnDroppedOnto` → `Container.DropItem`, which picks a spot inside the
+    // bag's own bounds. This used to send 0,0, which pinned every returned item
+    // to the top-left corner — invisible while the container was a uniform
+    // grid, and stacked in plain sight once the window started drawing the real
+    // bag. ServUO uses the same sentinel internally for "put it in the pack".
+    sendPlacement("drop:" + serial + ":65535:65535:0:" + bp, serial);
   } else {
     const gl = clientToGlobal(lastMenuX, lastMenuY), t = groundTileAt(gl.x, gl.y);
     sendPlacement("drop:" + serial + ":" + t.x + ":" + t.y + ":" + t.z + ":4294967295", serial);
