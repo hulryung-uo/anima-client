@@ -34,6 +34,9 @@ let dragGhost = null;           // floating <img> glued to the cursor while an i
 const DRAG_THRESHOLD = 6;       // min px of motion before a held press is even a drag candidate
 const DRAG_FAR = 22;            // px of motion that means "definitely a drag" regardless of hold time
 const DRAG_HOLD_MS = 250;       // a small drift only becomes a drag after the button's been held this long (> a tap)
+// Nominal item-icon size: keeps a dropped item's stored position far enough
+// from the far edge that its sprite still lands inside the bag.
+const ITEM_ICON_PX = 44;
 
 // Place/refresh the floating ghost image at the cursor (page coords).
 function moveGhost(clientX, clientY) {
@@ -104,9 +107,18 @@ function placeCursorItem(clientX, clientY) {
     let tgt = null;
     for (const [s, w] of dialogWindows("containers")) if (w.el === contWin) { tgt = s; break; }
     if (tgt == null) return false;
-    const r = contWin.getBoundingClientRect();
-    const gx = Math.max(0, Math.min(150, Math.round(clientX - r.left)));
-    const gy = Math.max(0, Math.min(120, Math.round(clientY - r.top - 20)));
+    // Measure against the BODY, which is the gump's own pixel space — the
+    // coordinates ServUO stores and the window now draws items at. This used
+    // to measure the whole window, subtract a hardcoded 20px title bar and
+    // clamp to a flat 150x120: fine while the body was a uniform grid, wrong
+    // the moment the art defines the space, since a real bag is both a
+    // different size and offset by its own chrome.
+    const cbody = contWin.querySelector(".gump-body") || contWin;
+    const r = cbody.getBoundingClientRect();
+    const cw = Math.max(1, cbody.clientWidth - ITEM_ICON_PX);
+    const ch = Math.max(1, cbody.clientHeight - ITEM_ICON_PX);
+    const gx = Math.max(0, Math.min(cw, Math.round(clientX - r.left)));
+    const gy = Math.max(0, Math.min(ch, Math.round(clientY - r.top)));
     sendPlacement("drop:" + serial + ":" + gx + ":" + gy + ":0:" + tgt, serial);
     return true;
   }

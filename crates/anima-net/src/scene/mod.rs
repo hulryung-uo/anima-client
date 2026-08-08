@@ -347,6 +347,17 @@ pub fn build_scene(
     let combatant = s.world.combatant.unwrap_or(0);
     // AOS expansion (SupportedFeatures 0xB9): gates AOS-only UI like the weapon
     // special-ability bar. T2A servers don't advertise it → the client hides it.
+    // Container gump art, by container serial (0x24 DrawContainer). The window
+    // is drawn from this instead of a bare grid, and it is retained state
+    // rather than an event — see `World::container_gumps`.
+    let container_gumps = serde_json::to_string(
+        &s.world
+            .container_gumps
+            .iter()
+            .map(|(serial, gump)| (serial.to_string(), *gump))
+            .collect::<std::collections::BTreeMap<_, _>>(),
+    )
+    .unwrap_or_else(|_| "{}".into());
     // Bulletin boards (0x71): the open board with its summary lines, and the
     // most recently fetched full body. Decoded since the codec landed with no
     // consumer until the posting verbs existed.
@@ -473,7 +484,7 @@ pub fn build_scene(
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
          \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"logoutAck\":{logout_ack},\"boatMoves\":{boat_moves},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
-         \"armedAbility\":{armed_ability},\"activeSpells\":{active_spells},\"chat\":{chat},\"bboard\":{bboard},\
+         \"armedAbility\":{armed_ability},\"activeSpells\":{active_spells},\"chat\":{chat},\"bboard\":{bboard},\"contGumps\":{container_gumps},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
          \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps}{placement_field}{house_design_field},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",

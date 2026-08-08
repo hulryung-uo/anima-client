@@ -1365,6 +1365,16 @@ pub struct World {
     pub recent_container_opens: Vec<(u64, u32, u16)>,
     /// Monotonic counter assigning each container-open event a unique `seq`.
     pub container_open_seq: u64,
+    /// The gump art id ServUO named for each container it has displayed
+    /// (0x24), retained by serial rather than aged out with
+    /// [`World::recent_container_opens`].
+    ///
+    /// The ring is an *event* log capped to a few entries, so a container that
+    /// has been open a while loses its entry — and the gump id is not an event,
+    /// it is what the window is drawn from for as long as it stays open. Kept
+    /// separately for that reason, and dropped by [`World::remove`] with the
+    /// item it describes.
+    pub container_gumps: HashMap<u32, u16>,
     /// Recent Swing events (0x2F): each `(seq, attacker, defender)`, newest
     /// last, capped like `recent_lift_rejects`. ServUO only ever sends this to
     /// the ATTACKING player's own client (`attacker.Send(...)` — an NPC
@@ -1843,6 +1853,9 @@ impl World {
     /// monotonic `seq` and keeps only the most recent
     /// [`MAX_RECENT_CONTAINER_OPENS`].
     pub fn push_container_open(&mut self, serial: u32, gump_id: u16) {
+        // Retained beside the event ring — see `container_gumps` for why the
+        // ring alone cannot answer "what is this open window drawn from".
+        self.container_gumps.insert(serial, gump_id);
         self.container_open_seq += 1;
         self.recent_container_opens
             .push((self.container_open_seq, serial, gump_id));
@@ -2482,6 +2495,7 @@ impl World {
     /// a queued OPL refetch: there is no longer anything to show a tooltip for.
     pub fn remove(&mut self, serial: u32) -> bool {
         let was_mobile = self.mobiles.remove(&serial).is_some();
+        self.container_gumps.remove(&serial);
         self.items.remove(&serial);
         self.opl.remove(&serial);
         self.opl_revision.remove(&serial);

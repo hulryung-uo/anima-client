@@ -490,7 +490,41 @@ function refreshContainer(serial) {
   // `[set Hue` on an item in an open backpack left its icon in the old colour.
   const body = win.body;
   body.innerHTML = "";
-  if (!items.length) { body.innerHTML = '<div class="cont-empty">(empty)</div>'; return; }
+  // Draw the container's real gump art and place each item at the (x, y) the
+  // server stored for it, instead of a uniform grid. Both halves were already
+  // on the wire and thrown away: 0x3C carries a position per item, and 0x24
+  // names the gump (retained by `World::container_gumps`, since the open event
+  // ring ages out while the window stays open).
+  //
+  // Coordinates are the gump's own pixel space and go in raw, exactly as
+  // ClassicUO does (`itemControl.X = (short)item.X`) — note the SIGNED read,
+  // which is why a `| 0` here would be wrong for a negative x. ClassicUO also
+  // clamps into a per-gump bounds table so a stray position cannot draw
+  // outside the bag; we clip with `overflow: hidden` instead, which needs no
+  // 78-entry table to be ported and cannot disagree with the server about
+  // where the item actually is.
+  const gump = (scene && scene.contGumps && scene.contGumps[String(serial)]) | 0;
+  const authentic = gump > 0;
+  body.classList.toggle("cont-art", authentic);
+  body.classList.toggle("cont-grid", !authentic);
+  if (authentic) {
+    const bg = document.createElement("img");
+    bg.className = "cont-bg";
+    bg.src = `gump/${gump}.png`;
+    bg.draggable = false;
+    // A gump we cannot fetch must not leave an empty window: fall back to the
+    // grid rather than to nothing.
+    bg.onerror = () => {
+      bg.remove();
+      body.classList.remove("cont-art");
+      body.classList.add("cont-grid");
+    };
+    body.appendChild(bg);
+  }
+  if (!items.length) {
+    if (!authentic) body.innerHTML = '<div class="cont-empty">(empty)</div>';
+    return;
+  }
   for (const it of items) {
     const itemSerial = it.serial >>> 0;
     const cell = document.createElement("div");
@@ -501,6 +535,14 @@ function refreshContainer(serial) {
     cell.dataset.amount = (it.amount | 0) || 1;
     cell.dataset.st = it.st ? "1" : "0";
     cell.dataset.hue = it.hue | 0;          // carried into the drag ghost on lift
+    if (authentic) {
+      // Signed, per ClassicUO's `(short)item.X` — a `| 0` on an already-u16
+      // value would place a negative x off at 65000-odd instead.
+      const sx = (it.x << 16) >> 16, sy = (it.y << 16) >> 16;
+      cell.style.position = "absolute";
+      cell.style.left = sx + "px";
+      cell.style.top = sy + "px";
+    }
     const img = document.createElement("img");
     img.className = "cont-icon"; img.src = `art/static/${stackGraphic(it.g, it.amount | 0)}.png${hueQuery(it.hue)}`;
     img.draggable = false;                  // let the cell own the drag

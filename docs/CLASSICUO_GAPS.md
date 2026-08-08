@@ -124,6 +124,29 @@ v25 → v26. Tier 1 is now closed out entirely. Three findings:
   list. It also surfaced that the summary decode appended blindly, showing a
   message twice when two consumers asked; it upserts by serial now.
 
+Closed 2026-08-08 (container fidelity): the first Tier 2 row — authentic
+container layout. Contract unchanged (no new actions; `contItems` already
+carried the positions).
+
+Two things it surfaced rather than caused:
+
+- **The drop clamp was written for the grid.** Dropping into a container
+  measured the whole window, subtracted a hardcoded 20px title bar and clamped
+  to a flat 150x120. Harmless while the body was a uniform grid; wrong the
+  moment the art defines the coordinate space. It measures the body and its
+  real size now.
+- **"Return to backpack" sends (0, 0)**, so anything put back that way piles
+  into the bag's top-left corner — invisible in a grid, obvious now. Left
+  alone deliberately: there is no wire value that asks the server to choose
+  (`Container.DropItem`'s randomiser is an internal path the drop packet never
+  reaches), so picking a position here means inventing one. Worth revisiting
+  with ClassicUO's bounds table, which is what would give a sensible default.
+
+Tier 2 is **not** finished — still open: the 0x11 `type >= 6` combat tail
+(unobservable on this shard, see the expansion note below), journal
+filters/tabs/timestamps, grid loot, the info bar, the counter bar and friends,
+and window management.
+
 **Know what the local shard can and cannot prove.** `Config/Expansion.cfg` on
 the ServUO at `127.0.0.1:2594` says `CurrentExpansion=T2A`, so `Core.AOS` is
 **false** there. That single fact splits this batch in half, and it is worth
@@ -427,7 +450,7 @@ The receive side is generally complete; there is no way to *act*.
 | Grid loot | corpses already open as a grid; the one-click loot workflow is what's missing | M |
 | Info bar | a fixed HUD readout exists; ClassicUO's user-configurable field set does not | M |
 | Counter bar, ignore list, combat-book gump, racial-abilities book, network-stats and inspector windows | absent | S–M |
-| Container gumps ignore real container art and each item's stored (x,y) | contents render as a uniform grid rather than the authentic bag layout | M |
+| ~~Container gumps ignore real container art and each item's stored (x,y)~~ — **CLOSED, live-verified** | Both halves were already on the wire and discarded: 0x3C carries a position per item, and 0x24 names the container's gump. The gump id is now **retained** (`World::container_gumps`) rather than read from the open-event ring, which ages out while the window stays open, and reaches the renderer as `scene.contGumps`. The window draws that art and places each item at its raw (x, y), read **signed** as ClassicUO does (`(short)item.X`). ClassicUO additionally clamps into a per-gump bounds table (78 entries); we clip with `overflow: hidden` instead, which needs no table and cannot disagree with the server about where an item actually is. Verified live on a real backpack (gump 60, 230×204) with a dozen items at their stored positions | M |
 | Window management | no resize, no anchoring/docking, no saved per-window layout | M |
 
 ---
