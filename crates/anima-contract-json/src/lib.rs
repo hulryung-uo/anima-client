@@ -118,13 +118,16 @@
 //! books became writable — `BookHeaderChange` (0xD4) and `BookPageWrite`
 //! (0x66). Both are silently all-or-nothing server-side: an over-long title,
 //! a ninth line or an 80-character line makes ServUO discard the whole packet,
-//! so the builders clamp and a caller confirms by re-reading `book`.)
+//! so the builders clamp and a caller confirms by re-reading `book`. v25:
+//! `BoatMove`/`BoatStop` (0xBF/0x33) steer a piloted ship. The player must be
+//! piloting first — double-click the tiller man — and nothing reports the
+//! omission; `player.mounted` turning true is the signal it took.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 24;
+pub const SCHEMA_VERSION: u32 = 25;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
@@ -835,6 +838,11 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         "OplRequest" => Ok(Action::OplRequest {
             serial: req_u32("serial")?,
         }),
+        "BoatMove" => Ok(Action::BoatMove {
+            dir: req_u32("dir")? as u8,
+            run: v.get("run").and_then(Value::as_bool).unwrap_or_default(),
+        }),
+        "BoatStop" => Ok(Action::BoatStop),
         "BookHeaderChange" => Ok(Action::BookHeaderChange {
             serial: req_u32("serial")?,
             title: text("title"),
@@ -1205,6 +1213,11 @@ mod tests {
                 Action::OplRequest { serial: 8 },
             ),
             (
+                json!({"type": "BoatMove", "dir": 2, "run": true}),
+                Action::BoatMove { dir: 2, run: true },
+            ),
+            (json!({"type": "BoatStop"}), Action::BoatStop),
+            (
                 json!({"type": "BookHeaderChange", "serial": 9, "title": "T", "author": "A"}),
                 Action::BookHeaderChange {
                     serial: 9,
@@ -1566,8 +1579,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v24_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 24);
+    fn schema_v25_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 25);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,

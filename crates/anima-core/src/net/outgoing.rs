@@ -618,6 +618,55 @@ pub fn build_bandage_target(bandage: u32, target: u32) -> Vec<u8> {
     finish_variable(w.into_vec())
 }
 
+/// Boat pilot speed: one step per slow tick (ClassicUO sends this for a walk).
+pub const BOAT_SPEED_SLOW: u8 = 1;
+/// Boat pilot speed: fast tick (ClassicUO sends this for a run).
+pub const BOAT_SPEED_FAST: u8 = 2;
+/// Boat pilot speed meaning "stop".
+///
+/// Any value ServUO does not recognise stops the ship rather than erroring:
+/// `GetMovementInterval(int speed, …)`'s `default` arm yields `clientSpeed = 0`,
+/// `StartMove` refuses a zero client speed, and `OnMousePilotCommand` answers
+/// that refusal with `StopMove`. So 0 is the honest spelling of a stop, and
+/// there is no such thing as speed 3.
+pub const BOAT_SPEED_STOP: u8 = 0;
+
+/// MultiBoatMoveRequest — GeneralInfo `0xBF`, subcommand `0x0033`: steer the
+/// boat the player is currently piloting.
+/// `[0xBF][len:u16][0x0033][playerSerial:u32][dir:u8][dir:u8][speed:u8]`.
+///
+/// **The serial is the PLAYER's, not the boat's** — ServUO's
+/// `MultiMouseMovementRequest` does `World.FindMobile(playerSerial)` and then
+/// reaches the ship through `mob.Mount`. ClassicUO passes `_world.Player` for
+/// the same reason. Sending the boat's serial finds no mobile and the packet
+/// is dropped in silence.
+///
+/// The direction byte is written **twice** (movement, then facing); ServUO
+/// reads the second and discards it, and ClassicUO writes the same value for
+/// both. It is an ordinary 0..7 UO direction, the same space
+/// [`build_walk_request`] uses — ClassicUO derives it with the identical
+/// `facing - 1` expression it feeds to `Player.Walk`, so there is no offset to
+/// apply here.
+///
+/// **This only works while piloting.** The handler returns unless the player
+/// is `Mounted` on a `BaseBoat`, which happens when `LockPilot` attaches a
+/// `BoatMountItem` (graphic `0x3E96`, worn on the Mount layer) — entered by
+/// double-clicking the tiller man or a ship wheel. A brain must do that first;
+/// nothing reports the omission.
+///
+/// Note the *other* boat-control path, tiller-man speech ("forward", "stop"),
+/// is **not reachable from this client at all**: `BaseBoat.OnSpeech` dispatches
+/// on `e.Keywords`, which requires the `speech.mul` keyword encoding this
+/// project does not implement (see CLASSICUO_GAPS.md Tier 5). Mouse piloting is
+/// the whole of our boat control, not a convenience on top of speech.
+pub fn build_boat_move_request(player_serial: u32, dir: u8, speed: u8) -> Vec<u8> {
+    let d = dir & 0x07;
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x0033);
+    w.u32(player_serial).u8(d).u8(d).u8(speed);
+    finish_variable(w.into_vec())
+}
+
 /// Longest title ServUO will accept, in UTF-8 **bytes** (`HeaderChange`:
 /// `if (titleLength > 60) return`).
 const BOOK_TITLE_MAX: usize = 60;
@@ -1586,6 +1635,25 @@ mod tests {
             d,
             vec![0xD7, 0x00, 0x0F, 0, 0, 0, 1, 0x00, 0x19, 0, 0, 0, 0, 0, 0x0A]
         );
+    }
+
+    #[test]
+    fn boat_move_request_layout() {
+        let p = build_boat_move_request(0xDEAD_BEEF, 2, BOAT_SPEED_FAST);
+        assert_eq!(
+            p,
+            vec![0xBF, 0x00, 0x0C, 0x00, 0x33, 0xDE, 0xAD, 0xBE, 0xEF, 2, 2, 2]
+        );
+        // The direction is written TWICE (movement, then facing) and ServUO
+        // discards the second — dropping it would shift the speed byte into
+        // the facing slot and read the speed as 0, i.e. a silent stop.
+        assert_eq!(p[9], p[10]);
+        // Out-of-range directions wrap rather than corrupting the facing byte.
+        let w = build_boat_move_request(1, 9, BOAT_SPEED_SLOW);
+        assert_eq!((w[9], w[10]), (1, 1));
+        // Stop is speed 0; there is no speed 3 (see BOAT_SPEED_STOP).
+        assert_eq!(build_boat_move_request(1, 0, BOAT_SPEED_STOP)[11], 0);
+        assert_eq!((BOAT_SPEED_SLOW, BOAT_SPEED_FAST), (1, 2));
     }
 
     #[test]

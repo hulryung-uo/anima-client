@@ -99,7 +99,8 @@ pub(super) fn parse_house_design_command(body: &str) -> Option<Action> {
 /// `gump:<serial>:<gumpId>:<button>[:sw=1,2][:e=<id>=<text>,…]` (gump reply; text
 /// entries can't contain `:`, `,`, or `=`) · `menusel:<serial>:<index>` (legacy
 /// 0x7C menu; index 0 cancels) · `huepick:<serial>:<hue>` (0x95 dye picker) ·
-/// `bookhdr:<serial>:<title>|<author>` · `bookpage:<serial>:<page>:<line>|<line>…`
+/// `boat:<dir>[:<0|1>]` / `boatstop` (steer a piloted ship; double-click the
+/// tiller man first) · `bookhdr:<serial>:<title>|<author>` · `bookpage:<serial>:<page>:<line>|<line>…`
 /// (1-based page; both clamped to what ServUO accepts) ·
 /// `mapedit:<serial>` (toggle a map into edit mode — required before any pin
 /// edit) · `mappin:<serial>:<x>:<y>` · `mappinins`/`mappinmv:<serial>:<index>:<x>:<y>` ·
@@ -287,6 +288,17 @@ pub(super) fn parse_command(body: &str) -> Option<Action> {
         "oplreq" => Some(Action::OplRequest {
             serial: parse_serial(arg)?,
         }),
+        // boat:<dir>[:<0|1 run>] / boatstop — steer a piloted ship (0xBF/0x33).
+        // Double-click the tiller man first; without the pilot lock ServUO
+        // drops these without a word.
+        "boat" => {
+            let mut p = arg.split(':');
+            Some(Action::BoatMove {
+                dir: p.next()?.parse::<u8>().ok()? & 7,
+                run: p.next() == Some("1"),
+            })
+        }
+        "boatstop" => arg.is_empty().then_some(Action::BoatStop),
         // bookhdr:<serial>:<title>|<author> — 0xD4. `|` separates the two so a
         // title may contain colons; both are clamped by the builder.
         "bookhdr" => {
@@ -834,6 +846,26 @@ mod command_tests {
         // Missing coordinates must not silently become a pin at the origin.
         assert!(parse_command("mappin:0x40001111:12").is_none());
         assert!(parse_command("mappindel:0x40001111").is_none());
+    }
+
+    #[test]
+    fn boat_commands_parse() {
+        assert_eq!(
+            parse_command("boat:2"),
+            Some(Action::BoatMove { dir: 2, run: false })
+        );
+        assert_eq!(
+            parse_command("boat:2:1"),
+            Some(Action::BoatMove { dir: 2, run: true })
+        );
+        // Directions wrap into 0..7 like every other direction verb here.
+        assert_eq!(
+            parse_command("boat:9"),
+            Some(Action::BoatMove { dir: 1, run: false })
+        );
+        assert_eq!(parse_command("boatstop"), Some(Action::BoatStop));
+        assert!(parse_command("boatstop:1").is_none());
+        assert!(parse_command("boat").is_none());
     }
 
     #[test]

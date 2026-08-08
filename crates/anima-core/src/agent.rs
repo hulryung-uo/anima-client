@@ -692,6 +692,26 @@ pub enum Action {
     /// absolute number, and must not compare it against a spell's mana cost.
     /// Our own vitals are exempt — those arrive un-normalized.
     StatusRequest { serial: u32 },
+    /// Steer the boat we are piloting in absolute direction `dir` (0..7),
+    /// walking or running (0xBF/0x33). The driver fills our own serial —
+    /// ServUO looks the *player* up and reaches the ship through `mob.Mount`.
+    ///
+    /// **Requires piloting first**, and nothing says so if you are not: the
+    /// handler returns unless the player is mounted on a `BaseBoat`, which
+    /// happens when the tiller man (or a High Seas ship wheel) is
+    /// double-clicked. `Observation::player.mounted` becomes true when it
+    /// takes, because the pilot lock equips a virtual mount item.
+    ///
+    /// The other boat-control path — tiller-man speech ("forward", "stop") —
+    /// is unreachable from this client: it dispatches on `speech.mul` keyword
+    /// ids, which are not implemented (CLASSICUO_GAPS.md Tier 5).
+    BoatMove { dir: u8, run: bool },
+    /// Stop the boat we are piloting (0xBF/0x33 with speed 0).
+    ///
+    /// Spelled as its own action because the speed byte has no "3": ServUO
+    /// treats every unrecognised speed as a stop, so an out-of-range value is
+    /// indistinguishable from this and a caller should not have to know that.
+    BoatStop,
     /// Rewrite an open book's title and author (0xD4).
     ///
     /// Silent all-or-nothing on the server: ServUO discards the whole packet

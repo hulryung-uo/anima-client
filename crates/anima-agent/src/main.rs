@@ -155,6 +155,10 @@ fn main() {
                 }
                 Action::PartySetCanLoot { can_loot } => format!("partyloot({can_loot})"),
                 Action::StatusRequest { serial } => format!("statusreq(0x{serial:08X})"),
+                Action::BoatMove { dir, run } => {
+                    format!("boat(d{dir}{})", if *run { ",run" } else { "" })
+                }
+                Action::BoatStop => "boatstop".into(),
                 Action::BookHeaderChange { serial, title, .. } => {
                     format!("bookhdr(0x{serial:08X} {title:?})")
                 }

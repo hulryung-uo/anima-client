@@ -565,6 +565,32 @@ function applyBoatSpriteGlides(now) {
   for (const entry of itemPool.values()) move(entry.sp);
 }
 
+// Graphic of the virtual mount ServUO equips on whoever takes the helm
+// (`BoatMountItem`, worn on the Mount layer). It is how the client can tell
+// "piloting a ship" from "riding a horse" — both report `mounted`.
+const BOAT_MOUNT_GRAPHIC = 0x3E96;
+function pilotingBoat() {
+  const p = scene && scene.player;
+  if (!p || !p.mounted || !p.equip) return false;
+  return p.equip.some((e) => (e.layer | 0) === 0x19 && (e.g & 0xFFFF) === BOAT_MOUNT_GRAPHIC);
+}
+// Steer from the same held-key/mouse intent that would otherwise walk.
+//
+// The ship keeps sailing on its own until told otherwise — one packet starts it
+// and one stops it — so this sends only on a CHANGE, unlike the walk path which
+// commits a packet per step. Re-sending every frame would flood the server and,
+// worse, `OnMousePilotCommand` restarts the move each time, which stutters the
+// ship instead of speeding it up.
+let boatCmd = null;   // last (dir,run) sent, or null when stopped
+function steerBoat() {
+  const want = moveIntent ? { dir: moveIntent.dir & 7, run: !!moveIntent.run } : null;
+  const same = (a, b) => (!a && !b) || (a && b && a.dir === b.dir && a.run === b.run);
+  if (same(want, boatCmd)) return;
+  boatCmd = want;
+  if (want) sendInput(`boat:${want.dir}:${want.run ? 1 : 0}`);
+  else sendInput("boatstop");
+}
+
 function renderFrame(dt) {
   if (!scene) return;
   const now = performance.now();
@@ -576,8 +602,13 @@ function renderFrame(dt) {
   // Player: append predicted steps while a key is held, then interpolate the queue.
   const me = anim.get("self");
   if (me && pred) {
-    enqueueSteps(now);
-    processSteps(now, dt);
+    // At the helm the SHIP moves, not the avatar, so the walk predictor is
+    // simply the wrong machine — ClassicUO branches the same way, before its
+    // own `Player.Walk`. `steerBoat` turns the identical direction intent into
+    // 0xBF/0x33 instead, and `boatVisual` below already carries us with the
+    // ship's 0xF6 steps.
+    if (pilotingBoat()) steerBoat();
+    else { enqueueSteps(now); processSteps(now, dt); }
     let carriedByBoat = false;
     if (scene.player) {
       const boatPos = boatVisual(
