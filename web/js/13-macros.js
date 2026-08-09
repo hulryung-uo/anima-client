@@ -409,7 +409,7 @@ function setupInput() {
     // Inventory/container item under the cursor → show its OPL tooltip (same flow
     // as world items). This must come BEFORE the panel-suppression below, since a
     // container window IS a gump and would otherwise hide the tooltip.
-    const cell = e.target.closest && e.target.closest(".cont-item[data-serial]");
+    const cell = e.target.closest && e.target.closest(".cont-item[data-serial], .cb-slot[data-serial]");
     if (cell) { hoverEntity((+cell.dataset.serial) >>> 0); return; }
     const overPanel = e.target.closest && e.target.closest(".gump-win, #worldmap, #paperdoll, .popup-menu");
     if (overPanel && pdTipEl == null && tipSerial != null) { tipSerial = null; hideTip(); }
@@ -486,6 +486,7 @@ function setupInput() {
   });
   optBody.addEventListener("click", (e) => {
     if (e.target.closest(".opt-infobar")) { toggleInfoBar(); return; }
+    if (e.target.closest(".opt-counterbar")) { toggleCounterBar(); return; }
     if (!e.target.closest(".opt-logout")) return;
     requestLogout();
   });

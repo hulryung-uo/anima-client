@@ -631,3 +631,260 @@ function refreshInfoBar(s, force) {
     host.appendChild(el);
   }
 }
+
+// ---- counter bar (ClassicUO's CounterBarGump) ------------------------------
+//
+// A row of cells, each pinned to an item GRAPHIC (optionally to one specific
+// hue), showing how many of that item you are carrying and using one on
+// double-click. It exists for reagents, potions and bandages: the count falls as
+// you spend them without any bag being open.
+//
+// The count is a port of ClassicUO's `PlayerMobile.GetTotalAmountOfItem` +
+// `Item.GetTotalAmount`: walk the worn items on layers 1..0x17 (which is where
+// the backpack, 0x15, sits); if a worn item holds anything, recurse and count
+// matches anywhere below it including nested bags; otherwise test the worn item
+// itself. That last branch is why an *empty* worn pouch counts as one pouch —
+// ClassicUO's `IsContainer && !IsEmpty` falls through the same way. "Holds
+// nothing we have been told about" is the only form of that test available to a
+// client, which raises the obvious worry: a bar reading zero until you have
+// opened every bag. It doesn't. Instrumenting the 0x25 handler shows ServUO
+// pushing one add-to-container per carried item at login, at every depth — 16
+// for the worn pack, and the stack of 20 inside a nested bag nobody had ever
+// opened. Nothing here has to ask; this bar sends no packet at all except when
+// you use a slot.
+const CB_LAYER_MIN = 1, CB_LAYER_MAX = 0x17;
+const CB_FLASH_MS = 5000;      // ClassicUO HIGHLIGHT_AMOUNT_CHANGED_DURATION
+const CB_EMPTY_SLOTS = 5;      // a fresh bar has somewhere to drag onto
+let counterBarOn = localStorage.getItem("anima.counterBarOn") === "1";
+let counterSlots = null;       // [{ g, hue: number|null, cmp }] — hue null = any hue
+try {
+  const saved = JSON.parse(localStorage.getItem("anima.counterSlots") || "null");
+  if (Array.isArray(saved)) counterSlots = saved;
+} catch (e) {}
+if (!counterSlots) counterSlots = Array.from({ length: CB_EMPTY_SLOTS }, () => ({ g: 0, hue: null, cmp: 0 }));
+let cbSel = -1;                // slot the options strip is editing; -1 = none
+// ClassicUO's `CounterBarHighlightOnAmount` / `CounterBarHighlightAmount`, and
+// its defaults (off, 5).
+let cbWarnOn = localStorage.getItem("anima.cbWarnOn") === "1";
+let cbWarnAt = parseInt(localStorage.getItem("anima.cbWarnAt") || "5", 10) || 5;
+function saveCounterBar() {
+  localStorage.setItem("anima.counterBarOn", counterBarOn ? "1" : "0");
+  localStorage.setItem("anima.counterSlots", JSON.stringify(counterSlots));
+  localStorage.setItem("anima.cbWarnOn", cbWarnOn ? "1" : "0");
+  localStorage.setItem("anima.cbWarnAt", String(cbWarnAt));
+}
+// contItems is a flat list of "item X is inside container Y"; index it by
+// container once per pass rather than re-scanning it per slot.
+function cbIndex() {
+  const byCont = new Map();
+  for (const it of (scene && scene.contItems) || []) {
+    const c = it.cont >>> 0;
+    let a = byCont.get(c);
+    if (!a) byCont.set(c, (a = []));
+    a.push(it);
+  }
+  return byCont;
+}
+// Depth-first through everything below a container. `seen` guards a malformed
+// cont-chain from looping forever; the server should never send one.
+function cbWalk(byCont, serial, visit, seen) {
+  seen = seen || new Set();
+  serial = serial >>> 0;
+  if (seen.has(serial)) return;
+  seen.add(serial);
+  for (const it of byCont.get(serial) || []) {
+    cbWalk(byCont, it.serial >>> 0, visit, seen);
+    visit(it);
+  }
+}
+// Every item we are carrying, by ClassicUO's counting rule above. (Its own
+// `FindItem` walks a fractionally different tree — it also considers a worn
+// container itself, which the count does not. We use one rule for both, so a
+// slot bound to a bag graphic finds a nested bag rather than the worn one.)
+function cbEachCarried(visit) {
+  const p = scene && scene.player;
+  if (!p || !p.equip) return;
+  const byCont = cbIndex();
+  for (const e of p.equip) {
+    const layer = e.layer | 0;
+    if (layer < CB_LAYER_MIN || layer > CB_LAYER_MAX) continue;
+    const kids = byCont.get(e.serial >>> 0);
+    if (kids && kids.length) cbWalk(byCont, e.serial, visit);
+    else visit(e);
+  }
+}
+function cbMatches(it, g, hue) {
+  return (it.g | 0) === (g | 0) && (hue == null || (it.hue | 0) === (hue | 0));
+}
+function cbCount(g, hue) {
+  let total = 0;
+  // A worn item has no `amount` field — it is one of itself.
+  cbEachCarried((it) => { if (cbMatches(it, g, hue)) total += (it.amount | 0) || 1; });
+  return total;
+}
+function cbFind(g, hue) {
+  let best = null;
+  cbEachCarried((it) => {
+    if (!cbMatches(it, g, hue)) return;
+    // Hue-agnostic slot: ClassicUO's FindItem keeps the LOWEST hue among the
+    // matches (`minColor`) — the plainest one, so a stack of undyed reagents
+    // goes before a dyed keepsake of the same graphic.
+    if (!best || hue == null && (it.hue | 0) < (best.hue | 0)) best = it;
+  });
+  return best;
+}
+// ClassicUO `CalculateDisplayAmountText`: a lone item shows no number at all;
+// with a compare-to set the label becomes the signed distance from it, and ±
+// marks sitting exactly on target.
+function cbText(amount, cmp) {
+  const d = amount - (cmp | 0);
+  if (!cmp) return d === 1 ? "" : String(d);
+  return (d === 0 ? "±" : d > 0 ? "+" : "") + d;
+}
+function toggleCounterBar() {
+  counterBarOn = !counterBarOn;
+  document.getElementById("counterbar").classList.toggle("on", counterBarOn);
+  saveCounterBar();
+  if (counterBarOn) renderCounterSlots();
+}
+function renderCounterSlots() {
+  const host = document.getElementById("cb-slots");
+  if (!host) return;
+  host.innerHTML = "";
+  counterSlots.forEach((slot, i) => {
+    const cell = document.createElement("div");
+    cell.className = "cb-slot" + (i === cbSel ? " sel" : "");
+    cell.dataset.i = String(i);
+    if (slot.g) {
+      const img = document.createElement("img");
+      img.src = `art/static/${slot.g}.png${hueQuery(slot.hue || 0)}`;
+      img.onerror = () => { img.style.visibility = "hidden"; };
+      cell.appendChild(img);
+      const amt = document.createElement("span");
+      amt.className = "cb-amt";
+      cell.appendChild(amt);
+    }
+    const x = document.createElement("span");
+    x.className = "cb-x"; x.textContent = "×"; x.title = "remove this slot";
+    cell.appendChild(x);
+    host.appendChild(cell);
+  });
+  renderCounterOpts();
+  refreshCounterBar(true);
+}
+// Bind a slot to what was just dropped on it (ClassicUO CounterItem.OnMouseUp).
+function assignCounterSlot(i, g, hue) {
+  if (!counterSlots[i]) return;
+  counterSlots[i] = { g: g | 0, hue: hue | 0, cmp: counterSlots[i].cmp | 0 };
+  saveCounterBar();
+  renderCounterSlots();
+}
+// ClassicUO reaches the per-slot settings through a right-click context menu,
+// which this client has no equivalent of; a strip under the bar showing the
+// selected slot's settings puts the same three entries (ignore hue, compare to,
+// remove) somewhere visible instead.
+function renderCounterOpts() {
+  const box = document.getElementById("cb-opts");
+  if (!box) return;
+  const slot = counterSlots[cbSel];
+  box.classList.toggle("on", !!slot);
+  box.innerHTML = "";
+  if (!slot) return;
+  const hueRow = document.createElement("label");
+  const hueCb = document.createElement("input");
+  hueCb.type = "checkbox"; hueCb.checked = slot.hue == null; hueCb.disabled = !slot.g;
+  hueCb.addEventListener("change", () => {
+    slot.hue = hueCb.checked ? null : (cbFind(slot.g, null) || { hue: 0 }).hue | 0;
+    saveCounterBar();
+    renderCounterSlots();
+  });
+  hueRow.appendChild(hueCb);
+  hueRow.appendChild(document.createTextNode("Ignore hue"));
+  box.appendChild(hueRow);
+  const cmpRow = document.createElement("label");
+  cmpRow.appendChild(document.createTextNode("Compare to"));
+  const cmp = document.createElement("input");
+  cmp.type = "number"; cmp.value = String(slot.cmp | 0);
+  cmp.addEventListener("change", () => {
+    slot.cmp = parseInt(cmp.value, 10) || 0;
+    saveCounterBar();
+    refreshCounterBar(true);
+  });
+  cmpRow.appendChild(cmp);
+  box.appendChild(cmpRow);
+  const warnRow = document.createElement("label");
+  const warnCb = document.createElement("input");
+  warnCb.type = "checkbox"; warnCb.checked = cbWarnOn;
+  warnCb.addEventListener("change", () => { cbWarnOn = warnCb.checked; saveCounterBar(); refreshCounterBar(true); });
+  const warnAt = document.createElement("input");
+  warnAt.type = "number"; warnAt.value = String(cbWarnAt);
+  warnAt.addEventListener("change", () => {
+    cbWarnAt = parseInt(warnAt.value, 10) || 0;
+    saveCounterBar();
+    refreshCounterBar(true);
+  });
+  warnRow.appendChild(warnCb);
+  warnRow.appendChild(document.createTextNode("Warn below"));
+  warnRow.appendChild(warnAt);
+  box.appendChild(warnRow);
+}
+function cbSelect(i) {
+  cbSel = cbSel === i ? -1 : i;
+  const host = document.getElementById("cb-slots");
+  if (host) for (const cell of host.children) cell.classList.toggle("sel", (+cell.dataset.i) === cbSel);
+  renderCounterOpts();
+}
+function removeCounterSlot(i) {
+  counterSlots.splice(i, 1);
+  if (cbSel === i) cbSel = -1; else if (cbSel > i) cbSel--;
+  saveCounterBar();
+  renderCounterSlots();
+}
+function addCounterSlot() {
+  counterSlots.push({ g: 0, hue: null, cmp: 0 });
+  saveCounterBar();
+  renderCounterSlots();
+}
+function useCounterSlot(i) {
+  const slot = counterSlots[i];
+  if (!slot || !slot.g) return;
+  const it = cbFind(slot.g, slot.hue);
+  // ClassicUO does nothing at all here; say why instead, since a slot that
+  // silently ignores a double-click reads as a broken slot.
+  if (!it) { addSysMessage("You are not carrying one of those."); return; }
+  sendInput("use:" + (it.serial >>> 0));
+}
+// Amounts only — the cells themselves are rebuilt by renderCounterSlots. Runs on
+// every poll, so each cell keeps its last count and only touches the DOM when
+// that changed.
+function refreshCounterBar(force) {
+  if (!counterBarOn) return;
+  const host = document.getElementById("cb-slots");
+  if (!host) return;
+  for (const cell of host.children) {
+    const slot = counterSlots[+cell.dataset.i];
+    if (!slot || !slot.g) continue;
+    const amount = cbCount(slot.g, slot.hue);
+    const shown = cbText(amount, slot.cmp);
+    if (!force && cell._amt === amount && cell._shown === shown) continue;
+    const had = cell._amt;
+    cell._amt = amount; cell._shown = shown;
+    const label = cell.querySelector(".cb-amt");
+    if (label) label.textContent = shown;
+    // ClassicUO tints the cell on a change and fades it over 5s — icelight for a
+    // gain, firelight for a loss. Worth keeping: it is what tells you a reagent
+    // was just spent when the bar is at the edge of your eye.
+    if (had != null && amount !== had && !force) {
+      cell.style.transition = "none";
+      cell.style.background = amount > had ? "rgba(70, 167, 88, .35)" : "rgba(229, 72, 77, .35)";
+      void cell.offsetWidth;                       // commit the jump before transitioning off it
+      cell.style.transition = `background ${CB_FLASH_MS}ms linear`;
+      cell.style.background = "";
+    }
+    cell.classList.toggle("low", cbWarnOn && amount - (slot.cmp | 0) < cbWarnAt);
+    // Hovering a cell shows the real item's OPL, exactly as hovering it in a bag
+    // does (ClassicUO's CounterItem.OnMouseOver does the same lookup).
+    const it = cbFind(slot.g, slot.hue);
+    if (it) cell.dataset.serial = String(it.serial >>> 0); else delete cell.dataset.serial;
+  }
+}

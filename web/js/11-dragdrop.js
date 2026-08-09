@@ -55,7 +55,13 @@ function endGroundDrag() {
 // item is placed. Reused by every drag source so lifting behaves identically.
 function liftToCursor(serial, g, amount, clientX, clientY, hue) {
   serial = serial >>> 0; g = g | 0; amount = amount || 1; hue = hue | 0;
-  cursorItem = { serial, g, amount, hue };
+  // Where it came from, read BEFORE the pickup — the server drops the item out
+  // of its container the moment it accepts one. Only the counter bar uses this
+  // (to put an item back exactly where it was after binding a slot to it), which
+  // is also what ClassicUO does with its own held-item origin.
+  const src = ((scene && scene.contItems) || []).find((it) => (it.serial >>> 0) === serial);
+  cursorItem = { serial, g, amount, hue,
+    src: src ? { cont: src.cont >>> 0, x: src.x | 0, y: src.y | 0, amount: (src.amount | 0) || 1 } : null };
   sendInput("pickup:" + serial + (amount > 1 ? ":" + amount : ""));
   if (dragGhost) { dragGhost.remove(); dragGhost = null; }
   const img = document.createElement("img");
@@ -90,6 +96,27 @@ function placeCursorItem(clientX, clientY) {
   // so the target comes from the enclosing .trade-win via its dialog family, not a
   // single global session). The opponent's side (.tr-theirs-grid) is
   // intentionally NOT a target here — we can't place items into their half.
+  // Released over a counter-bar cell: bind the cell to what we are holding, then
+  // put the item back. ClassicUO's CounterItem.OnMouseUp is this same pair —
+  // SetGraphic from the held item, then DropItem(serial, hold.X, hold.Y, 0,
+  // hold.Container) — because binding a slot must not cost you the item. Back
+  // into the pack if we never saw where it came from (a world item dragged in).
+  const cbCell = el && el.closest && el.closest(".cb-slot");
+  if (cbCell) {
+    assignCounterSlot(+cbCell.dataset.i, cursorItem.g, cursorItem.hue | 0);
+    const src = cursorItem.src;
+    const bp = backpackSerial();
+    // A stack we only lifted PART of has to go back through the container's own
+    // placement (0xFFFF/0xFFFF → OnDroppedOnto → Container.TryDropItem), which
+    // stacks it onto the pile it was split from; an exact-coordinate drop is
+    // OnDroppedInto, which places it as-is and would leave a second little pile
+    // sitting on top of the first. Whole lifts go back to the exact spot.
+    if (src && cursorItem.amount >= src.amount) sendPlacement(`drop:${serial}:${src.x}:${src.y}:0:${src.cont}`, serial);
+    else if (src) sendPlacement(`drop:${serial}:65535:65535:0:${src.cont}`, serial);
+    else if (bp != null) sendPlacement(`drop:${serial}:65535:65535:0:${bp}`, serial);
+    else return false;                  // nowhere safe to put it → keep holding
+    return true;
+  }
   const tradeGrid = el && el.closest && el.closest(".tr-mine-grid");
   const tradeWinEl = tradeGrid && tradeGrid.closest(".trade-win");
   if (tradeWinEl) {

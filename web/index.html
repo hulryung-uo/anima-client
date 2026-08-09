@@ -588,6 +588,36 @@
       #ib-picker label { display: block; font-size: 11px; color: #c7d0dc; cursor: pointer; padding: 1px 0; }
       #ib-picker input { margin-right: 5px; }
       #ib-picker .ib-note { color: #6b7280; font-size: 10px; margin-top: 6px; line-height: 1.4; }
+      /* ---- counter bar (ClassicUO CounterBarGump) ---- */
+      #counterbar { top: 130px; left: 210px; width: auto; display: none; }
+      #counterbar.on { display: block; }
+      #cb-slots { display: flex; flex-wrap: wrap; gap: 4px; max-width: 228px; }
+      .cb-slot {
+        position: relative; width: 40px; height: 40px; flex: none;
+        border: 1px solid #34404f; border-radius: 4px; background: rgba(12, 16, 22, .55);
+        cursor: pointer; user-select: none;
+      }
+      /* ClassicUO paints the hovered cell's border yellow and the selected/low ones red. */
+      .cb-slot:hover { border-color: #d9c341; }
+      .cb-slot.sel { border-color: #4a90d9; }
+      .cb-slot.low { border-color: #e5484d; }
+      .cb-slot img { position: absolute; inset: 0; margin: auto; max-width: 38px; max-height: 38px;
+                     image-rendering: pixelated; pointer-events: none; }
+      .cb-amt { position: absolute; left: 2px; bottom: 0; font-size: 10px; color: #e6e9ee;
+                text-shadow: 0 0 2px #000, 0 0 2px #000; pointer-events: none; }
+      .cb-slot .cb-x { position: absolute; right: 1px; top: -2px; display: none; font-size: 10px; color: #8b94a0; }
+      .cb-slot:hover .cb-x { display: block; }
+      .cb-slot .cb-x:hover { color: #e5484d; }
+      .cb-add { cursor: pointer; color: #6b7280; user-select: none; font-size: 13px; }
+      .cb-add:hover { color: #c7d0dc; }
+      .cb-hint { color: #6b7280; font-size: 10px; margin-top: 6px; line-height: 1.4; }
+      #cb-opts { display: none; margin-top: 6px; padding-top: 6px; border-top: 1px solid #2a3442;
+                 font-size: 11px; color: #c7d0dc; }
+      #cb-opts.on { display: block; }
+      #cb-opts label { display: block; padding: 1px 0; cursor: pointer; }
+      #cb-opts input[type=checkbox] { margin-right: 5px; }
+      #cb-opts input[type=number] { width: 60px; font: inherit; font-size: 11px; margin-left: 5px;
+        border: 1px solid #34404f; background: rgba(12, 16, 22, .8); color: #c7d0dc; border-radius: 3px; }
       /* ---- skills window (0x3A) ---- */
       #skills { top: 60px; right: 16px; width: 280px; display: none; }
       #statusbar { top: 60px; left: 210px; width: 170px; display: none; }
@@ -1202,6 +1232,16 @@
         <span class="ib-cfg" title="choose fields">&#9881;</span>
         <span class="gump-close" id="ib-close">&#10005;</span></div>
       <div class="gump-body"><div id="ib-fields"></div><div id="ib-picker"></div></div>
+    </div>
+    <div id="counterbar" class="gump-win">
+      <div class="gump-title" id="cb-title"><span>Counter bar</span>
+        <span class="cb-add" title="add a slot">&#43;</span>
+        <span class="gump-close" id="cb-close">&#10005;</span></div>
+      <div class="gump-body">
+        <div id="cb-slots"></div>
+        <div class="cb-hint">drag an item onto a slot · double-click to use · click to configure</div>
+        <div id="cb-opts"></div>
+      </div>
     </div>
     <div id="statusbar" class="gump-win">
       <div class="gump-title" id="st-title">

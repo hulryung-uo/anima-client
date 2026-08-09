@@ -76,6 +76,24 @@ async function main() {
   document.querySelector("#infobar .ib-cfg").addEventListener("click", () => {
     document.getElementById("ib-picker").classList.toggle("on");
   });
+  document.getElementById("counterbar").classList.toggle("on", counterBarOn);
+  makeDraggable(document.getElementById("counterbar"), document.getElementById("cb-title"));
+  document.getElementById("cb-close").addEventListener("click", toggleCounterBar);
+  document.querySelector("#counterbar .cb-add").addEventListener("click", addCounterSlot);
+  // One delegated pair on the slot host: the cells are rebuilt whenever the set
+  // changes, so per-cell listeners would have to be re-hung every time.
+  document.getElementById("cb-slots").addEventListener("click", (e) => {
+    const cell = e.target.closest(".cb-slot");
+    if (!cell) return;
+    const i = +cell.dataset.i;
+    if (e.target.classList.contains("cb-x")) { removeCounterSlot(i); return; }
+    cbSelect(i);
+  });
+  document.getElementById("cb-slots").addEventListener("dblclick", (e) => {
+    const cell = e.target.closest(".cb-slot");
+    if (cell) useCounterSlot(+cell.dataset.i);
+  });
+  renderCounterSlots();
   restoreJournalHeight();
   setupItemDnD();
   initFx();
