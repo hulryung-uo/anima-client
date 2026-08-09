@@ -487,6 +487,7 @@ function setupInput() {
   optBody.addEventListener("click", (e) => {
     if (e.target.closest(".opt-infobar")) { toggleInfoBar(); return; }
     if (e.target.closest(".opt-counterbar")) { toggleCounterBar(); return; }
+    if (e.target.closest(".opt-ignorelist")) { toggleIgnoreList(); return; }
     if (!e.target.closest(".opt-logout")) return;
     requestLogout();
   });

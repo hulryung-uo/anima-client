@@ -231,6 +231,34 @@ Tier 2 still open: the 0x11 `type >= 6` combat tail (unobservable here), and the
 ignore list / combat book / racial-abilities book / network stats / inspector
 remainder of the grab-bag row.
 
+Closed 2026-08-09 (ignore list): the second entry of the grab-bag row (four
+left). One scene field, no packet, and one ClassicUO bug found by trying to
+match it:
+
+- **ClassicUO's ignore list half-works on a titled name.** 0x98 UpdateName
+  carries the title with the name — this shard answers a single-click on a
+  young player with `"Anima\t (Young)"`, and an NPC with `"Carl\tthe tailor"` —
+  while the 30-byte name field on a speech packet carries the bare `"Anima"`.
+  `IgnoreManager.AddIgnoredTarget` stores the former (`m.Name`), and then the
+  two filter sites disagree about what to compare it against:
+  `MessageManager` tests the *entity's* name and matches, `JournalGump` tests
+  the *packet's* name (`entry.Name`) and does not. So ClassicUO silences a
+  titled player's floating text while still printing their journal lines, and a
+  player who ages out of Young leaves the list silently, since the stored
+  string no longer describes anyone. Both strings were read off this client's
+  own scene, live. Keying on the part before the tab makes the two sites agree
+  and survives the title changing.
+- **The filter is retroactive here.** ClassicUO drops an ignored line as it
+  arrives, so everything said before you hit ignore stays in the log; this
+  journal re-renders under the filter, so ignoring someone also clears what
+  they already said (and un-ignoring brings it back — verified both ways). A
+  deliberate difference: the point of the button is to stop reading them.
+- **Spell text is exempt**, ClassicUO's rule, and worth keeping for a reason
+  that is not politeness: the mantra tells you what is about to hit you.
+  Verified with a real cast — the ignored player's `Uus Jux` (type 10) reaches
+  both the journal and the overhead while their ordinary speech reaches
+  neither.
+
 **Know what the local shard can and cannot prove.** `Config/Expansion.cfg` on
 the ServUO at `127.0.0.1:2594` says `CurrentExpansion=T2A`, so `Core.AOS` is
 **false** there. That single fact splits this batch in half, and it is worth
@@ -534,7 +562,8 @@ The receive side is generally complete; there is no way to *act*.
 | ~~Grid loot~~ — **CLOSED, live-verified** | A corpse (identified by its gump id `9`, which `scene.contGumps` already carries) opens the uniform grid rather than the authentic corpse art, with **click-an-item-to-take** and **Loot all** — the split ClassicUO's separate `GridLootGump` exists to make, since a body's scattered layout is the wrong shape for looting. Off in Options for anyone who wants the real corpse gump. One click is ClassicUO's `GameActions.GrabItem`: a lift, then a drop with **no position**. Verified live on an orc corpse | M |
 | ~~Info bar~~ — **CLOSED, live-verified** | A draggable bar of user-chosen readouts with a ⚙ field picker, persisted, opened from Options. Fields are ClassicUO's `InfoBarVars` restricted to what `scene.player` actually carries: HP, mana, stamina, weight, followers, gold, damage, armour, luck, the four resistances, stat cap, tithing and notoriety. **The nine it is missing are exactly the `0x11 type >= 6` row below** — LowerReagentCost, SpellDamageInc, FasterCasting/Recovery, Hit/Defense/DamageChanceInc, LowerManaCost, SwingSpeedInc — so the picker says so in place of leaving the absence to read as an oversight. Weight turns red over capacity, which is the one field whose colour carries information: past `weightMax` ServUO refuses a pickup in silence (see the grid-loot row) | M |
 | ~~Counter bar~~ — **CLOSED, live-verified** | Cells pinned to an item graphic (optionally to one hue), counting what you carry and using one on double-click. The count is a port of ClassicUO's `GetTotalAmountOfItem` + `Item.GetTotalAmount` — worn items on layers 1..0x17, recursing through nested bags — and its display rules: no number on a lone item, a signed distance from a per-slot *compare to* with `±` on target, a red cell below a *warn below* threshold, and the change flash (green up, red down, fading over 5s). Bind a cell by dragging an item onto it, which puts the item straight back where it came from, as ClassicUO does. Reachable ClassicUO settings that live in its right-click context menu — ignore hue, compare to, remove — sit in a strip under the bar instead, since this client has no context menus | S–M |
-| Ignore list, combat-book gump, racial-abilities book, network-stats and inspector windows | absent | S–M |
+| ~~Ignore list~~ — **CLOSED, live-verified** | A set of character names whose talk this client drops, in both places ClassicUO drops it — the floating overhead and the journal — with ClassicUO's Spell exemption, its guards (a mobile, not yourself, not one with a yellow health bar) and its messages. Added by ClassicUO's own client-side pick (arm, then click a player; no packet leaves) or by typing a name, which ClassicUO cannot do. The yellow-bar guard needed `Mobile::yellow_health` — parsed since the health-bar batch, never sent — to reach the renderer as `yellow`. **Keyed on the bare name**, which is where ClassicUO gets it wrong: see the note below | S–M |
+| Combat-book gump, racial-abilities book, network-stats and inspector windows | absent | S–M |
 | ~~Container gumps ignore real container art and each item's stored (x,y)~~ — **CLOSED, live-verified** | Both halves were already on the wire and discarded: 0x3C carries a position per item, and 0x24 names the container's gump. The gump id is now **retained** (`World::container_gumps`) rather than read from the open-event ring, which ages out while the window stays open, and reaches the renderer as `scene.contGumps`. The window draws that art and places each item at its raw (x, y), read **signed** as ClassicUO does (`(short)item.X`). ClassicUO additionally clamps into a per-gump bounds table (78 entries); we clip with `overflow: hidden` instead, which needs no table and cannot disagree with the server about where an item actually is. Verified live on a real backpack (gump 60, 230×204) with a dozen items at their stored positions | M |
 | ~~Window management~~ — **CLOSED, live-verified** | Every draggable panel — the dynamic windows from `makeWindowFrame` *and* the static ones (paperdoll, spellbook, skills, options, macros) — now **remembers where it was left** and comes back inside the viewport, because the persistence lives in `makeDraggable`, the one function they all already went through. Keyed by element id or class, never by serial: a serial is per-corpse/per-bag and never returns, so "the next container opens where I put the last one" is the only memory worth having (ClassicUO's per-type defaults do the same). Windows are clamped on restore and on browser resize, and a position saved on a bigger screen is **written back clamped**, so it heals instead of being re-clamped forever. `resize: both` is opt-in per window (bulletin board, server gumps, plus the journal from the row above) — deliberately not on the map or an authentic container, whose layout is in the server's own pixel space | M |
 

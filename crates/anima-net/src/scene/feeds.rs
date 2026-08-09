@@ -66,6 +66,23 @@ pub(super) fn poisoned_field(poisoned: bool) -> Value {
     }
 }
 
+/// `yellow` scene field for a mobile — the yellow/blessed health bar (0x16/0x17
+/// type 2; see [`anima_core::world::Mobile::yellow_health`]'s doc). Only emitted
+/// when true, same convention as [`hidden_field`].
+///
+/// ServUO raises it for `Blessed || YellowHealthbar` (`Mobile.GetPacketFlags`
+/// bit 0x08 carries the same fact for a pre-SA client), i.e. a mobile that
+/// cannot be killed. The renderer needs it because ClassicUO's ignore list
+/// refuses to add one: `IgnoreManager.AddIgnoredTarget` tests `!m.IsYellowHits`
+/// before taking a name.
+pub(super) fn yellow_field(yellow: bool) -> Value {
+    if yellow {
+        json!({ "yellow": true })
+    } else {
+        json!({})
+    }
+}
+
 /// Serialize a scene array, falling back to `[]` rather than failing the whole
 /// frame. Every one of these fields is either replayable next poll or re-sent
 /// every poll, so a frame the renderer can still parse beats no frame at all.

@@ -396,6 +396,14 @@ fn hidden_field_present_only_when_true() {
 }
 
 #[test]
+fn yellow_field_present_only_when_true() {
+    assert_eq!(yellow_field(true), json!({ "yellow": true }));
+    // An ordinary killable mobile carries no key — the ignore list's guard
+    // reads the absence as "fine to ignore".
+    assert_eq!(yellow_field(false), json!({}));
+}
+
+#[test]
 fn poisoned_field_present_only_when_true() {
     assert_eq!(poisoned_field(true), json!({ "poisoned": true }));
     // Not poisoned → no key at all (not `"poisoned": false`), so the

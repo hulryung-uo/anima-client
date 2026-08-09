@@ -72,6 +72,7 @@ pub(super) fn mobiles_json(world: &World, look: &Look, player: &Mobile) -> Vec<V
             });
             merge_obj(&mut v, hidden_field(m.hidden));
             merge_obj(&mut v, poisoned_field(m.poisoned));
+            merge_obj(&mut v, yellow_field(m.yellow_health));
             v
         })
         .collect()

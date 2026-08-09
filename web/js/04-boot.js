@@ -94,6 +94,16 @@ async function main() {
     if (cell) useCounterSlot(+cell.dataset.i);
   });
   renderCounterSlots();
+  document.getElementById("ignorelist").classList.toggle("on", ignoreListOn);
+  makeDraggable(document.getElementById("ignorelist"), document.getElementById("ig-title"));
+  document.getElementById("ig-close").addEventListener("click", toggleIgnoreList);
+  document.getElementById("ig-pick").addEventListener("click", () => armIgnorePick(!ignorePick));
+  document.getElementById("ig-name").addEventListener("keydown", (e) => {
+    e.stopPropagation();               // typed keys must not reach the game input handler
+    if (e.code !== "Enter" && e.code !== "NumpadEnter") return;
+    if (ignoreName(e.target.value)) e.target.value = "";
+  });
+  renderIgnoreList();
   restoreJournalHeight();
   setupItemDnD();
   initFx();

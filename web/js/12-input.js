@@ -102,6 +102,11 @@ function onEntityPointerDown(serial, e, isItem) {
   if (e.button !== 0) return;   // left only — right button still steers movement
   entityClickedAt = performance.now(); // a mobile/item ate this click → no click-to-walk
   e.stopPropagation();          // don't let it bubble to other interaction
+  // An armed ignore pick spends itself here, ahead of the server's target
+  // cursor: the arm is local and was made two clicks ago, so it is the more
+  // specific intent. ClassicUO cannot reach this state at all — its ignore pick
+  // IS the target cursor, so arming one cancels the other.
+  if (ignorePick) { ignoreMobile(serial); armIgnorePick(false); return; }
   if (scene && scene.target && scene.target.active === 1 && !targetUIHidden) {
     targetConsumedAt = performance.now();
     sendInput("target:" + serial);   // answer the object-target cursor

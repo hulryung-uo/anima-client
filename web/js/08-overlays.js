@@ -75,6 +75,7 @@ function ingestSpeech(s) {
     if (!text) continue;
     const serial = (j.serial >>> 0);
     if (!serial || serial === 0xffffffff) continue;     // system message → not overhead
+    if (isIgnoredLine(j)) continue;                     // ClassicUO: MessageManager's ignore check
     const id = serial === pserial ? "self" : "m" + serial;
     if (!anim.has(id)) continue;                         // speaker not in view
     addOverhead(id, text, j.type | 0, j.hue | 0, now);
@@ -125,6 +126,9 @@ function showNameOverhead(serial, tries) {
     return;
   }
   name = name.replace(/\s+/g, " ").trim(); // OPL names can carry tabs ("Carl\tthe tailor")
+  // A single-click name is a server Label message in ClassicUO, so its ignore
+  // filter covers it; ours is built client-side and has to check for itself.
+  if (isIgnoredName(name)) return;
   const id = isSelf ? "self" : "m" + sv;
   if (!anim.has(id)) return;         // not in view
   const el = document.createElement("div");
@@ -761,6 +765,141 @@ function buildJournalTabs() {
   }
 }
 
+// ---- ignore list (ClassicUO's IgnoreManager) -------------------------------
+//
+// A set of character NAMES whose talk this client drops. ClassicUO keys on the
+// name and not the serial, and so does this: the serial of the player who
+// followed you around Britain shouting is not the thing you want to remember,
+// and it changes nothing to them anyway.
+//
+// The two filter sites are ClassicUO's, both in `MessageManager.HandleMessage`
+// (floating overheads) and the journal gumps: drop a line whose speaker is on
+// the list, unless its type is Spell. That exemption is deliberate there and
+// kept here — the mantra a mage shouts is combat information, not conversation,
+// and losing it to a grudge would cost you the fight.
+//
+// Two departures, both forced by what the server actually sends.
+//
+// **Names are keyed on the part before the tab.** 0x98 UpdateName carries the
+// title with the name — this shard answers a single-click on a young player
+// with "Anima\t (Young)", and an NPC with "Carl\tthe tailor" — while the
+// 30-byte name field on a speech packet carries the bare "Anima". ClassicUO
+// stores the former (`AddIgnoredTarget` takes `m.Name`) and then filters with
+// *both*: the overhead check reads the entity's name and matches, the journal
+// check reads the packet's name (`entry.Name`) and does not. So on this server
+// ClassicUO would silence a titled player's floating text and keep printing
+// their journal lines — and a player who ages out of Young walks off the list
+// entirely, since the stored string no longer describes them. Keying on the
+// bare name makes the two sites agree and survives the title changing.
+//
+// **Case-insensitive**, where ClassicUO's ordinal `HashSet<string>` is not.
+// This list has a type-a-name field ClassicUO has no equivalent of (it can only
+// add whoever you click), and a typed name that silently does nothing is worse
+// than a rule one shade too broad.
+const MSG_SPELL = 10;
+// Bare character name, without the tab-separated title and without case.
+function ignoreKey(name) {
+  return String(name == null ? "" : name).split("\t")[0].trim().toLowerCase();
+}
+function ignoreLabel(name) {
+  return String(name == null ? "" : name).split("\t")[0].trim();
+}
+let ignoredNames = new Map();      // lowercased name → the name as it was added
+try {
+  const saved = JSON.parse(localStorage.getItem("anima.ignoreList") || "[]");
+  if (Array.isArray(saved)) for (const n of saved) ignoredNames.set(ignoreKey(n), ignoreLabel(n));
+} catch (e) {}
+// Bumped on every change so the journal's render signature notices — otherwise
+// ignoring someone would only take effect on their next line.
+let ignoreSeq = 0;
+function saveIgnoreList() {
+  localStorage.setItem("anima.ignoreList", JSON.stringify([...ignoredNames.values()]));
+  ignoreSeq++;
+  renderIgnoreList();
+  invalidateJournal();
+}
+function isIgnoredName(name) {
+  const n = ignoreKey(name);
+  return !!n && ignoredNames.has(n);
+}
+// A journal line (or the overhead built from one) we should not show.
+function isIgnoredLine(line) {
+  return (line.type | 0) !== MSG_SPELL && isIgnoredName(line.name);
+}
+// ClassicUO `IgnoreManager.AddIgnoredTarget`, guards and messages included: a
+// mobile, not yourself, and not one with a yellow health bar — ServUO raises
+// that for `Blessed || YellowHealthbar`, so it means invulnerable, and putting
+// a GM or a quest NPC on an ignore list is never what you meant.
+function ignoreMobile(serial) {
+  serial = serial >>> 0;
+  const me = (scene && scene.player && scene.player.serial) >>> 0;
+  const m = ((scene && scene.mobiles) || []).find((x) => (x.serial >>> 0) === serial);
+  if (!m || serial === me) { addSysMessage("This is not a player."); return false; }
+  if (m.yellow) { addSysMessage("This is not a player."); return false; }
+  // A mobile we have never single-clicked has no name yet; ignoring "" would
+  // silence every nameless mobile at once.
+  const name = ignoreLabel(m.name);
+  if (!name) { addSysMessage("Their name is not known yet — click them first."); return false; }
+  return ignoreName(name);
+}
+function ignoreName(name) {
+  name = ignoreLabel(name);
+  if (!name) return false;
+  if (ignoredNames.has(ignoreKey(name))) {
+    addSysMessage(`Character ${name} already exist in a list.`);
+    return false;
+  }
+  ignoredNames.set(ignoreKey(name), name);
+  saveIgnoreList();
+  addSysMessage(`Added ${name} to ignore list.`);
+  return true;
+}
+function unignoreName(name) {
+  ignoredNames.delete(ignoreKey(name));
+  saveIgnoreList();
+}
+let ignoreListOn = localStorage.getItem("anima.ignoreListOn") === "1";
+function toggleIgnoreList() {
+  ignoreListOn = !ignoreListOn;
+  document.getElementById("ignorelist").classList.toggle("on", ignoreListOn);
+  localStorage.setItem("anima.ignoreListOn", ignoreListOn ? "1" : "0");
+  if (ignoreListOn) renderIgnoreList(); else armIgnorePick(false);
+}
+// The pick mode ClassicUO reaches through its own target cursor
+// (`CursorTarget.IgnorePlayerTarget`): a purely client-side arm — no packet
+// leaves — that spends itself on the next mobile clicked.
+let ignorePick = false;
+function armIgnorePick(on) {
+  ignorePick = !!on;
+  const b = document.getElementById("ig-pick");
+  if (b) {
+    b.classList.toggle("arm", ignorePick);
+    b.textContent = ignorePick ? "click a player…" : "Ignore a player…";
+  }
+}
+function renderIgnoreList() {
+  const host = document.getElementById("ig-names");
+  if (!host) return;
+  host.innerHTML = "";
+  if (!ignoredNames.size) {
+    const d = document.createElement("div");
+    d.className = "ig-none"; d.textContent = "(nobody)";
+    host.appendChild(d);
+    return;
+  }
+  for (const name of [...ignoredNames.values()].sort((a, b) => a.localeCompare(b))) {
+    const row = document.createElement("div");
+    row.className = "ig-row";
+    const label = document.createElement("span");
+    label.textContent = name;
+    const x = document.createElement("span");
+    x.className = "ig-x"; x.textContent = "×"; x.title = "stop ignoring";
+    x.addEventListener("click", () => unignoreName(name));
+    row.appendChild(label); row.appendChild(x);
+    host.appendChild(row);
+  }
+}
+
 // Force the next `hud()` to rebuild the log. Used when something the render
 // depends on resolved asynchronously — the hue table, chiefly.
 function invalidateJournal() {
@@ -823,7 +962,7 @@ function hud(s) {
   // Local half: a monotonic counter (bumped in addSysMessage, not derived from
   // length/newest-text) so a repeated-text line, or the ring hitting its own cap,
   // still registers as a change.
-  const jSig = `${jLen}:${jTail}:${localJournalSeq}:${journalTab}`;
+  const jSig = `${jLen}:${jTail}:${localJournalSeq}:${journalTab}:${ignoreSeq}`;
   if (j._sig !== jSig) {
     j._sig = jSig;
     // Keep following the newest line only if already scrolled to the bottom (don't
@@ -833,6 +972,7 @@ function hud(s) {
     const put = (line, local) => {
       const type = local ? JRNL_LOCAL_TYPE : (line.type | 0);
       if (!journalTabAccepts(journalTab, line, local)) return;
+      if (!local && isIgnoredLine(line)) return;   // ClassicUO: JournalGump's ignore check
       const d = document.createElement("div");
       const cls = MSG_CLASS[type];
       if (cls) d.className = cls;

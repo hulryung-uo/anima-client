@@ -618,6 +618,23 @@
       #cb-opts input[type=checkbox] { margin-right: 5px; }
       #cb-opts input[type=number] { width: 60px; font: inherit; font-size: 11px; margin-left: 5px;
         border: 1px solid #34404f; background: rgba(12, 16, 22, .8); color: #c7d0dc; border-radius: 3px; }
+      /* ---- ignore list (ClassicUO IgnoreManagerGump) ---- */
+      #ignorelist { top: 200px; left: 210px; width: 250px; display: none; }
+      #ignorelist.on { display: block; }
+      .ig-add { display: flex; gap: 5px; margin-bottom: 6px; }
+      .ig-add button { font: inherit; font-size: 11px; padding: 2px 8px; border-radius: 4px;
+        border: 1px solid #34404f; background: rgba(22, 28, 38, .88); color: #c7d0dc; cursor: pointer; white-space: nowrap; }
+      .ig-add button:hover { border-color: #4a90d9; color: #e6e9ee; }
+      .ig-add button.arm { border-color: #d9a441; color: #ffdf9e; background: rgba(58, 44, 16, .9); }
+      .ig-add input { flex: 1; min-width: 0; font: inherit; font-size: 11px; padding: 2px 5px;
+        border: 1px solid #34404f; background: rgba(12, 16, 22, .8); color: #c7d0dc; border-radius: 4px; }
+      #ig-names { max-height: 200px; overflow-y: auto; }
+      .ig-row { display: flex; justify-content: space-between; align-items: center;
+                font-size: 11px; color: #c7d0dc; padding: 2px 0; border-bottom: 1px solid #1c2430; }
+      .ig-row .ig-x { color: #8b94a0; cursor: pointer; padding: 0 3px; }
+      .ig-row .ig-x:hover { color: #e5484d; }
+      .ig-none, .ig-note { color: #6b7280; font-size: 10px; line-height: 1.4; }
+      .ig-note { margin-top: 6px; }
       /* ---- skills window (0x3A) ---- */
       #skills { top: 60px; right: 16px; width: 280px; display: none; }
       #statusbar { top: 60px; left: 210px; width: 170px; display: none; }
@@ -1241,6 +1258,19 @@
         <div id="cb-slots"></div>
         <div class="cb-hint">drag an item onto a slot · double-click to use · click to configure</div>
         <div id="cb-opts"></div>
+      </div>
+    </div>
+    <div id="ignorelist" class="gump-win">
+      <div class="gump-title" id="ig-title"><span>Ignore list</span>
+        <span class="gump-close" id="ig-close">&#10005;</span></div>
+      <div class="gump-body">
+        <div class="ig-add">
+          <button type="button" id="ig-pick">Ignore a player…</button>
+          <input id="ig-name" placeholder="or type a name" spellcheck="false">
+        </div>
+        <div id="ig-names"></div>
+        <div class="ig-note">Their speech stops reaching the journal and the screen.
+          Spell words still show — those are combat information.</div>
       </div>
     </div>
     <div id="statusbar" class="gump-win">
