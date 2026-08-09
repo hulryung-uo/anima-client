@@ -69,6 +69,13 @@ async function main() {
   requestAnimationFrame(frame);
   setupInput();
   buildJournalTabs();   // filter chips above the log (All / Speech / Guild / System)
+  buildInfoBarPicker();
+  document.getElementById("infobar").classList.toggle("on", infoBarOn);
+  makeDraggable(document.getElementById("infobar"), document.getElementById("ib-title"));
+  document.getElementById("ib-close").addEventListener("click", toggleInfoBar);
+  document.querySelector("#infobar .ib-cfg").addEventListener("click", () => {
+    document.getElementById("ib-picker").classList.toggle("on");
+  });
   restoreJournalHeight();
   setupItemDnD();
   initFx();

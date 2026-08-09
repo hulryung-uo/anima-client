@@ -97,6 +97,7 @@ async function poll() {
     refreshAbilities(); // keep the weapon special-ability bar in sync with the equipped weapon
     if (wmOn) drawWorldmap();  // keep the open world map tracking the player
     if (scene.player) hud(scene);
+    refreshInfoBar(scene);   // user-chosen readouts (ClassicUO InfoBarManager)
     updateMoveDebug(scene); // movement/Z debug HUD (Options → "Movement debug")
     refreshPaperdoll();   // keep the paperdoll live (equip/stats change)
     if (spellbookOn) { refreshSpellMana(); refreshSpellbookContent(); refreshActiveSpells(); } // keep the spellbook live (mana + book content + active stances)

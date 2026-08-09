@@ -574,6 +574,20 @@
         cursor: pointer;
       }
       .bb-actions button:hover { border-color: #4a90d9; color: #e6e9ee; }
+      /* ---- info bar (ClassicUO InfoBarManager) ---- */
+      #infobar { top: 60px; left: 210px; width: auto; display: none; }
+      #infobar.on { display: block; }
+      #ib-fields { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 2px 2px 0; }
+      .ib-item { font-size: 11px; white-space: nowrap; }
+      .ib-item .ib-l { color: #6b7280; margin-right: 3px; }
+      .ib-cfg { cursor: pointer; color: #6b7280; user-select: none; }
+      .ib-cfg:hover { color: #c7d0dc; }
+      #ib-picker { display: none; margin-top: 6px; padding-top: 6px; border-top: 1px solid #2a3442;
+                   max-height: 220px; overflow-y: auto; }
+      #ib-picker.on { display: block; }
+      #ib-picker label { display: block; font-size: 11px; color: #c7d0dc; cursor: pointer; padding: 1px 0; }
+      #ib-picker input { margin-right: 5px; }
+      #ib-picker .ib-note { color: #6b7280; font-size: 10px; margin-top: 6px; line-height: 1.4; }
       /* ---- skills window (0x3A) ---- */
       #skills { top: 60px; right: 16px; width: 280px; display: none; }
       #statusbar { top: 60px; left: 210px; width: 170px; display: none; }
@@ -1182,6 +1196,12 @@
         <div id="sk-sortbar"></div>
         <div id="sk-list"></div>
       </div>
+    </div>
+    <div id="infobar" class="gump-win">
+      <div class="gump-title" id="ib-title"><span>Info bar</span>
+        <span class="ib-cfg" title="choose fields">&#9881;</span>
+        <span class="gump-close" id="ib-close">&#10005;</span></div>
+      <div class="gump-body"><div id="ib-fields"></div><div id="ib-picker"></div></div>
     </div>
     <div id="statusbar" class="gump-win">
       <div class="gump-title" id="st-title">

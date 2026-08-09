@@ -523,3 +523,111 @@ function wmRemoveMarkerNear(sx, sy, w, h) {
   if (best >= 0) { wmMarkers.splice(best, 1); saveMarkers(); drawWorldmap(); }
 }
 
+// ---- info bar (ClassicUO's InfoBarManager, minus what the wire won't give us) ----
+//
+// A user-chosen set of readouts, as opposed to the fixed HUD block: pick the
+// half-dozen numbers you actually watch and put them where you want them
+// (the bar is an ordinary draggable window, so it remembers that).
+//
+// The field list is ClassicUO's `InfoBarVars`, restricted to what
+// `scene.player` actually carries. The nine it is missing —
+// LowerReagentCost, SpellDamageInc, FasterCasting, FasterCastRecovery,
+// HitChanceInc, DefenseChanceInc, LowerManaCost, DamageChanceInc and
+// SwingSpeedInc — are exactly the `0x11 type >= 6` block the core does not
+// parse (its own open row in CLASSICUO_GAPS.md), so this is the whole of the
+// set until that lands. The picker says so rather than leaving the absence to
+// look like an oversight.
+const INFOBAR_FIELDS = [
+  { key: "hp",      label: "HP",      color: "#e5484d", get: (p) => `${p.hits}/${p.hitsMax}` },
+  { key: "mana",    label: "Mana",    color: "#4f8cf7", get: (p) => `${p.mana}/${p.manaMax}` },
+  { key: "stam",    label: "Stam",    color: "#46a758", get: (p) => `${p.stam}/${p.stamMax}` },
+  { key: "weight",  label: "Weight",  color: "#d7cfa8",
+    // Over capacity is the one field whose colour carries information: ServUO
+    // refuses a pickup past `weightMax`, silently (see the grid-loot row).
+    get: (p) => `${p.weight}/${p.weightMax}`,
+    warn: (p) => (p.weight | 0) > (p.weightMax | 0) },
+  { key: "follow",  label: "Pets",    color: "#c7d0dc", get: (p) => `${p.followers}/${p.followersMax}` },
+  { key: "gold",    label: "Gold",    color: "#e3c34d", get: (p) => String(p.gold) },
+  { key: "damage",  label: "Dmg",     color: "#e08a5a", get: (p) => `${p.damageMin}-${p.damageMax}` },
+  { key: "armor",   label: "AR",      color: "#9aa0a6", get: (p) => String(p.armor) },
+  { key: "luck",    label: "Luck",    color: "#b9a7ff", get: (p) => String(p.luck) },
+  { key: "rfire",   label: "Fire",    color: "#ff7a45", get: (p) => String(p.resistFire) },
+  { key: "rcold",   label: "Cold",    color: "#7fd4ff", get: (p) => String(p.resistCold) },
+  { key: "rpois",   label: "Poison",  color: "#8fd14f", get: (p) => String(p.resistPoison) },
+  { key: "renrg",   label: "Energy",  color: "#d98cff", get: (p) => String(p.resistEnergy) },
+  { key: "statcap", label: "Cap",     color: "#c7d0dc", get: (p) => String(p.statsCap) },
+  { key: "tithe",   label: "Tithe",   color: "#e3c34d", get: (p) => String(p.tithing) },
+  { key: "noto",    label: "Noto",    color: "#c7d0dc", get: (p) => NOTO_NAMES[p.noto | 0] || String(p.noto | 0) },
+];
+// ServUO `Notoriety`: 1 innocent, 2 friend, 3 grey/animal, 4 criminal,
+// 5 enemy, 6 murderer, 7 invulnerable.
+const NOTO_NAMES = { 1: "innocent", 2: "friend", 3: "grey", 4: "criminal", 5: "enemy", 6: "murderer", 7: "invul" };
+const INFOBAR_DEFAULT = ["hp", "mana", "stam", "weight", "gold"];
+let infoBarOn = localStorage.getItem("anima.infoBarOn") === "1";
+let infoBarFields = INFOBAR_DEFAULT.slice();
+try {
+  const saved = JSON.parse(localStorage.getItem("anima.infoBarFields") || "null");
+  if (Array.isArray(saved)) infoBarFields = saved;
+} catch (e) {}
+function saveInfoBar() {
+  localStorage.setItem("anima.infoBarOn", infoBarOn ? "1" : "0");
+  localStorage.setItem("anima.infoBarFields", JSON.stringify(infoBarFields));
+}
+function toggleInfoBar() {
+  infoBarOn = !infoBarOn;
+  document.getElementById("infobar").classList.toggle("on", infoBarOn);
+  saveInfoBar();
+  if (infoBarOn && scene) refreshInfoBar(scene);
+}
+function buildInfoBarPicker() {
+  const p = document.getElementById("ib-picker");
+  if (!p || p.childElementCount) return;
+  for (const f of INFOBAR_FIELDS) {
+    const l = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = infoBarFields.includes(f.key);
+    cb.addEventListener("change", () => {
+      // Keep the user's own order: a re-checked field goes back to the end
+      // rather than jumping to wherever the table happens to list it.
+      infoBarFields = cb.checked
+        ? infoBarFields.concat([f.key])
+        : infoBarFields.filter((k) => k !== f.key);
+      saveInfoBar();
+      if (scene) refreshInfoBar(scene, true);
+    });
+    l.appendChild(cb);
+    l.appendChild(document.createTextNode(f.label));
+    p.appendChild(l);
+  }
+  const note = document.createElement("div");
+  note.className = "ib-note";
+  note.textContent = "ClassicUO also offers the AoS combat modifiers (hit chance, "
+    + "faster casting, lower mana cost…). Those ride in the 0x11 status packet's "
+    + "extended tail, which this client does not parse yet.";
+  p.appendChild(note);
+}
+// Rebuild only when a shown value changed — this runs on every poll.
+function refreshInfoBar(s, force) {
+  if (!infoBarOn) return;
+  const host = document.getElementById("ib-fields");
+  const p = s && s.player;
+  if (!host || !p) return;
+  const shown = infoBarFields
+    .map((k) => INFOBAR_FIELDS.find((f) => f.key === k))
+    .filter(Boolean);
+  const sig = shown.map((f) => f.key + "=" + f.get(p) + (f.warn && f.warn(p) ? "!" : "")).join("|");
+  if (!force && host._sig === sig) return;
+  host._sig = sig;
+  host.innerHTML = "";
+  for (const f of shown) {
+    const el = document.createElement("span");
+    el.className = "ib-item";
+    const lab = document.createElement("span");
+    lab.className = "ib-l"; lab.textContent = f.label;
+    const val = document.createElement("span");
+    val.textContent = f.get(p);
+    val.style.color = f.warn && f.warn(p) ? "#e5484d" : f.color;
+    el.appendChild(lab); el.appendChild(val);
+    host.appendChild(el);
+  }
+}

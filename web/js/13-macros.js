@@ -485,6 +485,7 @@ function setupInput() {
     saveSettings(); applyAudioSettings();
   });
   optBody.addEventListener("click", (e) => {
+    if (e.target.closest(".opt-infobar")) { toggleInfoBar(); return; }
     if (!e.target.closest(".opt-logout")) return;
     requestLogout();
   });

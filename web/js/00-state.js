@@ -266,6 +266,7 @@ function renderOptions() {
     + cb("debugMove", "Movement debug")
     + cb("autoOpenDoors", "Auto-open doors")
     + cb("gridLoot", "Click-to-loot corpses")
+    + '<label class="opt-row"><button type="button" class="dlg-btn opt-infobar">Info bar</button></label>' 
     + '<div class="opt-sect">Session</div>'
     + `<button type="button" class="dlg-btn opt-logout"${logoutPending ? " disabled" : ""}>`
     + (logoutPending ? "LOGGING OUT…" : "LOG OUT") + "</button>";
