@@ -22,7 +22,13 @@ const MALE_GUMP_OFFSET = 50000, FEMALE_GUMP_OFFSET = 60000;
 function bringToFront(el) { document.body.appendChild(el); }
 
 // Drag a window by its title bar; clamp so it never fully leaves the viewport.
+// Every draggable panel remembers where it was left, and comes back inside the
+// viewport. Restore happens here rather than at each call site because this is
+// the one function every movable thing already goes through — the dynamic
+// windows from `makeWindowFrame` and the static panels (paperdoll, spellbook,
+// skills, options, macros) alike.
 function makeDraggable(win, handle, onMove) {
+  restoreWinPos(win);
   handle.addEventListener("mousedown", (e) => {
     if (e.target.classList.contains("gump-close")) return; // let the ✕ click through
     e.preventDefault();
@@ -35,7 +41,10 @@ function makeDraggable(win, handle, onMove) {
       win.style.left = x + "px"; win.style.top = y + "px"; win.style.right = "auto";
       if (onMove) onMove(x, y);
     };
-    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+    const up = () => {
+      window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up);
+      saveWinPos(win);
+    };
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   });

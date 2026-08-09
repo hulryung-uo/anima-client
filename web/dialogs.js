@@ -256,9 +256,88 @@ function syncDialogs(scene) {
 // `cascade` staggers successive windows of the same family so they don't stack
 // exactly on top of each other; pass the family's own counter object. `pos`
 // overrides it outright (a remembered per-kind position, say).
-function makeWindowFrame({ cls, title, bodyCls, cascade, pos, onClose, draggable = true }) {
+// ---- window geometry: remembered, resizable, kept on screen ----
+//
+// Keyed by the window's CLASS, not by the serial it happens to be showing. A
+// serial is per-corpse, per-bag, per-gump and never comes back, so a
+// serial-keyed memory would remember nothing you could ever see again; keying
+// by class means "the next container opens where I put the last one", which is
+// what a person actually wants and what ClassicUO's per-type defaults do.
+const WIN_GEOM_KEY = "anima.winGeom";
+let winGeom = {};
+try { winGeom = JSON.parse(localStorage.getItem(WIN_GEOM_KEY) || "{}"); } catch (e) {}
+function saveWinGeom(key, g) {
+  if (!key) return;
+  winGeom[key] = Object.assign(winGeom[key] || {}, g);
+  try { localStorage.setItem(WIN_GEOM_KEY, JSON.stringify(winGeom)); } catch (e) {}
+}
+// A window's identity for the geometry store: its element id when it has one
+// (the static panels), otherwise its own class (the dynamic windows). Never the
+// serial — see the note above.
+function winKey(el) {
+  if (el.id) return "#" + el.id;
+  const cls = [...el.classList].find((c) => c !== "gump-win" && c !== "on");
+  return cls ? "." + cls : null;
+}
+// Where a window effectively is. A hidden panel measures as all zeros — the
+// paperdoll and friends are `display: none` until their key is pressed — so
+// the rect alone is not enough; fall back to the inline position it will take
+// when shown. Both the clamp and the save go through this, because getting it
+// right in only one of them stores a corner position for a window that is
+// visibly somewhere else.
+function winPos(el) {
+  const r = el.getBoundingClientRect();
+  if (r.width !== 0 || r.height !== 0) return { x: r.left, y: r.top };
+  const x = parseFloat(el.style.left), y = parseFloat(el.style.top);
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+}
+function saveWinPos(el) {
+  const p = winPos(el);
+  if (p) saveWinGeom(winKey(el), { left: Math.round(p.x), top: Math.round(p.y) });
+}
+function restoreWinPos(el) {
+  const g = winGeom[winKey(el)];
+  if (!g || g.left == null) return;
+  el.style.left = g.left + "px";
+  el.style.top = g.top + "px";
+  el.style.right = "auto";      // the static panels are right-anchored by CSS
+  el.style.bottom = "auto";
+  // Write the clamped position back, so a geometry saved on a bigger screen
+  // heals itself instead of being re-clamped on every open forever.
+  if (clampWindow(el)) saveWinPos(el);
+}
+// Pull a window fully back into view. Runs on restore AND whenever the browser
+// window changes size, because a position saved on a wide monitor is off-screen
+// on a laptop and a window you cannot see is a window you cannot close. Keeps
+// the same margins the drag clamp uses so the two cannot disagree.
+function clampWindow(el) {
+  // Measured live before `winPos` existed: a position planted at (5000, 4000)
+  // survived into a 756-wide viewport, because clamping a hidden panel's
+  // zero-rect is a no-op that leaves the real inline position untouched.
+  const p = winPos(el);
+  if (!p) return false;
+  const curX = p.x, curY = p.y;
+  const x = Math.max(0, Math.min(window.innerWidth - 40, curX));
+  const y = Math.max(0, Math.min(window.innerHeight - 24, curY));
+  if (x === curX && y === curY) return false;
+  el.style.left = x + "px";
+  el.style.top = y + "px";
+  return true;
+}
+function clampAllWindows() {
+  for (const el of document.querySelectorAll(".gump-win")) clampWindow(el);
+}
+window.addEventListener("resize", clampAllWindows);
+
+function makeWindowFrame({
+  cls, title, bodyCls, cascade, pos, onClose, draggable = true,
+  resizable = false,
+}) {
   const el = document.createElement("div");
   el.className = "gump-win" + (cls ? " " + cls : "");
+  // Position: `pos`/`cascade` set the default. A remembered position, if there
+  // is one, is applied later by `makeDraggable` and wins — the user put it
+  // there on purpose.
   if (pos) {
     el.style.left = pos.left + "px";
     el.style.top = pos.top + "px";
@@ -282,6 +361,22 @@ function makeWindowFrame({ cls, title, bodyCls, cascade, pos, onClose, draggable
   el.appendChild(body);
   document.body.appendChild(el);
   if (onClose) closer.addEventListener("click", onClose);
-  if (draggable) makeDraggable(el, bar);
+  if (draggable) makeDraggable(el, bar);   // restores + persists, keyed by class
+  if (resizable) {
+    body.classList.add("win-resizable");
+    // One key per window for both halves of its geometry — `winKey`, the same
+    // one `makeDraggable` persists the position under.
+    const key = winKey(el);
+    const saved = key ? winGeom[key] : null;
+    if (saved && saved.w) { body.style.width = saved.w + "px"; body.style.height = saved.h + "px"; }
+    // The resize drag is the browser's own, so there is no event of ours to
+    // hang this on — the same reason the journal watches itself this way.
+    if (typeof ResizeObserver !== "undefined") {
+      new ResizeObserver(() => {
+        if (body.offsetWidth > 0) saveWinGeom(key, { w: body.offsetWidth, h: body.offsetHeight });
+      }).observe(body);
+    }
+  }
+  clampWindow(el);
   return { el, bar, body, label, closer };
 }

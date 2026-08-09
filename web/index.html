@@ -358,6 +358,11 @@
         background: rgba(11, 13, 16, .92); backdrop-filter: blur(3px);
         box-shadow: 0 4px 20px rgba(0, 0, 0, .5); color: #d6dae0;
       }
+      /* Opt-in resize. Deliberately NOT on every window: a map window and an
+         authentic container are laid out in the server's own pixel space, so a
+         resize would either crop them or desynchronise the coordinates the
+         items are placed at. The ones enabled below are lists and text. */
+      .win-resizable { resize: both; overflow: auto; min-width: 180px; min-height: 80px; }
       .gump-title {
         display: flex; justify-content: space-between; align-items: center; gap: 10px;
         padding: 7px 10px; border-bottom: 1px solid #2a2f37; cursor: move; user-select: none;

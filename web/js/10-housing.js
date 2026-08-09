@@ -953,7 +953,7 @@ function buildGumpWindow(g, { previous } = {}) {
   // gump anchored across its close-and-reopen-with-a-new-serial cycle.
   const saved = gumpPos.get(gumpId);
   const { el, bar: title, body } = makeWindowFrame({
-    cls: "dialog-win", title: "Dialog", cascade: gumpCascade, pos: saved,
+    cls: "dialog-win", title: "Dialog", cascade: gumpCascade, pos: saved, resizable: true,
     onClose: () => { sendInput(`gump:${serial}:${gumpId}:0`); closeGump(serial); },
     draggable: false, // wired below so the drag can also update gumpPos
   });
@@ -1520,7 +1520,7 @@ function buildBBoardWindow(b) {
   const { el, body } = makeWindowFrame({
     cls: "bboard-win", title: b.name || "Bulletin Board",
     cascade: { n: 0, left: 300, top: 100 },
-    onClose: closeBBoard,
+    onClose: closeBBoard, resizable: true,
   });
   body.innerHTML = '<div class="bb-list"></div><div class="bb-body"></div>'
     + '<div class="bb-compose">'

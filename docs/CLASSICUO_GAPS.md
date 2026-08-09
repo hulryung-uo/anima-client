@@ -188,6 +188,17 @@ one-click take is two packets we already had. Two notes:
 Tier 2 still open: the 0x11 `type >= 6` combat tail (unobservable here), the
 info bar, the counter bar and friends, and window management.
 
+Closed 2026-08-09 (window management): the fourth Tier 2 row. Purely client
+work — no packet is involved. One trap, hit twice:
+
+- **A hidden panel measures as all zeros.** The static panels are
+  `display: none` until their key is pressed, so `getBoundingClientRect()`
+  reports (0, 0, 0, 0) and both halves of the geometry code got it wrong in
+  turn: clamping the zero-rect was a no-op that left a planted (5000, 4000)
+  intact in a 756-wide viewport, and saving from it then stored (0, 0) for a
+  panel visibly at (716, 445). Both now go through one `winPos`, which falls
+  back to the inline style — the position the element *will* take when shown.
+
 **Know what the local shard can and cannot prove.** `Config/Expansion.cfg` on
 the ServUO at `127.0.0.1:2594` says `CurrentExpansion=T2A`, so `Core.AOS` is
 **false** there. That single fact splits this batch in half, and it is worth
@@ -492,7 +503,7 @@ The receive side is generally complete; there is no way to *act*.
 | Info bar | a fixed HUD readout exists; ClassicUO's user-configurable field set does not | M |
 | Counter bar, ignore list, combat-book gump, racial-abilities book, network-stats and inspector windows | absent | S–M |
 | ~~Container gumps ignore real container art and each item's stored (x,y)~~ — **CLOSED, live-verified** | Both halves were already on the wire and discarded: 0x3C carries a position per item, and 0x24 names the container's gump. The gump id is now **retained** (`World::container_gumps`) rather than read from the open-event ring, which ages out while the window stays open, and reaches the renderer as `scene.contGumps`. The window draws that art and places each item at its raw (x, y), read **signed** as ClassicUO does (`(short)item.X`). ClassicUO additionally clamps into a per-gump bounds table (78 entries); we clip with `overflow: hidden` instead, which needs no table and cannot disagree with the server about where an item actually is. Verified live on a real backpack (gump 60, 230×204) with a dozen items at their stored positions | M |
-| Window management | no resize, no anchoring/docking, no saved per-window layout | M |
+| ~~Window management~~ — **CLOSED, live-verified** | Every draggable panel — the dynamic windows from `makeWindowFrame` *and* the static ones (paperdoll, spellbook, skills, options, macros) — now **remembers where it was left** and comes back inside the viewport, because the persistence lives in `makeDraggable`, the one function they all already went through. Keyed by element id or class, never by serial: a serial is per-corpse/per-bag and never returns, so "the next container opens where I put the last one" is the only memory worth having (ClassicUO's per-type defaults do the same). Windows are clamped on restore and on browser resize, and a position saved on a bigger screen is **written back clamped**, so it heals instead of being re-clamped forever. `resize: both` is opt-in per window (bulletin board, server gumps, plus the journal from the row above) — deliberately not on the map or an authentic container, whose layout is in the server's own pixel space | M |
 
 ---
 
