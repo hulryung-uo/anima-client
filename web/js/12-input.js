@@ -107,6 +107,7 @@ function onEntityPointerDown(serial, e, isItem) {
   // specific intent. ClassicUO cannot reach this state at all — its ignore pick
   // IS the target cursor, so arming one cancels the other.
   if (ignorePick) { ignoreMobile(serial); armIgnorePick(false); return; }
+  if (inspectPick) { inspectPicked({ serial }); return; }
   if (scene && scene.target && scene.target.active === 1 && !targetUIHidden) {
     targetConsumedAt = performance.now();
     sendInput("target:" + serial);   // answer the object-target cursor

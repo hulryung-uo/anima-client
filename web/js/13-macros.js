@@ -333,6 +333,12 @@ function setupInput() {
     // clicks are completely unaffected — this is a pure no-op against an older
     // server that never sends scene.houseDesign.
     if (handleHouseDesignClick(e)) return;
+    if (inspectPick) {
+      const gl = clientToGlobal(e.clientX, e.clientY);
+      const t = groundTileAt(gl.x, gl.y);
+      inspectPicked({ x: t.x, y: t.y });
+      return;
+    }
     if (!(scene && scene.target && scene.target.active === 1) || targetUIHidden) return;
     if (performance.now() - targetConsumedAt < 200) return; // a mob/item already answered
     // Our own avatar is always at the canvas centre but isn't a click target (so it
@@ -491,6 +497,7 @@ function setupInput() {
     if (e.target.closest(".opt-combatbook")) { toggleCombatBook(); return; }
     if (e.target.closest(".opt-racialbook")) { toggleRacialBook(); return; }
     if (e.target.closest(".opt-netstats")) { toggleNetStats(); return; }
+    if (e.target.closest(".opt-inspector")) { toggleInspector(); return; }
     if (!e.target.closest(".opt-logout")) return;
     requestLogout();
   });

@@ -115,6 +115,12 @@ async function main() {
   document.getElementById("netstats").classList.toggle("on", netStatsOn);
   makeDraggable(document.getElementById("netstats"), document.getElementById("ns-title"));
   document.getElementById("ns-close").addEventListener("click", toggleNetStats);
+  document.getElementById("inspector").classList.toggle("on", inspectOn);
+  makeDraggable(document.getElementById("inspector"), document.getElementById("insp-title"));
+  document.getElementById("insp-close").addEventListener("click", toggleInspector);
+  document.getElementById("insp-pick").addEventListener("click", () => armInspect(!inspectPick));
+  document.getElementById("insp-dump").addEventListener("click", inspectDump);
+  renderInspector();
   restoreJournalHeight();
   setupItemDnD();
   initFx();

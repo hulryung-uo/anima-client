@@ -682,7 +682,7 @@
       .rcb-desc { font-size: 11px; color: #b6bcc6; line-height: 1.4; margin-top: 2px; }
       .rcb-none { font-size: 11px; color: #6b7280; line-height: 1.4; }
       /* ---- network stats (ClassicUO NetworkStatsGump) ---- */
-      #netstats { top: 60px; left: 210px; width: 210px; display: none; }
+      #netstats { top: 270px; left: 210px; width: 210px; display: none; }
       #netstats.on { display: block; }
       .ns-hdr { font-size: 9px; letter-spacing: .08em; text-transform: uppercase;
                 color: #6b7280; margin: 6px 0 3px; }
@@ -691,6 +691,26 @@
                 color: #c7d0dc; padding: 1px 0; }
       .ns-row span:first-child { color: #8a929c; }
       .ns-row.ns-tot span { color: #6b7280; font-size: 10px; }
+      /* ---- object inspector (ClassicUO InspectorGump) ---- */
+      #inspector { top: 60px; left: 470px; width: 330px; display: none; }
+      #inspector.on { display: block; }
+      .insp-bar { display: flex; gap: 5px; margin-bottom: 6px; }
+      .insp-bar button { font: inherit; font-size: 11px; padding: 2px 8px; border-radius: 4px;
+        border: 1px solid #34404f; background: rgba(22, 28, 38, .88); color: #c7d0dc; cursor: pointer; white-space: nowrap; }
+      .insp-bar button:hover { border-color: #4a90d9; color: #e6e9ee; }
+      .insp-bar button.arm { border-color: #d9a441; color: #ffdf9e; background: rgba(58, 44, 16, .9); }
+      #insp-body { max-height: 60vh; overflow-y: auto; }
+      .insp-hdr { font-size: 11px; color: #8ab4f8; margin-bottom: 4px; }
+      .insp-row { display: flex; gap: 8px; font-size: 11px; padding: 1px 0; border-bottom: 1px solid #1c2430; }
+      .insp-k { color: #8a929c; flex: 0 0 118px; }
+      .insp-v { color: #d7dde5; word-break: break-word; cursor: copy; }
+      .insp-v:hover { color: #ffdf9e; }
+      .insp-raw-hdr { font-size: 9px; letter-spacing: .08em; text-transform: uppercase;
+                      color: #6b7280; margin: 8px 0 3px; }
+      .insp-raw { font-size: 10px; color: #8a929c; background: rgba(12, 16, 22, .6);
+                  border-radius: 4px; padding: 5px; margin: 0; max-height: 200px; overflow: auto;
+                  white-space: pre-wrap; word-break: break-word; }
+      .insp-none { font-size: 11px; color: #6b7280; line-height: 1.4; }
       /* ---- skills window (0x3A) ---- */
       #skills { top: 60px; right: 16px; width: 280px; display: none; }
       #statusbar { top: 60px; left: 210px; width: 170px; display: none; }
@@ -1322,6 +1342,17 @@
       <div class="gump-body">
         <div id="cbk-equipped"></div>
         <div id="cbk-list"></div>
+      </div>
+    </div>
+    <div id="inspector" class="gump-win">
+      <div class="gump-title" id="insp-title"><span>INSPECTOR</span>
+        <span class="gump-close" id="insp-close">&#10005;</span></div>
+      <div class="gump-body">
+        <div class="insp-bar">
+          <button type="button" id="insp-pick">Inspect…</button>
+          <button type="button" id="insp-dump">Copy dump</button>
+        </div>
+        <div id="insp-body"></div>
       </div>
     </div>
     <div id="netstats" class="gump-win">

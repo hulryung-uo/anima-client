@@ -969,3 +969,191 @@ function refreshNetStats() {
     + `<div class="ns-hdr">this page (HTTP poll)</div>`
     + `<div class="ns-row"><span>Scene fetch</span><span>${diag.poll.toFixed(0)} ms</span></div>`;
 }
+// ---- object inspector (ClassicUO's InspectorGump) ---------------------------
+//
+// Arm it, click a thing, and read back everything this client believes about
+// it. ClassicUO's version is a fixed key/value dump per object type — graphic,
+// hue, position, then a hand-written list per Mobile/Item/Land/Static — and
+// clicking a value copies it. Same here, with the same field names where the
+// two clients have the same field.
+//
+// One addition, which is the reason this window is worth having in *this*
+// project: the raw scene record underneath. ClassicUO's list silently omits
+// anything nobody hardcoded, and the interesting question here is usually
+// "what did the server actually send", not "what did someone remember to
+// print". The table is the readable view; the JSON is the complete one.
+let inspectOn = localStorage.getItem("anima.inspectOn") === "1";
+let inspectPick = false;
+let inspectData = null;   // { kind, title, rows: [[k, v], …], raw }
+function toggleInspector() {
+  inspectOn = !inspectOn;
+  document.getElementById("inspector").classList.toggle("on", inspectOn);
+  localStorage.setItem("anima.inspectOn", inspectOn ? "1" : "0");
+  if (!inspectOn) armInspect(false);
+  renderInspector();
+}
+function armInspect(on) {
+  inspectPick = !!on;
+  const b = document.getElementById("insp-pick");
+  if (b) {
+    b.classList.toggle("arm", inspectPick);
+    b.textContent = inspectPick ? "click anything…" : "Inspect…";
+  }
+}
+const hex4 = (n) => "0x" + ((n | 0) & 0xFFFF).toString(16).toUpperCase().padStart(4, "0");
+const hex8 = (n) => "0x" + ((n >>> 0).toString(16).toUpperCase().padStart(8, "0"));
+// Chebyshev distance, which is UO's own notion of range (`GameObject.Distance`).
+function tileDistance(x, y) {
+  const p = scene && scene.player;
+  if (!p) return "";
+  return String(Math.max(Math.abs((x | 0) - p.x), Math.abs((y | 0) - p.y)));
+}
+function inspectMobile(serial) {
+  const p = scene && scene.player;
+  const self = p && (p.serial >>> 0) === (serial >>> 0);
+  const m = self ? p : ((scene && scene.mobiles) || []).find((x) => (x.serial >>> 0) === (serial >>> 0));
+  if (!m) return null;
+  const rows = [
+    ["Serial", hex8(m.serial)], ["Name", m.name || ""], ["Graphics", hex4(m.body)],
+    ["Hue", hex4(m.hue)], ["Position", `X=${m.x}, Y=${m.y}, Z=${m.z}`],
+    ["Distance", tileDistance(m.x, m.y)], ["Direction", String(m.dir | 0)],
+    ["HP", `${m.hits | 0}/${m.hitsMax | 0}`],
+    ["Notoriety", NOTO_NAMES[m.noto | 0] || String(m.noto | 0)],
+    ["IsMounted", String(!!m.mounted)], ["IsHidden", String(!!m.hidden)],
+    ["IsPoisoned", String(!!m.poisoned)], ["IsInvulnerable", String(!!m.yellow)],
+    ["AnimType", String(m.at | 0)], ["Equipment", String((m.equip || []).length)],
+  ];
+  if (self) {
+    rows.push(["Mana", `${p.mana | 0}/${p.manaMax | 0}`], ["Stamina", `${p.stam | 0}/${p.stamMax | 0}`],
+      ["Race", String(p.race | 0)], ["IsDead", String(!!p.dead)]);
+  }
+  const opl = (scene && scene.opl && scene.opl[m.serial >>> 0]) || null;
+  if (opl) rows.push(["OPL", opl.join(" · ")]);
+  return { kind: "Mobile", title: m.name || hex8(m.serial), rows, raw: m };
+}
+function inspectItem(serial) {
+  serial = serial >>> 0;
+  const world = ((scene && scene.items) || []).find((x) => (x.serial >>> 0) === serial);
+  const held = ((scene && scene.contItems) || []).find((x) => (x.serial >>> 0) === serial);
+  const it = world || held;
+  if (!it) return null;
+  const rows = [
+    ["Serial", hex8(it.serial)], ["Graphics", hex4(it.g)], ["Hue", hex4(it.hue)],
+    ["Amount", String((it.amount | 0) || 1)], ["IsContainer", String(!!it.c)],
+    ["IsStackable", String(!!it.st)],
+  ];
+  if (world) {
+    rows.push(["Position", `X=${it.x}, Y=${it.y}, Z=${it.z}`], ["Distance", tileDistance(it.x, it.y)]);
+  } else {
+    // A held item's x/y are the container gump's own pixel space, not tiles —
+    // labelling them "Position" like a world item's would be a lie.
+    rows.push(["Container", hex8(it.cont)], ["Slot", `X=${it.x}, Y=${it.y} (gump px)`]);
+  }
+  const opl = (scene && scene.opl && scene.opl[serial]) || null;
+  if (opl) rows.push(["OPL", opl.join(" · ")]);
+  return { kind: world ? "Item" : "Item (in container)", title: (opl && opl[0]) || hex8(serial), rows, raw: it };
+}
+// A land tile plus whatever statics stand on it. ClassicUO inspects one object,
+// but our picking resolves a click to a tile, and "what is on this square" is
+// the question a tile click is actually asking.
+function inspectTile(x, y) {
+  const map = scene && scene.map;
+  if (!map) return null;
+  const r = map.radius | 0, w = r * 2 + 1;
+  const dx = (x | 0) - (map.cx | 0) + r, dy = (y | 0) - (map.cy | 0) + r;
+  if (dx < 0 || dy < 0 || dx >= w || dy >= w) return null;
+  const t = map.tiles[dy * w + dx];
+  if (!t) return null;
+  const rows = [
+    ["Position", `X=${x}, Y=${y}, Z=${t.z}`], ["Graphics", hex4(t.g)],
+    ["Texture", t.tx ? hex4(t.tx) : "none (flat draw)"],
+    ["Distance", tileDistance(x, y)],
+    ["Walkable", String(!!t.w)], ["StandZ", String(t.sz | 0)],
+    ["Impassable", String(!!t.i)], ["UnderRoof", String(!!t.h)],
+  ];
+  const on = (typeof staticsAt === "function" && staticsAt(x | 0, y | 0)) || [];
+  rows.push(["Statics", String(on.length)]);
+  on.slice(0, 12).forEach((s, i) => {
+    rows.push([`Static ${i}`, `${hex4(s.g)} z=${s.z}${s.h != null ? ` h=${s.h}` : ""}${s.ms ? " (multi)" : ""}`]);
+  });
+  return { kind: "Land tile", title: `${x}, ${y}`, rows, raw: { tile: t, statics: on } };
+}
+// Called from the click paths. Returns true when the armed pick consumed it.
+function inspectPicked(what) {
+  if (!inspectPick) return false;
+  armInspect(false);
+  const data = what.serial != null
+    ? (inspectMobile(what.serial) || inspectItem(what.serial))
+    : inspectTile(what.x, what.y);
+  if (!data) { addSysMessage("Nothing to inspect there."); return true; }
+  inspectData = data;
+  if (!inspectOn) toggleInspector(); else renderInspector();
+  return true;
+}
+function renderInspector() {
+  if (!inspectOn) return;
+  const host = document.getElementById("insp-body");
+  if (!host) return;
+  if (!inspectData) {
+    host.innerHTML = '<div class="insp-none">Press Inspect, then click a mobile, an item or the ground.</div>';
+    return;
+  }
+  const d = inspectData;
+  // Sorted by key, as ClassicUO does (`dict.OrderBy(s => s.Key)`), except the
+  // statics list, which is only meaningful in its own order.
+  const named = d.rows.filter(([k]) => !k.startsWith("Static "));
+  const statics = d.rows.filter(([k]) => k.startsWith("Static "));
+  named.sort((a, b) => a[0].localeCompare(b[0]));
+  const row = ([k, v]) => `<div class="insp-row"><span class="insp-k">${k}</span>`
+    + `<span class="insp-v" title="click to copy">${String(v).replace(/[<&]/g, (c) => c === "<" ? "&lt;" : "&amp;")}</span></div>`;
+  host.innerHTML = `<div class="insp-hdr">${d.kind} · ${d.title}</div>`
+    + named.map(row).join("") + statics.map(row).join("")
+    + `<div class="insp-raw-hdr">scene record</div>`
+    + `<pre class="insp-raw">${JSON.stringify(d.raw, null, 1).replace(/[<&]/g, (c) => c === "<" ? "&lt;" : "&amp;")}</pre>`;
+  // ClassicUO copies a clicked value to the clipboard; its Dump button writes a
+  // file, which a browser tab cannot do unasked — copying the whole dump is the
+  // same act with the same result in hand.
+  for (const el of host.querySelectorAll(".insp-v"))
+    el.addEventListener("click", () => inspectCopy(el.textContent, el));
+}
+// ClassicUO copies a clicked value with one SDL call. A browser cannot count on
+// that: the async Clipboard API needs a permission the page may not have (it
+// refuses outright under automation, and headless Chrome has no clipboard at
+// all), and `execCommand` needs a trusted gesture. So there are three tiers, and
+// the last one always works — if we cannot put the text on the clipboard, we
+// select it on the page so ⌘C/Ctrl-C can.
+function inspectCopy(text, el) {
+  const ok = () => addSysMessage("Copied to clipboard.");
+  const selectInstead = () => {
+    if (!el) { addSysMessage("Could not copy — no clipboard available."); return; }
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    addSysMessage("Selected — press ⌘C / Ctrl-C to copy.");
+  };
+  const viaCommand = () => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;left:-9999px;top:0";
+    document.body.appendChild(ta);
+    ta.select();
+    let done = false;
+    try { done = document.execCommand("copy"); } catch (e) {}
+    ta.remove();
+    if (done) ok(); else selectInstead();
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(ok, viaCommand);
+  } else {
+    viaCommand();
+  }
+}
+function inspectDump() {
+  if (!inspectData) return;
+  const d = inspectData;
+  inspectCopy(`${d.kind}: ${d.title}\n`
+    + d.rows.map(([k, v]) => `${k} = ${v}`).join("\n")
+    + `\n\nscene record:\n${JSON.stringify(d.raw, null, 1)}`);
+}

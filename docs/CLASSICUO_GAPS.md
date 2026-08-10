@@ -364,6 +364,35 @@ else); a GM `[go` teleport, which makes ServUO resend the whole view, spikes to
 **3.25 KB/s in** and settles back within two seconds. Totals and packet counts
 climb monotonically across both.
 
+Closed 2026-08-10 (inspector): the last entry of the grab-bag row, and with it
+everything in Tier 2 except the 0x11 `type >= 6` combat tail, which this shard
+cannot show at all. Client-only — the inspector reads the scene and sends
+nothing.
+
+- **The picking is ours, the dump is ClassicUO's.** Its inspector opens from a
+  per-object hit test (and from several context menus); ours arms a local mode
+  and spends it on the next click, the same shape the ignore list uses. That
+  reaches mobiles, world items, container items and land tiles. A ground click
+  resolves to a *tile* rather than to one static, so the tile view lists what
+  stands on it — four stacked wall/roof pieces on the test tile, at z 20, 40,
+  60 and 63.
+- **The raw record is the addition worth having.** ClassicUO's dump is a
+  hand-written list per object type and silently omits anything nobody thought
+  to print. Here the readable table sits above the scene record itself, which is
+  the whole of what the server told us.
+- **A browser cannot just take the clipboard.** ClassicUO copies a clicked value
+  with one SDL call; the async Clipboard API needs a permission and a trusted
+  gesture, and `execCommand` needs the gesture too. Three tiers, ending in
+  "select the text on the page so ⌘C can have it", which always works. Verified
+  both ways: a real click copies, a scripted `.click()` (untrusted) falls
+  through the tiers instead of silently doing nothing.
+- **Found while testing: two windows opening in the same corner.** The network
+  window and the inspector both defaulted to `top: 60px; left: 210px`, so the
+  second one to open was invisible under the first — the click that was supposed
+  to hit the inspector landed on the network readout. Staggered. The geometry
+  memory from the window-management row only helps *after* a window has been
+  dragged once.
+
 **Know what the local shard can and cannot prove.** `Config/Expansion.cfg` on
 the ServUO at `127.0.0.1:2594` says `CurrentExpansion=T2A`, so `Core.AOS` is
 **false** there. That single fact splits this batch in half, and it is worth
@@ -671,7 +700,7 @@ The receive side is generally complete; there is no way to *act*.
 | ~~Combat book~~ — **CLOSED, live-verified** | All 32 weapon moves with the client's own icons (gump `0x5200 + id - 1`), their names and descriptions read from **cliloc** at runtime (`1028838 + i` / `1061693 + i`, ClassicUO's ids) through a new `/abilities.json`, and the weapons that grant each — the inverse of the `WEAPON_ABILITIES` table the ability bar already had, so the two halves cannot drift (ClassicUO keeps a second hand-written copy for this gump, a 400-line `GetItemsList` switch). The equipped weapon's two moves head the window, armed state and click-to-arm included. Reconciling that table against ServUO's own weapon classes corrected 19 entries and added 21 — see the note below | S–M |
 | ~~Racial-abilities book~~ — **CLOSED, live-verified** | What your race gives you: four entries for a human, six for an elf, five for a gargoyle, with ClassicUO's icons (`0x5DD0`/`0x5DD4`/`0x5DDA` + i) and its names, and the descriptions read from cliloc (`1112198`/`1112202`/`1112208` + i) through the same `/abilities.json` the combat book fetches. Race comes from 0x11's ML byte when the shard sends one and otherwise from the body graphic, ClassicUO's other rule — which is the only one that fires here. All entries are passive except the gargoyle's Flying, now `Action::ToggleFlying` (0xBF/0x32) | S–M |
 | ~~Network stats~~ — **CLOSED, live-verified** | Ping, in/out rate, totals and packet counts for the link to the game server, plus this page's own HTTP poll — two hops, because this client has two and a lag reading that blamed the wrong one would be worse than none. The ping is a real 0x73 round trip (ServUO's `PingAck` echoes the sequence byte), averaged over five as ClassicUO does, measured in the driver that owns the socket since the core has no clock by design. Kept in **microseconds** — see the note below | S–M |
-| Inspector window | absent | S–M |
+| ~~Inspector~~ — **CLOSED, live-verified** | Arm it, click a mobile, an item or the ground, and read back everything this client believes about it: ClassicUO's key/value dump with its field names, sorted by key, click-a-value-to-copy. Plus the **raw scene record** underneath — ClassicUO's list only prints what someone hardcoded, and the question worth asking in this repo is what the server actually sent. A ground click resolves to a tile, so that view also lists the statics standing on it | S–M |
 | ~~Container gumps ignore real container art and each item's stored (x,y)~~ — **CLOSED, live-verified** | Both halves were already on the wire and discarded: 0x3C carries a position per item, and 0x24 names the container's gump. The gump id is now **retained** (`World::container_gumps`) rather than read from the open-event ring, which ages out while the window stays open, and reaches the renderer as `scene.contGumps`. The window draws that art and places each item at its raw (x, y), read **signed** as ClassicUO does (`(short)item.X`). ClassicUO additionally clamps into a per-gump bounds table (78 entries); we clip with `overflow: hidden` instead, which needs no table and cannot disagree with the server about where an item actually is. Verified live on a real backpack (gump 60, 230×204) with a dozen items at their stored positions | M |
 | ~~Window management~~ — **CLOSED, live-verified** | Every draggable panel — the dynamic windows from `makeWindowFrame` *and* the static ones (paperdoll, spellbook, skills, options, macros) — now **remembers where it was left** and comes back inside the viewport, because the persistence lives in `makeDraggable`, the one function they all already went through. Keyed by element id or class, never by serial: a serial is per-corpse/per-bag and never returns, so "the next container opens where I put the last one" is the only memory worth having (ClassicUO's per-type defaults do the same). Windows are clamped on restore and on browser resize, and a position saved on a bigger screen is **written back clamped**, so it heals instead of being re-clamped forever. `resize: both` is opt-in per window (bulletin board, server gumps, plus the journal from the row above) — deliberately not on the map or an authentic container, whose layout is in the server's own pixel space | M |
 
