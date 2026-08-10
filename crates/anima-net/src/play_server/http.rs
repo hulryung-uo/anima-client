@@ -20,6 +20,7 @@ pub(super) struct SpawnHttp {
     pub(super) gumps: Option<Arc<Gumps>>,
     pub(super) hues: Option<Arc<Hues>>,
     pub(super) tiledata: Option<Arc<TileData>>,
+    pub(super) cliloc: Option<Arc<Cliloc>>,
     pub(super) texmaps: Option<Arc<Texmaps>>,
     pub(super) worldmap: Arc<Mutex<Option<Vec<u8>>>>,
     pub(super) sounds: Option<Arc<Sounds>>,
@@ -48,6 +49,7 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         gumps,
         hues,
         tiledata,
+        cliloc,
         texmaps,
         worldmap,
         sounds,
@@ -78,6 +80,7 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         let gumps = gumps.clone();
         let hues = hues.clone();
         let tiledata = tiledata.clone();
+        let cliloc = cliloc.clone();
         let texmaps = texmaps.clone();
         let tile_cache = tile_cache.clone();
         let anim_cache = anim_cache.clone();
@@ -106,6 +109,7 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
                     gumps: &gumps,
                     hues: &hues,
                     tiledata: &tiledata,
+                    cliloc: &cliloc,
                     texmaps: &texmaps,
                     tile_cache: &tile_cache,
                     anim_cache: &anim_cache,
@@ -140,6 +144,7 @@ pub(super) struct Ctx<'a> {
     pub(super) gumps: &'a Option<Arc<Gumps>>,
     pub(super) hues: &'a Option<Arc<Hues>>,
     pub(super) tiledata: &'a Option<Arc<TileData>>,
+    pub(super) cliloc: &'a Option<Arc<Cliloc>>,
     pub(super) texmaps: &'a Option<Arc<Texmaps>>,
     pub(super) tile_cache: &'a TileCache,
     pub(super) anim_cache: &'a AnimCache,
@@ -173,6 +178,7 @@ pub(super) fn handle_request(ctx: Ctx) {
         gumps,
         hues,
         tiledata,
+        cliloc,
         texmaps,
         tile_cache,
         anim_cache,
@@ -399,6 +405,19 @@ pub(super) fn handle_request(ctx: Ctx) {
         let body = regions_json(guard_rects, cur);
         let mut r = Response::from_string(body);
         r.add_header(ctype("application/json"));
+        let _ = req.respond(r);
+    } else if url == "/abilities.json" {
+        // The combat book's catalogue: cliloc text for all 32 weapon moves plus
+        // the tile names of the weapon graphics the caller listed. Static per
+        // (data files, query), so it caches like /pois.json.
+        let body = abilities_json(
+            cliloc.as_deref(),
+            tiledata.as_deref(),
+            &parse_graphics_query(&raw_url),
+        );
+        let mut r = Response::from_string(body);
+        r.add_header(ctype("application/json"));
+        r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=3600"[..]).unwrap());
         let _ = req.respond(r);
     } else if url == "/housecatalog" {
         // Custom-house building catalog (walls/floors/doors/misc/stairs/roofs/

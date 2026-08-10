@@ -104,6 +104,10 @@ async function main() {
     if (ignoreName(e.target.value)) e.target.value = "";
   });
   renderIgnoreList();
+  document.getElementById("combatbook").classList.toggle("on", cbkOn);
+  makeDraggable(document.getElementById("combatbook"), document.getElementById("cbk-title"));
+  document.getElementById("cbk-close").addEventListener("click", toggleCombatBook);
+  if (cbkOn) loadAbilityText();
   restoreJournalHeight();
   setupItemDnD();
   initFx();

@@ -168,6 +168,24 @@ impl TileData {
             .is_some_and(|off| self.data[off + 21..off + 27].eq_ignore_ascii_case(b"nodraw"))
     }
 
+    /// The tile's own name — the 20-byte ASCII field at item-entry offset +21,
+    /// NUL-padded (the same field [`Self::item_is_nodraw`] sniffs). This is UO's
+    /// built-in English name for a graphic ("kryss", "war fork"), which is what
+    /// ClassicUO's combat book lists under each weapon ability
+    /// (`TileData.StaticData[id].Name`). Empty when the graphic is out of range.
+    ///
+    /// Not a substitute for an OPL name: this one is per-GRAPHIC and knows
+    /// nothing about a particular item's magical prefix, dye or crafter.
+    pub fn item_name(&self, graphic: u16) -> String {
+        self.item_entry_off(graphic)
+            .map(|off| {
+                let raw = &self.data[off + 21..off + 41];
+                let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+                String::from_utf8_lossy(&raw[..end]).trim().to_string()
+            })
+            .unwrap_or_default()
+    }
+
     /// Height of a static/item graphic (used for Z stacking/walkability).
     pub fn item_height(&self, graphic: u16) -> u8 {
         // height is the byte at entry offset +20 (after flags+the fixed fields).

@@ -269,6 +269,7 @@ function renderOptions() {
     + '<label class="opt-row"><button type="button" class="dlg-btn opt-infobar">Info bar</button></label>'
     + '<label class="opt-row"><button type="button" class="dlg-btn opt-counterbar">Counter bar</button></label>'
     + '<label class="opt-row"><button type="button" class="dlg-btn opt-ignorelist">Ignore list</button></label>'
+    + '<label class="opt-row"><button type="button" class="dlg-btn opt-combatbook">Combat book</button></label>'
     + '<div class="opt-sect">Session</div>'
     + `<button type="button" class="dlg-btn opt-logout"${logoutPending ? " disabled" : ""}>`
     + (logoutPending ? "LOGGING OUT…" : "LOG OUT") + "</button>";

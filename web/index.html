@@ -635,6 +635,33 @@
       .ig-row .ig-x:hover { color: #e5484d; }
       .ig-none, .ig-note { color: #6b7280; font-size: 10px; line-height: 1.4; }
       .ig-note { margin-top: 6px; }
+      /* ---- combat book (ClassicUO CombatBookGump) ---- */
+      #combatbook { top: 60px; right: 280px; width: 290px; display: none; }
+      #combatbook.on { display: block; }
+      #cbk-equipped { border-bottom: 1px solid #2a3442; padding-bottom: 6px; margin-bottom: 6px; }
+      .cbk-eq-hdr { font-size: 9px; letter-spacing: .08em; text-transform: uppercase; color: #6b7280; margin-bottom: 4px; }
+      .cbk-eq { display: flex; align-items: center; gap: 7px; padding: 3px 5px; border-radius: 5px;
+                cursor: pointer; font-size: 12px; color: #c7d0dc; border: 1px solid transparent; }
+      .cbk-eq:hover { background: rgba(138, 180, 248, .14); }
+      .cbk-eq.armed { border-color: #d9a441; background: rgba(58, 44, 16, .9); color: #ffdf9e; }
+      .cbk-eq img { width: 28px; height: 28px; image-rendering: pixelated; }
+      .cbk-eq .cbk-slot { margin-left: auto; font-size: 9px; color: #6b7280; }
+      .cbk-eq.armed .cbk-slot { color: #d9a441; }
+      #cbk-list { max-height: 56vh; overflow-y: auto; }
+      .cbk-row { display: flex; align-items: center; gap: 7px; padding: 2px 5px; border-radius: 5px; cursor: pointer; }
+      .cbk-row:hover { background: rgba(138, 180, 248, .14); }
+      .cbk-row.open { background: rgba(138, 180, 248, .1); }
+      .cbk-icon { width: 26px; height: 26px; image-rendering: pixelated; flex: 0 0 26px; }
+      .cbk-name { font-size: 12px; color: #d7dde5; }
+      /* A move the weapon in your hands actually offers. */
+      .cbk-row.mine .cbk-name { color: #ffdf9e; }
+      .cbk-count { margin-left: auto; font-size: 10px; color: #6b7280; }
+      .cbk-detail { padding: 3px 6px 8px 38px; }
+      .cbk-desc { font-size: 11px; color: #b6bcc6; line-height: 1.45; margin-bottom: 5px; }
+      .cbk-weps { display: flex; flex-wrap: wrap; gap: 4px 8px; }
+      .cbk-wep { display: flex; align-items: center; gap: 4px; font-size: 10px; color: #8a929c; }
+      .cbk-wep img { width: 22px; height: 22px; image-rendering: pixelated; }
+      .cbk-none { font-size: 10px; color: #6b7280; }
       /* ---- skills window (0x3A) ---- */
       #skills { top: 60px; right: 16px; width: 280px; display: none; }
       #statusbar { top: 60px; left: 210px; width: 170px; display: none; }
@@ -1258,6 +1285,14 @@
         <div id="cb-slots"></div>
         <div class="cb-hint">drag an item onto a slot · double-click to use · click to configure</div>
         <div id="cb-opts"></div>
+      </div>
+    </div>
+    <div id="combatbook" class="gump-win">
+      <div class="gump-title" id="cbk-title"><span>COMBAT BOOK</span>
+        <span class="gump-close" id="cbk-close">&#10005;</span></div>
+      <div class="gump-body">
+        <div id="cbk-equipped"></div>
+        <div id="cbk-list"></div>
       </div>
     </div>
     <div id="ignorelist" class="gump-win">

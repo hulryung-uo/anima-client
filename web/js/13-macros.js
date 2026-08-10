@@ -488,6 +488,7 @@ function setupInput() {
     if (e.target.closest(".opt-infobar")) { toggleInfoBar(); return; }
     if (e.target.closest(".opt-counterbar")) { toggleCounterBar(); return; }
     if (e.target.closest(".opt-ignorelist")) { toggleIgnoreList(); return; }
+    if (e.target.closest(".opt-combatbook")) { toggleCombatBook(); return; }
     if (!e.target.closest(".opt-logout")) return;
     requestLogout();
   });

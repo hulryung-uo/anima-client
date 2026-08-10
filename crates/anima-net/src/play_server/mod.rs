@@ -331,6 +331,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
             gumps,
             hues,
             tiledata: tiledata.clone(),
+            cliloc: cliloc.clone(),
             texmaps,
             worldmap,
             sounds,

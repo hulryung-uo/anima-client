@@ -572,6 +572,36 @@ mod hue_palette_tests {
     }
 
     #[test]
+    fn abilities_json_lists_every_move_even_without_data_files() {
+        let value: serde_json::Value =
+            serde_json::from_str(&abilities_json(None, None, &[3908, 5048])).unwrap();
+        let abilities = value["abilities"].as_array().unwrap();
+        assert_eq!(abilities.len(), 32);
+        assert_eq!(abilities[0]["id"], 1);
+        assert_eq!(abilities[31]["id"], 32);
+        // No cliloc → null text, not a fabricated name. The renderer already
+        // carries ClassicUO's English names and falls back to them.
+        assert!(abilities[0]["name"].is_null());
+        // No tiledata → no item names at all, rather than empty strings that
+        // would render as blank rows under an ability.
+        assert_eq!(value["items"].as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn graphics_query_survives_junk() {
+        assert_eq!(parse_graphics_query("/abilities.json"), Vec::<u16>::new());
+        assert_eq!(
+            parse_graphics_query("/abilities.json?g=3908,5048,3935"),
+            vec![3908, 5048, 3935]
+        );
+        // A bad entry is dropped, not fatal — the ability text still matters.
+        assert_eq!(
+            parse_graphics_query("/abilities.json?g=1,,zz,70000,7"),
+            vec![1, 7]
+        );
+    }
+
+    #[test]
     #[ignore] // needs ~/dev/uo/uo-resource/hues.mul
     fn real_hues_mul_produces_visible_varied_picker_colors() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
@@ -635,4 +665,66 @@ mod resource_limit_tests {
         let mut invalid = Cursor::new(vec![0xFF]);
         assert!(read_text_limited(&mut invalid, 4).is_err());
     }
+}
+
+/// Ability id → cliloc for its NAME. ClassicUO's combat book tooltips the
+/// primary/secondary icons with `1028838 + (ability - 1)` and the index entries
+/// with the description below.
+const ABILITY_NAME_CLILOC: u32 = 1028838;
+
+/// Ability id → cliloc for its DESCRIPTION (`1061693 + (ability - 1)` in
+/// ClassicUO's `CombatBookGump`).
+const ABILITY_DESC_CLILOC: u32 = 1061693;
+
+/// How many weapon special moves exist. ClassicUO stops at 32
+/// (`Constants.MAX_ABILITIES_COUNT`, ending at Disrobe); ServUO's
+/// `WeaponAbility.m_Abilities` has a 33rd, Cold Wind. We serve ClassicUO's 32 —
+/// the extra one is an SA-era move no weapon in the client's table grants.
+const ABILITY_COUNT: u32 = 32;
+
+/// The combat book's static half: every weapon special move's name and
+/// description, straight out of cliloc, plus the tile name of each graphic the
+/// caller asked about (`?g=3908,5048,…` — the weapons its own table says grant
+/// each move).
+///
+/// Built on request rather than at startup because it is asked for once, when
+/// the book is first opened, and the graphic list is the caller's.
+pub(super) fn abilities_json(
+    cliloc: Option<&Cliloc>,
+    tiledata: Option<&TileData>,
+    graphics: &[u16],
+) -> String {
+    let abilities: Vec<serde_json::Value> = (1..=ABILITY_COUNT)
+        .map(|id| {
+            let off = id - 1;
+            serde_json::json!({
+                "id": id,
+                "name": cliloc.and_then(|c| c.format(ABILITY_NAME_CLILOC + off, "")),
+                "desc": cliloc.and_then(|c| c.format(ABILITY_DESC_CLILOC + off, "")),
+            })
+        })
+        .collect();
+    let mut items = serde_json::Map::new();
+    for &g in graphics {
+        let name = tiledata.map(|t| t.item_name(g)).unwrap_or_default();
+        if !name.is_empty() {
+            items.insert(g.to_string(), serde_json::Value::String(name));
+        }
+    }
+    serde_json::json!({ "abilities": abilities, "items": items }).to_string()
+}
+
+/// Extract `g=<n>,<n>,…` from a raw URL query string. Unparsable entries are
+/// dropped rather than failing the request — a client asking about a graphic
+/// this data set has never heard of should still get its ability text.
+pub(super) fn parse_graphics_query(raw_url: &str) -> Vec<u16> {
+    let Some(q) = raw_url.split('?').nth(1) else {
+        return Vec::new();
+    };
+    for kv in q.split('&') {
+        if let Some(v) = kv.strip_prefix("g=") {
+            return v.split(',').filter_map(|s| s.parse().ok()).collect();
+        }
+    }
+    Vec::new()
 }

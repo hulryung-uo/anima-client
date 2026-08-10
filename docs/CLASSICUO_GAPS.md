@@ -259,6 +259,48 @@ match it:
   both the journal and the overhead while their ordinary speech reaches
   neither.
 
+Closed 2026-08-10 (combat book): the third entry of the grab-bag row (three
+left). The gump itself is a reference window, but building it meant checking the
+data behind it, and the data was wrong.
+
+- **ClassicUO's weapon→ability table disagrees with the server on 19 of the 202
+  graphics they share.** The server is the half that decides: ServUO's
+  `WeaponAbility.SetCurrentAbility` refuses anything that is not the equipped
+  weapon's `PrimaryAbility`/`SecondaryAbility` and clears the arm. Extracting
+  those two properties from every `Scripts/Items/Equipment/Weapons/*.cs` and
+  diffing found eight entries with **the pair in the wrong order** (dagger,
+  gargish dagger, viking sword) and eleven naming **a move the weapon does not
+  have at all** — club Shadow Strike (really Crushing Blow), sledge and smithy
+  hammer Shadow Strike (Paralyzing Blow), tessen and gargish tessen Block (Dual
+  Wield), nunchaku Feint (Double Strike), sai Block (Dual Wield), gargish
+  gnarled staff Paralyzing Blow (Force of Nature). Each was confirmed by reading
+  the class, not just by the extractor. The eleven are buttons the server
+  answers by disarming them.
+- **It is also missing 21 graphics ServUO knows**, nearly all the second art of
+  a `[Flipable]` pair — katana `0x13FE`, kryss `0x1400`, scimitar `0x13B5`.
+  ClassicUO papers over these at lookup time by retrying `graphic ± 1` when the
+  tiledata AnimID matches; with the real entries present that hack is not needed
+  here. The 21 the ClassicUO table has and ServUO does not are kept — another
+  shard may define them.
+- **Unarmed was offering ids 0 and 1**, on the belief that they meant "server
+  picks". They do not: ServUO's `EventSink_SetAbility` reads 0 as *clear the
+  arm* and 1 as *Armor Ignore*, which fists do not have. Bare hands now use
+  ServUO's `Fists` — Disarm, then Paralyzing Blow. (ClassicUO's own default is
+  the same pair in the opposite order.)
+- **Cliloc has no text for the last three moves** on this shard's data files —
+  Infused Throw, Mystic Arc and Disrobe come back empty and fall back to the
+  client's English names. Cliloc also calls ability 8 *Infecting* where ServUO's
+  class is `InfectiousStrike`; the book shows the cliloc name, since that is
+  what the game itself calls it.
+
+Verified live: the endpoint returns all 32 with real descriptions; a katana
+reads Double Strike / Armor Ignore, matching `Katana.cs`; a club reads Crushing
+Blow / Dismount, which is the corrected entry and not ClassicUO's Shadow Strike;
+bare hands read Disarm / Paralyzing Blow; and the weapon list under Crushing
+Blow draws 37 weapons with their tiledata names. What is **not** verifiable here
+is arming a move — `SetCurrentAbility` returns early on `!Core.AOS`, so on this
+T2A shard no arm ever sticks. That was already true of the ability bar.
+
 **Know what the local shard can and cannot prove.** `Config/Expansion.cfg` on
 the ServUO at `127.0.0.1:2594` says `CurrentExpansion=T2A`, so `Core.AOS` is
 **false** there. That single fact splits this batch in half, and it is worth
@@ -563,7 +605,8 @@ The receive side is generally complete; there is no way to *act*.
 | ~~Info bar~~ — **CLOSED, live-verified** | A draggable bar of user-chosen readouts with a ⚙ field picker, persisted, opened from Options. Fields are ClassicUO's `InfoBarVars` restricted to what `scene.player` actually carries: HP, mana, stamina, weight, followers, gold, damage, armour, luck, the four resistances, stat cap, tithing and notoriety. **The nine it is missing are exactly the `0x11 type >= 6` row below** — LowerReagentCost, SpellDamageInc, FasterCasting/Recovery, Hit/Defense/DamageChanceInc, LowerManaCost, SwingSpeedInc — so the picker says so in place of leaving the absence to read as an oversight. Weight turns red over capacity, which is the one field whose colour carries information: past `weightMax` ServUO refuses a pickup in silence (see the grid-loot row) | M |
 | ~~Counter bar~~ — **CLOSED, live-verified** | Cells pinned to an item graphic (optionally to one hue), counting what you carry and using one on double-click. The count is a port of ClassicUO's `GetTotalAmountOfItem` + `Item.GetTotalAmount` — worn items on layers 1..0x17, recursing through nested bags — and its display rules: no number on a lone item, a signed distance from a per-slot *compare to* with `±` on target, a red cell below a *warn below* threshold, and the change flash (green up, red down, fading over 5s). Bind a cell by dragging an item onto it, which puts the item straight back where it came from, as ClassicUO does. Reachable ClassicUO settings that live in its right-click context menu — ignore hue, compare to, remove — sit in a strip under the bar instead, since this client has no context menus | S–M |
 | ~~Ignore list~~ — **CLOSED, live-verified** | A set of character names whose talk this client drops, in both places ClassicUO drops it — the floating overhead and the journal — with ClassicUO's Spell exemption, its guards (a mobile, not yourself, not one with a yellow health bar) and its messages. Added by ClassicUO's own client-side pick (arm, then click a player; no packet leaves) or by typing a name, which ClassicUO cannot do. The yellow-bar guard needed `Mobile::yellow_health` — parsed since the health-bar batch, never sent — to reach the renderer as `yellow`. **Keyed on the bare name**, which is where ClassicUO gets it wrong: see the note below | S–M |
-| Combat-book gump, racial-abilities book, network-stats and inspector windows | absent | S–M |
+| ~~Combat book~~ — **CLOSED, live-verified** | All 32 weapon moves with the client's own icons (gump `0x5200 + id - 1`), their names and descriptions read from **cliloc** at runtime (`1028838 + i` / `1061693 + i`, ClassicUO's ids) through a new `/abilities.json`, and the weapons that grant each — the inverse of the `WEAPON_ABILITIES` table the ability bar already had, so the two halves cannot drift (ClassicUO keeps a second hand-written copy for this gump, a 400-line `GetItemsList` switch). The equipped weapon's two moves head the window, armed state and click-to-arm included. Reconciling that table against ServUO's own weapon classes corrected 19 entries and added 21 — see the note below | S–M |
+| Racial-abilities book, network-stats and inspector windows | absent | S–M |
 | ~~Container gumps ignore real container art and each item's stored (x,y)~~ — **CLOSED, live-verified** | Both halves were already on the wire and discarded: 0x3C carries a position per item, and 0x24 names the container's gump. The gump id is now **retained** (`World::container_gumps`) rather than read from the open-event ring, which ages out while the window stays open, and reaches the renderer as `scene.contGumps`. The window draws that art and places each item at its raw (x, y), read **signed** as ClassicUO does (`(short)item.X`). ClassicUO additionally clamps into a per-gump bounds table (78 entries); we clip with `overflow: hidden` instead, which needs no table and cannot disagree with the server about where an item actually is. Verified live on a real backpack (gump 60, 230×204) with a dozen items at their stored positions | M |
 | ~~Window management~~ — **CLOSED, live-verified** | Every draggable panel — the dynamic windows from `makeWindowFrame` *and* the static ones (paperdoll, spellbook, skills, options, macros) — now **remembers where it was left** and comes back inside the viewport, because the persistence lives in `makeDraggable`, the one function they all already went through. Keyed by element id or class, never by serial: a serial is per-corpse/per-bag and never returns, so "the next container opens where I put the last one" is the only memory worth having (ClassicUO's per-type defaults do the same). Windows are clamped on restore and on browser resize, and a position saved on a bigger screen is **written back clamped**, so it heals instead of being re-clamped forever. `resize: both` is opt-in per window (bulletin board, server gumps, plus the journal from the row above) — deliberately not on the map or an authentic container, whose layout is in the server's own pixel space | M |
 

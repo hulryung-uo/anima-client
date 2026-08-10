@@ -91,48 +91,87 @@ const ABILITY_NAMES = {
   17: "Defense Mastery", 18: "Nerve Strike", 19: "Talon Strike", 20: "Feint",
   21: "Dual Wield", 22: "Double Shot", 23: "Armor Pierce", 24: "Bladeweave",
   25: "Force Arrow", 26: "Lightning Arrow", 27: "Psychic Attack", 28: "Serpent Arrow",
-  29: "Force of Nature", 30: "Infused Throw", 31: "Mystic Arc",
+  29: "Force of Nature", 30: "Infused Throw", 31: "Mystic Arc", 32: "Disrobe",
 };
-// weapon graphic → [primaryAbilityId, secondaryAbilityId]
+// Bare hands, or a weapon in neither table. ClassicUO uses its own
+// `DefaultItemAbilities` here — Paralyzing Blow then Disarm — but ServUO's
+// `Fists` declares Disarm primary and Paralyzing Blow secondary, and the server
+// is the half that accepts or refuses the arm, so its order wins.
+//
+// This replaces sending ids 0 and 1, which was a misreading: ServUO's
+// `EventSink_SetAbility` treats index 0 as "clear the arm" and index 1 as Armor
+// Ignore, so the old unarmed bar offered a button that cleared itself and one
+// the server refuses (fists have no Armor Ignore). Nothing in the protocol asks
+// the server to pick.
+const DEFAULT_ABILITIES = [5, 11];
+// weapon graphic → [primaryAbilityId, secondaryAbilityId].
+//
+// Started as a port of ClassicUO's `AbilityData.GraphicToAbilitiesMap` and is
+// now **reconciled against ServUO's own weapon classes**, which is what decides
+// whether a move is accepted: `WeaponAbility.SetCurrentAbility` refuses
+// anything that is not the equipped weapon's `PrimaryAbility`/`SecondaryAbility`
+// and silently clears the arm. Extracting those two properties from every
+// `Scripts/Items/Equipment/Weapons/*.cs` and diffing found ClassicUO wrong on
+// 19 of the 202 graphics they share:
+//
+//   * eight are the PAIR IN THE WRONG ORDER — dagger (0x0F51/52), gargish
+//     dagger, viking sword (0x13B9/BA) — harmless for "may I use it", wrong
+//     about which one is primary;
+//   * eleven name a move the server does not give that weapon at all, so
+//     ClassicUO offers a button the server answers by disarming it: club
+//     (0x13B3/B4) Shadow Strike → really Crushing Blow, sledge hammer and
+//     smithy hammer Shadow Strike → Paralyzing Blow, tessen and gargish tessen
+//     Block → Dual Wield, nunchaku Feint → Double Strike, sai Block → Dual
+//     Wield, gargish gnarled staff Paralyzing Blow → Force of Nature.
+//
+// It also adds the 21 graphics ServUO knows and ClassicUO's map does not —
+// mostly the second art of a `[Flipable]` pair (katana 0x13FE, kryss 0x1400,
+// scimitar 0x13B5…). ClassicUO papers over those at lookup time by retrying
+// `graphic ± 1` when its tiledata AnimID matches; having the real entries makes
+// that hack unnecessary here. The 21 our list has and ServUO does not are left
+// alone — a different shard may well define them.
 const WEAPON_ABILITIES = {
-  0x0901:[10,30], 0x0902:[8,12], 0x0905:[7,9], 0x0906:[4,6], 0x090C:[2,9], 0x0DF0:[13,11],
-  0x0DF1:[13,11], 0x0DF2:[6,5], 0x0DF3:[6,5], 0x0DF4:[6,5], 0x0DF5:[6,5], 0x0E81:[4,5],
-  0x0E82:[4,5], 0x0E85:[7,5], 0x0E86:[7,5], 0x0E87:[2,6], 0x0E88:[2,6], 0x0E89:[7,3],
-  0x0E8A:[7,3], 0x0EC2:[2,8], 0x0EC3:[2,8], 0x0EC4:[12,2], 0x0EC5:[12,2], 0x0F43:[1,5],
-  0x0F44:[1,5], 0x0F45:[2,9], 0x0F46:[2,9], 0x0F47:[2,3], 0x0F48:[2,3], 0x0F49:[4,6],
-  0x0F4A:[4,6], 0x0F4B:[7,13], 0x0F4C:[7,13], 0x0F4D:[11,6], 0x0F4E:[11,6], 0x0F4F:[3,9],
-  0x0F50:[3,9], 0x0F51:[8,12], 0x0F52:[8,12], 0x0F5C:[3,5], 0x0F5D:[3,5], 0x0F5E:[4,1],
-  0x0F5F:[4,1], 0x0F60:[1,3], 0x0F61:[1,3], 0x0F62:[1,11], 0x0F63:[1,11], 0x0FB5:[4,12],
-  0x13AF:[1,2], 0x13B0:[1,2], 0x13B1:[11,9], 0x13B2:[11,9], 0x13B3:[12,6], 0x13B4:[12,6],
-  0x13B6:[7,11], 0x13B7:[7,11], 0x13B8:[7,11], 0x13B9:[11,4], 0x13BA:[11,4], 0x13FD:[10,6],
-  0x13E3:[4,12], 0x13F6:[8,5], 0x13F8:[3,29], 0x13FB:[13,2], 0x13FF:[7,1], 0x1401:[1,8],
-  0x1402:[12,9], 0x1403:[12,9], 0x1404:[2,5], 0x1405:[2,5], 0x1406:[4,9], 0x1407:[4,9],
-  0x1438:[13,4], 0x1439:[13,4], 0x143A:[7,3], 0x143B:[7,3], 0x143C:[1,9], 0x143D:[1,9],
-  0x143E:[13,3], 0x143F:[13,3], 0x1440:[2,12], 0x1441:[2,12], 0x1442:[7,12], 0x1443:[7,12],
-  0x26BA:[2,11], 0x26BB:[11,9], 0x26BC:[4,9], 0x26BD:[1,6], 0x26BE:[11,8], 0x26BF:[7,8],
-  0x26C0:[6,3], 0x26C1:[7,9], 0x26C2:[1,10], 0x26C3:[7,10], 0x26C4:[2,11], 0x26C5:[11,9],
-  0x26C6:[4,9], 0x26C7:[1,6], 0x26C8:[11,8], 0x26C9:[7,8], 0x26CA:[6,3], 0x26CB:[7,9],
-  0x26CC:[1,10], 0x26CD:[7,10], 0x26CE:[13,5], 0x26CF:[13,5], 0x27A2:[4,14], 0x27A3:[20,16],
-  0x27A4:[15,7], 0x27A5:[23,22], 0x27A6:[15,4], 0x27A7:[17,15], 0x27A8:[20,18], 0x27A9:[20,7],
-  0x27AA:[5,11], 0x27AB:[21,19], 0x27AD:[13,17], 0x27AE:[16,20], 0x27AF:[16,23], 0x27ED:[4,14],
-  0x27EE:[20,16], 0x27EF:[15,7], 0x27F0:[23,22], 0x27F1:[15,4], 0x27F2:[17,15], 0x27F3:[20,18],
-  0x27F4:[20,7], 0x27F5:[5,11], 0x27F6:[21,19], 0x27F8:[13,17], 0x27F9:[16,20], 0x27FA:[16,23],
-  0x2D1E:[25,28], 0x2D1F:[26,27], 0x2D20:[27,2], 0x2D21:[8,12], 0x2D22:[20,1], 0x2D23:[5,24],
-  0x2D24:[3,4], 0x2D25:[16,29], 0x2D26:[5,24], 0x2D27:[13,24], 0x2D28:[5,4], 0x2D29:[17,24],
-  0x2D2A:[25,28], 0x2D2B:[26,27], 0x2D2C:[27,2], 0x2D2D:[8,12], 0x2D2E:[20,1], 0x2D2F:[5,24],
-  0x2D30:[3,4], 0x2D31:[16,29], 0x2D32:[5,24], 0x2D33:[13,24], 0x2D34:[5,4], 0x2D35:[17,24],
-  0x4067:[31,3], 0x08FD:[7,8], 0x4068:[7,8], 0x406B:[1,9], 0x406C:[10,30], 0x0904:[7,5],
-  0x406D:[7,5], 0x0903:[1,5], 0x406E:[1,5], 0x08FE:[2,11], 0x4072:[2,11], 0x090B:[4,3],
-  0x4074:[4,3], 0x0908:[13,6], 0x4075:[13,6], 0x4076:[1,9], 0x48AE:[2,8], 0x48B0:[2,3],
-  0x48B3:[4,6], 0x48B2:[4,6], 0x48B5:[11,6], 0x48B4:[11,6], 0x48B7:[8,5], 0x48B6:[8,5],
-  0x48B9:[3,11], 0x48B8:[3,11], 0x48BB:[7,1], 0x48BA:[7,1], 0x48BD:[1,8], 0x48BC:[1,8],
-  0x48BF:[2,5], 0x48BE:[2,5], 0x48CB:[6,3], 0x48CA:[6,3], 0x0481:[13,4], 0x48C0:[13,4],
-  0x48C3:[7,3], 0x48C2:[7,3], 0x48C5:[2,11], 0x48C4:[2,11], 0x48C7:[11,9], 0x48C6:[11,9],
-  0x48C9:[11,8], 0x48C8:[11,8], 0x48CC:[20,16], 0x48CD:[20,16], 0x48CF:[21,19], 0x48CE:[21,19],
-  0x48D1:[20,7], 0x48D0:[20,7], 0xA289:[3,13], 0xA291:[3,13], 0xA28A:[23,13], 0xA292:[23,13],
-  0xA28B:[2,13], 0xA293:[2,13], 0x08FF:[31,3], 0x0900:[1,11], 0x090A:[1,9], 0xAEA5:[7,1],
-  0xAEB4:[7,1], 0xAEC3:[7,1], 0xAED2:[7,1], 0xAEA4:[7,13], 0xAEB3:[7,13], 0xAEC2:[7,13],
-  0xAED1:[7,13],
+  0x0481:[13,4], 0x08FD:[7,8], 0x08FE:[2,11], 0x08FF:[31,3], 0x0900:[1,11], 0x0901:[10,30],
+  0x0902:[12,8], 0x0903:[1,5], 0x0904:[7,5], 0x0905:[7,9], 0x0906:[4,6], 0x0907:[1,9],
+  0x0908:[13,6], 0x090A:[1,9], 0x090B:[4,3], 0x090C:[2,9], 0x0DF0:[13,11], 0x0DF1:[13,11],
+  0x0DF2:[6,5], 0x0DF3:[6,5], 0x0DF4:[6,5], 0x0DF5:[6,5], 0x0E81:[4,5], 0x0E82:[4,5],
+  0x0E85:[7,5], 0x0E86:[7,5], 0x0E87:[2,6], 0x0E88:[2,6], 0x0E89:[7,3], 0x0E8A:[7,3],
+  0x0EC2:[2,8], 0x0EC3:[2,8], 0x0EC4:[12,2], 0x0EC5:[12,2], 0x0F43:[1,5], 0x0F44:[1,5],
+  0x0F45:[2,9], 0x0F46:[2,9], 0x0F47:[2,3], 0x0F48:[2,3], 0x0F49:[4,6], 0x0F4A:[4,6],
+  0x0F4B:[7,13], 0x0F4C:[7,13], 0x0F4D:[11,6], 0x0F4E:[11,6], 0x0F4F:[3,9], 0x0F50:[3,9],
+  0x0F51:[12,8], 0x0F52:[12,8], 0x0F5C:[3,5], 0x0F5D:[3,5], 0x0F5E:[4,1], 0x0F5F:[4,1],
+  0x0F60:[1,3], 0x0F61:[1,3], 0x0F62:[1,11], 0x0F63:[1,11], 0x0FB4:[4,12], 0x0FB5:[4,11],
+  0x13AF:[1,2], 0x13B0:[1,2], 0x13B1:[11,9], 0x13B2:[11,9], 0x13B3:[4,6], 0x13B4:[4,6],
+  0x13B5:[7,11], 0x13B6:[7,11], 0x13B7:[7,11], 0x13B8:[7,11], 0x13B9:[4,11], 0x13BA:[4,11],
+  0x13E3:[4,11], 0x13E4:[4,11], 0x13F6:[8,5], 0x13F7:[8,5], 0x13F8:[3,29], 0x13F9:[3,29],
+  0x13FA:[13,2], 0x13FB:[13,2], 0x13FC:[10,6], 0x13FD:[10,6], 0x13FE:[7,1], 0x13FF:[7,1],
+  0x1400:[1,8], 0x1401:[1,8], 0x1402:[12,9], 0x1403:[12,9], 0x1404:[2,5], 0x1405:[2,5],
+  0x1406:[4,9], 0x1407:[4,9], 0x1438:[13,4], 0x1439:[13,4], 0x143A:[7,3], 0x143B:[7,3],
+  0x143C:[1,9], 0x143D:[1,9], 0x143E:[13,3], 0x143F:[13,3], 0x1440:[2,12], 0x1441:[2,12],
+  0x1442:[7,12], 0x1443:[7,12], 0x241D:[4,14], 0x26BA:[2,11], 0x26BB:[11,9], 0x26BC:[4,9],
+  0x26BD:[1,6], 0x26BE:[11,8], 0x26BF:[7,8], 0x26C0:[6,3], 0x26C1:[7,9], 0x26C2:[1,10],
+  0x26C3:[7,10], 0x26C4:[2,11], 0x26C5:[11,9], 0x26C6:[4,9], 0x26C7:[1,6], 0x26C8:[11,8],
+  0x26C9:[7,8], 0x26CA:[6,3], 0x26CB:[7,9], 0x26CC:[1,10], 0x26CD:[7,10], 0x26CE:[13,5],
+  0x26CF:[13,5], 0x27A2:[4,14], 0x27A3:[20,21], 0x27A4:[15,7], 0x27A5:[23,22], 0x27A6:[15,4],
+  0x27A7:[17,15], 0x27A8:[20,18], 0x27A9:[20,7], 0x27AA:[5,11], 0x27AB:[21,19], 0x27AD:[13,17],
+  0x27AE:[16,7], 0x27AF:[21,23], 0x27ED:[4,14], 0x27EE:[20,21], 0x27EF:[15,7], 0x27F0:[23,22],
+  0x27F1:[15,4], 0x27F2:[17,15], 0x27F3:[20,18], 0x27F4:[20,7], 0x27F5:[5,11], 0x27F6:[21,19],
+  0x27F8:[13,17], 0x27F9:[16,7], 0x27FA:[21,23], 0x2D1E:[25,28], 0x2D1F:[26,27], 0x2D20:[27,2],
+  0x2D21:[8,12], 0x2D22:[20,1], 0x2D23:[5,24], 0x2D24:[3,4], 0x2D25:[16,29], 0x2D26:[5,24],
+  0x2D27:[13,24], 0x2D28:[5,4], 0x2D29:[17,24], 0x2D2A:[25,28], 0x2D2B:[26,27], 0x2D2C:[27,2],
+  0x2D2D:[8,12], 0x2D2E:[20,1], 0x2D2F:[5,24], 0x2D30:[3,4], 0x2D31:[16,29], 0x2D32:[5,24],
+  0x2D33:[13,24], 0x2D34:[5,4], 0x2D35:[17,24], 0x2F5B:[6,5], 0x4067:[31,3], 0x4068:[7,8],
+  0x406A:[12,8], 0x406B:[1,9], 0x406C:[10,30], 0x406D:[7,5], 0x406E:[1,5], 0x406F:[4,6],
+  0x4070:[7,9], 0x4071:[1,11], 0x4072:[2,11], 0x4073:[2,9], 0x4074:[4,3], 0x4075:[13,6],
+  0x4076:[1,9], 0x48AE:[2,8], 0x48AF:[2,8], 0x48B0:[2,3], 0x48B1:[2,3], 0x48B2:[4,6],
+  0x48B3:[4,6], 0x48B4:[11,6], 0x48B5:[11,6], 0x48B6:[8,5], 0x48B7:[8,5], 0x48B8:[3,29],
+  0x48B9:[3,29], 0x48BA:[7,1], 0x48BB:[7,1], 0x48BC:[1,8], 0x48BD:[1,8], 0x48BE:[2,5],
+  0x48BF:[2,5], 0x48C0:[13,4], 0x48C2:[7,3], 0x48C3:[7,3], 0x48C4:[2,11], 0x48C5:[2,11],
+  0x48C6:[11,9], 0x48C7:[11,9], 0x48C8:[11,8], 0x48C9:[11,8], 0x48CA:[6,3], 0x48CB:[6,3],
+  0x48CC:[20,21], 0x48CD:[20,21], 0x48CE:[21,19], 0x48CF:[21,19], 0x48D0:[20,7], 0x48D1:[20,7],
+  0xA289:[3,13], 0xA28A:[23,13], 0xA28B:[2,13], 0xA291:[3,13], 0xA292:[23,13], 0xA293:[2,13],
+  0xA343:[16,29], 0xA344:[16,29], 0xAEA4:[7,13], 0xAEA5:[7,1], 0xAEB3:[7,13], 0xAEB4:[7,1],
+  0xAEC2:[7,13], 0xAEC3:[7,1], 0xAED1:[7,13], 0xAED2:[7,1],
 };
 const WEAPON_LAYERS = [1, 2]; // right hand / left hand (two-handed weapons sit on 1)
 let armedAbility = 0;    // the ability id armed right now (0 = none)
@@ -190,15 +229,16 @@ function refreshAbilities(force) {
   if (T2A || !(scene && scene.aos) || !settings.abilities) { bar.style.display = "none"; return; }
   bar.style.display = "flex";
   const ab = equippedWeaponAbilities();
-  // ab: null = no weapon → generic ids 0/1 ; "unknown" = weapon not in table ;
-  // [p,s] = real moves. (ids 0/1 let the server pick based on the equipped weapon.)
+  // ab: null = no weapon (fists) ; "unknown" = weapon not in the table ; [p,s] =
+  // that weapon's real moves. Both non-array cases fall back to DEFAULT_ABILITIES.
   let prim, sec, primName, secName;
   if (Array.isArray(ab)) {
     [prim, sec] = ab;
     primName = ABILITY_NAMES[prim] || "Primary";
     secName = ABILITY_NAMES[sec] || "Secondary";
   } else {
-    prim = 0; sec = 1; primName = "Primary"; secName = "Secondary";
+    [prim, sec] = DEFAULT_ABILITIES;
+    primName = ABILITY_NAMES[prim]; secName = ABILITY_NAMES[sec];
   }
   const sig = `${prim}:${sec}:${armedAbility}`;
   if (!force && bar._sig === sig) return;
@@ -211,6 +251,124 @@ function refreshAbilities(force) {
     `<span>${secName}</span><span class="ak">SEC</span></div>`;
   for (const el of bar.querySelectorAll(".abil-btn"))
     el.addEventListener("click", () => clickAbility(Number(el.dataset.id)));
+}
+
+// --- combat book (ClassicUO's CombatBookGump) --------------------------------
+//
+// The reference half of the weapon moves: all 32 of them, each with the icon
+// the client ships (gump 0x5200 + id - 1), its name and description out of
+// cliloc, and the weapons that grant it. The two-button bar answers "what can
+// this weapon do"; the book answers "what do I need to carry to do that", which
+// is the question you ask before going shopping.
+//
+// The weapon list per move is the INVERSE of WEAPON_ABILITIES — the table the
+// bar already uses, now reconciled against ServUO (see its comment). ClassicUO
+// keeps a second, hand-written copy for this gump (`GetItemsList`, a 400-line
+// switch); one table that both halves read cannot drift against itself.
+const ABILITY_ICON0 = 0x5200;                // icon gump for ability id 1
+let cbkOn = localStorage.getItem("anima.combatBookOn") === "1";
+let cbkSel = 0;                              // expanded ability id, 0 = none
+let cbkText = null;                          // /abilities.json once it lands
+let cbkAsked = false;
+// ability id → [graphic, …], both slots, in graphic order.
+function abilityWeapons() {
+  if (abilityWeapons._cache) return abilityWeapons._cache;
+  const by = {};
+  for (const [g, pair] of Object.entries(WEAPON_ABILITIES)) {
+    for (const id of pair) (by[id] || (by[id] = [])).push(+g);
+  }
+  for (const id of Object.keys(by)) by[id].sort((a, b) => a - b);
+  abilityWeapons._cache = by;
+  return by;
+}
+// One fetch, on first open: cliloc names/descriptions for the 32 moves plus a
+// tile name for every weapon graphic we might list. ~240 graphics is one URL,
+// where a per-graphic /iteminfo would be 240 round trips.
+function loadAbilityText() {
+  if (cbkAsked) return;
+  cbkAsked = true;
+  const gs = Object.keys(WEAPON_ABILITIES).map(Number).sort((a, b) => a - b).join(",");
+  fetch("abilities.json?g=" + gs)
+    .then((r) => r.json())
+    .then((j) => { cbkText = j; renderCombatBook(true); })
+    .catch(() => { cbkAsked = false; });     // let the next open retry
+}
+function toggleCombatBook() {
+  cbkOn = !cbkOn;
+  document.getElementById("combatbook").classList.toggle("on", cbkOn);
+  localStorage.setItem("anima.combatBookOn", cbkOn ? "1" : "0");
+  if (cbkOn) { loadAbilityText(); renderCombatBook(true); }
+}
+function abilityName(id) {
+  const t = cbkText && cbkText.abilities && cbkText.abilities[id - 1];
+  // Cliloc first (it is the server's own wording, and localized), ClassicUO's
+  // English table as the fallback when the data files are missing.
+  return (t && t.name) || ABILITY_NAMES[id] || `Ability ${id}`;
+}
+// A tiledata name, singular. The file carries UO's plural markup inline —
+// "clean bandage%s%", and the "%singular/plural%" form elsewhere — which the old
+// client resolved against the stack amount. A book entry is one weapon, so take
+// the singular. (ClassicUO prints the raw field and would show the %s% too; the
+// endpoint keeps it raw for the same reason, since only the caller knows the
+// count.)
+function itemName(g) {
+  const raw = cbkText && cbkText.items && cbkText.items[String(g)];
+  if (!raw) return `#${g}`;
+  const singular = raw.replace(/%([^%]*)%/g, (_, body) => body.split("/")[0].replace(/^s$|^es$/, ""));
+  // Title case, as ClassicUO does here (`StringHelper.CapitalizeAllWords`):
+  // tiledata is inconsistent about it on its own — "Disc Mace" but "wand".
+  // Whitespace only, matching that function — a `\b` rule also fires after the
+  // apostrophe and gives "Shepherd'S Crook".
+  return singular.replace(/(^|\s)([a-z])/g, (_, sp, c) => sp + c.toUpperCase());
+}
+function renderCombatBook(force) {
+  if (!cbkOn) return;
+  const host = document.getElementById("cbk-list");
+  const head = document.getElementById("cbk-equipped");
+  if (!host || !head) return;
+  const ab = equippedWeaponAbilities();
+  const pair = Array.isArray(ab) ? ab : DEFAULT_ABILITIES;
+  const sig = `${pair}:${armedAbility}:${cbkSel}:${cbkText ? 1 : 0}`;
+  if (!force && host._sig === sig) return;
+  host._sig = sig;
+  // Header: what the thing in your hands does right now, armed state included —
+  // the same two moves as the bar, kept here because ClassicUO's book shows
+  // them on every index page and because the list below is otherwise abstract.
+  const wpn = Array.isArray(ab) ? "equipped weapon" : (ab === "unknown" ? "unlisted weapon" : "bare hands");
+  head.innerHTML = `<div class="cbk-eq-hdr">${wpn}</div>` + pair.map((id, i) =>
+    `<div class="cbk-eq${armedAbility === id ? " armed" : ""}" data-id="${id}">`
+    + `<img src="gump/${ABILITY_ICON0 + id - 1}.png" alt="" onerror="this.style.visibility='hidden'">`
+    + `<span>${abilityName(id)}</span><span class="cbk-slot">${i ? "SEC" : "PRI"}</span></div>`).join("");
+  for (const el of head.querySelectorAll(".cbk-eq"))
+    el.addEventListener("click", () => clickAbility(Number(el.dataset.id)));
+  const by = abilityWeapons();
+  let html = "";
+  for (let id = 1; id <= 32; id++) {
+    const mine = pair.includes(id);
+    const weapons = by[id] || [];
+    html += `<div class="cbk-row${mine ? " mine" : ""}${cbkSel === id ? " open" : ""}" data-id="${id}">`
+      + `<img class="cbk-icon" src="gump/${ABILITY_ICON0 + id - 1}.png" alt="" onerror="this.style.visibility='hidden'">`
+      + `<span class="cbk-name">${abilityName(id)}</span>`
+      + `<span class="cbk-count">${weapons.length}</span></div>`;
+    if (cbkSel !== id) continue;
+    const desc = cbkText && cbkText.abilities && cbkText.abilities[id - 1] && cbkText.abilities[id - 1].desc;
+    html += `<div class="cbk-detail">`
+      + (desc ? `<div class="cbk-desc">${desc}</div>` : "")
+      + (weapons.length
+        ? `<div class="cbk-weps">` + weapons.map((g) =>
+            `<div class="cbk-wep" title="${itemName(g)}">`
+            + `<img src="art/static/${g}.png" alt="" onerror="this.style.visibility='hidden'">`
+            + `<span>${itemName(g)}</span></div>`).join("") + `</div>`
+        : `<div class="cbk-none">No weapon in this client's table grants it.</div>`)
+      + `</div>`;
+  }
+  host.innerHTML = html;
+  for (const el of host.querySelectorAll(".cbk-row"))
+    el.addEventListener("click", () => {
+      const id = Number(el.dataset.id);
+      cbkSel = cbkSel === id ? 0 : id;
+      renderCombatBook(true);
+    });
 }
 
 // --- spellbook (all schools, toggled by the 'K' key; ✕/Esc close) ---
