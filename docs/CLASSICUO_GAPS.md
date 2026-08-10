@@ -422,10 +422,31 @@ packet, which is worth being precise about.
   are indistinguishable — everything reads 0 either way. The info bar's picker
   says so rather than letting a row of zeroes imply a measurement.
 
-Confirming this against a real server needs an ML-or-later shard. Flipping
-`Config/Expansion.cfg` on the local one would do it, but that file is
-hand-tuned here (T2A with OPL forced on) and every other row in this document
-is written against that setting, so it is not a change to make in passing.
+Confirmed 2026-08-10, after the fact, by flipping `Config/Expansion.cfg` to ML
+for one session (backed up, restored, and the shard restarted on T2A
+afterwards — its world, including the fixtures earlier batches left in
+FoundryGM's pack, came through both restarts intact). What that session showed:
+
+- **`type = 6`, frame length 121** on the probe — precisely ServUO's
+  `EnsureCapacity(isEnhancedClient ? 151 : 121)` for a classic client.
+- **`defenseChanceMax` = 45**, which is `45 + BaseArmor.GetRefinedDefenseChance`
+  with no refinement — and slot 6 is the *only* one of the fifteen whose
+  expected value is 45. That single number confirms the field alignment far
+  better than the run of zeros a bonus-less character produces elsewhere.
+- **The five resistance caps = 100**, which is `Mobile.GetMaxResistance`'s
+  non-player branch; the 70 a plain player gets does not apply to a staff
+  mobile. The status sheet duly read "0 / 100" per resist and the info bar's
+  nine new fields rendered.
+- **Two other rows got their missing confirmation for free.** The ML block
+  arrived as well, so `player.race` came off the wire as **1** instead of being
+  inferred, and the racial-abilities book switched its own label from "inferred
+  from body 400" to "from the 0x11 race byte" — the path that row had to ship
+  untested. `weightMax` likewise came from the server (450) rather than from
+  our `7*(str>>1)+40` fallback (390).
+
+That was the one row where the shard's own configuration was the obstacle, and
+a reversible half-hour settled it — worth remembering the next time a row reads
+"unobservable here".
 
 **Know what the local shard can and cannot prove.** `Config/Expansion.cfg` on
 the ServUO at `127.0.0.1:2594` says `CurrentExpansion=T2A`, so `Core.AOS` is
@@ -724,7 +745,7 @@ The receive side is generally complete; there is no way to *act*.
 | Gap | Note | Effort |
 |---|---|---|
 | ~~**Extended status sheet**~~ — **CLOSED** | all of it (armor + the four resistances, weight/max, stats-cap, followers/max, damage range, luck, tithing, and the three stat locks) now leaves `build_scene` and shows in the status panel. It had been parsed into `World` all along and simply never sent | M |
-| ~~0x11 `type >= 6` combat tail~~ — **CLOSED (parse + UI); not observable on this shard** | All fifteen values now parse into `PlayerStats::aos` and reach the scene, `Observation` (schema v28), the status sheet and the info bar — which is where the nine fields the info-bar row had to leave out finally appear. The five resistance **caps** arrive in the same block, so the sheet reads "60 / 70" instead of a bare 60. What no test here can do is receive one: this ServUO answers with **`type = 3`**, measured on the wire, so the whole AOS block is absent, never mind the tail three versions past it | M |
+| ~~0x11 `type >= 6` combat tail~~ — **CLOSED, live-verified** (on a temporarily ML-flipped shard) | All fifteen values now parse into `PlayerStats::aos` and reach the scene, `Observation` (schema v28), the status sheet and the info bar — which is where the nine fields the info-bar row had to leave out finally appear. The five resistance **caps** arrive in the same block, so the sheet reads "60 / 70" instead of a bare 60. Confirmed against a real server by flipping the shard to ML for one session: **`type = 6`, 121 bytes**, with `defenseChanceMax` = 45 — a value only slot 6 can produce. Back on T2A it answers **`type = 3`** and every field returns to 0 | M |
 | ~~**Buff names**~~ — **CLOSED** | 0xDF's title/description clilocs and their (little-endian) argument blocks are parsed into `Buff`; the renderer resolves the title for the bar and shows the description on hover, and `anima_net::localize` fills `display`/`display_desc` for brains. The 35-entry English table survives as the fallback when a shard sends no title cliloc. The debuff tint is still a regex over the name — UO carries no buff/debuff flag on 0xDF (ClassicUO hardcodes the split by icon id) | M |
 | ~~Journal~~ — **CLOSED, live-verified** | All five: lines take the **server hue** through the same `msgColor` the floating overheads already used (per-type colour only as the fallback, ClassicUO's rule) plus per-type styling — a yell bold, a whisper dim, an emote italic; **All/Speech/Guild/System tabs**; an arrival **timestamp**, stamped client-side because UO sends none; and the log is `resize: vertical` with its height remembered. The tab rule is a port of ClassicUO's `TextType` decision, **not** a filter on message type — see the note above for why the obvious version puts every system line under Speech | M |
 | ~~Grid loot~~ — **CLOSED, live-verified** | A corpse (identified by its gump id `9`, which `scene.contGumps` already carries) opens the uniform grid rather than the authentic corpse art, with **click-an-item-to-take** and **Loot all** — the split ClassicUO's separate `GridLootGump` exists to make, since a body's scattered layout is the wrong shape for looting. Off in Options for anyone who wants the real corpse gump. One click is ClassicUO's `GameActions.GrabItem`: a lift, then a drop with **no position**. Verified live on an orc corpse | M |
