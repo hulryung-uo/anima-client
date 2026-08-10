@@ -594,6 +594,28 @@ mod hue_palette_tests {
     }
 
     #[test]
+    fn static_filters_split_trees_from_vegetation_by_impassability() {
+        // With no tiledata nothing is impassable, so ClassicUO's rule files
+        // *every* tree seed as vegetation and leaves the tree table empty —
+        // which is exactly the degenerate case worth pinning, because it is
+        // what a renderer would silently get if the data files went missing.
+        let v: serde_json::Value = serde_json::from_str(&static_filters_json(None)).unwrap();
+        assert!(v["trees"].as_object().unwrap().is_empty());
+        let veg = v["vegetation"].as_array().unwrap();
+        assert_eq!(veg.len(), VEGETATION_TILES.len() + TREE_TILES.len());
+        // Cave is a plain range with one hole at 0x0550.
+        let cave: Vec<u64> = v["cave"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_u64().unwrap())
+            .collect();
+        assert_eq!(cave.len(), 0x0553 - 0x053B); // 25 ids minus the hole
+        assert!(!cave.contains(&0x0550));
+        assert!(cave.contains(&0x053B) && cave.contains(&0x0553));
+    }
+
+    #[test]
     fn graphics_query_survives_junk() {
         assert_eq!(parse_graphics_query("/abilities.json"), Vec::<u16>::new());
         assert_eq!(
@@ -751,4 +773,76 @@ pub(super) fn parse_graphics_query(raw_url: &str) -> Vec<u16> {
         }
     }
     Vec::new()
+}
+
+/// ClassicUO's `StaticFilters` cave list: `0x053B..=0x0553` except `0x0550`.
+const CAVE_TILES: std::ops::RangeInclusive<u16> = 0x053B..=0x0553;
+
+/// ClassicUO's vegetation seed list (`StaticFilters.Load`, `vegetation.txt`).
+const VEGETATION_TILES: &[u16] = &[
+    0x0D45, 0x0D46, 0x0D47, 0x0D48, 0x0D49, 0x0D4A, 0x0D4B, 0x0D4C, 0x0D4D, 0x0D4E, 0x0D4F, 0x0D50,
+    0x0D51, 0x0D52, 0x0D53, 0x0D54, 0x0D5C, 0x0D5D, 0x0D5E, 0x0D5F, 0x0D60, 0x0D61, 0x0D62, 0x0D63,
+    0x0D64, 0x0D65, 0x0D66, 0x0D67, 0x0D68, 0x0D69, 0x0D6D, 0x0D73, 0x0D74, 0x0D75, 0x0D76, 0x0D77,
+    0x0D78, 0x0D79, 0x0D7A, 0x0D7B, 0x0D7C, 0x0D7D, 0x0D7E, 0x0D7F, 0x0D80, 0x0D83, 0x0D87, 0x0D88,
+    0x0D89, 0x0D8A, 0x0D8B, 0x0D8C, 0x0D8D, 0x0D8E, 0x0D8F, 0x0D90, 0x0D91, 0x0D93, 0x12B6, 0x12B7,
+    0x12BC, 0x12BD, 0x12BE, 0x12BF, 0x12C0, 0x12C1, 0x12C2, 0x12C3, 0x12C4, 0x12C5, 0x12C6, 0x12C7,
+    0x0CB9, 0x0CBC, 0x0CBD, 0x0CBE, 0x0CBF, 0x0CC0, 0x0CC1, 0x0CC3, 0x0CC5, 0x0CC6, 0x0CC7, 0x0CF3,
+    0x0CF4, 0x0CF5, 0x0CF6, 0x0CF7, 0x0D04, 0x0D06, 0x0D07, 0x0D08, 0x0D09, 0x0D0A, 0x0D0B, 0x0D0C,
+    0x0D0D, 0x0D0E, 0x0D0F, 0x0D10, 0x0D11, 0x0D12, 0x0D13, 0x0D14, 0x0D15, 0x0D16, 0x0D17, 0x0D18,
+    0x0D19, 0x0D28, 0x0D29, 0x0D2A, 0x0D2B, 0x0D2D, 0x0D34, 0x0D36, 0x0DAE, 0x0DAF, 0x0DBA, 0x0DBB,
+    0x0DBC, 0x0DBD, 0x0DBE, 0x0DC1, 0x0DC2, 0x0DC3, 0x0C83, 0x0C84, 0x0C85, 0x0C86, 0x0C87, 0x0C88,
+    0x0C89, 0x0C8A, 0x0C8B, 0x0C8C, 0x0C8D, 0x0C8E, 0x0C93, 0x0C94, 0x0C98, 0x0C9F, 0x0CA0, 0x0CA1,
+    0x0CA2, 0x0CA3, 0x0CA4, 0x0CA7, 0x0CAC, 0x0CAD, 0x0CAE, 0x0CAF, 0x0CB0, 0x0CB1, 0x0CB2, 0x0CB3,
+    0x0CB4, 0x0CB5, 0x0CB6, 0x0C45, 0x0C46, 0x0C49, 0x0C47, 0x0C48, 0x0C4A, 0x0C4B, 0x0C4C, 0x0C4D,
+    0x0C4E, 0x0C37, 0x0C38, 0x0CBA, 0x0D2F, 0x0D32, 0x0D33, 0x0D3F, 0x0D40, 0x0CE9,
+];
+
+/// ClassicUO's tree seed list, and the ones it marks "hatched" (flag 0 in
+/// `tree.txt`; every other entry gets 1).
+const TREE_TILES: &[u16] = &[
+    0x0C95, 0x0C96, 0x0C99, 0x0C9B, 0x0C9C, 0x0C9D, 0x0C9E, 0x0CA6, 0x0CA8, 0x0CAA, 0x0CAB, 0x0CC9,
+    0x0CCA, 0x0CCB, 0x0CCC, 0x0CCD, 0x0CD0, 0x0CD3, 0x0CD6, 0x0CD8, 0x0CDA, 0x0CDD, 0x0CE0, 0x0CE3,
+    0x0CE6, 0x0CF8, 0x0CFB, 0x0CFE, 0x0D01, 0x0D37, 0x0D38, 0x0D41, 0x0D42, 0x0D43, 0x0D44, 0x0D57,
+    0x0D58, 0x0D59, 0x0D5A, 0x0D5B, 0x0D6E, 0x0D6F, 0x0D70, 0x0D71, 0x0D72, 0x0D84, 0x0D85, 0x0D86,
+    0x0D94, 0x0D98, 0x0D9C, 0x0DA0, 0x0DA4, 0x0DA8, 0x12B6, 0x12B7, 0x12B8, 0x12B9, 0x12BA, 0x12BB,
+    0x12BC, 0x12BD,
+];
+const TREE_HATCHED: &[u16] = &[
+    0x0C9E, 0x0CA8, 0x0CAA, 0x0CAB, 0x0CC9, 0x0CF8, 0x0CFB, 0x0CFE, 0x0D01, 0x12B6, 0x12B7, 0x12B8,
+    0x12B9, 0x12BA, 0x12BB,
+];
+
+/// ClassicUO's static-tile classification, resolved against real tiledata.
+///
+/// Its `StaticFilters.Load` writes three text files the first time it runs and
+/// reads them back; the interesting part is not the files but the rule it
+/// applies while writing them: **a "tree" that is not `IsImpassable` is filed as
+/// vegetation instead**, and a vegetation seed that *is* impassable is dropped
+/// altogether. So the split depends on tiledata, which is why this is resolved
+/// here rather than hardcoded in the renderer — the browser has no tiledata.
+///
+/// Rocks and the spell fields are ranges rather than tables (`IsRock`,
+/// `IsFireField` and friends), so they stay in the renderer as the formulas
+/// they are.
+pub(super) fn static_filters_json(tiledata: Option<&TileData>) -> String {
+    let impassable = |g: u16| {
+        tiledata.is_some_and(|t| t.item_flags(g) & anima_assets::tiledata::flags::IMPASSABLE != 0)
+    };
+    let cave: Vec<u16> = CAVE_TILES.filter(|&g| g != 0x0550).collect();
+    let mut vegetation: Vec<u16> = VEGETATION_TILES
+        .iter()
+        .copied()
+        .filter(|&g| !impassable(g))
+        .collect();
+    let mut trees = serde_json::Map::new();
+    for &g in TREE_TILES {
+        if impassable(g) {
+            let hatched = u8::from(!TREE_HATCHED.contains(&g));
+            trees.insert(g.to_string(), serde_json::json!(hatched));
+        } else {
+            // Not impassable → ClassicUO files it as vegetation, not a tree.
+            vegetation.push(g);
+        }
+    }
+    serde_json::json!({ "cave": cave, "vegetation": vegetation, "trees": trees }).to_string()
 }

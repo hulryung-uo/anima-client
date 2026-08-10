@@ -424,6 +424,13 @@ pub(super) fn handle_request(ctx: Ctx) {
         let mut r = Response::from_string(body);
         r.add_header(ctype("application/json"));
         let _ = req.respond(r);
+    } else if url == "/staticfilters.json" {
+        // ClassicUO's StaticFilters tables, resolved against this install's
+        // tiledata (the tree/vegetation split depends on impassability). Static
+        // per data files; the renderer fetches it once.
+        let mut r = Response::from_string(static_filters_json(tiledata.as_deref()));
+        r.add_header(ctype("application/json"));
+        let _ = req.respond(r);
     } else if url == "/housecatalog" {
         // Custom-house building catalog (walls/floors/doors/misc/stairs/roofs/
         // teleporters). Static per-process data, parsed once on the FIRST

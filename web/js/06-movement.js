@@ -1299,3 +1299,24 @@ function attachCorpseLayers(sp, it, frame, bodyH, bodyC) {
   }
   return complete;
 }
+
+// A static's shadow (ClassicUO shadows trees, foliage and rocks the same way it
+// shadows mobiles — `GameSceneDrawingSorting` pushes them with the shadow flag).
+// Same parallelogram as `DrawShadow`: half height, top edge pushed right by that
+// half-height, lifted 10px. Parented to the static, so `sp`'s own anchor
+// (0.5, 1.0 — foot-centred, unlike a mobile's top-left) is what the offsets are
+// measured from.
+function attachStaticShadow(sp, tex) {
+  const shadow = new PIXI.Sprite(tex);
+  shadow.anchor.set(0, 0);
+  shadow.skew.x = -Math.PI / 4;
+  shadow.scale.set(1, Math.SQRT1_2);
+  shadow.alpha = 0.4;
+  shadow.tint = 0x000000;
+  shadow.eventMode = "none";
+  // The parent is anchored (0.5, 1.0), so its local origin sits at the sprite's
+  // bottom-centre: the top-left this transform expects is (-w/2, -h).
+  shadow.x = -tex.width / 2;
+  shadow.y = -tex.height + tex.height / 2 - 10;
+  sp.addChildAt(shadow, 0);   // behind the static itself
+}

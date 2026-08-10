@@ -770,7 +770,8 @@ land/static graphic remap (the season *system* exists, the remap does not);
 `TileFlag.Translucent` statics drawn opaque; static hue from `statics.mul` discarded
 at decode; mount rider vertical offset; seated-character deformation; roof/ceiling
 fading; 0x23 DragEffect decoded but never drawn; GameEffect blend modes and
-projectile rotation; StaticFilters (tree→stumps, hide vegetation).
+projectile rotation; ~~StaticFilters (tree→stumps, hide vegetation)~~
+(**CLOSED, live-verified** — see below).
 
 Closed 2026-08-10 (corpse equipment layers): the first Tier 3 row. A corpse
 already drew the dead thing's held death-pose frame; now it wears what it died
@@ -852,10 +853,9 @@ Closed 2026-08-10 (shadows): the third Tier 3 row. Characters cast one.
   too: not while dead, not while hidden, and an Options toggle
   (`ShadowsEnabled`, on by default there and here). A mounted rider's shadow
   drops 10px, matching the `drawY + 10` in that branch.
-- **Not done: static shadows.** ClassicUO also shadows trees, foliage and rocks
-  behind a second toggle, but "is this graphic a tree or a rock" is
-  `StaticFilters` — its own open row further down this list. Better to close
-  that one first than to guess at the classification here.
+- **Static shadows followed** once `StaticFilters` landed (the row below):
+  ClassicUO also shadows trees, foliage and rocks behind a second toggle, and
+  "is this graphic a tree or a rock" is exactly what that row answers.
 
 Verified live. The transform, read off the sprite: skew -0.785 rad, scaleY
 0.707, alpha 0.4, tint 0x000000, y offset = height/2 - 10, z just under the
@@ -863,6 +863,33 @@ body. The hidden gate proved itself by accident — the test character was hidde
 so no shadow appeared until `Set Hidden false`. And a pixel diff of the same
 frame with the pass on and off shows **2572 pixels darkened by ~15/255** in a
 right-leaning parallelogram at the character's feet, and nothing else changed.
+
+Closed 2026-08-10 (StaticFilters): the fourth Tier 3 row — and with it the half
+of the shadows row that was waiting on it.
+
+- **The split is data, not a list.** ClassicUO's `StaticFilters.Load` looks like
+  three hardcoded arrays written out to text files, and the interesting rule is
+  buried in the writing: a "tree" seed that is **not** `IsImpassable` is filed
+  under *vegetation* instead, and a vegetation seed that is impassable is
+  dropped. So the classification depends on tiledata, which the browser has no
+  access to — hence `/staticfilters.json`, resolved server-side. Against this
+  install: 24 cave tiles, 46 trees and 194 vegetation, the last figure being the
+  178 surviving seeds plus the 16 tree seeds that turned out to be passable.
+- **Both toggles are ClassicUO's, applied where it applies them** — at draw
+  time, never in the scene: which trees a player wants to see is not the
+  server's business. `TreeToStumps` drops every foliage static (that is what
+  removes the canopy) and swaps a tree's graphic for `0x0E59`; `HideVegetation`
+  drops vegetation outright. Both off by default, as there.
+- **Static shadows, finally.** The shadows row shipped without them because
+  "is this a tree or a rock" had no answer yet. It does now, so trees, foliage
+  and rocks cast the same parallelogram mobiles do, behind ClassicUO's second
+  toggle (`ShadowsStatics`, on by default).
+
+Verified live in the woods south-east of Britain (1402 statics in view): trees
+as stumps redraws 32 trees as stumps and removes 29 canopies, hiding vegetation
+drops 96 statics, and 62 of the 1402 qualify for a shadow — a pixel diff of the
+same frame with static shadows on and off shows **85,356 pixels darkened by
+~14.5/255** under the canopies, and nothing else changed.
 
 ---
 

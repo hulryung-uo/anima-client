@@ -232,6 +232,15 @@ function ingestBoatMoves(s) {
   }
 }
 
+// Drop every static sprite so the next poll rebuilds them under the current
+// filters. Cheap enough to be a toggle handler: the pool is rebuilt from the
+// scene the client already has, with no server round trip.
+function rebuildStatics() {
+  for (const sp of staticPool.values()) { animatedStatics.delete(sp); world.removeChild(sp); sp.destroy({ children: true }); }
+  staticPool.clear();
+  markDirty();
+}
+
 function updateAnimStates(s) {
   const now = performance.now();
   const seen = new Set();
@@ -457,7 +466,14 @@ function syncWorld(s) {
   const P = s.player || { x: 0, y: 0 };
   const VR = (s.map && s.map.viewRange != null) ? s.map.viewRange : (s.map ? s.map.radius : 18);
   for (const st of s.statics || []) {
-    const key = `${st.x},${st.y},${st.g},${st.z}`;
+    // ClassicUO's StaticFilters, applied where it applies them — at draw time,
+    // not in the scene: the toggles are the player's and the server has no
+    // business knowing about them. `null` = this static is not drawn at all.
+    const drawG = filterStatic(st.g, st.f);
+    if (drawG === null) continue;
+    // The key carries the DRAWN graphic so flipping "trees as stumps" rebuilds
+    // the sprite instead of leaving the old tree art in place.
+    const key = `${st.x},${st.y},${drawG},${st.z}`;
     seenS.add(key);
     const beyondView = Math.max(Math.abs(st.x - P.x), Math.abs(st.y - P.y)) > VR;
     if (staticPool.has(key)) {
@@ -470,7 +486,7 @@ function syncWorld(s) {
       }
       continue; // unchanged; see the blanket LRU-touch note above
     }
-    const texUrl = `art/static/${st.g}.png`;
+    const texUrl = `art/static/${drawG}.png`;
     const tex = texFor(texUrl);
     if (!tex) continue;
     const sp = new PIXI.Sprite(tex);
@@ -501,6 +517,10 @@ function syncWorld(s) {
       sp._fidx = -1;
       animatedStatics.add(sp);
     }
+    // Tree/foliage/rock shadow — the half of ClassicUO's shadow support that
+    // was waiting on this classification. A child of the static so it inherits
+    // position and depth; same transform and colour as a mobile's.
+    if (staticCastsShadow(st.g, st.f)) attachStaticShadow(sp, tex);
     world.addChild(sp);
     staticPool.set(key, sp);
   }

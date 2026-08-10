@@ -240,6 +240,9 @@ const SETTINGS_DEFAULTS = {
   autoOpenDoors: true,            // walking into a closed door opens it (ClassicUO TryOpenDoors) — on by default
   gridLoot: true,                 // corpses open a click-to-loot grid instead of the authentic corpse gump
   shadows: true,                  // mobile shadows (ClassicUO's ShadowsEnabled, on by default there too)
+  shadowsStatics: true,           // …and on trees/foliage/rocks (ClassicUO's ShadowsStatics)
+  treeStumps: false,              // draw trees as stumps and drop their canopy (ClassicUO TreeToStumps)
+  hideVegetation: false,          // don't draw vegetation at all (ClassicUO HideVegetation)
 };
 let settings = Object.assign({}, SETTINGS_DEFAULTS);
 try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}")); } catch (e) {}
@@ -268,6 +271,9 @@ function renderOptions() {
     + cb("autoOpenDoors", "Auto-open doors")
     + cb("gridLoot", "Click-to-loot corpses")
     + cb("shadows", "Character shadows")
+    + cb("shadowsStatics", "…and tree/rock shadows")
+    + cb("treeStumps", "Trees as stumps")
+    + cb("hideVegetation", "Hide vegetation")
     + '<label class="opt-row"><button type="button" class="dlg-btn opt-infobar">Info bar</button></label>'
     + '<label class="opt-row"><button type="button" class="dlg-btn opt-counterbar">Counter bar</button></label>'
     + '<label class="opt-row"><button type="button" class="dlg-btn opt-ignorelist">Ignore list</button></label>'

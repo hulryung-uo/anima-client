@@ -480,6 +480,9 @@ function setupInput() {
     const k = e.target.dataset.k; if (!k || e.target.type !== "checkbox") return;
     settings[k] = e.target.checked; saveSettings(); applyAudioSettings();
     if (k === "tooltips" && !settings.tooltips) { tipSerial = null; hideTip(); }
+    // These change which statics are drawn (or what they are drawn as), so the
+    // pool has to be thrown away — its keys encode the drawn graphic.
+    if (k === "treeStumps" || k === "hideVegetation" || k === "shadows" || k === "shadowsStatics") rebuildStatics();
     if (k === "abilities") refreshAbilities(true);
     if (k === "guardZones") updateGuardZones(scene);
     markDirty();

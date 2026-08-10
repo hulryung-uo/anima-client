@@ -485,3 +485,54 @@ function renderSize() {
   return { w: Math.max(320, Math.round(w * s)), h: Math.max(240, Math.round(h * s)) };
 }
 
+
+// ---- static filters (ClassicUO's StaticFilters) -----------------------------
+//
+// The player-facing half of UO's oldest visibility complaint: trees and bushes
+// stand between you and everything. ClassicUO answers with two toggles — draw
+// trees as stumps, and hide vegetation outright — plus the classification that
+// makes tree/rock shadows possible at all.
+//
+// The tables come from `/staticfilters.json` rather than being copied here,
+// because the tree/vegetation split is not a fixed list: ClassicUO files a
+// "tree" seed under vegetation when tiledata says it is *not* impassable, and
+// tiledata is the server's to read. Rocks and spell fields are ranges, not
+// tables, so they stay here as the formulas they are.
+const TREE_REPLACE_GRAPHIC = 0x0E59;   // ClassicUO Constants.TREE_REPLACE_GRAPHIC (a stump)
+let staticFilters = null;              // { cave:Set, vegetation:Set, trees:Map }
+let staticFiltersAsked = false;
+function loadStaticFilters() {
+  if (staticFiltersAsked) return;
+  staticFiltersAsked = true;
+  fetch("staticfilters.json").then((r) => r.json()).then((j) => {
+    staticFilters = {
+      cave: new Set(j.cave || []),
+      vegetation: new Set(j.vegetation || []),
+      trees: new Map(Object.entries(j.trees || {}).map(([g, h]) => [+g, h | 0])),
+    };
+    // The filters change which statics exist, so everything drawn under the old
+    // (empty) tables has to be rebuilt once.
+    rebuildStatics();
+  }).catch(() => { staticFiltersAsked = false; });
+}
+const isTreeGraphic = (g) => !!staticFilters && staticFilters.trees.has(g | 0);
+const isVegetationGraphic = (g) => !!staticFilters && staticFilters.vegetation.has(g | 0);
+// ClassicUO `StaticFilters.IsRock` — a short switch plus one range.
+const ROCK_GRAPHICS = new Set([4945, 4948, 4950, 4953, 4955, 4958, 4959, 4960, 4962]);
+const isRockGraphic = (g) => ROCK_GRAPHICS.has(g | 0) || ((g | 0) >= 6001 && (g | 0) <= 6012);
+// Should this static be drawn at all, and as what? Returns null to skip it.
+// ClassicUO applies both rules in `GameSceneDrawingSorting`: foliage vanishes
+// under TreeToStumps (that is what removes the canopy, leaving the trunk to be
+// replaced), and vegetation vanishes under HideVegetation.
+function filterStatic(g, foliage) {
+  if (settings.treeStumps && foliage) return null;
+  if (settings.hideVegetation && isVegetationGraphic(g)) return null;
+  if (settings.treeStumps && isTreeGraphic(g)) return TREE_REPLACE_GRAPHIC;
+  return g | 0;
+}
+// Trees, foliage and rocks cast one, exactly as mobiles do — the other half of
+// ClassicUO's shadow support, which needed this classification to exist.
+function staticCastsShadow(g, foliage) {
+  return settings.shadows && settings.shadowsStatics
+    && (isTreeGraphic(g) || !!foliage || isRockGraphic(g));
+}

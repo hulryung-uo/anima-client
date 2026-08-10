@@ -121,6 +121,7 @@ async function main() {
   document.getElementById("insp-pick").addEventListener("click", () => armInspect(!inspectPick));
   document.getElementById("insp-dump").addEventListener("click", inspectDump);
   renderInspector();
+  loadStaticFilters();   // ClassicUO's tree/vegetation/cave tables, tiledata-resolved
   restoreJournalHeight();
   setupItemDnD();
   initFx();
