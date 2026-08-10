@@ -127,13 +127,17 @@
 //! `BulletinRemove` (0x71). The decode and all four builders already existed
 //! with no caller; only this layer was missing. v27: `player.race` (0x11's ML
 //! race byte, 0 when the shard never sends one) and `ToggleFlying`
-//! (0xBF/0x32), the racial-abilities book's only non-passive entry.)
+//! (0xBF/0x32), the racial-abilities book's only non-passive entry. v28: the
+//! whole `type >= 6` tail of 0x11 — the five resistance caps and the ten
+//! combat/casting modifiers — flat on `player`. All zero unless the shard is
+//! ML+ and the client asked for the extended status; nothing on the wire
+//! distinguishes "absent" from "no bonuses".)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 27;
+pub const SCHEMA_VERSION: u32 = 28;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
@@ -164,6 +168,21 @@ fn player_json(p: &PlayerView) -> Value {
         "fire_resistance": p.fire_resistance, "cold_resistance": p.cold_resistance,
         "poison_resistance": p.poison_resistance, "energy_resistance": p.energy_resistance,
         "body": p.body, "poisoned": p.poisoned, "dead": p.dead, "race": p.race,
+        "maxResistPhysical": p.aos_status.max_physical_resistance,
+        "maxResistFire": p.aos_status.max_fire_resistance,
+        "maxResistCold": p.aos_status.max_cold_resistance,
+        "maxResistPoison": p.aos_status.max_poison_resistance,
+        "maxResistEnergy": p.aos_status.max_energy_resistance,
+        "defenseChance": p.aos_status.defense_chance_increase,
+        "defenseChanceMax": p.aos_status.max_defense_chance_increase,
+        "hitChance": p.aos_status.hit_chance_increase,
+        "swingSpeed": p.aos_status.swing_speed_increase,
+        "damageChance": p.aos_status.damage_increase,
+        "lowerRegCost": p.aos_status.lower_reagent_cost,
+        "spellDamage": p.aos_status.spell_damage_increase,
+        "fasterCastRecovery": p.aos_status.faster_cast_recovery,
+        "fasterCasting": p.aos_status.faster_casting,
+        "lowerManaCost": p.aos_status.lower_mana_cost,
     })
 }
 
@@ -1661,8 +1680,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v27_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 27);
+    fn schema_v28_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 28);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,

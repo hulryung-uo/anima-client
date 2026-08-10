@@ -78,6 +78,12 @@ pub struct PlayerView {
     /// the female id after each). Gates [`Action::ToggleFlying`], which ServUO
     /// answers only for a gargoyle.
     pub race: u8,
+    /// The AOS combat tail of 0x11 ([`crate::world::AosStatus`]) — the five
+    /// resistance caps and the hit/defence/swing/damage/casting modifiers.
+    /// Entirely zero on a shard that does not send `type >= 6`, which is every
+    /// pre-ML server. Named apart from [`Observation::aos`], which is the
+    /// shard's AOS *feature* flag and a different question.
+    pub aos_status: crate::world::AosStatus,
 }
 
 /// A nearby creature.
@@ -1019,6 +1025,7 @@ impl World {
             weight: self.player_stats.weight,
             weight_max: self.player_stats.weight_max,
             race: self.player_stats.race,
+            aos_status: self.player_stats.aos,
             armor: self.player_stats.armor,
             followers: self.player_stats.followers,
             followers_max: self.player_stats.followers_max,

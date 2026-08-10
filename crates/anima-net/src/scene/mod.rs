@@ -260,6 +260,25 @@ pub fn build_scene(
         // (`Mobile.CheckGraphicChange`). The racial-abilities book is the only
         // thing that needs it.
         "race": st.race,
+        // 0x11's `type >= 6` combat tail. All zero on a shard that never sends
+        // it (this one), which is indistinguishable from a character with no
+        // such bonuses — the same ambiguity ClassicUO lives with, since the
+        // packet carries no "absent" marker.
+        "maxResistPhysical": st.aos.max_physical_resistance,
+        "maxResistFire": st.aos.max_fire_resistance,
+        "maxResistCold": st.aos.max_cold_resistance,
+        "maxResistPoison": st.aos.max_poison_resistance,
+        "maxResistEnergy": st.aos.max_energy_resistance,
+        "defenseChance": st.aos.defense_chance_increase,
+        "defenseChanceMax": st.aos.max_defense_chance_increase,
+        "hitChance": st.aos.hit_chance_increase,
+        "swingSpeed": st.aos.swing_speed_increase,
+        "damageChance": st.aos.damage_increase,
+        "lowerRegCost": st.aos.lower_reagent_cost,
+        "spellDamage": st.aos.spell_damage_increase,
+        "fasterCastRecovery": st.aos.faster_cast_recovery,
+        "fasterCasting": st.aos.faster_casting,
+        "lowerManaCost": st.aos.lower_mana_cost,
         // Stat training locks (0 up / 1 down / 2 locked) — the `statlock`
         // command's other half, so the UI can show what it is toggling.
         "strLock": st.str_lock, "dexLock": st.dex_lock, "intLock": st.int_lock,

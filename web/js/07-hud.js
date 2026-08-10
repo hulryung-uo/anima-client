@@ -558,7 +558,28 @@ const INFOBAR_FIELDS = [
   { key: "statcap", label: "Cap",     color: "#c7d0dc", get: (p) => String(p.statsCap) },
   { key: "tithe",   label: "Tithe",   color: "#e3c34d", get: (p) => String(p.tithing) },
   { key: "noto",    label: "Noto",    color: "#c7d0dc", get: (p) => NOTO_NAMES[p.noto | 0] || String(p.noto | 0) },
+  // The nine ClassicUO fields this bar could not offer until 0x11's `type >= 6`
+  // tail was parsed. A shard that never sends that block reports 0 for all of
+  // them, which is also what a character with no such bonuses looks like — the
+  // packet has no way to say "absent", so neither has the bar.
+  { key: "hci",     label: "HCI",     color: "#e08a5a", get: (p) => pct(p.hitChance) },
+  { key: "dci",     label: "DCI",     color: "#9aa0a6", get: (p) => pct(p.defenseChance) },
+  { key: "di",      label: "DI",      color: "#e08a5a", get: (p) => pct(p.damageChance) },
+  { key: "ssi",     label: "SSI",     color: "#e3c34d", get: (p) => pct(p.swingSpeed) },
+  { key: "lrc",     label: "LRC",     color: "#8fd14f", get: (p) => pct(p.lowerRegCost) },
+  { key: "lmc",     label: "LMC",     color: "#4f8cf7", get: (p) => pct(p.lowerManaCost) },
+  { key: "sdi",     label: "SDI",     color: "#d98cff", get: (p) => pct(p.spellDamage) },
+  { key: "fc",      label: "FC",      color: "#b9a7ff", get: (p) => String(p.fasterCasting | 0) },
+  { key: "fcr",     label: "FCR",     color: "#b9a7ff", get: (p) => String(p.fasterCastRecovery | 0) },
+  // And the resistance CAPS, which arrive in the same block and are the other
+  // half of reading a resistance number ("60 fire" means little without "of 70").
+  { key: "capfire", label: "FireCap", color: "#ff7a45", get: (p) => String(p.maxResistFire | 0) },
+  { key: "capcold", label: "ColdCap", color: "#7fd4ff", get: (p) => String(p.maxResistCold | 0) },
+  { key: "cappois", label: "PoisCap", color: "#8fd14f", get: (p) => String(p.maxResistPoison | 0) },
+  { key: "capenrg", label: "EnrgCap", color: "#d98cff", get: (p) => String(p.maxResistEnergy | 0) },
+  { key: "capphys", label: "PhysCap", color: "#9aa0a6", get: (p) => String(p.maxResistPhysical | 0) },
 ];
+const pct = (v) => `${v | 0}%`;
 // ServUO `Notoriety`: 1 innocent, 2 friend, 3 grey/animal, 4 criminal,
 // 5 enemy, 6 murderer, 7 invulnerable.
 const NOTO_NAMES = { 1: "innocent", 2: "friend", 3: "grey", 4: "criminal", 5: "enemy", 6: "murderer", 7: "invul" };
@@ -601,9 +622,9 @@ function buildInfoBarPicker() {
   }
   const note = document.createElement("div");
   note.className = "ib-note";
-  note.textContent = "ClassicUO also offers the AoS combat modifiers (hit chance, "
-    + "faster casting, lower mana cost…). Those ride in the 0x11 status packet's "
-    + "extended tail, which this client does not parse yet.";
+  note.textContent = "The combat modifiers and resistance caps ride in the 0x11 "
+    + "status packet's `type >= 6` tail, which only an ML-or-later shard sends. "
+    + "This one does not, so they all read 0 here.";
   p.appendChild(note);
 }
 // Rebuild only when a shown value changed — this runs on every poll.

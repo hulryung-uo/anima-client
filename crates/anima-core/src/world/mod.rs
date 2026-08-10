@@ -178,6 +178,43 @@ pub struct PlayerStats {
     /// FastUnmountAndCantRun. `>= 2` means the server forces us to walk (no
     /// running) — the movement driver can consult this later.
     pub speed_mode: u8,
+    /// The AOS combat tail of 0x11 CharacterStatus (`type >= 6`): fifteen
+    /// signed 16-bit values in the order ServUO's `AOS.GetStatus(index)`
+    /// enumerates them, which is the order ClassicUO reads them back in.
+    ///
+    /// Indices 0..=4 are the *caps* on each resistance, not the current values
+    /// (those are the `type >= 4` block above). 5/6 are the current and maximum
+    /// defence-chance bonus. The rest are the familiar suffix-name modifiers:
+    /// hit chance, swing speed, damage, lower reagent cost, spell damage,
+    /// faster cast recovery, faster casting, lower mana cost.
+    ///
+    /// A shard sends this only when `Core.ML` is on AND the client asked for
+    /// the extended status (version ≥ 7.0.30) — `MobileStatus` in ServUO's
+    /// `Packets.cs`. On a pre-ML shard the whole block is absent and every
+    /// field here stays 0.
+    pub aos: AosStatus,
+}
+
+/// The `type >= 6` block of 0x11 CharacterStatus. Field names follow
+/// ClassicUO's (`PacketHandlers.cs`), which match ServUO's index mapping
+/// one-for-one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AosStatus {
+    pub max_physical_resistance: i16,
+    pub max_fire_resistance: i16,
+    pub max_cold_resistance: i16,
+    pub max_poison_resistance: i16,
+    pub max_energy_resistance: i16,
+    pub defense_chance_increase: i16,
+    pub max_defense_chance_increase: i16,
+    pub hit_chance_increase: i16,
+    pub swing_speed_increase: i16,
+    pub damage_increase: i16,
+    pub lower_reagent_cost: i16,
+    pub spell_damage_increase: i16,
+    pub faster_cast_recovery: i16,
+    pub faster_casting: i16,
+    pub lower_mana_cost: i16,
 }
 
 /// One journal (chat/system) line.

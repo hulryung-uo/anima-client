@@ -6,6 +6,7 @@
 //! 0x11 CharacterStatus, the 0xA1-3 vitals, and 0x2D's full attribute block.
 
 use super::*;
+use crate::world::AosStatus;
 
 /// Status-flags bits on the mobile-update packets (0x20/0x77/0x78/0xD2/0xD3).
 /// ServUO `Mobile.cs GetPacketFlags`: 0x01 Frozen/Paralyzed, 0x04 Flying, 0x08
@@ -528,10 +529,37 @@ pub(super) fn char_status(world: &mut World, frame: &[u8]) -> PResult<()> {
             stats.damage_max = r.i16()?;
             stats.tithing_points = r.u32()?;
         }
-        // `flag >= 6` adds an extended combat-bonus tail (max resists,
-        // defense/hit/swing/damage increase, etc.) that we intentionally do
-        // not parse or store — the packet is self-framed, so those trailing
-        // bytes are harmlessly discarded once this handler returns.
+        if flag >= 6 {
+            // The AOS combat tail: ServUO writes `(short)AOS.GetStatus(i)` for
+            // `i in 0..=14` (`Packets.cs` MobileStatus), and ClassicUO reads
+            // exactly those fifteen back in the same order — two independent
+            // implementations agreeing, as with the stun/disarm pair.
+            //
+            // Read them the way ClassicUO does, defaulting a missing value to 0
+            // instead of failing the packet (`p.Position + 2 > p.Length ? 0 :
+            // ...`). It matters: an Enhanced-Client session gets *29* values
+            // here, and a shard that sends a shorter tail than it advertises
+            // would otherwise cost us the whole status update — name, HP and
+            // all — over trailing bytes nothing reads.
+            let mut next = || r.i16().unwrap_or(0);
+            stats.aos = AosStatus {
+                max_physical_resistance: next(),
+                max_fire_resistance: next(),
+                max_cold_resistance: next(),
+                max_poison_resistance: next(),
+                max_energy_resistance: next(),
+                defense_chance_increase: next(),
+                max_defense_chance_increase: next(),
+                hit_chance_increase: next(),
+                swing_speed_increase: next(),
+                damage_increase: next(),
+                lower_reagent_cost: next(),
+                spell_damage_increase: next(),
+                faster_cast_recovery: next(),
+                faster_casting: next(),
+                lower_mana_cost: next(),
+            };
+        }
 
         let m = world.mobile_mut(serial);
         m.stam = stam;

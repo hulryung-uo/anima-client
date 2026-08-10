@@ -3469,6 +3469,154 @@ fn char_status_flag5_reads_ml_ren_aos_tail_in_wire_order() {
     assert_eq!(s.tithing_points, 999);
 }
 
+/// Build a 0x11 CharacterStatus with `flag`, everything up to the AOS block
+/// filled in, and `tail` appended raw. Shared by the `type >= 6` tests.
+fn char_status_flag6(tail: &[u8]) -> Vec<u8> {
+    let mut p = PacketWriter::new();
+    p.u8(0x11).u16(0);
+    p.u32(0x1003)
+        .fixed_ascii("Anima", 30)
+        .u16(90)
+        .u16(100)
+        .u8(0)
+        .u8(6); // flag/type
+    p.u8(0)
+        .u16(60)
+        .u16(70)
+        .u16(80)
+        .u16(50)
+        .u16(55)
+        .u16(40)
+        .u16(45)
+        .u32(12_345)
+        .u16(25u16)
+        .u16(400);
+    p.u16(500).u8(1); // ML: weight_max, race
+    p.u16(225u16).u8(3).u8(5); // Renaissance
+    p.u16(10u16) // AOS: the four *current* resists, luck, damage, tithing
+        .u16(20u16)
+        .u16(30u16)
+        .u16(40u16)
+        .u16(77)
+        .u16(5u16)
+        .u16(12u16)
+        .u32(999);
+    let mut bytes = p.into_vec();
+    bytes.extend_from_slice(tail);
+    patch_len(bytes)
+}
+
+#[test]
+fn char_status_flag6_reads_the_aos_combat_tail_in_servuo_order() {
+    // The 15 shorts ServUO writes as `(short)AOS.GetStatus(i)` for i in 0..=14
+    // (`Packets.cs` MobileStatus), which is the order ClassicUO reads them back
+    // in. Distinct values per slot so a transposition cannot pass.
+    let mut w = World::new();
+    w.player = Some(crate::types::Serial(0x1003));
+
+    let mut t = PacketWriter::new();
+    t.u16(70u16) // 0 max physical resist
+        .u16(71u16) // 1 max fire
+        .u16(72u16) // 2 max cold
+        .u16(73u16) // 3 max poison
+        .u16(74u16) // 4 max energy
+        .u16(35u16) // 5 defense chance increase
+        .u16(45u16) // 6 max defense chance increase
+        .u16(15u16) // 7 hit chance increase
+        .u16(30u16) // 8 swing speed increase
+        .u16(50u16) // 9 damage increase
+        .u16(20u16) // 10 lower reagent cost
+        .u16(12u16) // 11 spell damage increase
+        .u16(4u16) // 12 faster cast recovery
+        .u16(2u16) // 13 faster casting
+        .u16(8u16); // 14 lower mana cost
+
+    assert!(apply_packet(&mut w, &char_status_flag6(&t.into_vec())));
+    let a = w.player_stats.aos;
+    assert_eq!(a.max_physical_resistance, 70);
+    assert_eq!(a.max_fire_resistance, 71);
+    assert_eq!(a.max_cold_resistance, 72);
+    assert_eq!(a.max_poison_resistance, 73);
+    assert_eq!(a.max_energy_resistance, 74);
+    assert_eq!(a.defense_chance_increase, 35);
+    assert_eq!(a.max_defense_chance_increase, 45);
+    assert_eq!(a.hit_chance_increase, 15);
+    assert_eq!(a.swing_speed_increase, 30);
+    assert_eq!(a.damage_increase, 50);
+    assert_eq!(a.lower_reagent_cost, 20);
+    assert_eq!(a.spell_damage_increase, 12);
+    assert_eq!(a.faster_cast_recovery, 4);
+    assert_eq!(a.faster_casting, 2);
+    assert_eq!(a.lower_mana_cost, 8);
+    // The blocks before it must still land — the tail is additive, not a
+    // replacement for the AOS resist block.
+    assert_eq!(w.player_stats.fire_resistance, 10);
+    assert_eq!(w.player_stats.tithing_points, 999);
+}
+
+#[test]
+fn char_status_flag6_survives_a_short_tail() {
+    // ClassicUO guards every read (`p.Position + 2 > p.Length ? 0 : …`), so a
+    // truncated tail costs those fields and nothing else. Ours must not fail
+    // the packet and lose the name/HP with it — an Enhanced-Client session is
+    // sent 29 of these values, and a shard mixing the two is exactly how a
+    // short tail arrives.
+    let mut w = World::new();
+    w.player = Some(crate::types::Serial(0x1003));
+
+    let mut t = PacketWriter::new();
+    t.u16(70u16).u16(71u16).u16(72u16); // three of fifteen, then nothing
+
+    assert!(apply_packet(&mut w, &char_status_flag6(&t.into_vec())));
+    let a = w.player_stats.aos;
+    assert_eq!(a.max_physical_resistance, 70);
+    assert_eq!(a.max_cold_resistance, 72);
+    assert_eq!(a.max_poison_resistance, 0, "missing values read as zero");
+    assert_eq!(a.lower_mana_cost, 0);
+    // And the rest of the packet still applied.
+    assert_eq!(w.player_stats.stats_cap, 225);
+    assert_eq!(w.mobiles[&0x1003].hits, 90);
+}
+
+#[test]
+fn char_status_flag5_leaves_the_aos_combat_tail_zeroed() {
+    // A pre-ML/pre-extended shard sends `type < 6` — this one sends 5 — and the
+    // combat tail simply is not on the wire. Nothing may invent values for it.
+    let mut w = World::new();
+    w.player = Some(crate::types::Serial(0x1004));
+    let mut p = PacketWriter::new();
+    p.u8(0x11).u16(0);
+    p.u32(0x1004)
+        .fixed_ascii("Anima", 30)
+        .u16(90)
+        .u16(100)
+        .u8(0)
+        .u8(5);
+    p.u8(0)
+        .u16(60)
+        .u16(70)
+        .u16(80)
+        .u16(50)
+        .u16(55)
+        .u16(40)
+        .u16(45)
+        .u32(1)
+        .u16(0u16)
+        .u16(0);
+    p.u16(500).u8(1);
+    p.u16(225u16).u8(0).u8(0);
+    p.u16(0u16)
+        .u16(0u16)
+        .u16(0u16)
+        .u16(0u16)
+        .u16(0)
+        .u16(0u16)
+        .u16(0u16)
+        .u32(0);
+    assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+    assert_eq!(w.player_stats.aos, crate::world::AosStatus::default());
+}
+
 #[test]
 fn char_status_flag3_reads_only_renaissance_tail() {
     // flag=3: only the Renaissance block is present on the wire — the ML

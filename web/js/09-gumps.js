@@ -881,11 +881,26 @@ function refreshStatus(s) {
   set("st-damage", `${p.damageMin | 0} - ${p.damageMax | 0}`);
   set("st-luck", p.luck | 0);
   set("st-tithing", p.tithing | 0);
-  set("st-armor", p.armor | 0);
-  set("st-rfire", p.resistFire | 0);
-  set("st-rcold", p.resistCold | 0);
-  set("st-rpoison", p.resistPoison | 0);
-  set("st-renergy", p.resistEnergy | 0);
+  // Resistances read against their caps once the shard sends them (0x11
+  // `type >= 6`): "60 / 70" says what "60" alone cannot. A shard that omits the
+  // block reports every cap as 0, so fall back to the bare value there rather
+  // than printing "60 / 0".
+  const cap = (v, c) => ((c | 0) > 0 ? `${v | 0} / ${c | 0}` : String(v | 0));
+  set("st-rfire", cap(p.resistFire, p.maxResistFire));
+  set("st-rcold", cap(p.resistCold, p.maxResistCold));
+  set("st-rpoison", cap(p.resistPoison, p.maxResistPoison));
+  set("st-renergy", cap(p.resistEnergy, p.maxResistEnergy));
+  set("st-armor", cap(p.armor, p.maxResistPhysical));
+  // The combat/casting modifiers from the same block.
+  set("st-hci", `${p.hitChance | 0}%`);
+  set("st-dci", `${p.defenseChance | 0}% / ${p.defenseChanceMax | 0}%`);
+  set("st-di", `${p.damageChance | 0}%`);
+  set("st-ssi", `${p.swingSpeed | 0}%`);
+  set("st-lrc", `${p.lowerRegCost | 0}%`);
+  set("st-lmc", `${p.lowerManaCost | 0}%`);
+  set("st-sdi", `${p.spellDamage | 0}%`);
+  set("st-fc", String(p.fasterCasting | 0));
+  set("st-fcr", String(p.fasterCastRecovery | 0));
 }
 function closeSkills() {
   skillsOn = false;

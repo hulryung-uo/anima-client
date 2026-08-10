@@ -393,6 +393,40 @@ nothing.
   memory from the window-management row only helps *after* a window has been
   dragged once.
 
+Closed 2026-08-10 (0x11 `type >= 6`): the last Tier 2 row, and the only one
+closed without a live confirmation — because this shard cannot produce the
+packet, which is worth being precise about.
+
+- **Measured, not assumed: this ServUO sends `type = 3`.** A one-line probe on
+  the 0x11 handler reports type 3 in a 70-byte frame, every time. `type` is
+  chosen by `MobileStatus` in `Packets.cs`: 6 needs `Core.ML` *and* a client
+  that asked for the extended status, 5 needs `Core.ML`, 4 needs `Core.AOS`,
+  else 3. So it is not only the combat tail that never arrives — the whole AOS
+  block above it (resistances, luck, damage range, tithing) is absent too, which
+  is why those read 0 in the status sheet and always have. The `Core.ML`/
+  `Core.AOS` gates are the server's expansion setting, so no client-side version
+  bump can unlock them.
+- **The layout is still pinned by two independent implementations.** ServUO
+  writes `(short)AOS.GetStatus(i)` for `i in 0..=14`, and ClassicUO reads
+  fifteen shorts back in exactly that order, field for field — the same
+  agreement that settled the stun/disarm subcommands. The golden-byte test
+  encodes that order with a distinct value per slot, so a transposition cannot
+  pass.
+- **Missing values read as 0, and never cost the packet.** ClassicUO guards
+  every read (`p.Position + 2 > p.Length ? 0 : …`) and so does this. It is not
+  hypothetical: an Enhanced-Client session is sent **29** of these values rather
+  than 15, so a mixed shard is exactly how a tail of the wrong length shows up,
+  and failing the packet would lose the name and HP with it.
+- **What is still ambiguous, in both clients.** The wire has no "absent"
+  marker, so a shard that never sends the block and a character with no bonuses
+  are indistinguishable — everything reads 0 either way. The info bar's picker
+  says so rather than letting a row of zeroes imply a measurement.
+
+Confirming this against a real server needs an ML-or-later shard. Flipping
+`Config/Expansion.cfg` on the local one would do it, but that file is
+hand-tuned here (T2A with OPL forced on) and every other row in this document
+is written against that setting, so it is not a change to make in passing.
+
 **Know what the local shard can and cannot prove.** `Config/Expansion.cfg` on
 the ServUO at `127.0.0.1:2594` says `CurrentExpansion=T2A`, so `Core.AOS` is
 **false** there. That single fact splits this batch in half, and it is worth
@@ -690,7 +724,7 @@ The receive side is generally complete; there is no way to *act*.
 | Gap | Note | Effort |
 |---|---|---|
 | ~~**Extended status sheet**~~ — **CLOSED** | all of it (armor + the four resistances, weight/max, stats-cap, followers/max, damage range, luck, tithing, and the three stat locks) now leaves `build_scene` and shows in the status panel. It had been parsed into `World` all along and simply never sent | M |
-| **0x11 `type >= 6` combat tail** | max resists, HCI/DCI/SSI/DI/LRC/SDI/FCR/FC/LMC are explicitly not parsed (`game.rs:2757`); no field of that family exists anywhere | M |
+| ~~0x11 `type >= 6` combat tail~~ — **CLOSED (parse + UI); not observable on this shard** | All fifteen values now parse into `PlayerStats::aos` and reach the scene, `Observation` (schema v28), the status sheet and the info bar — which is where the nine fields the info-bar row had to leave out finally appear. The five resistance **caps** arrive in the same block, so the sheet reads "60 / 70" instead of a bare 60. What no test here can do is receive one: this ServUO answers with **`type = 3`**, measured on the wire, so the whole AOS block is absent, never mind the tail three versions past it | M |
 | ~~**Buff names**~~ — **CLOSED** | 0xDF's title/description clilocs and their (little-endian) argument blocks are parsed into `Buff`; the renderer resolves the title for the bar and shows the description on hover, and `anima_net::localize` fills `display`/`display_desc` for brains. The 35-entry English table survives as the fallback when a shard sends no title cliloc. The debuff tint is still a regex over the name — UO carries no buff/debuff flag on 0xDF (ClassicUO hardcodes the split by icon id) | M |
 | ~~Journal~~ — **CLOSED, live-verified** | All five: lines take the **server hue** through the same `msgColor` the floating overheads already used (per-type colour only as the fallback, ClassicUO's rule) plus per-type styling — a yell bold, a whisper dim, an emote italic; **All/Speech/Guild/System tabs**; an arrival **timestamp**, stamped client-side because UO sends none; and the log is `resize: vertical` with its height remembered. The tab rule is a port of ClassicUO's `TextType` decision, **not** a filter on message type — see the note above for why the obvious version puts every system line under Speech | M |
 | ~~Grid loot~~ — **CLOSED, live-verified** | A corpse (identified by its gump id `9`, which `scene.contGumps` already carries) opens the uniform grid rather than the authentic corpse art, with **click-an-item-to-take** and **Loot all** — the split ClassicUO's separate `GridLootGump` exists to make, since a body's scattered layout is the wrong shape for looting. Off in Options for anyone who wants the real corpse gump. One click is ClassicUO's `GameActions.GrabItem`: a lift, then a drop with **no position**. Verified live on an orc corpse | M |
