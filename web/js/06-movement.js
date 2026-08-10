@@ -1089,6 +1089,17 @@ function drawMobs() {
     }
     // BODY (hued by skin).
     part("body", bodyAnim ? `anim/${bodyAnim}/${group}/${d}/${frame}.png${skinHue ? `?hue=${skinHue}` : ""}` : null, 0, true, bodyAnim, group, frame);
+    // SHADOW, behind everything. ClassicUO draws exactly one per mobile — an
+    // extra pass over the BODY frame only (`MobileView.Draw`'s `hasShadow`
+    // branch, `entity = null`), never per worn layer, so overlapping clothes
+    // don't darken it. Same gate as well: not while dead, not while hidden.
+    if (settings.shadows && !ghost && !hidden) {
+      const b = entries.find((e) => e.key === "body");
+      if (b && b.cx != null) {
+        entries.push({ key: "shadow", tex: b.tex, rank: -2, interactive: false,
+                       cx: b.cx, cy: b.cy, shadow: true, mounted: mountAnim > 0 });
+      }
+    }
     // WORN LAYERS (clothes/hair/beard), each hued, over the body in the facing's UO
     // draw order. Layers not in that order (backpack 21, mount 25) are skipped —
     // the mount is drawn separately as the animal above.
@@ -1171,7 +1182,20 @@ function drawMobs() {
         // screenY - height - cy). This is what seats a rider on a mount and aligns
         // held items / armor / hair instead of stacking everything at the feet.
         // Until the center loads, fall back to the foot anchor.
-        if (e.cx != null) {
+        if (e.shadow) {
+          // ClassicUO `Batcher2D.DrawShadow`: the sprite as a parallelogram —
+          // half height, top edge pushed right by that same half-height, and
+          // lifted 10px so it starts at the feet rather than under them. As a
+          // matrix that is [1, 0, -0.5, 0.5], which PIXI expresses as a -45°
+          // x-skew with scaleY = cos(45°). Mounted riders drop it 10px more,
+          // matching the `drawY + 10` in the mounted branch there.
+          const h = e.tex.height;
+          sp.anchor.set(0, 0);
+          sp.skew.x = -Math.PI / 4;
+          sp.scale.set(1, Math.SQRT1_2);
+          sp.x = x - e.cx;
+          sp.y = ((y - 3) - h - e.cy) + h / 2 - 10 + (e.mounted ? 10 : 0);
+        } else if (e.cx != null) {
           sp.anchor.set(0, 0);
           sp.x = x - e.cx;
           sp.y = (y - 3) - e.tex.height - e.cy;
@@ -1185,7 +1209,10 @@ function drawMobs() {
         // we're hidden even though we can see ourselves. Sprites are pooled/persistent,
         // so alpha must be reset to 1 every frame for a body that is neither (else a
         // former ghost/hidden mobile stays faint after it dies again/unhides).
-        sp.alpha = ghost ? 0.45 : (hidden ? 0.5 : 1);
+        // The shadow shader is `color.rgb = 0; alpha = 0.4` over the sprite's
+        // own alpha mask — a flat black silhouette, not a dimmed copy.
+        if (e.shadow) { sp.alpha = 0.4; sp.tint = 0x000000; }
+        else sp.alpha = ghost ? 0.45 : (hidden ? 0.5 : 1);
         const z = zi + e.rank / 256;
         if (sp.zIndex !== z) sp.zIndex = z;
         seen.add(key);

@@ -763,7 +763,7 @@ The receive side is generally complete; there is no way to *act*.
 
 ## Tier 3 — rendering fidelity
 
-Shadows; ~~corpse equipment layers~~ and ~~death animation~~ (**CLOSED,
+~~Shadows~~, ~~corpse equipment layers~~ and ~~death animation~~ (**CLOSED,
 live-verified** — see below); `light.mul` light shapes/colours (a radius-only light system
 exists — `build_scene`'s `lights` list in `scene/mod.rs`); directional lighting on stretched land; seasonal
 land/static graphic remap (the season *system* exists, the remap does not);
@@ -834,6 +834,35 @@ Verified live by logging the body sprite's texture every 60ms across a kill:
 each frame in order) → frame 3 held → the entity is released and the corpse
 sprite appears, with the corpse absent from the item pool for exactly that
 window. A canvas capture taken at frame ≥ 1 shows the orc mid-fall.
+
+Closed 2026-08-10 (shadows): the third Tier 3 row. Characters cast one.
+
+- **The transform is ClassicUO's, exactly.** `Batcher2D.DrawShadow` builds a
+  parallelogram from the sprite: half height, top edge pushed right by that same
+  half-height, and the whole thing lifted 10px so it starts at the feet. As a
+  matrix that is `[1, 0, -0.5, 0.5]`, which PIXI expresses as a **-45° x-skew
+  with `scaleY = cos 45°`** — worth writing down, because "squash and lean" has
+  a dozen plausible parameterisations and only one of them matches.
+- **The colour is the shader's, exactly.** `IsometricWorld.fx`'s `SHADOW` branch
+  is `color.rgb = 0; alpha = 0.4` over the sprite's own alpha mask — a flat
+  black silhouette, not a dimmed copy of the character.
+- **One per mobile, from the body frame only.** ClassicUO draws it as a separate
+  pass with `entity = null` before the layered draw, never per worn layer, so
+  overlapping clothes do not stack up into a darker patch. Its gates come along
+  too: not while dead, not while hidden, and an Options toggle
+  (`ShadowsEnabled`, on by default there and here). A mounted rider's shadow
+  drops 10px, matching the `drawY + 10` in that branch.
+- **Not done: static shadows.** ClassicUO also shadows trees, foliage and rocks
+  behind a second toggle, but "is this graphic a tree or a rock" is
+  `StaticFilters` — its own open row further down this list. Better to close
+  that one first than to guess at the classification here.
+
+Verified live. The transform, read off the sprite: skew -0.785 rad, scaleY
+0.707, alpha 0.4, tint 0x000000, y offset = height/2 - 10, z just under the
+body. The hidden gate proved itself by accident — the test character was hidden,
+so no shadow appeared until `Set Hidden false`. And a pixel diff of the same
+frame with the pass on and off shows **2572 pixels darkened by ~15/255** in a
+right-leaning parallelogram at the character's feet, and nothing else changed.
 
 ---
 

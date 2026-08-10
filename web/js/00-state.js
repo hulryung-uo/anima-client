@@ -239,6 +239,7 @@ const SETTINGS_DEFAULTS = {
   debugMove: false,               // movement/Z debug HUD (WalkTo rejects, predicted vs server pos)
   autoOpenDoors: true,            // walking into a closed door opens it (ClassicUO TryOpenDoors) — on by default
   gridLoot: true,                 // corpses open a click-to-loot grid instead of the authentic corpse gump
+  shadows: true,                  // mobile shadows (ClassicUO's ShadowsEnabled, on by default there too)
 };
 let settings = Object.assign({}, SETTINGS_DEFAULTS);
 try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}")); } catch (e) {}
@@ -266,6 +267,7 @@ function renderOptions() {
     + cb("debugMove", "Movement debug")
     + cb("autoOpenDoors", "Auto-open doors")
     + cb("gridLoot", "Click-to-loot corpses")
+    + cb("shadows", "Character shadows")
     + '<label class="opt-row"><button type="button" class="dlg-btn opt-infobar">Info bar</button></label>'
     + '<label class="opt-row"><button type="button" class="dlg-btn opt-counterbar">Counter bar</button></label>'
     + '<label class="opt-row"><button type="button" class="dlg-btn opt-ignorelist">Ignore list</button></label>'
