@@ -41,6 +41,7 @@ function primeSeqRings(s) {
   if (s.logoutAck) lastLogoutAckSeq = Math.max(lastLogoutAckSeq, s.logoutAck.seq | 0);
   lastBoatMoveSeq = Math.max(lastBoatMoveSeq, maxSeq(s.boatMoves));
   lastChatSeq = Math.max(lastChatSeq, maxSeq(s.chat && s.chat.lines));
+  lastDeathSeq = Math.max(lastDeathSeq, maxSeq(s.deaths));
   // Per-key open-counters live in the dialog families, not in a ring here.
   primeDialogSeqs(s);
 }
@@ -65,6 +66,11 @@ async function poll() {
     hideLogin();
     if (!seqPrimed) { primeSeqRings(scene); seqPrimed = true; }
     ingestBoatMoves(scene);
+    // Before updateAnimStates, deliberately: the server deletes a mobile in the
+    // same breath as the death cue, so by this poll it is already out of
+    // `scene.mobiles` and the prune below is about to drop its animation state
+    // too. This is the last moment both still exist.
+    ingestDeaths(scene); // start a death animation for each new 0xAF cue
     updateAnimStates(scene);
     const ts = performance.now();
     syncWorld(scene); // diffs only — no full rebuild
@@ -252,7 +258,13 @@ function updateAnimStates(s) {
     }
     Object.assign(st, { tx: x, ty: y, z, dir, body, fallback: fb });
   };
-  for (const m of s.mobiles || []) touch("m" + m.serial, m.x, m.y, m.z ?? 0, m.dir ?? 4, m.body, notoColor(m.noto));
+  for (const m of s.mobiles || []) {
+    touch("m" + m.serial, m.x, m.y, m.z ?? 0, m.dir ?? 4, m.body, notoColor(m.noto));
+    // Stash the scene record itself: when this mobile dies it leaves
+    // `scene.mobiles` immediately, and the falling body still needs its hue and
+    // its equipment to be drawn (see `ingestDeaths`).
+    anim.get("m" + m.serial).mobRec = m;
+  }
   // The player is rendered from the predicted position (set in renderFrame); here
   // we just seed/reconcile prediction against the authoritative server position.
   const p = s.player;
@@ -316,6 +328,14 @@ function updateAnimStates(s) {
     }
     if (!anim.has("self")) anim.set("self", { rx: pred.rx, ry: pred.ry, rz: pred.rz, stepDur: 400, fallback: 0xffffff });
     seen.add("self");
+  }
+  // A mobile that just died is gone from `s.mobiles` — the server deleted it —
+  // but its body is still falling over. Keep it out of the prune until the
+  // animation is done, which is ClassicUO holding the same entity under
+  // `serial | 0x80000000` for exactly as long.
+  for (const [id, d] of [...dyingMobs]) {
+    if (d.done || now >= d.endsAt) { dyingMobs.delete(id); const st = anim.get(id); if (st) st.death = null; }
+    else seen.add(id);
   }
   for (const id of [...anim.keys()]) if (!seen.has(id)) anim.delete(id);
 }
@@ -501,6 +521,11 @@ function syncWorld(s) {
     // the anim is absent) `corpseUrl` stays null and we fall through to the static
     // art below, same as any other item.
     let corpseUrl = null, corpseFrame = -1, corpseTex = null;
+    // A corpse whose owner is mid-fall is not drawn yet: the animating body is
+    // standing in for it (ClassicUO `DrawCorpse`'s first line, the
+    // `CorpseManager.Exists` check). It appears on the poll after the animation
+    // ends — the item loop runs every poll, so nothing else is needed.
+    if (it.g === 0x2006 && corpseIsDying(it.serial)) continue;
     if (it.g === 0x2006 && it.body != null) {
       const dir = it.dir & 7, dg = it.dg | 0;
       framesFor(it.body, dg, dir); // kick the animinfo (frame-count/centers) load

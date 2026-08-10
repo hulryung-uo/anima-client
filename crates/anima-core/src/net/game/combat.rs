@@ -105,10 +105,16 @@ pub(super) fn display_death(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     let killed_serial = r.u32()?;
     let corpse_serial = r.u32()?;
-    r.skip(4)?; // unused (ServUO always writes 0)
+    // ClassicUO reads this as `running` and feeds it to `GetDeathAction` as the
+    // "second death animation" selector. ServUO's `DeathAnimation` packet writes
+    // a literal 0 (`Packets.cs`), so on this family of servers the alternate
+    // death pose is unreachable — carried anyway, since nothing about the wire
+    // format promises that.
+    let running = r.u32()? != 0;
     if corpse_serial != 0 {
         world.set_corpse_of(corpse_serial, killed_serial);
     }
+    world.push_death(killed_serial, corpse_serial, running);
     Ok(())
 }
 

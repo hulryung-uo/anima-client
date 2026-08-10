@@ -128,6 +128,27 @@ pub fn build_scene(
     // end before the tile loop takes the `&mut` one.
     let (p_body, p_hue) = look.remap(p.body, p.hue);
     let p_atype = look.atype(p_body);
+    // Death cues (0xAF): the mobile fell over. The renderer keeps its body alive
+    // locally for the length of the death animation and holds the corpse's own
+    // sprite back until then — ClassicUO's `CorpseManager` in one field.
+    // Resolved here, with the other `look`-dependent values, because the shared
+    // map borrow has to end before the tile loop takes the `&mut` one. `dg`
+    // comes from the server for the same reason a corpse's does: the death
+    // group depends on mobtypes flags the browser cannot read.
+    let deaths: Vec<Value> = s
+        .world
+        .recent_deaths
+        .iter()
+        .map(|&(seq, killed, corpse, running)| {
+            let body = s.world.mobiles.get(&killed).map_or(0, |m| m.body);
+            let (rbody, _) = look.remap(body, 0);
+            json!({
+                "seq": seq, "serial": killed, "corpse": corpse,
+                "running": running as u8,
+                "dg": look.anim.map_or(0, |a| a.death_group(rbody)),
+            })
+        })
+        .collect();
 
     let mobiles = mobiles_json(&s.world, &look, &p);
     let items = items_json(&s.world, &look, px, py, max_z);
@@ -479,6 +500,7 @@ pub fn build_scene(
         .map(|&(seq, attacker, defender)| json!({ "seq": seq, "attacker": attacker, "defender": defender }))
         .collect();
     let swings = json_array(&swings);
+    let deaths = json_array(&deaths);
     // The latest server-initiated paperdoll open/refresh (0x88), or null. See
     // `paperdoll_json`'s doc for the `seq` "fresh request" semantics.
     let paperdoll =
@@ -524,7 +546,7 @@ pub fn build_scene(
          \"armedAbility\":{armed_ability},\"activeSpells\":{active_spells},\"chat\":{chat},\"bboard\":{bboard},\"contGumps\":{container_gumps},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
          \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps}{placement_field}{house_design_field},\
-         \"net\":{net},\
+         \"deaths\":{deaths},\"net\":{net},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",
         s.confirms, s.denies
     )

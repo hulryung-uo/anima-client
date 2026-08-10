@@ -1422,6 +1422,18 @@ pub struct World {
     pub recent_swings: Vec<(u64, u32, u32)>,
     /// Monotonic counter assigning each swing event a unique `seq`.
     pub swing_seq: u64,
+    /// Recent deaths (0xAF DisplayDeath): each `(seq, killed, corpse, running)`,
+    /// newest last, capped like the other rings.
+    ///
+    /// This is the *animation* cue, not the fact of death — the fact arrives
+    /// separately as the mobile's removal and the corpse item. ClassicUO keeps
+    /// the dying body alive locally under `serial | 0x80000000` so it can fall
+    /// over after the server has already deleted it, and suppresses the corpse's
+    /// own sprite until that finishes; a renderer needs this event to do the
+    /// same. `running` is ServUO's third field, which it always writes as 0.
+    pub recent_deaths: Vec<(u64, u32, u32, bool)>,
+    /// Monotonic counter assigning each death event a unique `seq`.
+    pub death_seq: u64,
     /// Current facet/map index (0xBF/0x08 MapChange): 0=Felucca, 1=Trammel,
     /// 2=Ilshenar, 3=Malas, 4=Tokuno, 5=TerMur (ServUO `Map.MapID`). The play server
     /// watches this and reloads `anima_assets::MapData` for the matching facet via
@@ -1511,6 +1523,11 @@ const MAX_PENDING_WAR_MODE_REQUESTS: usize = 16;
 const MAX_RECENT_CONTAINER_OPENS: usize = 16;
 /// How many recent swing events [`World::push_swing`] keeps.
 const MAX_RECENT_SWINGS: usize = 16;
+
+/// Cap on [`World::recent_deaths`]. A death is rarer than a swing and its
+/// animation outlives the poll that reported it, but the renderer only ever
+/// needs the ones it has not started yet.
+const MAX_RECENT_DEATHS: usize = 16;
 /// How many recent validated external-URL requests [`World::push_open_url`] keeps.
 const MAX_RECENT_OPEN_URLS: usize = 16;
 const MAX_RECENT_BOAT_MOVEMENTS: usize = 16;
@@ -1907,6 +1924,17 @@ impl World {
 
     /// Record a Swing event (0x2F): `attacker` just swung at `defender`.
     /// Assigns the next monotonic `seq` and keeps only the most recent
+    /// Record one 0xAF death cue, capped like the other rings.
+    pub fn push_death(&mut self, killed: u32, corpse: u32, running: bool) {
+        self.death_seq += 1;
+        self.recent_deaths
+            .push((self.death_seq, killed, corpse, running));
+        let overflow = self.recent_deaths.len().saturating_sub(MAX_RECENT_DEATHS);
+        if overflow > 0 {
+            self.recent_deaths.drain(0..overflow);
+        }
+    }
+
     /// [`MAX_RECENT_SWINGS`].
     pub fn push_swing(&mut self, attacker: u32, defender: u32) {
         self.swing_seq += 1;

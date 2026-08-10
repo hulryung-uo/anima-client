@@ -925,6 +925,10 @@ function drawMobs() {
   if (!mobById) {
     mobById = new Map();
     for (const m of scene.mobiles || []) mobById.set("m" + m.serial, m);
+    // A mobile that died this poll is no longer in the scene, but its body is
+    // still falling: draw it from the record captured when the cue arrived, so
+    // it keeps its equipment and hue all the way down.
+    for (const [id, dv] of dyingMobs) if (!mobById.has(id)) mobById.set(id, dv.mob);
     scene._mobById = mobById;
   }
   for (const [id, st] of anim) {
@@ -998,7 +1002,22 @@ function drawMobs() {
         if (loaded > 0 && fi >= loaded) st.act = null; // played every frame → done
       }
     }
-    if (st.act && !ghost) {
+    if (st.death) {
+      // Death: the group the server resolved (mobtypes-aware, same call a
+      // corpse's held frame uses), played once at the standard cadence and then
+      // held. `dyingMobs` drops the entity when this reports done, which is
+      // ClassicUO removing the body once `frameIndex >= fc`.
+      group = st.death.dg;
+      frames = framesFor(bodyAnim, group, d);
+      const fi = Math.floor((performance.now() - st.death.startMs) / CHAR_ANIM_DELAY);
+      frame = Math.max(0, Math.min(frames - 1, fi));
+      if (st.prevFrameKey !== `${group}/${d}`) {
+        for (let f = 0; f < frames; f++) texFor(`anim/${bodyAnim}/${group}/${d}/${f}.png`);
+        st.prevFrameKey = `${group}/${d}`;
+      }
+      const dying = dyingMobs.get(id);
+      if (dying && frameCount.has(`${bodyAnim}/${group}/${d}`) && fi >= frames) dying.done = true;
+    } else if (st.act && !ghost) {
       group = ag;
       frames = framesFor(bodyAnim, group, d);
       const fi = Math.max(0, Math.min(frames - 1, Math.floor((performance.now() - act.startMs) / act.frameMs)));

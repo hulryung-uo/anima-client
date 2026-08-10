@@ -1010,3 +1010,47 @@ function bar(id, c, m) { document.getElementById(id).style.width = (m > 0 ? Math
 function set(id, v) { const el = document.getElementById(id); if (el) el.textContent = v; }
 function setStatus(t) { set("status", t); }
 
+
+// ---- death animation (ClassicUO's DisplayDeath + CorpseManager) -------------
+//
+// 0xAF says "this mobile just died". The server then deletes the mobile and
+// drops a corpse item in its place, so by the time the next poll lands there is
+// nothing left to animate — which is why the body used to vanish and a corpse
+// blink into existence.
+//
+// ClassicUO keeps the dying body alive locally under `serial | 0x80000000`,
+// plays its death group once, and holds the corpse item back (`CorpseManager`)
+// until that finishes. Same here: the entity's animation state and last known
+// scene record are kept for the length of the animation, and the item loop
+// skips drawing that corpse while it runs.
+const dyingMobs = new Map();      // "m<serial>" -> { mob, corpse, endsAt, done }
+// Upper bound on how long a body may lie mid-fall. ClassicUO ends it when the
+// animation runs out of frames and immediately if the frames never load; this
+// is the second half of that — without it, art that 404s would leave a body
+// standing over its own corpse forever.
+const DEATH_MAX_MS = 2000;
+let lastDeathSeq = 0;
+function ingestDeaths(s) {
+  const now = performance.now();
+  for (const d of s.deaths || []) {
+    const seq = d.seq | 0;
+    if (seq <= lastDeathSeq) continue;
+    lastDeathSeq = seq;
+    const id = "m" + (d.serial >>> 0);
+    const st = anim.get(id);
+    // The record from the last poll that still listed it — `scene.mobiles` lost
+    // it the moment it died. Nothing rendered for it at all (it died out of
+    // view, or before we ever saw it) means there is no body to fall, so let
+    // the corpse draw immediately.
+    const mob = st && st.mobRec;
+    if (!st || !mob) continue;
+    st.death = { dg: d.dg | 0, startMs: now };
+    dyingMobs.set(id, { mob, corpse: d.corpse >>> 0, endsAt: now + DEATH_MAX_MS, done: false });
+  }
+}
+// Corpse serials whose own sprite is still being stood in for by a falling body.
+function corpseIsDying(serial) {
+  serial = serial >>> 0;
+  for (const d of dyingMobs.values()) if (d.corpse === serial) return true;
+  return false;
+}

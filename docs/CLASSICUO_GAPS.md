@@ -763,8 +763,8 @@ The receive side is generally complete; there is no way to *act*.
 
 ## Tier 3 — rendering fidelity
 
-Shadows; ~~corpse equipment layers~~ (**CLOSED, live-verified** — see below); death animation
-(mobiles do not fall); `light.mul` light shapes/colours (a radius-only light system
+Shadows; ~~corpse equipment layers~~ and ~~death animation~~ (**CLOSED,
+live-verified** — see below); `light.mul` light shapes/colours (a radius-only light system
 exists — `build_scene`'s `lights` list in `scene/mod.rs`); directional lighting on stretched land; seasonal
 land/static graphic remap (the season *system* exists, the remap does not);
 `TileFlag.Translucent` statics drawn opaque; static hue from `statics.mul` discarded
@@ -802,6 +802,38 @@ Verified live on a killed brigand (body 401, death group 21): six layers
 resolved with their AnimIDs and hues, and the rendered corpse shows tunic,
 skirt, shoes and the spear lying across it where the same corpse with the layer
 pass disabled is a bare body.
+
+Closed 2026-08-10 (death animation): the second Tier 3 row. Mobiles fall over
+now instead of blinking into a corpse.
+
+- **0xAF was parsed and half-used.** `display_death` already recorded which
+  corpse belongs to which killer; the animation cue itself — the reason the
+  packet exists — went nowhere. It is now a bounded `recent_deaths` ring beside
+  the other event feeds, carrying the death group the server resolves (the same
+  mobtypes-aware call a corpse's held frame uses, which the browser cannot make
+  for itself).
+- **The dying body has to outlive the mobile.** ServUO deletes the mobile and
+  drops the corpse in the same breath as the cue, so there is nothing left to
+  animate by the time the poll lands. ClassicUO keeps the entity alive locally
+  under `serial | 0x80000000` and holds the corpse's own sprite back
+  (`CorpseManager`) until the animation ends; this does the same with a
+  `dyingMobs` map and a skip in the item loop.
+- **The trap was ordering.** The first cut looked up the dying mobile in
+  `scene.mobiles` and its animation state in `anim` — and found neither, because
+  the cue arrives in the poll *after* it left the scene and `updateAnimStates`
+  had already pruned it. Both now happen while it still exists: the ingest runs
+  before the prune, and each mobile's scene record is stashed on its animation
+  state as it is touched, so the falling body keeps its hue and equipment.
+- **ServUO cannot show the second death pose.** ClassicUO reads 0xAF's third
+  field as `running` and passes it to `GetDeathAction` to pick Die2 over Die1;
+  ServUO's `DeathAnimation` writes a literal 0, so Die1 is the only reachable
+  pose here. Carried through anyway — nothing in the wire format promises that.
+
+Verified live by logging the body sprite's texture every 60ms across a kill:
+`17/1/0/0.png` (orc, stand) → the cue lands → `17/2/0/0,1,2,3` (MONSTER_DIE1,
+each frame in order) → frame 3 held → the entity is released and the corpse
+sprite appears, with the corpse absent from the item pool for exactly that
+window. A canvas capture taken at frame ≥ 1 shows the orc mid-fall.
 
 ---
 
