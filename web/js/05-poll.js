@@ -97,6 +97,7 @@ async function poll() {
     refreshAbilities(); // keep the weapon special-ability bar in sync with the equipped weapon
     renderCombatBook();  // and the combat book's "what you're holding" header (ClassicUO CombatBookGump)
     renderRacialBook();  // race can change under us (ghost body, polymorph) — cheap and signature-gated
+    refreshNetStats();   // link latency + traffic (ClassicUO NetworkStatsGump)
     if (wmOn) drawWorldmap();  // keep the open world map tracking the player
     if (scene.player) hud(scene);
     refreshInfoBar(scene);   // user-chosen readouts (ClassicUO InfoBarManager)

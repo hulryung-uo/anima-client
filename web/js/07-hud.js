@@ -888,3 +888,84 @@ function refreshCounterBar(force) {
     if (it) cell.dataset.serial = String(it.serial >>> 0); else delete cell.dataset.serial;
   }
 }
+
+
+// ---- network stats (ClassicUO's NetworkStatsGump) --------------------------
+//
+// ClassicUO shows one link because it has one: client ⇄ game server. This
+// client has two — browser ⇄ play server ⇄ game server — and a lag reading
+// that silently blamed the wrong hop would be worse than none, so both are
+// shown.
+//
+// The UO half is measured in the driver that owns the socket (`NetStats`): a
+// real 0x73 round trip, ServUO echoing the sequence byte back, averaged over
+// the last five as ClassicUO does. The browser half is the poll this page
+// already times for the diag line.
+//
+// Rates are differenced HERE rather than server-side: ClassicUO recomputes its
+// deltas on a 500ms timer, but the scene arrives on this page's own cadence, so
+// the honest denominator is the time between the two samples we actually saw.
+// ClassicUO's own thresholds, in milliseconds: green under 150, yellow under
+// 200, orange under 300, red beyond.
+const NET_PING_COLORS = [[150, "#46a758"], [200, "#e3c34d"], [300, "#e08a5a"]];
+const NET_BAD_COLOR = "#e5484d";
+let netStatsOn = localStorage.getItem("anima.netStatsOn") === "1";
+let netPrev = null;      // counters as of the last rate tick
+let netRate = { in: 0, out: 0 };
+function toggleNetStats() {
+  netStatsOn = !netStatsOn;
+  document.getElementById("netstats").classList.toggle("on", netStatsOn);
+  localStorage.setItem("anima.netStatsOn", netStatsOn ? "1" : "0");
+  netPrev = null; netRate = { in: 0, out: 0 };   // a fresh window starts fresh
+  if (netStatsOn) refreshNetStats();
+}
+// ClassicUO's `NetStatistics.GetSizeAdaptive`, including its two decimals.
+function netSize(bytes) {
+  let n = bytes, unit = "B";
+  for (const next of ["KB", "MB", "GB"]) {
+    if (n < 1024) break;
+    n /= 1024; unit = next;
+  }
+  return `${Math.round(n * 100) / 100} ${unit}`;
+}
+function netPingColor(ms) {
+  for (const [limit, color] of NET_PING_COLORS) if (ms < limit) return color;
+  return NET_BAD_COLOR;
+}
+function refreshNetStats() {
+  if (!netStatsOn) return;
+  const host = document.getElementById("ns-body");
+  const n = scene && scene.net;
+  if (!host || !n) return;
+  // Rates over a full second, recomputed once a second. The poll is 150ms, and
+  // differencing per poll made the number flicker to 0 the instant traffic
+  // paused — true, and useless. ClassicUO's 500ms delta timer exists for the
+  // same reason.
+  const now = performance.now();
+  if (!netPrev) netPrev = { t: now, in: n.in, out: n.out };
+  const dt = (now - netPrev.t) / 1000;
+  if (dt >= 1) {
+    netRate = { in: (n.in - netPrev.in) / dt, out: (n.out - netPrev.out) / dt };
+    netPrev = { t: now, in: n.in, out: n.out };
+  }
+  // Microseconds on the wire, null until a ping has come back. A shard on this
+  // machine answers in a few hundred µs, so print sub-millisecond times as
+  // such instead of rounding them to the "0 ms" ClassicUO shows there.
+  const us = n.pingUs;
+  const ping = us == null ? null : us / 1000;
+  const pingText = ping == null ? "no reply yet"
+    : ping < 1 ? `${ping.toFixed(2)} ms` : `${Math.round(ping)} ms`;
+  const sig = [us, n.in, n.out, n.pin, n.pout,
+    Math.round(netRate.in), Math.round(netRate.out), Math.round(diag.poll)].join(":");
+  if (host._sig === sig) return;
+  host._sig = sig;
+  host.innerHTML =
+    `<div class="ns-hdr">game server (0x73 round trip)</div>`
+    + `<div class="ns-row"><span>Ping</span><span style="color:${ping == null ? "#6b7280" : netPingColor(ping)}">${pingText}</span></div>`
+    + `<div class="ns-row"><span>In</span><span>${netSize(netRate.in)}/s</span></div>`
+    + `<div class="ns-row"><span>Out</span><span>${netSize(netRate.out)}/s</span></div>`
+    + `<div class="ns-row ns-tot"><span>Total</span><span>${netSize(n.in)} in · ${netSize(n.out)} out</span></div>`
+    + `<div class="ns-row ns-tot"><span>Packets</span><span>${n.pin} in · ${n.pout} out</span></div>`
+    + `<div class="ns-hdr">this page (HTTP poll)</div>`
+    + `<div class="ns-row"><span>Scene fetch</span><span>${diag.poll.toFixed(0)} ms</span></div>`;
+}

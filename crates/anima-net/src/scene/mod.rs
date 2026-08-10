@@ -402,6 +402,18 @@ pub fn build_scene(
     }))
     .unwrap_or_else(|_| "null".into());
     let aos = s.world.aos;
+    // What the link to the game server is doing (ClassicUO's NetStatistics).
+    // Totals, not rates: the browser polls this on its own cadence and can
+    // difference them itself, which beats a second timer here guessing at a
+    // window it cannot see.
+    let net = json!({
+        // Microseconds, and null until a ping has actually come back: this
+        // server is usually on the same machine as the shard, where a whole
+        // millisecond is several round trips.
+        "pingUs": s.stats.ping_us(),
+        "in": s.stats.bytes_in, "out": s.stats.bytes_out,
+        "pin": s.stats.packets_in, "pout": s.stats.packets_out,
+    });
     // The weapon special move armed for the next swing (0 = none). The bar used
     // to track this purely client-side, which meant its highlight outlived every
     // use: the server takes the arm away with 0xBF/0x21 and says nothing else.
@@ -493,6 +505,7 @@ pub fn build_scene(
          \"armedAbility\":{armed_ability},\"activeSpells\":{active_spells},\"chat\":{chat},\"bboard\":{bboard},\"contGumps\":{container_gumps},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
          \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps}{placement_field}{house_design_field},\
+         \"net\":{net},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",
         s.confirms, s.denies
     )

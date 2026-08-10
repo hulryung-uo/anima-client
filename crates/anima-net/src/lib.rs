@@ -188,7 +188,12 @@ const PUMP_READ_TIMEOUT: Duration = Duration::from_millis(20);
 
 /// Keepalive-ping cadence (0x73). A client that sends nothing for long enough is
 /// dropped by the server's idle timeout; ClassicUO pings on a similar heartbeat.
-const PING_INTERVAL: Duration = Duration::from_secs(30);
+/// How often the 0x73 keepalive goes out. ClassicUO pings once a second
+/// (`GameScene.Update`: `_timePing = Time.Ticks + 1000`) and averages the last
+/// five, which is also what makes the number worth showing; a 30-second
+/// keepalive kept the connection alive but measured latency once every half
+/// minute. Two bytes a second each way.
+const PING_INTERVAL: Duration = Duration::from_secs(1);
 /// Draw range (tiles) we advertise to the server on world entry (0xC8). 18 is
 /// the classic-client default; the server uses it to decide what falls in view.
 const DEFAULT_VIEW_RANGE: u8 = 18;
@@ -531,6 +536,71 @@ pub struct Session {
     last_ping: Instant,
     /// Rolling sequence byte for the keepalive ping.
     ping_seq: u8,
+    /// Traffic + latency counters for the UO socket (see [`NetStats`]).
+    pub stats: NetStats,
+}
+
+/// What the link to the game server is actually doing — ClassicUO's
+/// `NetStatistics`, measured where it can be measured: here, in the driver that
+/// owns the socket, not in the sans-IO core that has neither a socket nor a
+/// clock.
+///
+/// The ping is a real round trip, not an estimate: 0x73 carries a sequence byte
+/// and ServUO echoes it back untouched (`PacketHandlers.PingReq` →
+/// `PingAck.Instantiate(pvSrc.ReadByte())`), so the reply identifies which send
+/// it answers. Like ClassicUO we keep the last five and average the ones that
+/// have come back.
+#[derive(Debug, Clone, Default)]
+pub struct NetStats {
+    /// Bytes read off the socket since login. Counted before decompression, so
+    /// this is what actually crossed the wire — the game phase is Huffman-coded
+    /// server→client and the decoded stream is much larger.
+    pub bytes_in: u64,
+    /// Bytes written to the socket since login.
+    pub bytes_out: u64,
+    /// Complete game packets decoded since login.
+    pub packets_in: u64,
+    /// Packets sent since login.
+    pub packets_out: u64,
+    /// Round-trip times of the last five pings, in **microseconds**; `None` =
+    /// that slot has not answered yet.
+    ///
+    /// ClassicUO stores milliseconds and uses 0 for "unanswered"
+    /// (`NetStatistics.Ping` skips zero slots), which cannot tell a link faster
+    /// than a millisecond from a link that never replied — against a shard on
+    /// the same machine, as here, its gump reads 0 ms forever. Microseconds and
+    /// an explicit `None` separate the two.
+    pings: [Option<u32>; 5],
+    /// Which slot the next ping will use, and when it went out.
+    ping_idx: usize,
+    ping_sent: Option<(u8, Instant)>,
+}
+
+impl NetStats {
+    /// Mean round trip of the pings that have come back, in microseconds.
+    /// `None` before the first reply, which is a different thing from a fast
+    /// link and is shown as a different thing.
+    pub fn ping_us(&self) -> Option<u32> {
+        let answered: Vec<u32> = self.pings.iter().filter_map(|&p| p).collect();
+        if answered.is_empty() {
+            return None;
+        }
+        Some((answered.iter().map(|&p| p as u64).sum::<u64>() / answered.len() as u64) as u32)
+    }
+
+    /// A 0x73 came back. Only the sequence byte we are waiting on counts — a
+    /// stale echo (or a server that answers twice) must not be timed against
+    /// the newest send.
+    fn ping_echo(&mut self, seq: u8) {
+        if let Some((sent_seq, at)) = self.ping_sent {
+            if sent_seq == seq {
+                let slot = self.ping_idx % self.pings.len();
+                self.pings[slot] = Some(at.elapsed().as_micros().min(u32::MAX as u128) as u32);
+                self.ping_idx = self.ping_idx.wrapping_add(1);
+                self.ping_sent = None;
+            }
+        }
+    }
 }
 
 impl Session {
@@ -587,6 +657,7 @@ impl Session {
             logout_immediate: false,
             last_ping: Instant::now(),
             ping_seq: 0,
+            stats: NetStats::default(),
         };
         // ServUO doesn't push our stats/skills unsolicited — request them so the
         // first Observation carries them (ClassicUO does the same on login).
@@ -1367,13 +1438,19 @@ impl Session {
         // dropped. pump_once runs on a tight loop, so gate on the interval.
         if self.last_ping.elapsed() >= PING_INTERVAL {
             self.send(&build_ping(self.ping_seq))?;
+            // Remember which sequence is outstanding so the echo can be timed;
+            // an unanswered one is simply overwritten by the next send.
+            self.stats.ping_sent = Some((self.ping_seq, Instant::now()));
             self.ping_seq = self.ping_seq.wrapping_add(1);
             self.last_ping = Instant::now();
         }
         let mut buf = [0u8; 8192];
         match self.stream.read(&mut buf) {
             Ok(0) => return Err(DriverError::ConnectionClosed),
-            Ok(n) => self.decoder.feed(&buf[..n]),
+            Ok(n) => {
+                self.stats.bytes_in += n as u64;
+                self.decoder.feed(&buf[..n]);
+            }
             Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
                 return Ok(0)
             }
@@ -1383,6 +1460,7 @@ impl Session {
         loop {
             match self.decoder.pop() {
                 Ok(Some(frame)) => {
+                    self.stats.packets_in += 1;
                     self.handle_frame(&frame)?;
                     applied += 1;
                 }
@@ -1425,7 +1503,7 @@ impl Session {
                 // (ClassicUO ConfirmWalk isBadStep → Send_Resync). Walking stays
                 // gated (Walker.walking_failed) until the server replies with a deny.
                 if let Some(pkt) = self.walker.take_resync() {
-                    self.stream.write_all(&pkt)?;
+                    self.send(&pkt)?;
                 }
             }
             // 0x21 DenyWalk: [id][seq][x:u16][y:u16][dir:u8][z:i8]
@@ -1438,10 +1516,13 @@ impl Session {
                 let z = frame[7] as i8;
                 self.walker.on_deny(&mut self.world, seq, x, y, z, dir);
             }
+            // 0x73 Ping echo: ServUO sends back the sequence byte we chose, which
+            // is what makes this a round-trip measurement rather than a guess.
+            // Timed here rather than in the core, which has no clock by design.
+            Some(0x73) if frame.len() >= 2 => self.stats.ping_echo(frame[1]),
             // 0xBD ClientVersion request — must answer or the server denies movement.
             Some(0xBD) => {
-                self.stream
-                    .write_all(&build_client_version(CLIENT_VERSION))?;
+                self.send(&build_client_version(CLIENT_VERSION))?;
             }
             _ => {
                 // A server-pushed jump of the player's tile (>1 step) is a teleport
@@ -1508,7 +1589,7 @@ impl Session {
     /// to receive the confirm/deny. Returns whether a packet was sent.
     pub fn walk(&mut self, dir: u8, run: bool) -> Result<bool, DriverError> {
         if let Some(packet) = self.walker.step(&mut self.world, dir, run) {
-            self.stream.write_all(&packet)?;
+            self.send(&packet)?;
             Ok(true)
         } else {
             Ok(false)
@@ -1579,6 +1660,8 @@ impl Session {
     /// Send a pre-built packet to the server (client→server is uncompressed).
     pub fn send(&mut self, bytes: &[u8]) -> Result<(), DriverError> {
         self.stream.write_all(bytes)?;
+        self.stats.bytes_out += bytes.len() as u64;
+        self.stats.packets_out += 1;
         Ok(())
     }
 }
@@ -1716,6 +1799,58 @@ fn connect_game_server(
         }
     }
     connect(login)
+}
+
+#[cfg(test)]
+mod net_stats_tests {
+    use super::*;
+
+    #[test]
+    fn ping_averages_only_answered_slots() {
+        let mut st = NetStats::default();
+        // Nothing has come back yet — distinct from "the link is instant".
+        assert_eq!(st.ping_us(), None);
+        st.pings = [Some(10_000), Some(20_000), Some(30_000), None, None];
+        assert_eq!(
+            st.ping_us(),
+            Some(20_000),
+            "unanswered slots must not drag the mean to 12ms"
+        );
+        // A localhost round trip is a few hundred microseconds. ClassicUO would
+        // store 0 here and its own filter would then discard it as "no reply".
+        st.pings = [Some(180), None, None, None, None];
+        assert_eq!(st.ping_us(), Some(180));
+    }
+
+    #[test]
+    fn only_the_outstanding_sequence_is_timed() {
+        let mut st = NetStats {
+            ping_sent: Some((7, Instant::now())),
+            ..Default::default()
+        };
+        // A stale echo (a different sequence, or a duplicate of one already
+        // consumed) must not be timed against the send we are still waiting on.
+        st.ping_echo(6);
+        assert_eq!(st.ping_idx, 0);
+        assert!(st.ping_sent.is_some());
+        st.ping_echo(7);
+        assert_eq!(st.ping_idx, 1);
+        assert!(st.ping_sent.is_none(), "the answered send is cleared");
+        st.ping_echo(7);
+        assert_eq!(st.ping_idx, 1, "a second copy of the same echo is ignored");
+    }
+
+    #[test]
+    fn ping_slots_wrap_over_five() {
+        let mut st = NetStats::default();
+        for seq in 0..7u8 {
+            st.ping_sent = Some((seq, Instant::now()));
+            st.ping_echo(seq);
+        }
+        assert_eq!(st.ping_idx, 7);
+        // Seven answers, five slots: the ring holds the newest five.
+        assert!(st.pings.iter().all(|p| p.is_some()));
+    }
 }
 
 #[cfg(test)]

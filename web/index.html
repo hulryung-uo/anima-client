@@ -681,6 +681,16 @@
       .rcb-row.active .rcb-tag { color: #d9a441; }
       .rcb-desc { font-size: 11px; color: #b6bcc6; line-height: 1.4; margin-top: 2px; }
       .rcb-none { font-size: 11px; color: #6b7280; line-height: 1.4; }
+      /* ---- network stats (ClassicUO NetworkStatsGump) ---- */
+      #netstats { top: 60px; left: 210px; width: 210px; display: none; }
+      #netstats.on { display: block; }
+      .ns-hdr { font-size: 9px; letter-spacing: .08em; text-transform: uppercase;
+                color: #6b7280; margin: 6px 0 3px; }
+      .ns-hdr:first-child { margin-top: 0; }
+      .ns-row { display: flex; justify-content: space-between; gap: 10px; font-size: 11px;
+                color: #c7d0dc; padding: 1px 0; }
+      .ns-row span:first-child { color: #8a929c; }
+      .ns-row.ns-tot span { color: #6b7280; font-size: 10px; }
       /* ---- skills window (0x3A) ---- */
       #skills { top: 60px; right: 16px; width: 280px; display: none; }
       #statusbar { top: 60px; left: 210px; width: 170px; display: none; }
@@ -1313,6 +1323,11 @@
         <div id="cbk-equipped"></div>
         <div id="cbk-list"></div>
       </div>
+    </div>
+    <div id="netstats" class="gump-win">
+      <div class="gump-title" id="ns-title"><span>NETWORK</span>
+        <span class="gump-close" id="ns-close">&#10005;</span></div>
+      <div class="gump-body"><div id="ns-body"></div></div>
     </div>
     <div id="racialbook" class="gump-win">
       <div class="gump-title" id="rcb-title"><span>RACIAL ABILITIES</span>

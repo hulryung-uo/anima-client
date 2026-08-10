@@ -112,6 +112,9 @@ async function main() {
   makeDraggable(document.getElementById("racialbook"), document.getElementById("rcb-title"));
   document.getElementById("rcb-close").addEventListener("click", toggleRacialBook);
   if (rcbOn) loadAbilityText();
+  document.getElementById("netstats").classList.toggle("on", netStatsOn);
+  makeDraggable(document.getElementById("netstats"), document.getElementById("ns-title"));
+  document.getElementById("ns-close").addEventListener("click", toggleNetStats);
   restoreJournalHeight();
   setupItemDnD();
   initFx();
