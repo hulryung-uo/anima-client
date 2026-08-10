@@ -1190,3 +1190,66 @@ function notoColor(n) {
 }
 const cssColor = (n) => "#" + (n >>> 0).toString(16).padStart(6, "0");
 
+
+// ---- corpse equipment layers (ClassicUO ItemView.DrawCorpse) ----------------
+//
+// A corpse is drawn as the dead body's held death-pose frame; these are the
+// clothes and weapons over it. ServUO sends both halves unprompted for a human
+// corpse (`Corpse.SendInfoTo` → CorpseContent + CorpseEquip), and non-human
+// corpses get neither — which is the server side of the same `ishuman` test
+// ClassicUO applies before drawing any layer at all, so an orc corpse correctly
+// stays bare.
+//
+// Everything below reuses the living-mobile machinery: the per-direction
+// `LAYER_ORDER_DIR`, the `isCovered` suppression rules, and `centerFor`'s
+// per-frame draw-centers. Only the anchoring is new, because a corpse layer
+// hangs off the body sprite instead of standing on its own.
+
+// Which layers this corpse would draw, in order, as a change key.
+function corpseLayerSig(it) {
+  const d = it.dir & 7;
+  return (it.equip || [])
+    .filter((e) => (e.anim | 0) > 0 && layerRank(e.layer, d) >= 0)
+    .map((e) => `${e.layer}:${e.anim}:${e.hue | 0}`)
+    .join(",");
+}
+// Attach one child sprite per worn layer to the corpse's body sprite.
+// `bodyH`/`bodyC` are the body frame's height and draw-center, which is what
+// the offsets are measured against.
+// Returns false when a layer's art or centers had not loaded yet, so the caller
+// knows to rebuild on a later poll.
+function attachCorpseLayers(sp, it, frame, bodyH, bodyC) {
+  const d = it.dir & 7, dg = it.dg | 0;
+  const byLayer = {};
+  for (const e of it.equip || []) byLayer[e.layer] = e;
+  const worn = (it.equip || [])
+    .filter((e) => (e.anim | 0) > 0 && layerRank(e.layer, d) >= 0 && !isCovered(byLayer, e.layer))
+    .sort((a, b) => layerRank(a.layer, d) - layerRank(b.layer, d));
+  let complete = true;
+  for (const e of worn) {
+    // Kick the layer's animinfo so `centerFor` can resolve; without a center a
+    // layer would foot-anchor and sit below the body, which is the same trap
+    // the living-mobile path documents.
+    const n = framesFor(e.anim, dg, d);
+    // A worn layer can have fewer frames than the body's death pose. ClassicUO
+    // clamps to the layer's own count (`if (animIndex >= fc) animIndex = fc-1`)
+    // rather than dropping it.
+    const idx = Math.min(frame, Math.max(0, n - 1));
+    const url = `anim/${e.anim}/${dg}/${d}/${idx}.png${e.hue ? `?hue=${e.hue}` : ""}`;
+    const t = texFor(url);
+    const c = centerFor(e.anim, dg, d, idx);
+    // Not loaded yet: skip it this poll and report the corpse as incomplete, so
+    // the caller re-runs next poll instead of leaving the layer off for good —
+    // the change key tracks the layer list, not the state of its fetches.
+    if (!t || !c) { complete = false; continue; }
+    const layer = new PIXI.Sprite(t);
+    layer.anchor.set(0, 0);
+    // Both sprites are placed by their own draw-center against the same origin,
+    // so the child's offset is just the difference of the two placements.
+    layer.x = bodyC[0] - c[0];
+    layer.y = (bodyH + bodyC[1]) - (t.height + c[1]);
+    layer.eventMode = "none";     // the body owns the hit test, as in ClassicUO
+    sp.addChild(layer);
+  }
+  return complete;
+}

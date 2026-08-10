@@ -763,7 +763,7 @@ The receive side is generally complete; there is no way to *act*.
 
 ## Tier 3 — rendering fidelity
 
-Shadows; corpse equipment layers (corpses render as a bare body); death animation
+Shadows; ~~corpse equipment layers~~ (**CLOSED, live-verified** — see below); death animation
 (mobiles do not fall); `light.mul` light shapes/colours (a radius-only light system
 exists — `build_scene`'s `lights` list in `scene/mod.rs`); directional lighting on stretched land; seasonal
 land/static graphic remap (the season *system* exists, the remap does not);
@@ -771,6 +771,37 @@ land/static graphic remap (the season *system* exists, the remap does not);
 at decode; mount rider vertical offset; seated-character deformation; roof/ceiling
 fading; 0x23 DragEffect decoded but never drawn; GameEffect blend modes and
 projectile rotation; StaticFilters (tree→stumps, hide vegetation).
+
+Closed 2026-08-10 (corpse equipment layers): the first Tier 3 row. A corpse
+already drew the dead thing's held death-pose frame; now it wears what it died
+in.
+
+- **The data was already in the world, twice over.** 0x89 CorpseEquip has been
+  parsed into `World::corpse_equip` all along with no consumer, and the items
+  themselves arrive beside it: ServUO's `Corpse.SendInfoTo` sends
+  `CorpseContent` *and* `CorpseEquip` unprompted — but only when
+  `((Body)Amount).IsHuman`, which is the server half of the same `ishuman` test
+  ClassicUO applies before drawing any layer. So a non-human corpse stays bare
+  on both sides, without either needing a rule for it.
+- **The layers reuse the living-mobile path**: the per-direction
+  `LAYER_ORDER_DIR` (ClassicUO's `LayerOrder.UsedLayers`), the `isCovered`
+  suppression rules, and `centerFor`'s per-frame draw-centers. Each layer is a
+  child of the corpse's body sprite, so it inherits position, depth and the
+  boat/transparency passes; only the offset between the two draw-centers is
+  computed here. A layer with fewer frames than the death pose is clamped to its
+  own last frame, as ClassicUO does.
+- **One divergence found by looting.** 0x89 is a one-shot snapshot and nothing
+  on the wire retracts it, so the first cut left a corpse still wearing the
+  sword you had just taken off it. ClassicUO never faces this: it stores the
+  layer on the item and asks `FindItemByLayer`, a search of the corpse's *live*
+  contents. The scene now asks the same question — an entry is drawn only while
+  the item's container is still the corpse. Verified by taking a helm: five
+  layers to four, in the scene and in the sprite tree, within one poll.
+
+Verified live on a killed brigand (body 401, death group 21): six layers
+resolved with their AnimIDs and hues, and the rendered corpse shows tunic,
+skirt, shoes and the spear lying across it where the same corpse with the layer
+pass disabled is a bare body.
 
 ---
 

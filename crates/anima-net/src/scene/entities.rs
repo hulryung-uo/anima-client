@@ -154,6 +154,15 @@ pub(super) fn items_json(world: &World, look: &Look, px: i64, py: i64, max_z: i3
                 let (body, hue) = look.remap_corpse(it.amount, it.hue);
                 let dg = look.anim.map_or(0, |a| a.death_group(body));
                 merge_obj(&mut v, corpse_fields(body, hue, it.direction, dg));
+                // What it died wearing. ClassicUO draws these over the death
+                // pose exactly as it draws a living mobile's worn layers
+                // (`ItemView.DrawCorpse` walks `LayerOrder.UsedLayers`), and
+                // the data has been sitting in `World::corpse_equip` — parsed
+                // from 0x89 — with nowhere to go.
+                let equip = corpse_equip_json(world, look, it.serial, body);
+                if !equip.is_empty() {
+                    v["equip"] = json!(equip);
+                }
             }
             v
         })
@@ -211,6 +220,50 @@ pub(super) fn equip_json(
                 v["gump"] = json!(g);
             }
             v
+        })
+        .collect()
+}
+
+/// A corpse's worn layers, resolved for drawing: 0x89 CorpseEquip gives
+/// `(layer, item serial)` pairs and the items themselves arrive with it —
+/// ServUO's `Corpse.SendInfoTo` sends `CorpseContent` and `CorpseEquip`
+/// together, unprompted, for any human corpse — so everything needed is already
+/// in the world.
+///
+/// Same resolution a living mobile's equipment gets: tiledata AnimID, then the
+/// `Equipconv.def` override keyed by the wearer's body, then the PartialHue
+/// encoding. `body` is the Corpse.def-remapped body the death frame is drawn
+/// with, so a conversion keyed to it lines up with the frame underneath.
+///
+/// Layers with no AnimID (a backpack, a container of loot) are dropped: they
+/// have no world sprite, which is also why ClassicUO's per-direction layer
+/// order has no slot for them.
+pub(super) fn corpse_equip_json(world: &World, look: &Look, corpse: u32, body: u16) -> Vec<Value> {
+    let Some(entries) = world.corpse_equip.get(&corpse) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|&(layer, serial)| {
+            let it = world.items.get(&serial)?;
+            // Still *on* the corpse. 0x89 is a one-shot snapshot of what it died
+            // wearing and nothing on the wire retracts it, so looting the sword
+            // would otherwise leave the corpse holding it forever. ClassicUO
+            // never has to think about this because it stores the layer on the
+            // item and asks `FindItemByLayer` — a search of the corpse's *live*
+            // contents — which is the same question this line asks.
+            if it.container != Some(corpse) {
+                return None;
+            }
+            let (anim, _, hue) = look.equip_conv(body, look.item_anim(it.graphic), it.hue);
+            if anim == 0 {
+                return None;
+            }
+            Some(json!({
+                "layer": layer, "anim": anim,
+                "hue": look.item_hue(it.graphic, hue),
+                "serial": serial, "g": it.graphic,
+            }))
         })
         .collect()
 }

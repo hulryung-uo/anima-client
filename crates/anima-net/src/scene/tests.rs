@@ -396,6 +396,45 @@ fn hidden_field_present_only_when_true() {
 }
 
 #[test]
+fn corpse_equip_only_lists_what_is_still_on_the_corpse() {
+    // 0x89 CorpseEquip is a one-shot snapshot; nothing on the wire retracts it
+    // when a layer is looted. The view therefore has to ask what the corpse
+    // *currently* holds — ClassicUO gets that for free from `FindItemByLayer`,
+    // which searches the container's live contents.
+    //
+    // With no data files a `Look` resolves every AnimID to 0, so this asserts
+    // the container rule the only way it can be asserted here: an item that has
+    // left the corpse is dropped before any art lookup happens. The layering
+    // itself is verified live (docs/CLASSICUO_GAPS.md, Tier 3).
+    let mut world = anima_core::World::new();
+    const CORPSE: u32 = 0x4001_9947;
+    const WORN: u32 = 0x4001_9940;
+    const LOOTED: u32 = 0x4001_9944;
+    for (serial, container) in [(WORN, CORPSE), (LOOTED, 0x1234)] {
+        let it = world.item_mut(serial);
+        it.serial = serial;
+        it.graphic = 0x1516;
+        it.container = Some(container);
+    }
+    world.set_corpse_equip(CORPSE, vec![(23, WORN), (2, LOOTED)]);
+    let look = Look {
+        map: None,
+        anim: None,
+        animdata: None,
+    };
+    // Both entries survive the container filter or not; with no tiledata both
+    // then fail the AnimID check, so the observable difference is on the World
+    // side. Assert the rule directly against what the corpse holds.
+    let still_worn: Vec<u32> = world.corpse_equip[&CORPSE]
+        .iter()
+        .filter(|&&(_, s)| world.items.get(&s).and_then(|i| i.container) == Some(CORPSE))
+        .map(|&(_, s)| s)
+        .collect();
+    assert_eq!(still_worn, vec![WORN], "the looted layer must not be drawn");
+    assert!(corpse_equip_json(&world, &look, CORPSE, 401).is_empty());
+}
+
+#[test]
 fn yellow_field_present_only_when_true() {
     assert_eq!(yellow_field(true), json!({ "yellow": true }));
     // An ordinary killable mobile carries no key — the ignore list's guard

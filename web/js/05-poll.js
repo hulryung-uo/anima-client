@@ -532,7 +532,12 @@ function syncWorld(s) {
     // came back with frameCount 0.
     const iHue = it.g === 0x2006 ? 0 : (it.hue | 0);
     const hueQ = hueQuery(iHue);
-    if (e && e.g === stackG && e.hue === iHue && e.x === it.x && e.y === it.y && e.z === iz && e.corpseUrl === corpseUrl) continue; // unchanged; see the blanket LRU-touch note above
+    // A corpse's worn layers change as it is looted — every item taken leaves
+    // the CorpseEquip list, and the sprite has to lose that layer with it. So
+    // the equipment is part of the change key, not just the body frame.
+    const corpseEquipSig = corpseUrl ? corpseLayerSig(it) : "";
+    if (e && e.g === stackG && e.hue === iHue && e.x === it.x && e.y === it.y && e.z === iz
+        && e.corpseUrl === corpseUrl && e.equipSig === corpseEquipSig) continue; // unchanged; see the blanket LRU-touch note above
     const itemTexUrl = corpseUrl || `art/static/${stackG}.png${hueQ}`;
     const tex = corpseTex || texFor(itemTexUrl);
     if (!tex) continue; // await art, retry next poll
@@ -550,6 +555,15 @@ function syncWorld(s) {
       sp.anchor.set(0.5, 1.0);
       sp.x = x; sp.y = y + HALF;
     }
+    // WORN LAYERS over the death pose, in the same per-direction order and with
+    // the same per-frame draw-centers a living mobile's clothes use — this is
+    // ClassicUO's `DrawCorpse`, which walks `LayerOrder.UsedLayers` and draws
+    // each layer's own AnimID at the body's group/frame/direction.
+    //
+    // Parented to the body sprite rather than added to `world` separately, so
+    // they inherit its position, depth and the boat/transparency passes for
+    // free; only the offset between the two draw-centers is ours to compute.
+    const layersDone = (corpseUrl && c) ? attachCorpseLayers(sp, it, corpseFrame, tex.height, c) : true;
     sp.zIndex = depthZ(it.x, it.y, it.pz ?? iz, 5); // bias 5: just above same-tile statics
     sp._boatSerial = it.serial >>> 0;
     sp._boatBaseX = it.x; sp._boatBaseY = it.y; sp._boatBaseZ = iz;
@@ -585,7 +599,10 @@ function syncWorld(s) {
       animatedStatics.add(sp);
     }
     world.addChild(sp);
-    itemPool.set(key, { sp, g: stackG, hue: iHue, x: it.x, y: it.y, z: iz, corpseUrl, url: itemTexUrl });
+    // A corpse whose layer art is still loading stores no signature, so the next
+    // poll rebuilds it with the frames that have since arrived.
+    itemPool.set(key, { sp, g: stackG, hue: iHue, x: it.x, y: it.y, z: iz, corpseUrl, url: itemTexUrl,
+                        equipSig: layersDone ? corpseEquipSig : null });
     markDirty();
   }
   for (const [k, e] of itemPool) {
