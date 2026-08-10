@@ -6,6 +6,10 @@
 //! [`World`] from the server's game-packet stream. The browser build will have
 //! an analogous WebSocket driver; the core stays identical.
 
+// The scene builder's `json!` player literal outgrew rustc's default macro
+// recursion depth as fields were added (same reason anima-contract-json raises
+// it). Nothing here recurses at run time.
+#![recursion_limit = "512"]
 use std::collections::{HashMap, HashSet};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
@@ -40,9 +44,9 @@ use anima_core::net::outgoing::{
     build_profile_update, build_prompt_response, build_quest_arrow_click, build_quest_menu_request,
     build_rename_request, build_say, build_sell, build_single_click, build_skill_lock,
     build_stat_lock, build_status_request, build_stun_request, build_target_response,
-    build_text_entry_dialog_response, build_tip_request, build_trade_accept, build_trade_cancel,
-    build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
-    BOAT_SPEED_FAST, BOAT_SPEED_SLOW, BOAT_SPEED_STOP, OPL_REQUEST_BATCH,
+    build_text_entry_dialog_response, build_tip_request, build_toggle_flying, build_trade_accept,
+    build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability, build_use_skill,
+    build_war_mode, BOAT_SPEED_FAST, BOAT_SPEED_SLOW, BOAT_SPEED_STOP, OPL_REQUEST_BATCH,
 };
 use anima_core::net::{
     apply_packet, build_client_version, walk_pacing, CharacterChoice, CharacterPrompt,
@@ -769,6 +773,7 @@ impl Session {
             }
             Action::DisarmRequest => self.send(&build_disarm_request())?,
             Action::StunRequest => self.send(&build_stun_request())?,
+            Action::ToggleFlying => self.send(&build_toggle_flying())?,
             Action::BandageTarget { bandage, target } => {
                 // target 0 = "myself" (see the Action's doc).
                 let target = if *target != 0 {

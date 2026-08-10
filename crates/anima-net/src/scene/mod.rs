@@ -254,6 +254,12 @@ pub fn build_scene(
         "followers": st.followers, "followersMax": st.followers_max,
         "luck": st.luck, "damageMin": st.damage_min, "damageMax": st.damage_max,
         "tithing": st.tithing_points,
+        // 0x11's ML race byte (1 human / 2 elf / 3 gargoyle). 0 = the shard
+        // never sent one — every pre-ML server, this one included — and the
+        // renderer falls back to ClassicUO's other rule, the body graphic
+        // (`Mobile.CheckGraphicChange`). The racial-abilities book is the only
+        // thing that needs it.
+        "race": st.race,
         // Stat training locks (0 up / 1 down / 2 locked) — the `statlock`
         // command's other half, so the UI can show what it is toggling.
         "strLock": st.str_lock, "dexLock": st.dex_lock, "intLock": st.int_lock,

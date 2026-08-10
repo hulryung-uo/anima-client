@@ -371,6 +371,83 @@ function renderCombatBook(force) {
     });
 }
 
+// --- racial abilities book (ClassicUO's RacialAbilitiesBookGump) -------------
+//
+// What your race gives you for free. Four entries for a human, six for an elf,
+// five for a gargoyle, and all of them passive except the gargoyle's Flying —
+// the one racial ability that is *used* rather than merely possessed, which is
+// why it is the only one with a packet behind it (0xBF/0x32).
+//
+// Names are ClassicUO's; the descriptions come from cliloc through the same
+// `/abilities.json` the combat book fetches (1112198/1112202/1112208 + i,
+// ClassicUO's tooltip ids), so both books share one request.
+const RACES = {
+  1: { name: "Human", icon0: 0x5DD0,
+       abilities: ["Strong Back", "Tough", "Workhorse", "Jack of All Trades"] },
+  2: { name: "Elf", icon0: 0x5DD4,
+       abilities: ["Night Sight", "Infused with Magic", "Knowledge of Nature",
+                   "Difficult to Track", "Perception", "Wisdom"] },
+  3: { name: "Gargoyle", icon0: 0x5DDA,
+       abilities: ["Flying", "Berserk", "Master Artisan", "Deadly Aim", "Mystic Insight"],
+       active: 0 },        // index of the one you can actually press
+};
+// Body graphic → race, ClassicUO's `Mobile.CheckGraphicChange` table.
+const RACE_BODIES = { 0x0190: 1, 0x0192: 1, 0x0191: 1, 0x0193: 1,
+                      0x025D: 2, 0x025E: 2, 0x029A: 3, 0x029B: 3 };
+let lastRace = 0;
+// The 0x11 race byte when the shard sends one, else the body. A pre-ML server
+// (this one) never sends it, so the body is the whole answer in practice; a
+// ghost body is in neither table, hence the sticky last value rather than
+// "unknown" the moment you die.
+function playerRace() {
+  const p = scene && scene.player;
+  if (!p) return lastRace;
+  const byte = p.race | 0;
+  const race = (byte >= 1 && byte <= 3) ? byte : (RACE_BODIES[(p.body | 0) & 0xFFFF] || 0);
+  if (race) lastRace = race;
+  return lastRace;
+}
+let rcbOn = localStorage.getItem("anima.racialBookOn") === "1";
+function toggleRacialBook() {
+  rcbOn = !rcbOn;
+  document.getElementById("racialbook").classList.toggle("on", rcbOn);
+  localStorage.setItem("anima.racialBookOn", rcbOn ? "1" : "0");
+  if (rcbOn) { loadAbilityText(); renderRacialBook(true); }
+}
+function renderRacialBook(force) {
+  if (!rcbOn) return;
+  const head = document.getElementById("rcb-race");
+  const host = document.getElementById("rcb-list");
+  if (!head || !host) return;
+  const id = playerRace();
+  const race = RACES[id];
+  const sig = `${id}:${cbkText ? 1 : 0}`;
+  if (!force && host._sig === sig) return;
+  host._sig = sig;
+  if (!race) {
+    head.textContent = "";
+    host.innerHTML = '<div class="rcb-none">Race unknown — the shard sent no race byte and the body is not one of the six player bodies.</div>';
+    return;
+  }
+  // Say which of the two sources answered: on a pre-ML shard the race byte is
+  // absent and the body is all we have, which is worth showing rather than
+  // implying the server told us.
+  const fromByte = ((scene && scene.player && scene.player.race) | 0) >= 1;
+  head.innerHTML = `<span class="rcb-name">${race.name}</span>`
+    + `<span class="rcb-src">${fromByte ? "from the 0x11 race byte" : "inferred from body " + ((scene && scene.player && scene.player.body) | 0)}</span>`;
+  const descs = (cbkText && cbkText.racial && cbkText.racial[String(id)]) || [];
+  host.innerHTML = race.abilities.map((name, i) => {
+    const active = race.active === i;
+    return `<div class="rcb-row${active ? " active" : ""}"${active ? ' data-active="1"' : ""}>`
+      + `<img class="rcb-icon" src="gump/${race.icon0 + i}.png" alt="" onerror="this.style.visibility='hidden'">`
+      + `<div class="rcb-txt"><div class="rcb-hdr"><span class="rcb-ab">${name}</span>`
+      + `<span class="rcb-tag">${active ? "double-click to use" : "Passive"}</span></div>`
+      + `<div class="rcb-desc">${descs[i] || ""}</div></div></div>`;
+  }).join("");
+  for (const el of host.querySelectorAll('.rcb-row[data-active="1"]'))
+    el.addEventListener("dblclick", () => sendInput("flying"));
+}
+
 // --- spellbook (all schools, toggled by the 'K' key; ✕/Esc close) ---
 // The cast packet (0xBF/0x1C, Action::CastSpell) takes a GLOBAL spell id, so every
 // school is the same mechanism — `sendInput("cast:" + id)`. Ids/names ported from

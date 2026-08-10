@@ -415,9 +415,14 @@ pub(super) fn handle_request(ctx: Ctx) {
             tiledata.as_deref(),
             &parse_graphics_query(&raw_url),
         );
+        // No Cache-Control on purpose, unlike /pois.json: this answer is
+        // assembled from the server's cliloc and tiledata, and the renderer
+        // already fetches it once per page load, so an hour of browser cache
+        // buys one request and hides a data-file (or server) change behind a
+        // stale copy. Found the hard way — a restarted server kept serving the
+        // previous binary's answer to the same URL.
         let mut r = Response::from_string(body);
         r.add_header(ctype("application/json"));
-        r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=3600"[..]).unwrap());
         let _ = req.respond(r);
     } else if url == "/housecatalog" {
         // Custom-house building catalog (walls/floors/doors/misc/stairs/roofs/

@@ -225,6 +225,7 @@ pub(super) fn parse_command(body: &str) -> Option<Action> {
         // `:` is rejected rather than ignored, like `logout` below.
         "disarm" => arg.is_empty().then_some(Action::DisarmRequest),
         "stun" => arg.is_empty().then_some(Action::StunRequest),
+        "flying" => arg.is_empty().then_some(Action::ToggleFlying),
         // bandage:<bandage-serial>[:<target-serial>] — 0xBF/0x2C, apply bandages
         // without the target-cursor round-trip. An omitted target means ourselves
         // (the case worth a shortcut), carried as the serial-0 sentinel the
@@ -1051,6 +1052,7 @@ mod command_tests {
     fn stun_and_disarm_commands_are_exact_and_argument_free() {
         assert_eq!(parse_command("disarm"), Some(Action::DisarmRequest));
         assert_eq!(parse_command("stun"), Some(Action::StunRequest));
+        assert_eq!(parse_command("flying"), Some(Action::ToggleFlying));
         assert!(parse_command("disarm:1").is_none());
         assert!(parse_command("stun:1").is_none());
     }

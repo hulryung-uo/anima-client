@@ -138,6 +138,7 @@ fn main() {
                 Action::UseAbility { ability } => format!("ability({ability})"),
                 Action::DisarmRequest => "disarm".into(),
                 Action::StunRequest => "stun".into(),
+                Action::ToggleFlying => "flying".into(),
                 Action::BandageTarget { bandage, target } => {
                     format!("bandage(0x{bandage:08X}→0x{target:08X})")
                 }

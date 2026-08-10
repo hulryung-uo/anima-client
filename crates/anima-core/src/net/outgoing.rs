@@ -586,6 +586,27 @@ pub fn build_disarm_request() -> Vec<u8> {
     finish_variable(w.into_vec())
 }
 
+/// ToggleGargoyleFlying — GeneralInfo `0xBF`, subcommand `0x0032`.
+///
+/// The one racial ability that is a *button*: every human and elf trait is
+/// passive, and of the gargoyle's five only Flying is used rather than merely
+/// possessed (ClassicUO's `RacialAbilitiesBookGump` marks the other four
+/// "Passive" and hangs a double-click handler on this one alone).
+///
+/// Layout is ClassicUO's `Send_ToggleGargoyleFlying` verbatim:
+/// `[0xBF][len:u16=0x000B][0x0032][0x0001][0x00000000]` — a constant `1` and
+/// four zero bytes ServUO never reads (`ToggleFlying` takes the packet and
+/// ignores its body), kept because the wire format is not ours to trim.
+///
+/// ServUO answers by race and nothing else: `PlayerMobile.ToggleFlying`
+/// returns immediately unless `Race == Race.Gargoyle`, then casts/cancels
+/// `FlySpell`. There is no AOS or expansion gate on the handler itself.
+pub fn build_toggle_flying() -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x0032).u16(0x0001).u32(0);
+    finish_variable(w.into_vec())
+}
+
 /// StunRequest — GeneralInfo `0xBF`, subcommand `0x000A`, no payload. The Stun
 /// half of the pre-AOS pair; see [`build_disarm_request`] for why the
 /// subcommand is `0x0A` and not ClassicUO's `0x09`. ServUO gates it on
@@ -1879,6 +1900,17 @@ mod tests {
         // the wrong special — no error, just the other move.
         assert_eq!(build_disarm_request(), vec![0xBF, 0x00, 0x05, 0x00, 0x09]);
         assert_eq!(build_stun_request(), vec![0xBF, 0x00, 0x05, 0x00, 0x0A]);
+    }
+
+    #[test]
+    fn toggle_flying_layout() {
+        // ClassicUO's Send_ToggleGargoyleFlying byte for byte: subcommand
+        // 0x0032, then a constant 1 and four zeros ServUO's handler never
+        // reads. 11 bytes total, and the length field must say so.
+        assert_eq!(
+            build_toggle_flying(),
+            vec![0xBF, 0x00, 0x0B, 0x00, 0x32, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
+        );
     }
 
     #[test]

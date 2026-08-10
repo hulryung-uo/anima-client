@@ -125,13 +125,15 @@
 //! boards gained `bulletin_board`/`bulletin_message` plus
 //! `BulletinRequestMessage`/`BulletinRequestSummary`/`BulletinPost`/
 //! `BulletinRemove` (0x71). The decode and all four builders already existed
-//! with no caller; only this layer was missing.)
+//! with no caller; only this layer was missing. v27: `player.race` (0x11's ML
+//! race byte, 0 when the shard never sends one) and `ToggleFlying`
+//! (0xBF/0x32), the racial-abilities book's only non-passive entry.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 26;
+pub const SCHEMA_VERSION: u32 = 27;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
@@ -161,7 +163,7 @@ fn player_json(p: &PlayerView) -> Value {
         "followers": p.followers, "followers_max": p.followers_max,
         "fire_resistance": p.fire_resistance, "cold_resistance": p.cold_resistance,
         "poison_resistance": p.poison_resistance, "energy_resistance": p.energy_resistance,
-        "body": p.body, "poisoned": p.poisoned, "dead": p.dead,
+        "body": p.body, "poisoned": p.poisoned, "dead": p.dead, "race": p.race,
     })
 }
 
@@ -841,6 +843,7 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         }),
         "DisarmRequest" => Ok(Action::DisarmRequest),
         "StunRequest" => Ok(Action::StunRequest),
+        "ToggleFlying" => Ok(Action::ToggleFlying),
         "BandageTarget" => Ok(Action::BandageTarget {
             bandage: req_u32("bandage")?,
             target: req_u32("target")?,
@@ -1240,6 +1243,7 @@ mod tests {
             ),
             (json!({"type": "DisarmRequest"}), Action::DisarmRequest),
             (json!({"type": "StunRequest"}), Action::StunRequest),
+            (json!({"type": "ToggleFlying"}), Action::ToggleFlying),
             (
                 json!({"type": "BandageTarget", "bandage": 12, "target": 34}),
                 Action::BandageTarget {
@@ -1657,8 +1661,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v26_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 26);
+    fn schema_v27_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 27);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,

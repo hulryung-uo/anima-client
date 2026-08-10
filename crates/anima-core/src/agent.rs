@@ -71,6 +71,13 @@ pub struct PlayerView {
     pub poisoned: bool,
     /// True for every ghost body recognized by ServUO `Body.IsGhost`.
     pub dead: bool,
+    /// Race from 0x11's ML tail ([`crate::world::PlayerStats::race`]):
+    /// 1 human, 2 elf, 3 gargoyle. **0 when the shard never sent one** — every
+    /// pre-ML server, which is most of them — in which case the body graphic is
+    /// the only clue (0x0190/0x0192 human, 0x025D elf, 0x029A gargoyle, plus
+    /// the female id after each). Gates [`Action::ToggleFlying`], which ServUO
+    /// answers only for a gargoyle.
+    pub race: u8,
 }
 
 /// A nearby creature.
@@ -626,6 +633,12 @@ pub enum Action {
     /// Arm the pre-AOS Stun special (UO 0xBF/0x0A). The Stun half of the pair
     /// described on [`Action::DisarmRequest`]; gated on Anatomy + Wrestling ≥ 80.
     StunRequest,
+    /// Toggle a gargoyle's flight (UO 0xBF/0x32) — the only racial ability that
+    /// is used rather than merely possessed. ServUO's `PlayerMobile.ToggleFlying`
+    /// returns immediately for any other race, so this is a no-op unless
+    /// [`Observation::race`] is 3; on a shard that predates Stygian Abyss no
+    /// character can be one.
+    ToggleFlying,
     /// Apply bandage item `bandage` to mobile `target` in one packet (UO
     /// 0xBF/0x2C), skipping the double-click → 0x6C target-cursor round-trip.
     /// `target` 0 means the player themselves — the same "the driver fills in
@@ -1005,6 +1018,7 @@ impl World {
             gold: self.player_stats.gold,
             weight: self.player_stats.weight,
             weight_max: self.player_stats.weight_max,
+            race: self.player_stats.race,
             armor: self.player_stats.armor,
             followers: self.player_stats.followers,
             followers_max: self.player_stats.followers_max,

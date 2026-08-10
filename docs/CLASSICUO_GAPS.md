@@ -301,6 +301,39 @@ Blow draws 37 weapons with their tiledata names. What is **not** verifiable here
 is arming a move — `SetCurrentAbility` returns early on `!Core.AOS`, so on this
 T2A shard no arm ever sticks. That was already true of the ability bar.
 
+Closed 2026-08-10 (racial abilities book): the fourth entry of the grab-bag row
+(two left). Contract v27 — `player.race` and `ToggleFlying`.
+
+- **Race has two sources and this shard has only the second.** ClassicUO reads
+  it from 0x11's ML tail (`type >= 5`) and, separately, from the body graphic in
+  `Mobile.CheckGraphicChange`. The core has parsed the ML byte since the
+  extended-status batch; it had simply never left the server, so it now rides in
+  the scene and in `Observation`. Live it reads **0** — a T2A shard sends
+  `type < 5` and never mentions race — so the body is doing all the work, and
+  the window says which of the two answered rather than implying the server told
+  us. A ghost body is in neither table, hence the last-known-race stickiness
+  ClassicUO gets for free by never clearing the field.
+- **One racial ability is a packet.** Every human and elf trait is passive, and
+  of the gargoyle's five only Flying is used rather than possessed — which is
+  why `RacialAbilitiesBookGump` hangs a double-click on that icon alone.
+  `build_toggle_flying` is ClassicUO's `Send_ToggleGargoyleFlying` byte for
+  byte, including the constant `1` and four zeros ServUO's handler never reads.
+  ServUO gates it on race and nothing else (`PlayerMobile.ToggleFlying` returns
+  unless `Race == Race.Gargoyle`) — there is no expansion check on the handler.
+  Sent as a human it is accepted and ignored, which is the useful negative
+  test: a wrong length would have desynced the stream instead.
+- **The elf and gargoyle pages are rendering, not behaviour.** No gargoyle can
+  exist on a pre-SA shard, so those two were checked by forcing the race
+  client-side: the counts, names, icons, cliloc text and the single non-passive
+  entry all come out right. Flying actually flying is not something this shard
+  can show.
+- **A cache header bit back.** `/abilities.json` shipped with
+  `Cache-Control: max-age=3600`, copied from `/pois.json`. After a rebuild the
+  browser kept serving the previous binary's answer to the same URL, so the new
+  racial block silently arrived empty. The header is gone: the renderer fetches
+  this once per page load anyway, so an hour of cache bought one request and hid
+  a data change.
+
 **Know what the local shard can and cannot prove.** `Config/Expansion.cfg` on
 the ServUO at `127.0.0.1:2594` says `CurrentExpansion=T2A`, so `Core.AOS` is
 **false** there. That single fact splits this batch in half, and it is worth
@@ -606,7 +639,8 @@ The receive side is generally complete; there is no way to *act*.
 | ~~Counter bar~~ — **CLOSED, live-verified** | Cells pinned to an item graphic (optionally to one hue), counting what you carry and using one on double-click. The count is a port of ClassicUO's `GetTotalAmountOfItem` + `Item.GetTotalAmount` — worn items on layers 1..0x17, recursing through nested bags — and its display rules: no number on a lone item, a signed distance from a per-slot *compare to* with `±` on target, a red cell below a *warn below* threshold, and the change flash (green up, red down, fading over 5s). Bind a cell by dragging an item onto it, which puts the item straight back where it came from, as ClassicUO does. Reachable ClassicUO settings that live in its right-click context menu — ignore hue, compare to, remove — sit in a strip under the bar instead, since this client has no context menus | S–M |
 | ~~Ignore list~~ — **CLOSED, live-verified** | A set of character names whose talk this client drops, in both places ClassicUO drops it — the floating overhead and the journal — with ClassicUO's Spell exemption, its guards (a mobile, not yourself, not one with a yellow health bar) and its messages. Added by ClassicUO's own client-side pick (arm, then click a player; no packet leaves) or by typing a name, which ClassicUO cannot do. The yellow-bar guard needed `Mobile::yellow_health` — parsed since the health-bar batch, never sent — to reach the renderer as `yellow`. **Keyed on the bare name**, which is where ClassicUO gets it wrong: see the note below | S–M |
 | ~~Combat book~~ — **CLOSED, live-verified** | All 32 weapon moves with the client's own icons (gump `0x5200 + id - 1`), their names and descriptions read from **cliloc** at runtime (`1028838 + i` / `1061693 + i`, ClassicUO's ids) through a new `/abilities.json`, and the weapons that grant each — the inverse of the `WEAPON_ABILITIES` table the ability bar already had, so the two halves cannot drift (ClassicUO keeps a second hand-written copy for this gump, a 400-line `GetItemsList` switch). The equipped weapon's two moves head the window, armed state and click-to-arm included. Reconciling that table against ServUO's own weapon classes corrected 19 entries and added 21 — see the note below | S–M |
-| Racial-abilities book, network-stats and inspector windows | absent | S–M |
+| ~~Racial-abilities book~~ — **CLOSED, live-verified** | What your race gives you: four entries for a human, six for an elf, five for a gargoyle, with ClassicUO's icons (`0x5DD0`/`0x5DD4`/`0x5DDA` + i) and its names, and the descriptions read from cliloc (`1112198`/`1112202`/`1112208` + i) through the same `/abilities.json` the combat book fetches. Race comes from 0x11's ML byte when the shard sends one and otherwise from the body graphic, ClassicUO's other rule — which is the only one that fires here. All entries are passive except the gargoyle's Flying, now `Action::ToggleFlying` (0xBF/0x32) | S–M |
+| Network-stats and inspector windows | absent | S–M |
 | ~~Container gumps ignore real container art and each item's stored (x,y)~~ — **CLOSED, live-verified** | Both halves were already on the wire and discarded: 0x3C carries a position per item, and 0x24 names the container's gump. The gump id is now **retained** (`World::container_gumps`) rather than read from the open-event ring, which ages out while the window stays open, and reaches the renderer as `scene.contGumps`. The window draws that art and places each item at its raw (x, y), read **signed** as ClassicUO does (`(short)item.X`). ClassicUO additionally clamps into a per-gump bounds table (78 entries); we clip with `overflow: hidden` instead, which needs no table and cannot disagree with the server about where an item actually is. Verified live on a real backpack (gump 60, 230×204) with a dozen items at their stored positions | M |
 | ~~Window management~~ — **CLOSED, live-verified** | Every draggable panel — the dynamic windows from `makeWindowFrame` *and* the static ones (paperdoll, spellbook, skills, options, macros) — now **remembers where it was left** and comes back inside the viewport, because the persistence lives in `makeDraggable`, the one function they all already went through. Keyed by element id or class, never by serial: a serial is per-corpse/per-bag and never returns, so "the next container opens where I put the last one" is the only memory worth having (ClassicUO's per-type defaults do the same). Windows are clamped on restore and on browser resize, and a position saved on a bigger screen is **written back clamped**, so it heals instead of being re-clamped forever. `resize: both` is opt-in per window (bulletin board, server gumps, plus the journal from the row above) — deliberately not on the map or an authentic container, whose layout is in the server's own pixel space | M |
 

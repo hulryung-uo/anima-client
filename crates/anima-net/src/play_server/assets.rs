@@ -585,6 +585,12 @@ mod hue_palette_tests {
         // No tiledata → no item names at all, rather than empty strings that
         // would render as blank rows under an ability.
         assert_eq!(value["items"].as_object().unwrap().len(), 0);
+        // Racial blocks are keyed by the 0x11 race byte and keep ClassicUO's
+        // counts: 4 human, 6 elf, 5 gargoyle.
+        let racial = value["racial"].as_object().unwrap();
+        assert_eq!(racial["1"].as_array().unwrap().len(), 4);
+        assert_eq!(racial["2"].as_array().unwrap().len(), 6);
+        assert_eq!(racial["3"].as_array().unwrap().len(), 5);
     }
 
     #[test]
@@ -682,6 +688,12 @@ const ABILITY_DESC_CLILOC: u32 = 1061693;
 /// the extra one is an SA-era move no weapon in the client's table grants.
 const ABILITY_COUNT: u32 = 32;
 
+/// Racial abilities, per race, as ClassicUO's `RacialAbilitiesBookGump` lays
+/// them out: `(first tooltip cliloc, count)` for human, elf and gargoyle. Its
+/// icons run alongside at `0x5DD0`, `0x5DD4` and `0x5DDA`, and the renderer
+/// carries the names, so cliloc only has to supply the descriptions.
+const RACIAL_CLILOC: [(u32, u32); 3] = [(1112198, 4), (1112202, 6), (1112208, 5)];
+
 /// The combat book's static half: every weapon special move's name and
 /// description, straight out of cliloc, plus the tile name of each graphic the
 /// caller asked about (`?g=3908,5048,…` — the weapons its own table says grant
@@ -711,7 +723,19 @@ pub(super) fn abilities_json(
             items.insert(g.to_string(), serde_json::Value::String(name));
         }
     }
-    serde_json::json!({ "abilities": abilities, "items": items }).to_string()
+    // Racial abilities ride along in the same answer: both books are opened
+    // rarely, both want cliloc text and nothing else, and one fetch beats two.
+    let racial: serde_json::Map<String, serde_json::Value> = RACIAL_CLILOC
+        .iter()
+        .enumerate()
+        .map(|(i, &(first, count))| {
+            let descs: Vec<serde_json::Value> = (0..count)
+                .map(|k| serde_json::json!(cliloc.and_then(|c| c.format(first + k, ""))))
+                .collect();
+            ((i + 1).to_string(), serde_json::Value::Array(descs))
+        })
+        .collect();
+    serde_json::json!({ "abilities": abilities, "items": items, "racial": racial }).to_string()
 }
 
 /// Extract `g=<n>,<n>,…` from a raw URL query string. Unparsable entries are

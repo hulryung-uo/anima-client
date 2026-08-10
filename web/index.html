@@ -662,6 +662,25 @@
       .cbk-wep { display: flex; align-items: center; gap: 4px; font-size: 10px; color: #8a929c; }
       .cbk-wep img { width: 22px; height: 22px; image-rendering: pixelated; }
       .cbk-none { font-size: 10px; color: #6b7280; }
+      /* ---- racial abilities book (ClassicUO RacialAbilitiesBookGump) ---- */
+      #racialbook { top: 60px; right: 280px; width: 300px; display: none; }
+      #racialbook.on { display: block; }
+      #rcb-race { display: flex; align-items: baseline; gap: 8px;
+                  border-bottom: 1px solid #2a3442; padding-bottom: 5px; margin-bottom: 6px; }
+      .rcb-name { font-size: 13px; color: #e8ecf2; font-weight: 600; }
+      .rcb-src { font-size: 10px; color: #6b7280; }
+      .rcb-row { display: flex; gap: 8px; padding: 5px 4px; border-top: 1px solid #1c2430; }
+      .rcb-row:first-child { border-top: none; }
+      .rcb-icon { width: 36px; height: 36px; flex: 0 0 36px; image-rendering: pixelated; }
+      .rcb-txt { min-width: 0; }
+      .rcb-hdr { display: flex; align-items: baseline; gap: 7px; }
+      .rcb-ab { font-size: 12px; color: #d7dde5; }
+      .rcb-tag { font-size: 9px; letter-spacing: .06em; text-transform: uppercase; color: #6b7280; }
+      .rcb-row.active { cursor: pointer; }
+      .rcb-row.active .rcb-ab { color: #ffdf9e; }
+      .rcb-row.active .rcb-tag { color: #d9a441; }
+      .rcb-desc { font-size: 11px; color: #b6bcc6; line-height: 1.4; margin-top: 2px; }
+      .rcb-none { font-size: 11px; color: #6b7280; line-height: 1.4; }
       /* ---- skills window (0x3A) ---- */
       #skills { top: 60px; right: 16px; width: 280px; display: none; }
       #statusbar { top: 60px; left: 210px; width: 170px; display: none; }
@@ -1293,6 +1312,14 @@
       <div class="gump-body">
         <div id="cbk-equipped"></div>
         <div id="cbk-list"></div>
+      </div>
+    </div>
+    <div id="racialbook" class="gump-win">
+      <div class="gump-title" id="rcb-title"><span>RACIAL ABILITIES</span>
+        <span class="gump-close" id="rcb-close">&#10005;</span></div>
+      <div class="gump-body">
+        <div id="rcb-race"></div>
+        <div id="rcb-list"></div>
       </div>
     </div>
     <div id="ignorelist" class="gump-win">

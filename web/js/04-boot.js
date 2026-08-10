@@ -108,6 +108,10 @@ async function main() {
   makeDraggable(document.getElementById("combatbook"), document.getElementById("cbk-title"));
   document.getElementById("cbk-close").addEventListener("click", toggleCombatBook);
   if (cbkOn) loadAbilityText();
+  document.getElementById("racialbook").classList.toggle("on", rcbOn);
+  makeDraggable(document.getElementById("racialbook"), document.getElementById("rcb-title"));
+  document.getElementById("rcb-close").addEventListener("click", toggleRacialBook);
+  if (rcbOn) loadAbilityText();
   restoreJournalHeight();
   setupItemDnD();
   initFx();
