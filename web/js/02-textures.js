@@ -199,17 +199,21 @@ function centerFor(body, group, dir, frame) {
 // PNGs whose alpha is the intensity (see anima-assets `lights.rs`). Fetched as
 // plain <img> rather than through the PIXI texture cache: the night overlay is a
 // 2D canvas, not a PIXI layer, and there are at most a hundred of them.
-const lightShapes = new Map();   // id -> HTMLImageElement | null (null = 404, don't retry)
-function lightShape(id) {
+// Keyed by "<id>/<colour>": a coloured light is the same mask with ClassicUO's
+// intensity ramp for that colour baked into the RGB, which the server does
+// (anima-assets `light_colored`) because it owns the curve tables.
+const lightShapes = new Map();   // key -> HTMLImageElement | null (null = 404, don't retry)
+function lightShape(id, color) {
   if (id == null) return null;
-  id = id | 0;
-  if (lightShapes.has(id)) {
-    const img = lightShapes.get(id);
+  id = id | 0; color = color | 0;
+  const key = `${id}/${color}`;
+  if (lightShapes.has(key)) {
+    const img = lightShapes.get(key);
     return img && img.complete && img.naturalWidth ? img : null;
   }
   const img = new Image();
-  img.onerror = () => lightShapes.set(id, null);
-  img.src = `light/${id}.png`;
-  lightShapes.set(id, img);
+  img.onerror = () => lightShapes.set(key, null);
+  img.src = `light/${id}.png` + (color ? `?c=${color}` : "");
+  lightShapes.set(key, img);
   return null;   // next frame, once it has decoded
 }

@@ -181,6 +181,7 @@ function fxFrame(now) {
       const cssY = app.canvas.clientHeight / app.renderer.height; // renderer→CSS px (y)
       const ox = app.stage.position.x, oy = app.stage.position.y;
       const center = 0.9 * fxTint; // erase strength at the glow's core
+      const tinted = [];           // coloured lights, drawn additively after the erase
       ctx.save();
       ctx.globalCompositeOperation = "destination-out";
       for (const L of scene.lights) {
@@ -192,13 +193,18 @@ function fxFrame(now) {
         // ClassicUO draws these additively into a light buffer; this overlay
         // subtracts instead, so the server hands over the same mask with the
         // intensity in the alpha channel (see anima-assets `lights.rs`).
-        const img = lightShape(L.id);
+        const img = lightShape(L.id, L.c);
         if (img) {
           const w = img.width * camZoom * cssX, h = img.height * camZoom * cssY;
           if (sx < -w || sy < -h || sx > W + w || sy > H + h) continue;
           ctx.globalAlpha = center;
           ctx.drawImage(img, sx - w / 2, sy - h / 2, w, h);   // centred, as ClassicUO draws it
           ctx.globalAlpha = 1;
+          // A coloured light also has to *add* its colour, not just clear the
+          // veil — a red brazier should tint what it lights. Queue it for the
+          // additive pass below, which is ClassicUO's light buffer: the erase
+          // above brightens, this colours.
+          if (L.c) tinted.push([img, sx, sy, w, h]);
           continue;
         }
         // No shape (no light.mul on the server, or an id it has no entry for):
@@ -214,6 +220,19 @@ function fxFrame(now) {
         ctx.fill();
       }
       ctx.restore();
+      // The colour half. ClassicUO adds its (coloured) light buffer onto the
+      // world, so a red brazier makes what it lights read red. This overlay is
+      // subtractive, and adding colour to a veil the pass above has just erased
+      // changes almost nothing — measured at 2/255 on a full-strength brazier.
+      // What works in this model is to erase *to a colour* instead of to
+      // nothing: paint the same mask back over the hole, so the world beneath
+      // shows through a thin wash of the light's own colour.
+      if (tinted.length) {
+        ctx.save();
+        ctx.globalAlpha = 0.5 * fxTint;
+        for (const [img, sx, sy, w, h] of tinted) ctx.drawImage(img, sx - w / 2, sy - h / 2, w, h);
+        ctx.restore();
+      }
     }
   }
 

@@ -72,6 +72,16 @@ pub(super) fn respond_png(req: tiny_http::Request, bytes: Vec<u8>) {
     let _ = req.respond(r);
 }
 
+/// Like [`respond_png`] but asks the browser to revalidate. For content whose
+/// URL does not change when the bytes do — a light shape's `?c=` variant, most
+/// of all — heuristic caching hands back yesterday's answer.
+pub(super) fn respond_png_nocache(req: tiny_http::Request, bytes: Vec<u8>) {
+    let mut r = Response::from_data(bytes);
+    r.add_header(ctype("image/png"));
+    r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).unwrap());
+    let _ = req.respond(r);
+}
+
 /// Like [`respond_png`] but also sends the anim frame's draw-center as `X-Cx`/`X-Cy`
 /// headers, so the renderer can place each part at `(screenX - cx, screenY - h - cy)`
 /// (ClassicUO positioning) instead of a naïve foot anchor — which is what aligns
@@ -218,6 +228,20 @@ pub(super) fn parse_iteminfo_url(url: &str) -> Option<u16> {
     url.strip_prefix("/iteminfo/")?.parse().ok()
 }
 
+/// Extract `c=<n>` from a raw URL query string — a light's colour index. 0 (no
+/// colour, plain white) if absent.
+pub(super) fn parse_color_query(raw_url: &str) -> u16 {
+    let Some(q) = raw_url.split('?').nth(1) else {
+        return 0;
+    };
+    for kv in q.split('&') {
+        if let Some(v) = kv.strip_prefix("c=") {
+            return v.parse().unwrap_or(0);
+        }
+    }
+    0
+}
+
 /// Extract `hue=<n>` from a raw URL query string (`...?hue=123`). 0 if absent.
 pub(super) fn parse_hue_query(raw_url: &str) -> u16 {
     let Some(q) = raw_url.split('?').nth(1) else {
@@ -336,13 +360,30 @@ pub(super) fn parse_light_url(url: &str) -> Option<u32> {
 /// Serve one `light.mul` shape as a white PNG whose alpha is the intensity.
 /// Uncached on purpose: there are at most a hundred of these, each a few
 /// hundred bytes, and the renderer fetches each one once per session.
-pub(super) fn serve_light(lights: &Option<Arc<Lights>>, id: u32, req: tiny_http::Request) {
+pub(super) fn serve_light(
+    lights: &Option<Arc<Lights>>,
+    id: u32,
+    color: u16,
+    req: tiny_http::Request,
+) {
     match lights
         .as_ref()
-        .and_then(|l| l.light(id))
+        .and_then(|l| {
+            if color != 0 {
+                l.light_colored(id, color)
+            } else {
+                l.light(id)
+            }
+        })
         .map(|i| i.to_png())
     {
-        Some(b) => respond_png(req, b),
+        // `no-cache` (revalidate, not "never store"): the bytes are a pure
+        // function of the data files, but a browser left to its own heuristics
+        // will hold a `?c=` variant across a server change and hand back a
+        // stale one — which cost an hour here, twice, once on /abilities.json
+        // and once on a light that stayed white after the colour ramp landed.
+        // A hundred small images revalidated once per page load is cheap.
+        Some(b) => respond_png_nocache(req, b),
         None => {
             let _ = req.respond(Response::from_string("no light").with_status_code(404));
         }

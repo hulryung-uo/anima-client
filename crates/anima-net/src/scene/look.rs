@@ -97,6 +97,18 @@ impl Look<'_> {
         self.map.map_or(0, |m| m.item_light_id(g))
     }
 
+    /// A light source's `(shape id, colour)`, applying ClassicUO's two rules:
+    /// a shape id above 200 is really **a colour riding on the standard shape**
+    /// (`AddLight`: `Color = ID - 200; ID = 1`), and otherwise the graphic is
+    /// looked up in its colour table. Colour 0 = plain white.
+    pub(super) fn item_light(&self, g: u16) -> (u8, u16) {
+        let id = self.item_light_id(g);
+        if id > 200 {
+            return (1, id as u16 - 200);
+        }
+        (id, anima_assets::lights::light_color_for(g).unwrap_or(0))
+    }
+
     /// Does an item graphic carry the Foliage flag (tree/bush)? Used so the
     /// renderer can fade it when it would occlude the player.
     pub(super) fn item_foliage(&self, g: u16) -> bool {

@@ -191,8 +191,9 @@ pub(super) fn lights_json(world: &World, look: &Look, px: i64, py: i64, pz: i32)
             // `id` is the light.mul shape (tiledata Quality/layer, ClassicUO
             // `AddLight`); `r` stays as the fallback radius for a renderer that
             // has no shape for it.
+            let (lid, lcolor) = look.item_light(it.graphic);
             lights.push(json!({ "x": it.pos.x, "y": it.pos.y, "z": it.pos.z, "r": 3,
-                                "id": look.item_light_id(it.graphic) }));
+                                "id": lid, "c": lcolor }));
         }
     }
     lights

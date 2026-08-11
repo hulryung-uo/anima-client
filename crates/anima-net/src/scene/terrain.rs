@@ -369,8 +369,17 @@ pub(super) fn emit_tiles(
                     // A static light source (wall torch, lamp, brazier) glows
                     // at night — same shape as dynamic-item lights (r:3).
                     if lights.len() < LIGHT_CAP && map.item_is_light(s.graphic) {
+                        let lid = map.item_light_id(s.graphic);
+                        let (lid, lc) = if lid > 200 {
+                            (1, lid as u16 - 200)
+                        } else {
+                            (
+                                lid,
+                                anima_assets::lights::light_color_for(s.graphic).unwrap_or(0),
+                            )
+                        };
                         lights.push(json!({ "x": x, "y": y, "z": s.z, "r": 3,
-                                            "id": map.item_light_id(s.graphic) }));
+                                            "id": lid, "c": lc }));
                     }
                 }
                 // Multi components (boat hull/deck, house walls) whose tile

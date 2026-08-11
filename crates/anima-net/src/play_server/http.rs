@@ -452,7 +452,7 @@ pub(super) fn handle_request(ctx: Ctx) {
     } else if let Some((is_static, g)) = parse_art_url(&url) {
         serve_art(art, hues, tile_cache, is_static, g, hue, req);
     } else if let Some(id) = parse_light_url(&url) {
-        serve_light(lights, id, req);
+        serve_light(lights, id, parse_color_query(&raw_url), req);
     } else if let Some(id) = parse_texmap_url(&url) {
         serve_texmap(texmaps, texmap_cache, id, req);
     } else if let Some((body, group, dir)) = parse_animinfo_url(&url) {

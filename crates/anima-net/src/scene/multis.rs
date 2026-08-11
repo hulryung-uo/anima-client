@@ -261,7 +261,15 @@ pub(super) fn emit_multi_component(
     );
     *n_statics += 1;
     if lights.len() < light_cap && map.item_is_light(graphic) {
-        lights.push(json!({ "x": x, "y": y, "z": cz, "r": 3,
-                            "id": map.item_light_id(graphic) }));
+        let lid = map.item_light_id(graphic);
+        let (lid, lc) = if lid > 200 {
+            (1, lid as u16 - 200)
+        } else {
+            (
+                lid,
+                anima_assets::lights::light_color_for(graphic).unwrap_or(0),
+            )
+        };
+        lights.push(json!({ "x": x, "y": y, "z": cz, "r": 3, "id": lid, "c": lc }));
     }
 }

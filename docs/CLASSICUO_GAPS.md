@@ -764,8 +764,8 @@ The receive side is generally complete; there is no way to *act*.
 ## Tier 3 — rendering fidelity
 
 ~~Shadows~~, ~~corpse equipment layers~~ and ~~death animation~~ (**CLOSED,
-live-verified** — see below); ~~`light.mul` light shapes~~ (**CLOSED, live-verified** — see below; the
-coloured-light table is still open); directional lighting on stretched land; seasonal
+live-verified** — see below); ~~`light.mul` light shapes and colours~~ (**CLOSED, live-verified** — see
+below); directional lighting on stretched land; seasonal
 land/static graphic remap (the season *system* exists, the remap does not);
 `TileFlag.Translucent` statics drawn opaque; static hue from `statics.mul` discarded
 at decode; mount rider vertical offset; seated-character deformation; roof/ceiling
@@ -908,10 +908,22 @@ now they have their real shapes.
   in the alpha channel** — the same mask and falloff, expressed for a
   compositor that subtracts. The pixel rule is otherwise ClassicUO's, negative
   lights (`val > 0x1F` → `~val & 0x1F`) included.
-- **Not done: coloured lights.** ClassicUO's `LightColors` is a ~500-line
-  graphic→hue table feeding a shader path (`SHADER_LIGHTS`) this overlay has no
-  equivalent of, and the `ID > 200 → colour = ID - 200` convention on top. The
-  shapes are the substance of the row; the colours are their own piece of work.
+- **The colours followed the same day.** ClassicUO's `LightColors` is a
+  graphic→colour table (a switch, then two nested range chains evaluated in
+  order — a later group overwrites an earlier one, which the port preserves)
+  plus the `ID > 200 → colour = ID - 200` convention, feeding a 64-row texture
+  built by scaling a base RGB through one of six intensity **curves** per
+  channel. All of that is ported: `light_colored(id, colour)` bakes the exact
+  ramp into the mask's RGB, so `/light/<id>.png?c=<n>` is the same shape in the
+  right colour. Its `IsHue` flag is not — that is only ever set by a
+  user-supplied `lightshaders.txt`, which nothing here reads.
+
+One thing the overlay had to translate rather than copy: ClassicUO *adds* its
+coloured light buffer onto the world, and adding colour to a veil this pass has
+just erased changes almost nothing — measured at 2/255 on a full-strength
+brazier. What works here is to erase *to a colour* instead of to nothing: the
+same mask is painted back over the hole, so the world shows through a thin wash
+of the light's own colour.
 
 Verified live at `globallight 28`: seven distinct shape ids in view
 (1, 2, 26, 27, 29, 40, 42) decoding to 110×110 up to 300×300 masks, and a pixel
@@ -919,6 +931,17 @@ diff of the same night frame drawn with the shapes versus the old radial
 fallback differs across **124,521 pixels**. The difference is not subtle in
 kind: the circle lifts the whole neighbourhood evenly, while the real masks
 leave the cobbles beyond a lamp dark and light the building faces beside it.
+For colour, a GM-spawned brazier (`0x0E31`, which the table puts at colour 40,
+red) tints its own glow: 68,975 pixels shift against a white-light control,
+green and blue down ~23 each while red barely moves.
+
+**A stale cache cost an hour, for the second time.** The coloured PNG kept
+coming back white after the ramp landed, because Chrome had heuristically
+cached `light/2.png?c=40` from the window when the server still ignored `?c=`.
+`/abilities.json` had the same bite. Light shapes now answer `no-cache` — the
+bytes are a pure function of the data files, but their *URL* does not change
+when the server's answer does, and that is the case where a heuristic cache is
+simply wrong.
 
 ---
 
