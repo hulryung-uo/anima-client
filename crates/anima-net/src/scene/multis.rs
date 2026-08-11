@@ -261,6 +261,7 @@ pub(super) fn emit_multi_component(
     );
     *n_statics += 1;
     if lights.len() < light_cap && map.item_is_light(graphic) {
-        lights.push(json!({ "x": x, "y": y, "z": cz, "r": 3 }));
+        lights.push(json!({ "x": x, "y": y, "z": cz, "r": 3,
+                            "id": map.item_light_id(graphic) }));
     }
 }

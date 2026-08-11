@@ -29,8 +29,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anima_assets::{
-    Anim, AnimData, Art, Cliloc, CustomHouseCatalog, Gumps, Hues, MapData, Multis, RadarCol,
-    Sounds, Texmaps, TileData,
+    Anim, AnimData, Art, Cliloc, CustomHouseCatalog, Gumps, Hues, Lights, MapData, Multis,
+    RadarCol, Sounds, Texmaps, TileData,
 };
 use anima_core::agent::{HouseDesignAction, SpeechMode};
 use anima_core::net::{
@@ -188,6 +188,9 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     // Cliloc table (Cliloc.enu): localized text for context-menu labels (and reusable
     // for gump/system-message clilocs). Resolved into the scene when present.
     let cliloc: Option<Arc<Cliloc>> = Cliloc::open(&data_dir).ok().map(Arc::new);
+    // light.mul/lightidx.mul — the per-light glow shapes. Optional like every
+    // other art file: without it the renderer keeps its plain radial falloff.
+    let lights: Option<Arc<Lights>> = Lights::open(&data_dir).ok().map(Arc::new);
     eprintln!(
         "play: cliloc {}",
         cliloc.as_ref().map_or("not loaded".into(), |c| format!(
@@ -332,6 +335,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
             hues,
             tiledata: tiledata.clone(),
             cliloc: cliloc.clone(),
+            lights: lights.clone(),
             texmaps,
             worldmap,
             sounds,

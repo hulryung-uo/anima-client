@@ -186,6 +186,23 @@ function fxFrame(now) {
       for (const L of scene.lights) {
         const sx = (ox + isoX(L.x, L.y) * camZoom) * cssX;
         const sy = (oy + isoY(L.x, L.y, L.z) * camZoom) * cssY;
+        // The real shape from light.mul when we have it — every light-emitting
+        // graphic names one through its tiledata Quality byte, and they are not
+        // circles: a wall torch throws a lopsided cone, a campfire a wide oval.
+        // ClassicUO draws these additively into a light buffer; this overlay
+        // subtracts instead, so the server hands over the same mask with the
+        // intensity in the alpha channel (see anima-assets `lights.rs`).
+        const img = lightShape(L.id);
+        if (img) {
+          const w = img.width * camZoom * cssX, h = img.height * camZoom * cssY;
+          if (sx < -w || sy < -h || sx > W + w || sy > H + h) continue;
+          ctx.globalAlpha = center;
+          ctx.drawImage(img, sx - w / 2, sy - h / 2, w, h);   // centred, as ClassicUO draws it
+          ctx.globalAlpha = 1;
+          continue;
+        }
+        // No shape (no light.mul on the server, or an id it has no entry for):
+        // the plain radial falloff this pass used before.
         const rad = (L.r || 3) * 44 * cssX;
         if (sx < -rad || sy < -rad || sx > W + rad || sy > H + rad) continue; // off-screen
         const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, rad);

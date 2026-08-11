@@ -177,7 +177,9 @@ pub(super) const LIGHT_CAP: usize = 64;
 /// caller keeps appending to, not a finished one.
 pub(super) fn lights_json(world: &World, look: &Look, px: i64, py: i64, pz: i32) -> Vec<Value> {
     let mut lights: Vec<Value> = Vec::new();
-    lights.push(json!({ "x": px, "y": py, "z": pz, "r": 5 }));
+    // The player's own glow. ClassicUO gives a mobile light shape 1
+    // (`AddLight`'s `obj is Mobile _` arm), which is its large soft one.
+    lights.push(json!({ "x": px, "y": py, "z": pz, "r": 5, "id": 1 }));
     for it in world.items.values() {
         if lights.len() >= LIGHT_CAP {
             break;
@@ -186,7 +188,11 @@ pub(super) fn lights_json(world: &World, look: &Look, px: i64, py: i64, pz: i32)
         // graphic — skip it here (any light-emitting components are handled
         // per-component in the tile loop below, alongside static lights).
         if !it.is_multi && it.container.is_none() && look.item_is_light(it.graphic) {
-            lights.push(json!({ "x": it.pos.x, "y": it.pos.y, "z": it.pos.z, "r": 3 }));
+            // `id` is the light.mul shape (tiledata Quality/layer, ClassicUO
+            // `AddLight`); `r` stays as the fallback radius for a renderer that
+            // has no shape for it.
+            lights.push(json!({ "x": it.pos.x, "y": it.pos.y, "z": it.pos.z, "r": 3,
+                                "id": look.item_light_id(it.graphic) }));
         }
     }
     lights

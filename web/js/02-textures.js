@@ -192,3 +192,24 @@ function centerFor(body, group, dir, frame) {
   return c && c[frame] ? c[frame] : null;
 }
 
+
+// ---- light.mul shapes (ClassicUO LightsLoader) ------------------------------
+// Each light-emitting graphic names one of ~100 hand-drawn masks through its
+// tiledata Quality byte; the server decodes light.mul and serves them as white
+// PNGs whose alpha is the intensity (see anima-assets `lights.rs`). Fetched as
+// plain <img> rather than through the PIXI texture cache: the night overlay is a
+// 2D canvas, not a PIXI layer, and there are at most a hundred of them.
+const lightShapes = new Map();   // id -> HTMLImageElement | null (null = 404, don't retry)
+function lightShape(id) {
+  if (id == null) return null;
+  id = id | 0;
+  if (lightShapes.has(id)) {
+    const img = lightShapes.get(id);
+    return img && img.complete && img.naturalWidth ? img : null;
+  }
+  const img = new Image();
+  img.onerror = () => lightShapes.set(id, null);
+  img.src = `light/${id}.png`;
+  lightShapes.set(id, img);
+  return null;   // next frame, once it has decoded
+}

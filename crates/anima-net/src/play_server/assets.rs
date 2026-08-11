@@ -325,6 +325,30 @@ pub(super) fn serve_gump(
 }
 
 /// Match `/texmap/<id>.png` → texmap id.
+/// Match `/light/<id>.png` → light-shape id.
+pub(super) fn parse_light_url(url: &str) -> Option<u32> {
+    url.strip_prefix("/light/")?
+        .strip_suffix(".png")?
+        .parse()
+        .ok()
+}
+
+/// Serve one `light.mul` shape as a white PNG whose alpha is the intensity.
+/// Uncached on purpose: there are at most a hundred of these, each a few
+/// hundred bytes, and the renderer fetches each one once per session.
+pub(super) fn serve_light(lights: &Option<Arc<Lights>>, id: u32, req: tiny_http::Request) {
+    match lights
+        .as_ref()
+        .and_then(|l| l.light(id))
+        .map(|i| i.to_png())
+    {
+        Some(b) => respond_png(req, b),
+        None => {
+            let _ = req.respond(Response::from_string("no light").with_status_code(404));
+        }
+    }
+}
+
 pub(super) fn parse_texmap_url(url: &str) -> Option<u16> {
     url.strip_prefix("/texmap/")?
         .strip_suffix(".png")?

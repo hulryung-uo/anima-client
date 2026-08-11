@@ -21,6 +21,7 @@ pub(super) struct SpawnHttp {
     pub(super) hues: Option<Arc<Hues>>,
     pub(super) tiledata: Option<Arc<TileData>>,
     pub(super) cliloc: Option<Arc<Cliloc>>,
+    pub(super) lights: Option<Arc<Lights>>,
     pub(super) texmaps: Option<Arc<Texmaps>>,
     pub(super) worldmap: Arc<Mutex<Option<Vec<u8>>>>,
     pub(super) sounds: Option<Arc<Sounds>>,
@@ -50,6 +51,7 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         hues,
         tiledata,
         cliloc,
+        lights,
         texmaps,
         worldmap,
         sounds,
@@ -81,6 +83,7 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         let hues = hues.clone();
         let tiledata = tiledata.clone();
         let cliloc = cliloc.clone();
+        let lights = lights.clone();
         let texmaps = texmaps.clone();
         let tile_cache = tile_cache.clone();
         let anim_cache = anim_cache.clone();
@@ -110,6 +113,7 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
                     hues: &hues,
                     tiledata: &tiledata,
                     cliloc: &cliloc,
+                    lights: &lights,
                     texmaps: &texmaps,
                     tile_cache: &tile_cache,
                     anim_cache: &anim_cache,
@@ -145,6 +149,7 @@ pub(super) struct Ctx<'a> {
     pub(super) hues: &'a Option<Arc<Hues>>,
     pub(super) tiledata: &'a Option<Arc<TileData>>,
     pub(super) cliloc: &'a Option<Arc<Cliloc>>,
+    pub(super) lights: &'a Option<Arc<Lights>>,
     pub(super) texmaps: &'a Option<Arc<Texmaps>>,
     pub(super) tile_cache: &'a TileCache,
     pub(super) anim_cache: &'a AnimCache,
@@ -179,6 +184,7 @@ pub(super) fn handle_request(ctx: Ctx) {
         hues,
         tiledata,
         cliloc,
+        lights,
         texmaps,
         tile_cache,
         anim_cache,
@@ -445,6 +451,8 @@ pub(super) fn handle_request(ctx: Ctx) {
         serve_music(music, id, req);
     } else if let Some((is_static, g)) = parse_art_url(&url) {
         serve_art(art, hues, tile_cache, is_static, g, hue, req);
+    } else if let Some(id) = parse_light_url(&url) {
+        serve_light(lights, id, req);
     } else if let Some(id) = parse_texmap_url(&url) {
         serve_texmap(texmaps, texmap_cache, id, req);
     } else if let Some((body, group, dir)) = parse_animinfo_url(&url) {

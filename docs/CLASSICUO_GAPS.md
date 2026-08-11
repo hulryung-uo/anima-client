@@ -764,8 +764,8 @@ The receive side is generally complete; there is no way to *act*.
 ## Tier 3 — rendering fidelity
 
 ~~Shadows~~, ~~corpse equipment layers~~ and ~~death animation~~ (**CLOSED,
-live-verified** — see below); `light.mul` light shapes/colours (a radius-only light system
-exists — `build_scene`'s `lights` list in `scene/mod.rs`); directional lighting on stretched land; seasonal
+live-verified** — see below); ~~`light.mul` light shapes~~ (**CLOSED, live-verified** — see below; the
+coloured-light table is still open); directional lighting on stretched land; seasonal
 land/static graphic remap (the season *system* exists, the remap does not);
 `TileFlag.Translucent` statics drawn opaque; static hue from `statics.mul` discarded
 at decode; mount rider vertical offset; seated-character deformation; roof/ceiling
@@ -890,6 +890,35 @@ as stumps redraws 32 trees as stumps and removes 29 canopies, hiding vegetation
 drops 96 statics, and 62 of the 1402 qualify for a shadow — a pixel diff of the
 same frame with static shadows on and off shows **85,356 pixels darkened by
 ~14.5/255** under the canopies, and nothing else changed.
+
+Closed 2026-08-10 (light.mul shapes): the fifth Tier 3 row. Lights had a radius;
+now they have their real shapes.
+
+- **A UO light is not a circle.** `light.mul` holds about a hundred hand-drawn
+  greyscale masks of different sizes — a wall torch throws a lopsided cone, a
+  campfire a wide oval, a mobile a 225×225 soft disc — and every light-emitting
+  graphic points at one through its tiledata **`Quality` byte**, the same field
+  wearables use as their layer (ClassicUO `AddLight`: `light.ID = data.Layer`).
+  A new `anima-assets::Lights` reads `lightidx.mul`/`light.mul`; the play server
+  serves each shape at `/light/<id>.png` and the scene now carries the id per
+  light source.
+- **Additive there, subtractive here.** ClassicUO draws the greys into a light
+  buffer with additive blending; this renderer erases holes in a darkness
+  overlay instead. So the decoder hands back **white pixels with the intensity
+  in the alpha channel** — the same mask and falloff, expressed for a
+  compositor that subtracts. The pixel rule is otherwise ClassicUO's, negative
+  lights (`val > 0x1F` → `~val & 0x1F`) included.
+- **Not done: coloured lights.** ClassicUO's `LightColors` is a ~500-line
+  graphic→hue table feeding a shader path (`SHADER_LIGHTS`) this overlay has no
+  equivalent of, and the `ID > 200 → colour = ID - 200` convention on top. The
+  shapes are the substance of the row; the colours are their own piece of work.
+
+Verified live at `globallight 28`: seven distinct shape ids in view
+(1, 2, 26, 27, 29, 40, 42) decoding to 110×110 up to 300×300 masks, and a pixel
+diff of the same night frame drawn with the shapes versus the old radial
+fallback differs across **124,521 pixels**. The difference is not subtle in
+kind: the circle lifts the whole neighbourhood evenly, while the real masks
+leave the cobbles beyond a lamp dark and light the building faces beside it.
 
 ---
 

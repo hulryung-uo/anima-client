@@ -396,6 +396,14 @@ impl MapData {
         self.tiledata.item_is_light(graphic)
     }
 
+    /// Which `light.mul` shape an item graphic casts. UO stores it in the
+    /// tiledata `Quality` byte, the same one wearables use as their layer —
+    /// ClassicUO reads exactly that (`AddLight`: `light.ID = data.Layer`).
+    /// Meaningless unless [`Self::item_is_light`] is true for the graphic.
+    pub fn item_light_id(&self, graphic: u16) -> u8 {
+        self.tiledata.item_layer(graphic)
+    }
+
     /// Is an item graphic a container (chest/bag/corpse)? Lets the client open a
     /// loot window only for real containers (not doors/other double-clickables).
     pub fn item_is_container(&self, graphic: u16) -> bool {

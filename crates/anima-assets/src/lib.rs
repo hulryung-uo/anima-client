@@ -12,6 +12,7 @@ pub mod cliloc;
 pub mod customhouse;
 pub mod gump;
 pub mod hues;
+pub mod lights;
 pub mod map;
 pub mod mounts;
 pub mod multis;
@@ -31,6 +32,7 @@ pub use customhouse::{
 };
 pub use gump::Gumps;
 pub use hues::{apply_hue, Hues};
+pub use lights::Lights;
 pub use map::{LandTile, MapData, StaticTile, ZReason, MAP_HEIGHT, MAP_WIDTH};
 pub use multis::{MultiComponent, Multis};
 pub use radarcol::RadarCol;

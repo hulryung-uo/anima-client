@@ -90,6 +90,13 @@ impl Look<'_> {
         self.map.is_some_and(|m| m.item_is_light(g))
     }
 
+    /// The `light.mul` shape a light-emitting graphic casts (tiledata's
+    /// `Quality`/layer byte). 0 when there's no map — the renderer falls back to
+    /// its plain radial glow for that.
+    pub(super) fn item_light_id(&self, g: u16) -> u8 {
+        self.map.map_or(0, |m| m.item_light_id(g))
+    }
+
     /// Does an item graphic carry the Foliage flag (tree/bush)? Used so the
     /// renderer can fade it when it would occlude the player.
     pub(super) fn item_foliage(&self, g: u16) -> bool {
