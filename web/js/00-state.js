@@ -240,6 +240,10 @@ const SETTINGS_DEFAULTS = {
   autoOpenDoors: true,            // walking into a closed door opens it (ClassicUO TryOpenDoors) — on by default
   gridLoot: true,                 // corpses open a click-to-loot grid instead of the authentic corpse gump
   shadows: true,                  // mobile shadows (ClassicUO's ShadowsEnabled, on by default there too)
+  // Terrain shading strength — ClassicUO's TerrainShadowsLevel (Profile.cs:237,
+  // default 15, slider 5..25 per Constants.cs:27-28). The shader multiplies by
+  // `Brightlight = level * 0.1`; at 10 every stretched tile is lit flat.
+  terrainShadows: 15,
   shadowsStatics: true,           // …and on trees/foliage/rocks (ClassicUO's ShadowsStatics)
   treeStumps: false,              // draw trees as stumps and drop their canopy (ClassicUO TreeToStumps)
   hideVegetation: false,          // don't draw vegetation at all (ClassicUO HideVegetation)
@@ -256,6 +260,11 @@ function renderOptions() {
   const sl = (key, label) => `<div class="opt-row"><label for="opt-${key}">${label}</label>`
     + `<input type="range" id="opt-${key}" data-k="${key}" min="0" max="100" value="${Math.round(settings[key] * 100)}">`
     + `<span class="opt-val" id="optv-${key}">${Math.round(settings[key] * 100)}</span></div>`;
+  // Integer slider (a real range with real units), as against `sl`'s 0..1 ×100
+  // volume sliders — ClassicUO's terrain-shadow strength is 5..25.
+  const sli = (key, label, min, max) => `<div class="opt-row"><label for="opt-${key}">${label}</label>`
+    + `<input type="range" id="opt-${key}" data-k="${key}" data-int="1" min="${min}" max="${max}" value="${settings[key] | 0}">`
+    + `<span class="opt-val" id="optv-${key}">${settings[key] | 0}</span></div>`;
   body.innerHTML =
     '<div class="opt-sect">Audio</div>'
     + cb("sfx", "Sound effects") + sl("sfxVol", "SFX volume")
@@ -274,6 +283,7 @@ function renderOptions() {
     + cb("shadowsStatics", "…and tree/rock shadows")
     + cb("treeStumps", "Trees as stumps")
     + cb("hideVegetation", "Hide vegetation")
+    + sli("terrainShadows", "Terrain shading", 5, 25)
     + '<label class="opt-row"><button type="button" class="dlg-btn opt-infobar">Info bar</button></label>'
     + '<label class="opt-row"><button type="button" class="dlg-btn opt-counterbar">Counter bar</button></label>'
     + '<label class="opt-row"><button type="button" class="dlg-btn opt-ignorelist">Ignore list</button></label>'

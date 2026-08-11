@@ -1090,6 +1090,13 @@ function inspectTile(x, y) {
     ["Texture", t.tx ? hex4(t.tx) : "none (flat draw)"],
     ["Distance", tileDistance(x, y)],
     ["Walkable", String(!!t.w)], ["StandZ", String(t.sz | 0)],
+    // The four corner lights, in vertex order — the cheap oracle for the
+    // ClassicUO port: a level corner must read exactly 0.854 at any terrain
+    // shading level, and nothing may fall below 0.323 at the default 15.
+    ["Light T/R/B/L", typeof cornerLight === "function"
+      ? [cornerLight(x, y), cornerLight(x + 1, y), cornerLight(x + 1, y + 1), cornerLight(x, y + 1)]
+          .map((v) => v.toFixed(3)).join(" ")
+      : "—"],
     ["Impassable", String(!!t.i)], ["UnderRoof", String(!!t.h)],
   ];
   const on = (typeof staticsAt === "function" && staticsAt(x | 0, y | 0)) || [];

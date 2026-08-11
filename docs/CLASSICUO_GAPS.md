@@ -764,8 +764,8 @@ The receive side is generally complete; there is no way to *act*.
 ## Tier 3 — rendering fidelity
 
 ~~Shadows~~, ~~corpse equipment layers~~ and ~~death animation~~ (**CLOSED,
-live-verified** — see below); ~~`light.mul` light shapes and colours~~ (**CLOSED, live-verified** — see
-below); directional lighting on stretched land; seasonal
+live-verified** — see below); ~~`light.mul` light shapes and colours~~ and ~~directional lighting on stretched
+land~~ (**CLOSED, live-verified** — see below); seasonal
 land/static graphic remap (the season *system* exists, the remap does not);
 `TileFlag.Translucent` statics drawn opaque; static hue from `statics.mul` discarded
 at decode; mount rider vertical offset; seated-character deformation; roof/ceiling
@@ -942,6 +942,55 @@ cached `light/2.png?c=40` from the window when the server still ignored `?c=`.
 bytes are a pure function of the data files, but their *URL* does not change
 when the server's answer does, and that is the case where a heuristic cache is
 simply wrong.
+
+Closed 2026-08-12 (directional lighting on stretched land): the sixth Tier 3
+row, and the first picked by surveying all nine remaining rows in parallel
+rather than taking the next one down the list. It won because it is the only one
+that shares no edit site with any other — four of the others all want the same
+statics loop.
+
+- **The light belongs to map CORNERS, not tiles.** `Land.ApplyStretch`
+  (`Land.cs:158-161`) calls `CalculateNormal` four times, once per corner of the
+  diamond, each with that corner's own Z and its four axis neighbours — so
+  neighbouring tiles *share* a corner's value and the shading is continuous
+  across the terrain instead of faceted per tile. The renderer interpolates the
+  light across the quad, which is the same gouraud result ClassicUO gets by
+  interpolating the normal, with the trigonometry done once per corner on the
+  CPU instead of once per fragment.
+- **The four cross products have a closed form.** `CalculateNormal`
+  (`Land.cs:164-238`) sums four cross products of `(±22, ±22, (nz - z) * 4)`.
+  That reduces to `n ∝ (L + B - R - T, L + T - B - R, 22)` — **the corner's own
+  Z cancels out entirely**. Checked against a literal port of the C# over
+  200,005 cases including the all-equal early-out and ±127 extremes: worst
+  component difference **2.2e-16**.
+- **`IsStretched` is wider than "this tile's corners differ".** It is the OR of
+  those same four calls, and each looks one tile *further out* than the diamond
+  — so a tile whose own corners are level but which sits beside a step is
+  stretched and shaded by ClassicUO, and was drawn flat here. Measured live in
+  the client: **612 tiles by the old test, 963 by ClassicUO's**, in one 49×49
+  window at (1420, 1702). The test and the light are two readings of the same
+  four calls, which is why they land together.
+- **Only stretched land is lit**, which is ClassicUO's rule and not an
+  oversight: `LandView.cs:41-56` picks `SHADER_LAND` when `IsStretched` and
+  `SHADER_NONE` otherwise, so a flat tile is drawn from its own 44×44 art with
+  no shading. A level *stretched* corner still darkens to 0.854 — the fixed
+  point of `get_light` — so the two classes of tile genuinely differ in
+  brightness there too.
+- **The custom shader was free.** These tiles are built from a plain
+  `PIXI.Geometry`, not a `MeshGeometry`, and PIXI only batches the latter — so
+  every stretched tile was already its own draw call. Confirmed at runtime:
+  `mesh.batched === false` with the shader attached, 92 shaders for a whole view
+  (one per texmap texture, not one per tile), fps unchanged at ~125.
+
+Verified live at (1420, 1702). The light range came out **0.3232 .. 1.0708**,
+matching the range the maths predicts. A level corner reads **0.8535534 at
+terrain-shading 5, 10, 15 and 25** — `get_light`'s fixed point, which must not
+move when the slider does — while a sloped corner beside it fans 0.884 → 1.006
+over the same range. One tile's four vertex lights read
+`0.854 / 0.854 / 0.653 / 0.854`, i.e. real per-vertex variation and not a flat
+tint. Against a control with the light forced to 1, **206,006 pixels changed and
+205,987 of them got darker**; the water in the same frame is untouched, because
+water with no texmap is the one thing ClassicUO refuses to stretch.
 
 ---
 

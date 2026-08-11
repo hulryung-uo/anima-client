@@ -489,6 +489,18 @@ function setupInput() {
   });
   optBody.addEventListener("input", (e) => {
     const k = e.target.dataset.k; if (!k || e.target.type !== "range") return;
+    // `data-int` sliders carry their own units (terrain shading is 5..25); the
+    // others are 0..1 values shown ×100.
+    if (e.target.dataset.int) {
+      settings[k] = +e.target.value;
+      const vi = document.getElementById("optv-" + k); if (vi) vi.textContent = e.target.value;
+      saveSettings();
+      // The light is baked into each tile's vertices when the sprite is built,
+      // so the pool has to go.
+      if (k === "terrainShadows") rebuildTiles();
+      markDirty();
+      return;
+    }
     settings[k] = (+e.target.value) / 100;
     const v = document.getElementById("optv-" + k); if (v) v.textContent = e.target.value;
     saveSettings(); applyAudioSettings();

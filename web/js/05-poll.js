@@ -235,6 +235,16 @@ function ingestBoatMoves(s) {
 // Drop every static sprite so the next poll rebuilds them under the current
 // filters. Cheap enough to be a toggle handler: the pool is rebuilt from the
 // scene the client already has, with no server round trip.
+// Drop every land sprite so the next poll rebuilds it. Needed when something
+// baked into a tile's vertices changes — the terrain-shading strength is baked
+// at build time exactly as ClassicUO bakes it into its vertex normals' shader
+// uniform, and nothing about the scene changed to trigger the usual rebuild.
+function rebuildTiles() {
+  for (const e of tilePool.values()) { world.removeChild(e.sp); e.sp.destroy(); }
+  tilePool.clear();
+  markDirty();
+}
+
 function rebuildStatics() {
   for (const sp of staticPool.values()) { animatedStatics.delete(sp); world.removeChild(sp); sp.destroy({ children: true }); }
   staticPool.clear();
@@ -419,17 +429,32 @@ function syncWorld(s) {
       // skip the tile — which flashes the black page background at the diamond's rim —
       // fall back to this tile's own Z so it still renders (flat).
       const z1 = zAt(x + 1, y) ?? z0, z2 = zAt(x + 1, y + 1) ?? z0, z3 = zAt(x, y + 1) ?? z0;
-      const sloped = !(z0 === z1 && z1 === z2 && z2 === z3);
+      // ClassicUO's `IsStretched` is the OR of the four corner normals being
+      // non-flat (Land.cs:158-161), and each corner looks one tile FURTHER OUT
+      // than the diamond does. That is wider than "this tile's own four corners
+      // differ", which is what this used to test: a tile whose corners are level
+      // but which sits beside a step is stretched and shaded by ClassicUO, and
+      // was drawn flat here. Measured on this map: 350 extra tiles in a 49×49
+      // window at (1420,1702), 15% of it.
+      const sloped = !(cornerFlat(x, y) && cornerFlat(x + 1, y)
+                    && cornerFlat(x + 1, y + 1) && cornerFlat(x, y + 1));
 
       // Until the art/texmap PNG has streamed in, draw a flat diamond in the tile's
       // server-provided average colour instead of `continue`-ing (which would leave the
       // black page background showing through). The `fallback` flag makes the unchanged-
       // check above re-evaluate it every poll until the real texture resolves.
+      // The four corner lights, in the vertex order makeStretchedTile uses:
+      // top (x,y), right (x+1,y), bottom (x+1,y+1), left (x,y+1). A pure
+      // function of map Z, so it never has to be recomputed for a pooled tile.
+      const light = [cornerLight(x, y), cornerLight(x + 1, y),
+                     cornerLight(x + 1, y + 1), cornerLight(x, y + 1)];
       let sp, texUrl, fallback = false;
       if (beyondView) {
         // Grayscale, dimmed diamond — no textured art or statics ever load for
         // this ring (the server never sends them out here; see scene.rs), so
         // this branch never touches texFor and never sets `fallback`.
+        // Not lit: ClassicUO leaves the un-stretched/context land on SHADER_NONE
+        // (LandView.cs:52-54), and this ring is already a flat grey memory.
         const L = Math.min(255, Math.round((0.3 * t.c[0] + 0.59 * t.c[1] + 0.11 * t.c[2]) * 0.65 + 50));
         sp = makeColorTile(x, y, z0, z1, z2, z3, [L, L, L]);
       } else if (!sloped || !(t.tx > 0)) {
@@ -446,13 +471,15 @@ function syncWorld(s) {
         // pre-seeded to `TexID == 0 && IsWet` purely to refuse it).
         texUrl = `art/land/${t.g}.png`;
         const tex = texFor(texUrl);
+        // Also unlit, for the same reason: a tile ClassicUO refuses to stretch
+        // draws from its own 44×44 art with no shading at all.
         if (tex) sp = makeFlatTile(x, y, z0, tex);
         else { sp = makeColorTile(x, y, z0, z0, z0, z0, t.c); fallback = true; }
       } else {
         texUrl = `texmap/${t.tx}.png`; // seamless texture for slopes
         const tex = texFor(texUrl);
-        if (tex) sp = makeStretchedTile(x, y, z0, z1, z2, z3, tex);
-        else { sp = makeColorTile(x, y, z0, z1, z2, z3, t.c); fallback = true; }
+        if (tex) sp = makeStretchedTile(x, y, z0, z1, z2, z3, tex, light);
+        else { sp = makeColorTile(x, y, z0, z1, z2, z3, t.c, light); fallback = true; }
       }
       if (e) { world.removeChild(e.sp); e.sp.destroy(); }
       world.addChild(sp);
@@ -739,7 +766,140 @@ function makeFlatTile(x, y, z, tex) {
 // next door — a fringe of foreign terrain. Every texmap here is loaded as its
 // own standalone texture (`PIXI.Assets.load` per URL, no Spritesheet anywhere),
 // so there is no neighbour to bleed in and clamping handles the edge.
-function makeStretchedTile(x, y, z0, z1, z2, z3, tex) {
+// ---- directional lighting on stretched land (ClassicUO Land.cs + IsometricWorld.fx) ----
+//
+// ClassicUO shades a stretched land tile per VERTEX from a surface normal, and
+// those normals belong to the map's corner POINTS, not to tiles: `ApplyStretch`
+// (Land.cs:158-161) calls `CalculateNormal` four times, once per corner of the
+// diamond — top (x,y), right (x+1,y), bottom (x+1,y+1), left (x,y+1) — each
+// time with that point's own Z and its four axis neighbours. Neighbouring tiles
+// therefore share a corner's light, and the shading is continuous across the
+// terrain rather than per-tile flat.
+//
+// `CalculateNormal` (Land.cs:164-238) sums four cross products of edge vectors
+// (±22, ±22, (neighbourZ - z) * 4). That sum has a closed form:
+//
+//     n ∝ (left + bottom - right - top,  left + top - bottom - right,  22)
+//
+// — the corner's own Z cancels out entirely. Checked against a literal port of
+// the four-cross-product code over 200,005 cases (including the all-equal
+// early-out and ±127 extremes): worst component difference 2.2e-16.
+const LAND_LIGHT_FLAT = 0.85355339; // the light of a level corner; see cornerLight
+// Land Z anywhere in the sent window, or null outside it. Module-scope (rather
+// than syncWorld's own `zAt`) so the tile inspector can print the same numbers
+// this shades with — that readout is the oracle the port was checked against.
+function landZAt(x, y) {
+  const m = scene && scene.map;
+  if (!m) return null;
+  const span = 2 * m.radius + 1;
+  const col = x - m.cx + m.radius, row = y - m.cy + m.radius;
+  if (col < 0 || col >= span || row < 0 || row >= span) return null;
+  const t = m.tiles[row * span + col];
+  return t ? (t.z | 0) : null;
+}
+// ClassicUO's early-out: all five Z's equal → normal (0,0,1) and "not stretched".
+// A null neighbour (outside the sent window) counts as level — it can only happen
+// in the two outermost rings, which are the grey context ring we never light.
+function cornerFlat(cx, cy) {
+  const c = landZAt(cx, cy);
+  if (c == null) return true;
+  const t = landZAt(cx, cy - 1), r = landZAt(cx + 1, cy), b = landZAt(cx, cy + 1), l = landZAt(cx - 1, cy);
+  return (t == null || t === c) && (r == null || r === c)
+      && (b == null || b === c) && (l == null || l === c);
+}
+// `get_light` from IsometricWorld.fx:58-67 with its compile-time
+// LIGHT_DIRECTION = (0, 1, 1) (fx:14), which never rotates because UO's camera
+// never does:
+//     base  = max(dot(n̂, L̂), 0) / 2 + 0.5
+//     light = base + (Brightlight - 1) * (base - 0.85355339)
+// 0.85355339 is (cos 45° / 2) + 0.5 — the light a flat corner gets, and the
+// fixed point of the second line, so level ground is lit identically at every
+// Brightlight. `Brightlight = TerrainShadowsLevel * 0.1` (GameScene.cs:928),
+// default 15 → 1.5 (Profile.cs:237), slider 5..25 (Constants.cs:27-28).
+function cornerLight(cx, cy) {
+  const c = landZAt(cx, cy);
+  let base = LAND_LIGHT_FLAT;
+  if (c != null) {
+    const t = landZAt(cx, cy - 1) ?? c, r = landZAt(cx + 1, cy) ?? c,
+          b = landZAt(cx, cy + 1) ?? c, l = landZAt(cx - 1, cy) ?? c;
+    if (!(t === c && r === c && b === c && l === c)) {
+      const nx = l + b - r - t, ny = l + t - b - r, nz = 22;
+      const inv = 1 / Math.hypot(nx, ny, nz);
+      base = Math.max((ny + nz) * inv * Math.SQRT1_2, 0) / 2 + 0.5;
+    }
+  }
+  const bright = (settings.terrainShadows | 0) * 0.1;
+  return base + ((bright * (base - LAND_LIGHT_FLAT)) - (base - LAND_LIGHT_FLAT));
+}
+
+// The land shader: ClassicUO's `IsometricWorld.fx` mode LAND, which is one line
+// — `color.rgb *= get_light(IN.Normal)` (fx:137) — with the light interpolated
+// across the quad from the four vertex normals. Here the light itself is
+// interpolated instead of the normal, which is the same gouraud result for a
+// linear function and keeps all the trigonometry on the CPU where it runs once
+// per corner rather than once per fragment.
+//
+// A custom shader would normally cost batching, but these tiles are built from a
+// plain `PIXI.Geometry` rather than a `MeshGeometry`, and PIXI only batches the
+// latter — every stretched tile is already its own draw call, so this is free.
+// `uProjectionMatrix`/`uWorldTransformMatrix` (global uniform group) and
+// `uTransformMatrix`/`uColor` (the mesh pipe's local group) are bound
+// automatically; only `uTexture` is ours to supply, so the shaders are cached
+// per texmap texture — a handful per view, not one per tile.
+const landShaders = new Map();   // TextureSource uid -> PIXI.Shader
+let landShaderBroken = false;    // set if the GPU refuses it; falls back to flat tinting
+function landShaderFor(tex) {
+  if (landShaderBroken) return null;
+  const src = tex.source;
+  const hit = landShaders.get(src.uid);
+  if (hit) return hit;
+  try {
+    const shader = PIXI.Shader.from({
+      gl: {
+        vertex: `
+          in vec2 aPosition;
+          in vec2 aUV;
+          in float aLight;
+          out vec2 vUV;
+          out float vLight;
+          uniform mat3 uProjectionMatrix;
+          uniform mat3 uWorldTransformMatrix;
+          uniform mat3 uTransformMatrix;
+          void main() {
+            mat3 mvp = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
+            gl_Position = vec4((mvp * vec3(aPosition, 1.0)).xy, 0.0, 1.0);
+            vUV = aUV;
+            vLight = aLight;
+          }
+        `,
+        fragment: `
+          in vec2 vUV;
+          in float vLight;
+          out vec4 finalColor;
+          uniform sampler2D uTexture;
+          uniform vec4 uColor;
+          void main() {
+            vec4 c = texture(uTexture, vUV);
+            finalColor = vec4(c.rgb * vLight, c.a) * uColor;
+          }
+        `,
+      },
+      resources: { uTexture: src },
+    });
+    landShaders.set(src.uid, shader);
+    return shader;
+  } catch (err) {
+    // No custom shader (old GPU, context loss, a PIXI build without it): fall
+    // back to flat per-tile tinting for the rest of the session rather than
+    // losing the terrain. Faceted on a tile whose corners disagree, right on
+    // the rest.
+    console.warn("land shader unavailable, falling back to flat tinting:", err);
+    landShaderBroken = true;
+    return null;
+  }
+}
+
+function makeStretchedTile(x, y, z0, z1, z2, z3, tex, light) {
   const Bx = (x - y) * HALF, By = (x + y) * HALF;
   const aPosition = [
     Bx,        By - HALF - z0 * ZSTEP, // top
@@ -748,8 +908,26 @@ function makeStretchedTile(x, y, z0, z1, z2, z3, tex) {
     Bx - HALF, By        - z3 * ZSTEP, // left
   ];
   const aUV = [0, 0, 1, 0, 1, 1, 0, 1];
-  const geometry = new PIXI.Geometry({ attributes: { aPosition, aUV }, indexBuffer: [0, 1, 2, 0, 2, 3] });
-  const mesh = new PIXI.Mesh({ geometry, texture: tex });
+  // One light per vertex, in the same top/right/bottom/left order as the
+  // positions above. Declared in full rather than as a bare array: PIXI infers
+  // `float32x2` for an untyped attribute, which would silently pair the corners
+  // up and light the tile from two of its four values.
+  const shader = landShaderFor(tex);
+  const attributes = { aPosition, aUV };
+  if (shader) {
+    attributes.aLight = {
+      buffer: new Float32Array(light), format: "float32", stride: 4, offset: 0,
+    };
+  }
+  const geometry = new PIXI.Geometry({ attributes, indexBuffer: [0, 1, 2, 0, 2, 3] });
+  const mesh = new PIXI.Mesh(shader ? { geometry, texture: tex, shader } : { geometry, texture: tex });
+  if (!shader) {
+    // Flat fallback: the tile's mean light as a grey tint. Clamped at 1 because
+    // a tint cannot brighten, and ClassicUO's light does reach 1.07 on a slope
+    // facing the light.
+    const v = Math.round(Math.min(1, (light[0] + light[1] + light[2] + light[3]) / 4) * 255);
+    mesh.tint = (v << 16) | (v << 8) | v;
+  }
   // Sort a sloped tile by its AverageZ (ClassicUO Land.CalculateAverageZ: the mean
   // of whichever diagonal corner-pair differs less), NOT the top corner — otherwise
   // a slope whose top corner is high sorts in front of taller statics (e.g. stairs)
@@ -764,15 +942,19 @@ function makeStretchedTile(x, y, z0, z1, z2, z3, tex) {
 // the server-provided average colour `c` so terrain never flashes the black page
 // background during load/scroll; replaced by the textured tile on a later poll once
 // texFor() resolves. Corner heights follow the same layout as makeStretchedTile.
-function makeColorTile(x, y, z0, z1, z2, z3, c) {
+function makeColorTile(x, y, z0, z1, z2, z3, c, light) {
   const Bx = (x - y) * HALF, By = (x + y) * HALF;
   const g = new PIXI.Graphics();
+  // Shade the placeholder by the same mean light as the tile that will replace
+  // it, so a slope doesn't flash bright and then darken when its texmap lands.
+  const lm = light ? Math.min(1, (light[0] + light[1] + light[2] + light[3]) / 4) : 1;
+  const ch = (v) => Math.max(0, Math.min(255, Math.round(v * lm)));
   g.poly([
     Bx,        By - HALF - z0 * ZSTEP, // top
     Bx + HALF, By        - z1 * ZSTEP, // right
     Bx,        By + HALF - z2 * ZSTEP, // bottom
     Bx - HALF, By        - z3 * ZSTEP, // left
-  ]).fill(Array.isArray(c) && c.length === 3 ? ((c[0] << 16) | (c[1] << 8) | c[2]) : 0x101418);
+  ]).fill(Array.isArray(c) && c.length === 3 ? ((ch(c[0]) << 16) | (ch(c[1]) << 8) | ch(c[2])) : 0x101418);
   const avgZ = Math.abs(z0 - z2) <= Math.abs(z3 - z1) ? (z0 + z2) >> 1 : (z3 + z1) >> 1;
   g.zIndex = depthZ(x, y, avgZ - 2, 0);
   return g;
