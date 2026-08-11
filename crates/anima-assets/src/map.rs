@@ -390,6 +390,16 @@ impl MapData {
         self.tiledata.item_flags(graphic)
     }
 
+    /// Texmap id of a land graphic — the seamless texture a *stretched* (sloped)
+    /// tile is drawn with. [`LandTile::tex_id`] already carries this for the tile
+    /// as it sits on the map; this by-graphic accessor exists for the seasonal
+    /// remap, where the tile must be drawn with its REPLACEMENT's texture (all
+    /// 312 winter land rows change TexID, and ClassicUO agrees — `Land.ApplyStretch`
+    /// reads `TileData.TexID` off the remapped `Graphic`).
+    pub fn land_tex_id(&self, graphic: u16) -> u16 {
+        self.tiledata.land_tex_id(graphic)
+    }
+
     /// Does an item graphic emit light (torches/lamps/braziers)? Drives the
     /// per-object night glow in the renderer.
     pub fn item_is_light(&self, graphic: u16) -> bool {

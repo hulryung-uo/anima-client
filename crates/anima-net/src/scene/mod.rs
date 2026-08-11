@@ -46,6 +46,7 @@ use look::Look;
 mod dialogs;
 mod feeds;
 mod multis;
+mod season;
 use dialogs::*;
 use feeds::*;
 use multis::*;
@@ -321,9 +322,13 @@ pub fn build_scene(
     let light = s.world.effective_light();
     let weather = s.world.weather.kind;
     let weather_n = s.world.weather.intensity;
-    // Current season (0xBC): the renderer may tint the scene per season. We do not
-    // remap tree/foliage graphics (a much larger change).
-    let season = s.world.season;
+    // Current season (0xBC). It reaches the client for the weather/UI, but the
+    // work it drives happens in `scene::season`: the season substitutes DRAW
+    // graphics only (grass → snow, green tree → bare), while every pathing field
+    // stays on the original graphic because ServUO's `MovementImpl` reads the raw
+    // map/statics ids and never consults `Map.Season`. See that module for why we
+    // deliberately diverge from ClassicUO here.
+    let season = season::scene_season(s.world.season);
     let buffs = json_array(&buffs_json(&s.world, cliloc));
     let skills = json_array(&skills_json(&s.world));
     let lights = json_array(&lights);

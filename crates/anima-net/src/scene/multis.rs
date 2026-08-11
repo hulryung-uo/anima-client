@@ -61,6 +61,13 @@ pub(super) fn placement_json(world: &World, multis: Option<&Multis>) -> Option<V
     // Same `comps`, same order (multi.mul's own listing — NOT sorted), just
     // without the (dx, dy) dedup: one entry per real component so the
     // browser can draw each one's actual art instead of a blank outline.
+    //
+    // Deliberately NOT season-remapped, unlike `emit_multi_component`: this is a
+    // transient targeting overlay read straight off `multi.mul`, not a placed
+    // object in the world. The moment the house exists the server sends it as a
+    // real multi and it goes through the remapping path like everything else.
+    // (Moot in practice — foundations are stone and timber, and the table's
+    // static rows are foliage.)
     let parts: Vec<Value> = comps
         .iter()
         .take(PLACEMENT_PART_CAP)
@@ -220,35 +227,55 @@ pub(super) fn emit_multi_component(
     light_cap: usize,
     px: i64,
     py: i64,
+    season: u8,
 ) {
     if map.item_is_nodraw(graphic) {
         return;
     }
     // Fetched once and reused below (is_roof/background/height/foliage/path)
-    // instead of re-querying tiledata per check.
+    // instead of re-querying tiledata per check. This one pair used to serve
+    // every consumer; the seasonal remap splits them, because ClassicUO DOES
+    // substitute multi components (`Multi.UpdateGraphicBySeason`) and a
+    // substituted graphic carries different tiledata. `flags`/`height` stay on
+    // the ORIGINAL — they gate the two early returns that drop the component out
+    // of the stream entirely (taking `h`/`pf` with it) and they feed
+    // `path_suffix`; `dflags`/`dheight` drive what is drawn.
     let flags = map.item_flags(graphic);
     let height = map.item_height(graphic);
     let is_roof = flags & FLAG_ROOF != 0;
     if cz >= max_z || (under_cover && is_roof) {
         return;
     }
+    let draw_g = season::static_draw_graphic(season, graphic);
+    let (dflags, dheight) = if draw_g == graphic {
+        (flags, height)
+    } else {
+        (map.item_flags(draw_g), map.item_height(draw_g))
+    };
     let mut spz = cz;
-    if flags & 0x1 != 0 {
+    if dflags & 0x1 != 0 {
         spz -= 1; // Background
     }
-    if height != 0 {
+    if dheight != 0 {
         spz += 1; // has height (wall/solid)
     }
-    let foliage = if flags & FLAG_FOLIAGE != 0 {
+    let foliage = if dflags & FLAG_FOLIAGE != 0 {
         ",\"f\":1"
     } else {
         ""
+    };
+    // No `fh` here on purpose: ClassicUO's foliage-hide rule exempts multi
+    // pieces (`!IsMultiMovable`), so a house's decorative shrub survives winter.
+    let season_g = if draw_g != graphic {
+        format!(",\"dg\":{draw_g}")
+    } else {
+        String::new()
     };
     // Same animdata frame-sequence lookup the real-statics loop does (via the
     // shared `anim_suffix`) — an animated component (mill wheel, pennant) or
     // design tile must cycle frames exactly like the identical graphic would
     // as a real static, not freeze on frame 0.
-    let anim = anim_suffix(map, animdata, graphic);
+    let anim = anim_suffix(map, animdata, draw_g);
     let path = path_suffix(
         (x - px).abs() <= PATH_RADIUS && (y - py).abs() <= PATH_RADIUS,
         height,
@@ -256,18 +283,18 @@ pub(super) fn emit_multi_component(
     );
     let _ = write!(
         statics,
-        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{},\"ms\":{}{}{}{}}},",
-        x, y, cz, graphic, spz, multi_serial, foliage, anim, path
+        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{},\"ms\":{}{}{}{}{}}},",
+        x, y, cz, graphic, spz, multi_serial, foliage, anim, path, season_g
     );
     *n_statics += 1;
-    if lights.len() < light_cap && map.item_is_light(graphic) {
-        let lid = map.item_light_id(graphic);
+    if lights.len() < light_cap && map.item_is_light(draw_g) {
+        let lid = map.item_light_id(draw_g);
         let (lid, lc) = if lid > 200 {
             (1, lid as u16 - 200)
         } else {
             (
                 lid,
-                anima_assets::lights::light_color_for(graphic).unwrap_or(0),
+                anima_assets::lights::light_color_for(draw_g).unwrap_or(0),
             )
         };
         lights.push(json!({ "x": x, "y": y, "z": cz, "r": 3, "id": lid, "c": lc }));

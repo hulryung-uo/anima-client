@@ -2463,3 +2463,168 @@ fn can_step_to_allows_the_stairs_climb_and_still_blocks_a_door_and_a_wall() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Seasonal graphic substitution (scene/season.rs).
+//
+// The table itself is not re-derived here — it was parsed independently from
+// ClassicUO's shipped `Data/Client/seasons.txt` and from the 498 `WriteLine`
+// literals of `SeasonManager.CreateDefaultSeasonsFile` that regenerate it, and
+// the two reconciled byte-for-byte before the table was written. What these
+// tests pin is everything a future edit could get wrong *around* it: which
+// direction a row reads, that a substitution is never chased, which seasons are
+// identity, and — the one that matters — that a season change cannot move a
+// single pathing byte.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn season_remap_reads_from_to_and_never_chases() {
+    // Direction. Rows are `<season>,<kind>,<from>,<to>`; a `to` that appeared as
+    // a `from` would mean we had it backwards. 573 grass → 1861 snow is the
+    // canonical one, and the winter `from` column contains zero snow tiles.
+    assert_eq!(season::land_draw_graphic(3, 573), 1861);
+    assert_eq!(season::land_draw_graphic(3, 578), 1866);
+    assert_eq!(season::static_draw_graphic(3, 3244), 3389);
+
+    // ONE hop, never a chain. The winter statics bucket holds exactly three
+    // rows whose `to` is itself a `from` — 3245, 3246 and 3253 all map to 3379,
+    // and 3379 maps on to 6093. A fixed-point loop would walk 3245 → 3379 →
+    // 6093 and over-substitute; ClassicUO reads the array once
+    // (`arr[g] == 0 ? g : arr[g]`), so 3245 lands on 3379 and stops.
+    for g in [3245u16, 3246, 3253] {
+        assert_eq!(season::static_draw_graphic(3, g), 3379);
+        assert_ne!(season::static_draw_graphic(3, g), 6093);
+    }
+    assert_eq!(season::static_draw_graphic(3, 3379), 6093);
+}
+
+#[test]
+fn season_remap_is_identity_where_the_table_is_empty() {
+    // Summer IS the art as shipped — it has no rows at all.
+    assert_eq!(season::static_draw_graphic(1, 3244), 3244);
+    assert_eq!(season::land_draw_graphic(1, 573), 573);
+    // Only winter remaps LAND; spring/fall/desolation are statics-only.
+    for s in [0u8, 1, 2, 4] {
+        assert_eq!(
+            season::land_draw_graphic(s, 573),
+            573,
+            "season {s} moved land"
+        );
+    }
+    // A graphic with no row is returned untouched, and an out-of-range season
+    // (a malformed 0xBC) must not panic or substitute.
+    assert_eq!(season::static_draw_graphic(3, 0xFFFF), 0xFFFF);
+    assert_eq!(season::static_draw_graphic(9, 3244), 3244);
+    assert_eq!(season::land_draw_graphic(9, 573), 573);
+}
+
+#[test]
+fn season_tables_are_sorted_and_free_of_duplicate_keys() {
+    // The lookup is a binary search, so an unsorted or duplicated key silently
+    // returns the wrong graphic (or none) instead of failing loudly.
+    let mut n = 0;
+    for (season, get) in [
+        (3u8, season::land_draw_graphic as fn(u8, u16) -> u16),
+        (0, season::static_draw_graphic as fn(u8, u16) -> u16),
+        (2, season::static_draw_graphic as fn(u8, u16) -> u16),
+        (3, season::static_draw_graphic as fn(u8, u16) -> u16),
+        (4, season::static_draw_graphic as fn(u8, u16) -> u16),
+    ] {
+        // Sweeping every graphic proves the search finds each row from either
+        // side — an out-of-order entry makes `binary_search` miss it.
+        n += (0..=u16::MAX).filter(|&g| get(season, g) != g).count();
+    }
+    assert_eq!(n, 312 + 17 + 27 + 70 + 72, "reachable rows != 498");
+}
+
+#[test]
+fn foliage_hide_rule_matches_classicuo_scope() {
+    // `IsFoliage && !IsMultiMovable && season >= Winter`.
+    let leafy = FLAG_FOLIAGE;
+    let boat_leafy = FLAG_FOLIAGE | FLAG_MULTI_MOVABLE;
+    for s in [0u8, 1, 2] {
+        assert!(
+            !foliage_hidden(s, leafy),
+            "season {s} stripped foliage early"
+        );
+    }
+    assert!(foliage_hidden(3, leafy));
+    assert!(foliage_hidden(4, leafy));
+    // A movable multi's own greenery survives — a boat must not go bare.
+    assert!(!foliage_hidden(3, boat_leafy));
+    assert!(!foliage_hidden(4, boat_leafy));
+    // Not foliage at all: never hidden.
+    assert!(!foliage_hidden(4, FLAG_SURFACE));
+}
+
+/// The regression that guards the whole design: a season may repaint the world
+/// but must not move one byte of what the client walks on.
+///
+/// ClassicUO stores the substitution *in* `Graphic` and then indexes tiledata
+/// with it everywhere, including in `Pathfinder.CreateItemList` — so it really
+/// does pathfind on substituted flags, and 29 of the 312 winter land rows flip
+/// IMPASSABLE (27 impassable → passable). ServUO's `MovementImpl` never looks at
+/// `Map.Season`. We follow the server. If someone ever "simplifies" this by
+/// rebinding the tile struct — `LandTile { graphic: draw_g, ..land }` — `li`
+/// follows the graphic and this test fails.
+#[test]
+#[ignore] // needs ~/dev/uo/uo-resource
+fn a_season_change_moves_no_pathing_field() {
+    let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+    let mut map = MapData::open(&dir).expect("open map data");
+    // Britain's north field: plain grass and trees, i.e. dense in rows from
+    // both the winter land table and the winter statics table.
+    const CENTER: (i64, i64, i32) = (1495, 1620, 0);
+
+    let emit = |map: &mut MapData, season: u8| {
+        let mut world = anima_core::World::new();
+        world.season = season;
+        let mut lights = Vec::new();
+        let e = emit_tiles(&world, map, None, None, &mut None, CENTER, 127, &mut lights);
+        let parse = |body: &str| -> Vec<Value> {
+            serde_json::from_str(&format!("[{}]", body.trim_end_matches(','))).expect("scene json")
+        };
+        (parse(&e.tiles), parse(&e.statics))
+    };
+    let (summer_t, summer_s) = emit(&mut map, 1);
+    let (winter_t, winter_s) = emit(&mut map, 3);
+
+    // The remap has to actually be doing something here, or the comparison
+    // below passes vacuously.
+    let remapped_t = winter_t.iter().filter(|t| t.get("dg").is_some()).count();
+    let remapped_s = winter_s.iter().filter(|t| t.get("dg").is_some()).count();
+    assert!(
+        remapped_t > 0,
+        "no land remapped at {CENTER:?} — pick a greener tile"
+    );
+    assert!(remapped_s > 0, "no statics remapped at {CENTER:?}");
+    assert!(
+        summer_t.iter().all(|t| t.get("dg").is_none()),
+        "summer remapped land"
+    );
+
+    // Every field that feeds a walk decision, byte for byte.
+    const PATH_FIELDS: [&str; 8] = ["w", "z", "g", "sz", "li", "dr", "h", "pf"];
+    assert_eq!(
+        summer_t.len(),
+        winter_t.len(),
+        "tile count changed with the season"
+    );
+    for (a, b) in summer_t.iter().zip(&winter_t) {
+        for f in PATH_FIELDS {
+            assert_eq!(a.get(f), b.get(f), "land field `{f}` moved: {a} vs {b}");
+        }
+    }
+    // Statics keep their identity too — a season must not add, drop or reorder
+    // one, because the browser's `calculate_new_z` walks this exact list.
+    assert_eq!(
+        summer_s.len(),
+        winter_s.len(),
+        "static count changed with the season"
+    );
+    for (a, b) in summer_s.iter().zip(&winter_s) {
+        for f in ["x", "y", "z", "g", "h", "pf", "ms"] {
+            assert_eq!(a.get(f), b.get(f), "static field `{f}` moved: {a} vs {b}");
+        }
+    }
+}

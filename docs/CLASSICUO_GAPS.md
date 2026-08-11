@@ -765,8 +765,8 @@ The receive side is generally complete; there is no way to *act*.
 
 ~~Shadows~~, ~~corpse equipment layers~~ and ~~death animation~~ (**CLOSED,
 live-verified** — see below); ~~`light.mul` light shapes and colours~~ and ~~directional lighting on stretched
-land~~ (**CLOSED, live-verified** — see below); seasonal
-land/static graphic remap (the season *system* exists, the remap does not);
+land~~ (**CLOSED, live-verified** — see below); ~~seasonal
+land/static graphic remap~~ (**CLOSED, live-verified** — see below);
 `TileFlag.Translucent` statics drawn opaque; static hue from `statics.mul` discarded
 at decode; mount rider vertical offset; seated-character deformation; roof/ceiling
 fading; 0x23 DragEffect decoded but never drawn; GameEffect blend modes and
@@ -991,6 +991,78 @@ over the same range. One tile's four vertex lights read
 tint. Against a control with the light forced to 1, **206,006 pixels changed and
 205,987 of them got darker**; the water in the same frame is untouched, because
 water with no texmap is the one thing ClassicUO refuses to stretch.
+
+Closed 2026-08-12 (seasonal land/static graphic remap): the seventh Tier 3 row,
+and the one the inventory had backwards — "the season *system* exists, the remap
+does not" was true, but the reason it was hard is that the remap is one line of
+lookup wrapped in a trap that a naive implementation walks straight into.
+
+- **UO ships one map, not four.** Winter is not separate art; it is
+  `Data/Client/seasons.txt`, a 498-row table of `<season>,<kind>,<from>,<to>`
+  substitutions the *client* applies — grass 573 becomes snow 1861, a green tree
+  becomes a bare one — while the server never learns about it. Before writing a
+  single row I parsed that file two independent ways (the shipped text, and the
+  498 `WriteLine` literals in `SeasonManager.CreateDefaultSeasonsFile` that
+  regenerate it) and reconciled them byte-for-byte: 312 winter land rows, and
+  17/27/70/72 static rows for spring/fall/winter/desolation. Summer has none — it
+  *is* the art as shipped.
+- **The trap is that graphic and walkability share a struct.** ClassicUO stores
+  the substitution *in* the object's `Graphic` field and then every tiledata
+  accessor indexes the remapped id — including the ones `Pathfinder.CreateItemList`
+  reads. So ClassicUO genuinely pathfinds on substituted flags, and **29 of the
+  312 winter land rows flip IMPASSABLE** (27 impassable → passable). That is fine
+  in ClassicUO because it *is* the authority; against a ServUO shard, whose
+  `MovementImpl` reads the raw ids and never consults `Map.Season`, it would be a
+  client that thinks it can walk onto tiles the server denies. So the remap here
+  is computed as a **local `draw_g`** and emitted as a *sibling* field (`dg`),
+  never rebound into the tile struct — `World` keeps the server's own graphics,
+  and every `w`/`sz`/`li`/`h`/`pf` byte with them. A `#[ignore]`d regression test
+  builds the same scene at summer and winter and asserts every pathing field is
+  byte-identical; fault-injecting the "obvious" rebind (writing `draw_g` into
+  `g`) makes it fail on field `g`, and the impassable-from-`draw_g` variant fails
+  to compile because `MapData` deliberately exposes no by-graphic land-flags
+  accessor. This is a **deliberate divergence from ClassicUO**, recorded in
+  DESIGN.md so a future reader doesn't file it as a porting bug.
+- **The texmap follows the drawn graphic.** All 312 winter land rows change
+  `TexID`, and a stretched snow tile must be drawn with snow's seamless texture —
+  so `dg`'s `tx` comes from a new by-graphic `land_tex_id`, verified live
+  (dg 285 → tx 285, not the original tile's texmap).
+- **One hop, never a chain.** The winter statics bucket has three rows whose `to`
+  is itself a `from` (3245/3246/3253 → 3379, and 3379 → 6093). ClassicUO reads
+  the array once (`arr[g] == 0 ? g : arr[g]`), so 3245 must land on 3379 and
+  stop; a fixed-point loop would over-substitute to 6093. Pinned by test.
+- **Foliage in winter/desolation is deleted, not recoloured.**
+  `IsFoliageVisibleAtSeason` skips drawing `IsFoliage && !IsMultiMovable &&
+  season >= Winter`. That is a *draw* skip (`fh` flag), not a removal — the static
+  stays in the stream so it still blocks and still feeds `calculate_new_z` — and
+  its scope is the easy thing to get wrong: it applies to real statics and to
+  non-multi dynamic *items* (a GM-placed shrub vanishes) but **not** to multi
+  components, so a boat or house keeps its own greenery. The idea of "remap the
+  foliage flag too" was checked and dropped: 0 of the 70 winter and 0 of the 72
+  desolation rows change the FOLIAGE bit.
+- **The old colour wash was wrong and is gone.** `04-boot.js` used to paint a
+  faint amber/blue/grey `fillRect` per season as a stand-in for the real remap. A
+  grep of ClassicUO's whole `src/` for `Season` reaches SeasonManager / World /
+  Land / Static / Multi / GameSceneDrawingSorting and not one of them touches
+  `Hue` or `AlphaHue`. Worse, on this shard Felucca registers as **season 4**, so
+  the wash meant every living player was permanently greyed — now the world is
+  the substituted art with no tint.
+
+Verified live four ways, all against the running ServUO. **Desolation (native** —
+Felucca is season 4, and the core also flips to it on player death): 303 statics
+remapped, every value matching the table, 65 foliage statics culled, the
+substituted burnt-tree art loading and rendering; no grey wash where there used
+to be one. **Winter, reachable no other way** (a shard's season is fixed at
+`RegisterMap` and no GM command changes it — so a client-side `ANIMA_SEASON`
+override was added, which doubles as the sharpest fault-injection rig there is,
+since it *guarantees* the client disagrees with the server): 2027 land tiles
+remapped to snow and 297 statics to their bare variants, all matching the table,
+snow rendering, bare trees rendering — and **zero** of the ~1200 in-view pathing
+fields moved versus the season-4 baseline at the same tile, the whole design
+proven in the running client and not just the unit test. **Spring (180) and
+fall (271)** statics remapped via the same override, zero mismatches. Summer is
+identity by construction. The shard was left on its native season and the
+override defaults off.
 
 ---
 

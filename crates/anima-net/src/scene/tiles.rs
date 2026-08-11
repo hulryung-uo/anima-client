@@ -89,6 +89,25 @@ pub(super) const FLAG_ROOF: u64 = 0x1000_0000;
 /// player, like ClassicUO's foliage transparency.
 pub(super) const FLAG_FOLIAGE: u64 = 0x2_0000;
 
+/// `TileFlag.MultiMovable` (ClassicUO `TileDataLoader.cs`) — the piece belongs
+/// to a movable multi (a boat's own foliage/deco). Only read by
+/// [`foliage_hidden`], which must NOT strip a boat bare when winter comes.
+pub(super) const FLAG_MULTI_MOVABLE: u64 = 0x100_0000_0000;
+
+/// Winter and desolation don't just recolour foliage — they DELETE it. ClassicUO
+/// `GameSceneDrawingSorting.IsFoliageVisibleAtSeason` skips drawing anything that
+/// `IsFoliage && !IsMultiMovable && season >= Winter`, so leafy bushes and shrubs
+/// simply aren't there in a snowfield. It is a *draw* skip only, which is why the
+/// scene emits it as a flag on the tile rather than dropping the tile: the static
+/// still blocks, still stacks, and still feeds the browser's `calculate_new_z`.
+///
+/// Scope is the easy thing to get wrong. ClassicUO applies it to real STATICS
+/// (`:661`) and to NON-MULTI DYNAMIC ITEMS (`:895`, guarded by `!item.IsMulti`),
+/// and never to multi components — a house's decorative shrub stays put.
+pub(super) fn foliage_hidden(season: u8, flags: u64) -> bool {
+    season >= 3 && flags & FLAG_FOLIAGE != 0 && flags & FLAG_MULTI_MOVABLE == 0
+}
+
 /// Stackable flag (`TileFlag.Generic`, ClassicUO `ItemData.IsStackable`): drives
 /// whether a dragged stack (amount > 1) offers the split-stack dialog, mirroring
 /// ClassicUO `GameActions.PickUp` (`item.Amount > 1 && item.ItemData.IsStackable`).

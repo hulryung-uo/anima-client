@@ -393,7 +393,13 @@ function syncWorld(s) {
       // style "you remember the land is there"): land only, dimmed/desaturated,
       // no art/texmap loads — see the render branch below and its `gray` pool flag.
       const beyondView = Math.max(Math.abs(col - m.radius), Math.abs(row - m.radius)) > viewRange;
-      if (!t || !t.g || t.g <= 2) {
+      // Seasonal draw graphic. The scene emits the remap as a SIBLING `dg` and
+      // never touches `g`, because `g` is a pathing input on this side too (the
+      // no-draw gate in createItemList). Everything below that decides a PIXEL
+      // reads `dg`; everything that decides a STEP keeps reading `g`.
+      const dg = t ? (t.dg ?? t.g) : 0;
+      // ClassicUO's `AllowedToDraw` is `Graphic > 2` on the REMAPPED id (Land.cs).
+      if (!t || !t.g || dg <= 2) {
         const e = tilePool.get(key);
         if (e) { world.removeChild(e.sp); e.sp.destroy(); tilePool.delete(key); }
         continue;
@@ -420,7 +426,11 @@ function syncWorld(s) {
       // with `fallback: false` and skips this re-check entirely — UNLESS `beyondView`
       // itself flipped since the last poll (the player crossed the draw-distance
       // boundary for this tile), which must force a rebuild into/out of grayscale.
-      if (e && e.g === t.g && e.z === z0 && !!e.gray === beyondView) {
+      // Keyed on `dg`, NOT `t.g`: with the remap in a sibling field `t.g` is
+      // identical across seasons, so comparing it would make this check never
+      // fire on a season change and freeze the land art at whatever season was
+      // live when the sprite was built.
+      if (e && e.g === dg && e.z === z0 && !!e.gray === beyondView) {
         if (!e.fallback) continue;
         if (texFor(e.url) == null) continue;
       }
@@ -469,7 +479,7 @@ function syncWorld(s) {
         // one of them is Wet, i.e. the whole footprint is water at a shoreline,
         // which ClassicUO deliberately never stretches (`IsStretched` is
         // pre-seeded to `TexID == 0 && IsWet` purely to refuse it).
-        texUrl = `art/land/${t.g}.png`;
+        texUrl = `art/land/${dg}.png`;
         const tex = texFor(texUrl);
         // Also unlit, for the same reason: a tile ClassicUO refuses to stretch
         // draws from its own 44×44 art with no shading at all.
@@ -483,7 +493,7 @@ function syncWorld(s) {
       }
       if (e) { world.removeChild(e.sp); e.sp.destroy(); }
       world.addChild(sp);
-      tilePool.set(key, { sp, g: t.g, z: z0, url: texUrl, fallback, gray: beyondView });
+      tilePool.set(key, { sp, g: dg, z: z0, url: texUrl, fallback, gray: beyondView });
     }
   }
   // Server now sends statics across the whole land window, including the
@@ -496,7 +506,15 @@ function syncWorld(s) {
     // ClassicUO's StaticFilters, applied where it applies them — at draw time,
     // not in the scene: the toggles are the player's and the server has no
     // business knowing about them. `null` = this static is not drawn at all.
-    const drawG = filterStatic(st.g, st.f);
+    // Winter/desolation don't fade leafy foliage, they delete it (ClassicUO
+    // `IsFoliageVisibleAtSeason`). A DRAW skip only — the static is still in
+    // `s.statics`, so `calculate_new_z` and the blocker checks still see it.
+    if (st.fh) continue;
+    // Seasonal substitution first, then the player's own StaticFilters on top of
+    // the result — the filters classify by what is DRAWN (a winter-bare tree is
+    // still a tree), and reading `st.g` here would silently regress them.
+    const sg = st.dg ?? st.g;
+    const drawG = filterStatic(sg, st.f);
     if (drawG === null) continue;
     // The key carries the DRAWN graphic so flipping "trees as stumps" rebuilds
     // the sprite instead of leaving the old tree art in place.
@@ -547,7 +565,7 @@ function syncWorld(s) {
     // Tree/foliage/rock shadow — the half of ClassicUO's shadow support that
     // was waiting on this classification. A child of the static so it inherits
     // position and depth; same transform and colour as a mobile's.
-    if (staticCastsShadow(st.g, st.f)) attachStaticShadow(sp, tex);
+    if (staticCastsShadow(sg, st.f)) attachStaticShadow(sp, tex);
     world.addChild(sp);
     staticPool.set(key, sp);
   }
@@ -558,6 +576,7 @@ function syncWorld(s) {
   const seenI = new Set();
   for (const it of s.items || []) {
     if (it.serial === undefined || !it.g) continue;
+    if (it.fh) continue; // seasonal foliage cull, same rule as statics above
     const key = it.serial;
     seenI.add(key);
     const iz = it.z | 0;

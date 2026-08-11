@@ -37,6 +37,7 @@ pub(super) fn emit_tiles(
     lights: &mut Vec<Value>,
 ) -> TileEmission {
     let (px, py, pz) = center;
+    let season = season::scene_season(world.season);
     let scan = TileScan::build(world, map);
     let mut tiles = String::with_capacity(64 * 1024);
     let mut statics = String::with_capacity(16 * 1024);
@@ -207,9 +208,18 @@ pub(super) fn emit_tiles(
                 explain_tile_walkable_scanned(&scan, map, multis, x, y, pz).is_ok()
             };
             let land = map.land(x as u32, y as u32);
+            // SEASONAL DRAW GRAPHIC. The one rule that governs every use of this
+            // below: NEVER REBIND THE TILE. `LandTile` bundles the graphic with
+            // `flags`/`z`/`tex_id`, so a tempting `LandTile { graphic: draw_g,
+            // ..land }` would drag `li` (from `land.impassable()`) along with it —
+            // and 29 of the 312 winter rows flip IMPASSABLE, 27 of them
+            // impassable → passable. The server never remaps, so that would be a
+            // client that thinks it can walk onto tiles the shard denies. Keep it
+            // a plain local, used only where a *pixel* depends on it.
+            let draw_g = season::land_draw_graphic(season, land.graphic);
             let c = art
                 .as_mut()
-                .map(|a| a.land_avg_color(land.graphic))
+                .map(|a| a.land_avg_color(draw_g))
                 .unwrap_or([60, 90, 50, 255]);
             // ClassicUO Land rule: hide terrain above the ceiling so the floor
             // below shows — e.g. the surface (z=0) over a basement. We keep z so
@@ -295,20 +305,36 @@ pub(super) fn emit_tiles(
             } else {
                 None
             };
+            // `dg` (draw graphic) is emitted as a SIBLING of `g`, never in place
+            // of it, because `g` is a pathing input on the browser side too (the
+            // no-draw gate in `createItemList`, mirroring `height.rs`). The
+            // renderer draws `dg ?? g`; every walk check keeps reading `g`.
+            let season_g = if draw_g != land.graphic {
+                format!(",\"dg\":{draw_g}")
+            } else {
+                String::new()
+            };
             let _ = write!(
                 tiles,
-                "{{\"w\":{},\"z\":{},\"g\":{},\"tx\":{},\"c\":[{},{},{}],\"h\":{},\"sz\":{}{}{}}},",
+                "{{\"w\":{},\"z\":{},\"g\":{},\"tx\":{},\"c\":[{},{},{}],\"h\":{},\"sz\":{}{}{}{}}},",
                 walk as u8,
                 land.z,
                 land.graphic,
-                land.tex_id,
+                // The stretched-tile texture must come from the graphic we DRAW —
+                // every winter land row changes TexID.
+                if draw_g == land.graphic {
+                    land.tex_id
+                } else {
+                    map.land_tex_id(draw_g)
+                },
                 c[0],
                 c[1],
                 c[2],
                 hidden as u8,
                 sz,
                 land_impassable,
-                door_suffix(door_to_open)
+                door_suffix(door_to_open),
+                season_g
             );
             // Static objects on this tile (walls/trees/deco). Skip anything at
             // or above max_z so a roof/upper floor over the player vanishes.
@@ -328,30 +354,58 @@ pub(super) fn emit_tiles(
                     if (s.z as i32) >= max_z || (under_cover && is_roof) {
                         continue;
                     }
+                    // Seasonal draw graphic — see the land site above for why this
+                    // is a local and not a rebound `StaticTile`. Note what stays on
+                    // the ORIGINAL graphic and why: the `nodraw` skip and this
+                    // roof/max_z cull both `continue`, i.e. they drop the static out
+                    // of the stream entirely, taking its `h`/`pf` pathing fields with
+                    // it. Deciding those on a substituted graphic would let a season
+                    // change silently delete a blocker from the client's walk math.
+                    let draw_g = season::static_draw_graphic(season, s.graphic);
+                    let (dflags, dheight) = if draw_g == s.graphic {
+                        (s.flags, s.height)
+                    } else {
+                        (map.item_flags(draw_g), map.item_height(draw_g))
+                    };
                     // Draw-sort priority (ClassicUO Chunk.AddGameObject): a tall
                     // object (height != 0, e.g. a wall) sorts above same-tile
                     // flats (floors); a background tile sorts below. Renderer
                     // uses `pz` so a floor draws under the wall on its tile.
+                    // Pure draw-sort, so it follows the drawn art (97 of the 186
+                    // static rows change height/SURFACE/BRIDGE).
                     let mut spz = s.z as i32;
-                    if s.flags & 0x1 != 0 {
+                    if dflags & 0x1 != 0 {
                         spz -= 1; // Background
                     }
-                    if s.height != 0 {
+                    if dheight != 0 {
                         spz += 1; // has height (wall/solid)
                     }
                     // Foliage (trees/bushes) get an `f` flag so the renderer fades
                     // them when they'd hide the player. Only emit when true.
-                    let foliage = if s.flags & FLAG_FOLIAGE != 0 {
+                    let foliage = if dflags & FLAG_FOLIAGE != 0 {
                         ",\"f\":1"
                     } else {
                         ""
+                    };
+                    // …and in winter/desolation leafy foliage isn't faded, it's
+                    // gone. `fh` is a DRAW skip: the static stays in the stream so
+                    // it still blocks and still feeds `calculate_new_z`.
+                    let fol_hidden = if foliage_hidden(season, dflags) {
+                        ",\"fh\":1"
+                    } else {
+                        ""
+                    };
+                    let season_g = if draw_g != s.graphic {
+                        format!(",\"dg\":{draw_g}")
+                    } else {
+                        String::new()
                     };
                     // Animated statics (flames/fountains/water wheels) flagged
                     // `TileFlag.Animation` cycle through ART tiles from animdata.mul.
                     // Bake the frame tile-id sequence (`a`) + per-frame interval in
                     // ms (`ai`) so the renderer just swaps textures. Only emit when
                     // the tile is animated AND animdata gives more than one frame.
-                    let anim = anim_suffix(map, animdata, s.graphic);
+                    let anim = anim_suffix(map, animdata, draw_g);
                     // `h`/`pf` (PATH_RADIUS-gated): `s.height`/`s.flags` are already
                     // fetched by `map.statics()` above, so this is free — see
                     // `path_suffix`'s doc.
@@ -362,20 +416,20 @@ pub(super) fn emit_tiles(
                     );
                     let _ = write!(
                         statics,
-                        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}{}}},",
-                        x, y, s.z, s.graphic, spz, foliage, anim, path
+                        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}{}{}{}}},",
+                        x, y, s.z, s.graphic, spz, foliage, anim, path, season_g, fol_hidden
                     );
                     n_statics += 1;
                     // A static light source (wall torch, lamp, brazier) glows
                     // at night — same shape as dynamic-item lights (r:3).
-                    if lights.len() < LIGHT_CAP && map.item_is_light(s.graphic) {
-                        let lid = map.item_light_id(s.graphic);
+                    if lights.len() < LIGHT_CAP && map.item_is_light(draw_g) {
+                        let lid = map.item_light_id(draw_g);
                         let (lid, lc) = if lid > 200 {
                             (1, lid as u16 - 200)
                         } else {
                             (
                                 lid,
-                                anima_assets::lights::light_color_for(s.graphic).unwrap_or(0),
+                                anima_assets::lights::light_color_for(draw_g).unwrap_or(0),
                             )
                         };
                         lights.push(json!({ "x": x, "y": y, "z": s.z, "r": 3,
@@ -428,6 +482,7 @@ pub(super) fn emit_tiles(
                                             LIGHT_CAP,
                                             px,
                                             py,
+                                            season,
                                         );
                                     }
                                 }
@@ -454,6 +509,7 @@ pub(super) fn emit_tiles(
                                 LIGHT_CAP,
                                 px,
                                 py,
+                                season,
                             );
                         }
                     }

@@ -169,8 +169,14 @@ pub(super) fn weather(world: &mut World, frame: &[u8]) -> PResult<()> {
 /// 0xBC Season — `[id][season:u8][playMusic:u8]` (3 bytes). `season`:
 /// 0=Spring, 1=Summer, 2=Fall, 3=Winter, 4=Desolation. `playMusic` (whether the
 /// client should (re)start seasonal music) is not used here. We only store the
-/// season so the renderer can tint the scene; tree/foliage graphic remap is not
-/// attempted.
+/// season here. The graphic substitution it drives (grass → snow, green tree →
+/// bare) happens one layer up, in `anima_net::scene::season`, and touches only
+/// fields that decide a PIXEL: `World` is the single source of truth for
+/// pathing and for the agent contract, so its graphics stay exactly what the
+/// server sent — which is also what ServUO's own `MovementImpl` walks on, since
+/// it never consults `Map.Season`. Keeping the remap out of core is both the
+/// rendering-concern rule (DESIGN.md D3) and the reason `anima-agent`'s brain
+/// can't be fooled by a season it cannot see.
 pub(super) fn season(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     world.season = r.u8()?;

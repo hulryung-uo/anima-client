@@ -116,6 +116,18 @@ impl Look<'_> {
             .is_some_and(|m| m.item_flags(g) & FLAG_FOLIAGE != 0)
     }
 
+    /// Is this item's foliage stripped by the season? See [`foliage_hidden`].
+    /// Dynamic items get the HIDE but never the graphic substitution: ClassicUO
+    /// overrides `UpdateGraphicBySeason` on `Land`/`Static`/`Multi` only, so
+    /// `World.ChangeSeason`'s chunk walk leaves `Item` alone — yet the draw-time
+    /// cull at `GameSceneDrawingSorting.cs:895` does apply to items. The
+    /// asymmetry looks like a bug and isn't: a GM-placed foliage item vanishes
+    /// in winter rather than turning bare, exactly as in ClassicUO.
+    pub(super) fn item_foliage_hidden(&self, season: u8, g: u16) -> bool {
+        self.map
+            .is_some_and(|m| foliage_hidden(season, m.item_flags(g)))
+    }
+
     /// "nodraw" void-placeholder items (name starts "nodraw", e.g. graphic 0x1
     /// staff spawner/markers): ClassicUO culls these for items just like
     /// statics — without this the "NO DRAW" placeholder bitmap shows on the

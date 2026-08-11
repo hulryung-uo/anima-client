@@ -104,6 +104,13 @@ pub(super) fn items_json(world: &World, look: &Look, px: i64, py: i64, max_z: i3
             if look.item_foliage(it.graphic) {
                 v["f"] = json!(1);
             }
+            // …and in winter/desolation, hide it outright — but not for a multi
+            // (ClassicUO's `!item.IsMulti` guard); a placed house keeps its shrubs.
+            if !it.is_multi
+                && look.item_foliage_hidden(season::scene_season(world.season), it.graphic)
+            {
+                v["fh"] = json!(1);
+            }
             // Mark containers so double-click opens a loot window (doors don't).
             if look.item_is_cont(it.graphic) {
                 v["c"] = json!(1);

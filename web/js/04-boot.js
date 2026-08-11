@@ -236,12 +236,15 @@ function fxFrame(now) {
     }
   }
 
-  // --- season tint (0xBC): a very faint color wash so the world feels seasonal.
-  // Fall = warm amber, Winter = cool blue, Desolation = desaturated grey. Spring(0)
-  // and Summer(1) get no wash. We do NOT remap tree/foliage graphics (much larger). ---
-  const seasonWash = { 2: "rgba(150,90,20,0.07)", 3: "rgba(120,150,200,0.07)", 4: "rgba(90,90,90,0.10)" };
-  const sw = scene && seasonWash[scene.season];
-  if (sw) { ctx.fillStyle = sw; ctx.fillRect(0, 0, W, H); }
+  // --- season (0xBC): NO tint. This used to paint a faint amber/blue/grey wash
+  // here as a stand-in for the graphic remap. The remap is real now (see
+  // anima-net scene/season.rs — grass 573 genuinely becomes snow 1861), and
+  // ClassicUO has no colour wash at all: a grep of its whole src/ for Season
+  // reaches SeasonManager/World/PacketHandlers/Land/Static/Multi and not one of
+  // them touches Hue or AlphaHue. Keeping it would double-tint an already
+  // substituted world — and it was actively wrong on a ServUO shard, where
+  // Felucca registers as season 4 and so every living player was permanently
+  // greyed. ---
 
   // --- weather: only rain(0) and snow(2) are animated; anything else clears ---
   const kind = scene ? scene.weather : 0xFF;
