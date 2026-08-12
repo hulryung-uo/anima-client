@@ -770,8 +770,8 @@ land/static graphic remap~~ (**CLOSED, live-verified** — see below);
 ~~`TileFlag.Translucent` statics drawn opaque~~ (**CLOSED, live-verified** — see
 below); static hue from `statics.mul` discarded
 at decode; mount rider vertical offset; seated-character deformation; ~~roof/ceiling
-fading~~ (**CLOSED, live-verified** — see below); the pathing half of the ceiling
-rule (ceiling-hidden objects still ship without `h`/`pf` — NEW, see below);
+fading~~ and ~~the pathing half of the ceiling rule~~ (**both CLOSED,
+live-verified** — see below);
 0x23 DragEffect decoded but never drawn; GameEffect blend modes and
 projectile rotation; ~~StaticFilters (tree→stumps, hide vegetation)~~
 (**CLOSED, live-verified** — see below).
@@ -1204,12 +1204,10 @@ previous row's alpha refactor was built for. It turned out to be a row about
   still pops (its sprite is destroyed outright). `HasSurfaceOverhead` and the
   `_maxGroundZ` gate are unported. And the **pathing half is deferred as its own
   new row**: ceiling-hidden objects still ship without `h`/`pf`, so the browser's
-  predicted Z stays blind to indoor staircases. Measured across three independent
-  sweeps at 0.019% / 0.026% / 0.064% of step resolutions, always one-directional
-  (browser more permissive, never a shifted Z) and never on a tile the server marks
-  walkable — because walk *denial* is the server-computed `w`, which reads unculled
-  `MapData`. Real, bounded, and a fix that must prove the browser's new answer
-  matches the server's.
+  predicted Z stays blind to indoor staircases. **The bound stated here was wrong
+  and was retired the same day — see the next entry.** It read "always
+  one-directional (browser more permissive, never a shifted Z) and never on a tile
+  the server marks walkable"; all three clauses are false.
 
 Verified live against the running ServUO at a Britain house (1618,1556,30 → walk
 south). The discriminating measurement is the transition, since a fade and a pop
@@ -1227,6 +1225,50 @@ exact start tile with no denials. The pathing golden is captured from the
 *pre-change* emitter (159/157/32 path-bearing and 437/1567/471 drawn statics at
 three under-cover centers) so it cannot certify itself — a first attempt passed
 vacuously at `max_z = 127` until its positive control caught it.
+
+Closed 2026-08-12 (the pathing half of the ceiling rule): opened by the row above
+and closed within the day, because the justification I recorded for deferring it
+turned out to be false in all three of its clauses.
+
+- **What the deferral claimed.** That withholding `h`/`pf` from ceiling-hidden
+  objects was safe: the browser-vs-server disagreement was "always one-directional
+  (browser more permissive, never a shifted Z) and never on a tile the server marks
+  walkable". Three independent sweeps had put it at 0.019–0.064% of step
+  resolutions, and the reasoning was that walk *denial* comes from the
+  server-computed `w`, so a blind browser could never walk anywhere forbidden.
+- **What it actually is.** Measured live in the shipping browser code, not in a
+  Rust twin: at (6318,1688,-35) with `maxZ = 0`, the page's own
+  `calculateNewZ(6317,1689,-35,5)` returned **0** while `tileSZ` returned **5** and
+  `tileAt(...).w` was **1**. Both answers non-null, different, on a tile the server
+  marks walkable — falsifying every clause at once. `createItemList` for that tile
+  returned a single element (the land) because the surface it should have stood on
+  had been stripped of its `pf`. Offline witnesses reach **20 Z units — 80 px** at
+  Trinsic (1900,2680) and a Britain house (1617,1560), both on walkable tiles, both
+  with the discarded `sz` correct.
+- **Why the old measurements missed it.** They swept single hops from a *land*-derived
+  starting Z. A real prediction chains, carrying the previous tile's `sz` forward;
+  taking `currentZ` from the wire's own `sz` for the tile behind surfaces 79
+  both-resolved-but-different cases, 8 on walkable tiles. A depth-5 cap in one sweep
+  also stopped exactly one hop short of the 20-unit cases at depth 6.
+- **The fix is a deletion.** `path_withheld` — the predicate the previous row
+  introduced so this half *could* be deferred — is retired at all three emit sites.
+  `hz` stays exactly as it was and remains purely a draw decision. This is also the
+  more faithful port: ClassicUO's `Pathfinder.CreateItemList` reads the raw object
+  chain and never consults the draw ceiling, so an invisible object still blocks and
+  still contributes a standing surface there too.
+- **The split was still worth building.** It is what made the previous row provably
+  inert while this question was open, and what made this fix a one-line deletion per
+  site rather than an untangling.
+
+Verified live at the witness tile with the fix in: `own` **5**, `sz` **5**, `agree:
+true`, and `createItemList` back to 3 elements including the restored
+`{flags: SURFACE|BRIDGE, avgZ: 5, height: 10}` — the object whose absence produced
+the 0. The pre-change golden is kept and its assertion inverted from equality to
+**superset**: every pathing entry blessed before this change must still be present
+and unchanged (nothing lost or altered), while the `draw:` half must still match
+exactly, which is what would catch hidden objects starting to evict drawn ones from
+the emit budget. At the three under-cover centers 410 of 1751 ceiling-hidden statics
+now carry `pf` (the rest are outside `PATH_RADIUS`, as for any static).
 
 ---
 

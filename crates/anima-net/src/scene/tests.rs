@@ -2906,7 +2906,37 @@ fn ceiling_hidden_objects_move_no_pathing_field() {
             want.as_array().is_some_and(|a| !a.is_empty()),
             "golden for {name} is empty — it would pass vacuously"
         );
-        assert_eq!(want, got, "pathing fields moved at {name}");
+        // SUPERSET, not equality. Ceiling-hidden objects now ship their `h`/`pf`
+        // too — they were withheld when this golden was blessed — so the `path:`
+        // set legitimately GREW. What must still hold is that nothing which had
+        // pathing fields lost them or had them altered: the pre-change projection
+        // has to survive entry-for-entry inside the new one. The `draw:` half must
+        // still match EXACTLY, because the drawn set is unaffected by any of this
+        // and a change there would mean hidden objects had started evicting drawn
+        // ones from the emit budget again.
+        let got_set: std::collections::HashSet<&str> = got
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        for e in want.as_array().unwrap() {
+            let e = e.as_str().unwrap();
+            assert!(
+                got_set.contains(e),
+                "{name}: a pre-change pathing entry vanished or changed: {e}"
+            );
+        }
+        let drawn = |v: &Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|e| e.as_str())
+                .filter(|e| e.starts_with("draw:"))
+                .map(String::from)
+                .collect()
+        };
+        assert_eq!(drawn(want), drawn(got), "{name}: the DRAWN set moved");
     }
 }
 
@@ -2948,11 +2978,11 @@ fn ceiling_hidden_objects_are_emitted_and_inert() {
             hidden.len()
         );
         for s in &hidden {
-            // The whole safety argument: no pathing fields ride along.
-            assert!(
-                s.get("h").is_none() && s.get("pf").is_none(),
-                "{name}: hidden static kept pathing fields: {s}"
-            );
+            // Hidden objects DO carry pathing fields now. Withholding them was
+            // measured to shift the browser's `calculateNewZ` by up to 20 Z units
+            // on tiles the server marks walkable; only DRAW properties are
+            // suppressed. The presence assertion is after this loop, because
+            // `h`/`pf` are PATH_RADIUS-gated and most hidden statics are outside it.
             // A faded object animates nothing (ClassicUO returns before every
             // render list when AlphaHue == 0), and an invisible animated sprite
             // would keep the browser's on-demand renderer awake forever.
@@ -2961,6 +2991,10 @@ fn ceiling_hidden_objects_are_emitted_and_inert() {
                 "{name}: hidden static kept anim frames: {s}"
             );
         }
+        assert!(
+            hidden.iter().any(|s| s.get("pf").is_some()),
+            "{name}: no ceiling-hidden static carries `pf` — the pathing gate never lifted"
+        );
         // …and it must not light the room either. A ceiling-hidden lamp reaching
         // `lights` would both illuminate from a hidden storey and, since LIGHT_CAP
         // is a hard 64 with static lights appended last, evict the nearest real ones.

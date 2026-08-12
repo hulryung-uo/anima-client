@@ -109,15 +109,12 @@ pub(super) fn items_json(
             if look.item_foliage(it.graphic) {
                 v["f"] = json!(1);
             }
-            // Ceiling hiding, split exactly as in terrain.rs. Note the asymmetry
-            // that the split exists to make safe: `hz` gains a ROOF clause that
-            // `path_withheld` does not, because ClassicUO applies the
-            // `_noDrawRoofs && IsRoof` branch to items too — so a roof-flagged item
-            // now fades with the roof it sits on, while its `h`/`pf` stay exactly
-            // as today's `z < max_z` cull left them. One is a new draw rule; the
-            // other is frozen pathing parity.
+            // Ceiling hiding — purely a DRAW decision, as in terrain.rs. The roof
+            // clause matches ClassicUO, which runs items through the same
+            // `_noDrawRoofs && IsRoof` branch as statics, so an item lying on a roof
+            // fades with it. Pathing fields are unaffected: an invisible item still
+            // blocks and still feeds the browser's `calculate_new_z`.
             let hz_item = (it.pos.z as i32) >= max_z || (under_cover && look.item_roof(it.graphic));
-            let path_withheld = (it.pos.z as i32) >= max_z;
             if hz_item {
                 v["hz"] = json!(1);
             }
@@ -144,8 +141,7 @@ pub(super) fn items_json(
             // `h`/`pf` (PATH_RADIUS-gated, see `item_path_bits`'s doc): omitted
             // whenever out of radius or zero, so this is purely additive —
             // an item outside PATH_RADIUS serializes exactly as before.
-            let in_radius = !path_withheld
-                && (it.pos.x as i64 - px).abs() <= PATH_RADIUS
+            let in_radius = (it.pos.x as i64 - px).abs() <= PATH_RADIUS
                 && (it.pos.y as i64 - py).abs() <= PATH_RADIUS;
             let (h, pf) = look.item_path_bits(it.graphic, in_radius);
             if let Some(h) = h {

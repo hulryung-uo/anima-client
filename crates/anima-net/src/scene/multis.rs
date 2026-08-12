@@ -242,13 +242,11 @@ pub(super) fn emit_multi_component(
     // `path_suffix`; `dflags`/`dheight` drive what is drawn.
     let flags = map.item_flags(graphic);
     let height = map.item_height(graphic);
-    // Ceiling hiding — the same two-predicate split as the real-statics loop in
-    // terrain.rs; see that comment for why `hz` and `path_withheld` must not be
-    // one variable. A placed house's own roof comes through here, so missing this
+    // Ceiling hiding — the same draw-only rule as the real-statics loop in
+    // terrain.rs. A placed house's own roof comes through here, so missing this
     // site would leave houses popping while map statics faded.
     let is_roof = flags & FLAG_ROOF != 0;
     let hz = cz >= max_z || (under_cover && is_roof);
-    let path_withheld = hz;
     let draw_g = season::static_draw_graphic(season, graphic);
     let (dflags, dheight) = if draw_g == graphic {
         (flags, height)
@@ -294,7 +292,7 @@ pub(super) fn emit_multi_component(
         anim_suffix(map, animdata, draw_g)
     };
     let path = path_suffix(
-        !path_withheld && (x - px).abs() <= PATH_RADIUS && (y - py).abs() <= PATH_RADIUS,
+        (x - px).abs() <= PATH_RADIUS && (y - py).abs() <= PATH_RADIUS,
         height,
         flags,
     );

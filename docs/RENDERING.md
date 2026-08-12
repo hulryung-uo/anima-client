@@ -116,11 +116,13 @@ depth-sorts by `(x+y)` + Z.
   tiledata flags incl. `Roof 0x10000000`, `Surface 0x200`.)
 - **scene ceiling flag** (was a cull): a static with `z >= maxZ` **or**
   `(under_cover && IsRoof)` is still EMITTED, carrying `"hz":1` and **no** `h`/`pf`
-  pathing suffix, no `a`/`ai` animation frames, and contributing no light. The renderer
+  animation frames and no light — but WITH its normal `h`/`pf` pathing suffix, since
+  an invisible object still blocks and still feeds the browser's `calculate_new_z`
+  (withholding it shifted the browser's predicted Z by up to 20 units on
+  server-walkable tiles; ClassicUO's own `Pathfinder` likewise never consults the
+  draw ceiling). The renderer
   eases it to alpha 0 and sets `visible = false`. Dropping it was what made a roof pop:
-  there was no sprite left to fade. Two predicates are kept separate in the emitters
-  (`hz` for drawing, `path_withheld` for the frozen pathing parity) so a later fidelity
-  fix to *what* is hidden cannot move a pathing byte
+  there was no sprite left to fade.  `hz` is purely a draw decision
   where `under_cover = maxZ < 127`. (Roof tiles flagged `0x10000000`.) The persistent
   tile pool in the renderer then drops the hidden statics automatically.
 - **Renderer depth order** (ClassicUO `Chunk.AddGameObject` priority): a single sorted

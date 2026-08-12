@@ -362,14 +362,18 @@ pub(super) fn emit_tiles(
                     // sprite. This used to be a `continue`, which is exactly why a
                     // roof popped — there was nothing left on screen to fade.
                     //
-                    // `path_withheld` is BYTE-FOR-BYTE the old cull, and it alone
-                    // gates the `h`/`pf` suffix below. Keeping the two apart is the
-                    // whole safety argument: when a later fidelity fix changes WHICH
-                    // objects are hidden, it moves `hz` only, and no pathing byte can
-                    // follow it. (A ceiling-hidden static reaches the browser with no
-                    // `pf`, and `tiledataPathObj` returns null for `pf == 0`, so it
-                    // contributes nothing to `createItemList` — `calculate_new_z` is
-                    // identical element-for-element.)
+                    // `hz` is ONLY a draw decision. It used to also suppress the
+                    // `h`/`pf` suffix below, on the theory that withholding pathing
+                    // data from an invisible object was harmless. It was not: the
+                    // browser's `calculateNewZ` is a real consumer, and blinding it
+                    // makes it disagree with the server on tiles the server marks
+                    // WALKABLE — measured live at (6318,1688,-35), where the browser
+                    // answered 0 and the server's own `sz` said 5, and offline up to
+                    // 20 Z units (80 px) at Trinsic (1900,2680) and a Britain house
+                    // (1617,1560). Re-attaching h/pf makes the browser's answer equal
+                    // the server's exactly. ClassicUO agrees on the principle: its
+                    // `Pathfinder.CreateItemList` reads the raw object chain and never
+                    // consults the draw ceiling.
                     //
                     // This is also what ClassicUO does, where the fade IS the cull:
                     // it never edits the tile's object chain, it eases `AlphaHue` to
@@ -378,7 +382,6 @@ pub(super) fn emit_tiles(
                     // untouched by the ceiling. `hz` is our `AlphaHue = 0`.
                     let is_roof = s.flags & 0x1000_0000 != 0;
                     let hz = (s.z as i32) >= max_z || (under_cover && is_roof);
-                    let path_withheld = hz;
                     if hz && n_hidden >= HIDDEN_STATIC_CAP {
                         continue; // budget spent — this one falls back to the old pop
                     }
@@ -466,7 +469,7 @@ pub(super) fn emit_tiles(
                     // fetched by `map.statics()` above, so this is free — see
                     // `path_suffix`'s doc.
                     let path = path_suffix(
-                        !path_withheld && dx.abs() <= PATH_RADIUS && dy.abs() <= PATH_RADIUS,
+                        dx.abs() <= PATH_RADIUS && dy.abs() <= PATH_RADIUS,
                         s.height,
                         s.flags,
                     );
