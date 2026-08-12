@@ -395,6 +395,22 @@ pub(super) fn emit_tiles(
                     } else {
                         ""
                     };
+                    // `TileFlag.Translucent` (spiderweb, blood, curtain, energy
+                    // field, ocean wave): ClassicUO eases the object's AlphaHue to
+                    // 178/255 (`ProcessAlpha`, GameSceneDrawingSorting.cs:367-371).
+                    // A pure draw property, so it rides as a sibling and nothing the
+                    // browser walks on can see it.
+                    //
+                    // Off `dflags` — the SEASONAL graphic's flags — like every other
+                    // draw field here, and that is not a formality: three
+                    // DESOLATION_STATIC rows remap a mushroom (3345/3348/3351) to
+                    // blood 4651, which IS translucent. Reading `s.flags` would draw
+                    // exactly those three opaque in the one season that produces them.
+                    let translucent = if dflags & FLAG_TRANSLUCENT != 0 {
+                        ",\"tr\":1"
+                    } else {
+                        ""
+                    };
                     let season_g = if draw_g != s.graphic {
                         format!(",\"dg\":{draw_g}")
                     } else {
@@ -416,8 +432,18 @@ pub(super) fn emit_tiles(
                     );
                     let _ = write!(
                         statics,
-                        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}{}{}{}}},",
-                        x, y, s.z, s.graphic, spz, foliage, anim, path, season_g, fol_hidden
+                        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}{}{}{}{}}},",
+                        x,
+                        y,
+                        s.z,
+                        s.graphic,
+                        spz,
+                        foliage,
+                        anim,
+                        path,
+                        season_g,
+                        fol_hidden,
+                        translucent
                     );
                     n_statics += 1;
                     // A static light source (wall torch, lamp, brazier) glows

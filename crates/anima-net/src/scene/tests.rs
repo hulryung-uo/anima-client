@@ -2628,3 +2628,163 @@ fn a_season_change_moves_no_pathing_field() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// `TileFlag.Translucent` (scene field `tr`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn translucent_is_bit_8_and_the_flag_table_matches_classicuo() {
+    // The bit itself. This constant lived in `anima-assets` as `WET` — the name
+    // was wrong by one nibble and it had no readers, so nothing misbehaved, but
+    // an implementer reaching for "the water flag" would have got this one.
+    assert_eq!(FLAG_TRANSLUCENT, 0x8);
+    assert_ne!(FLAG_TRANSLUCENT, 0x80, "0x80 is Wet, not Translucent");
+    assert_eq!(
+        FLAG_TRANSLUCENT,
+        anima_assets::tiledata::flags::TRANSLUCENT,
+        "the assets and scene copies of the bit must agree"
+    );
+
+    // While we are here: the rest of the table, against ClassicUO's
+    // `TileDataLoader.cs` enum. A wrong bit here is silent and wide-blast.
+    for (name, ours, classicuo) in [
+        ("Impassable", FLAG_IMPASSABLE, 0x0000_0040_u64),
+        ("Surface", FLAG_SURFACE, 0x0000_0200),
+        ("Bridge", FLAG_BRIDGE, 0x0000_0400),
+        ("Stackable", FLAG_STACKABLE, 0x0000_0800),
+        ("Foliage", FLAG_FOLIAGE, 0x0002_0000),
+        ("PartialHue", FLAG_PARTIAL_HUE, 0x0004_0000),
+        ("Roof", FLAG_ROOF, 0x1000_0000),
+        ("MultiMovable", FLAG_MULTI_MOVABLE, 0x100_0000_0000),
+    ] {
+        assert_eq!(ours, classicuo, "{name} bit disagrees with ClassicUO");
+    }
+}
+
+/// Emitter coverage: `tr` is present on exactly the statics whose DRAWN graphic
+/// carries the bit, and on no others.
+///
+/// Note what this does NOT prove. At a center where no season row fires,
+/// `draw_g == s.graphic`, so a buggy implementation reading `s.flags` satisfies
+/// this too — the discrimination lives in the desolation test below. What this
+/// one catches is a wrong bit, a missed emit site, and a `tr` that leaks onto
+/// something opaque.
+#[test]
+#[ignore] // needs ~/dev/uo/uo-resource
+fn translucent_is_emitted_for_exactly_the_translucent_statics() {
+    let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+    let mut map = MapData::open(&dir).expect("open map data");
+    // A blood-soaked clearing on the main continent — 120 translucent statics
+    // inside the +/-24 statics window, all `blood`/`blood smear`. Deliberately
+    // NOT one of the spiderweb clusters: every dense one of those sits at
+    // x > 5120, i.e. in the Lost Lands, which a shard may not have loaded.
+    const CENTER: (i64, i64, i32) = (956, 700, 0);
+
+    let world = anima_core::World::new();
+    let mut lights = Vec::new();
+    let e = emit_tiles(
+        &world,
+        &mut map,
+        None,
+        None,
+        &mut None,
+        CENTER,
+        127,
+        &mut lights,
+    );
+    let statics: Vec<Value> =
+        serde_json::from_str(&format!("[{}]", e.statics.trim_end_matches(',')))
+            .expect("statics json");
+    let tiles: Vec<Value> =
+        serde_json::from_str(&format!("[{}]", e.tiles.trim_end_matches(','))).expect("tiles json");
+
+    let mut n_tr = 0;
+    for s in &statics {
+        let g = s["g"].as_u64().unwrap() as u16;
+        let drawn = s.get("dg").and_then(|v| v.as_u64()).unwrap_or(g as u64) as u16;
+        let want = map.item_flags(drawn) & FLAG_TRANSLUCENT != 0;
+        let got = s.get("tr").is_some();
+        assert_eq!(
+            got, want,
+            "`tr` disagrees with tiledata for graphic {drawn}: {s}"
+        );
+        n_tr += got as usize;
+    }
+    assert!(
+        n_tr > 100,
+        "expected ~120 translucent statics at {CENTER:?}, got {n_tr}"
+    );
+
+    // Land is never translucent: 0 of 16384 land graphics carry the bit, and
+    // ClassicUO's `case Land land:` never calls `ProcessAlpha` at all
+    // (GameSceneDrawingSorting.cs:624). So the land stream must stay clean.
+    assert!(
+        tiles.iter().all(|t| t.get("tr").is_none()),
+        "a land tile grew a `tr` field"
+    );
+}
+
+/// The fault injection: translucency must follow the DRAWN graphic.
+///
+/// Desolation remaps mushrooms 3345/3348/3351 → blood 4651, and blood IS
+/// translucent while a mushroom is not. So an implementation that reads
+/// `s.flags` instead of the seasonal `dflags` draws exactly these opaque in the
+/// one season that produces them. There is a real mushroom at the center below,
+/// verified against `statics0.mul`.
+#[test]
+#[ignore] // needs ~/dev/uo/uo-resource
+fn translucency_follows_the_seasonal_draw_graphic() {
+    // `scene_season` caches ANIMA_SEASON in a process-wide OnceLock, which would
+    // collapse both halves of this test onto one season and pass it vacuously.
+    assert!(
+        std::env::var("ANIMA_SEASON").is_err(),
+        "unset ANIMA_SEASON — it pins scene_season process-wide"
+    );
+    let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+    let mut map = MapData::open(&dir).expect("open map data");
+    const CENTER: (i64, i64, i32) = (1532, 1603, 7);
+    const MUSHROOM: u64 = 3351;
+    const BLOOD: u64 = 4651;
+
+    let at = |map: &mut MapData, season: u8| -> Vec<Value> {
+        let mut world = anima_core::World::new();
+        world.season = season;
+        let mut lights = Vec::new();
+        let e = emit_tiles(&world, map, None, None, &mut None, CENTER, 127, &mut lights);
+        let all: Vec<Value> =
+            serde_json::from_str(&format!("[{}]", e.statics.trim_end_matches(',')))
+                .expect("statics json");
+        all.into_iter()
+            .filter(|s| s["g"].as_u64() == Some(MUSHROOM))
+            .collect()
+    };
+
+    let summer = at(&mut map, 1);
+    let deso = at(&mut map, 4);
+    assert!(!summer.is_empty(), "no mushroom {MUSHROOM} at {CENTER:?}");
+    assert_eq!(
+        summer.len(),
+        deso.len(),
+        "the season added or dropped a static"
+    );
+
+    for s in &summer {
+        assert!(s.get("dg").is_none(), "summer remapped a mushroom: {s}");
+        assert!(s.get("tr").is_none(), "a mushroom is not translucent: {s}");
+    }
+    for s in &deso {
+        assert_eq!(
+            s["dg"].as_u64(),
+            Some(BLOOD),
+            "desolation should draw blood: {s}"
+        );
+        assert!(
+            s.get("tr").is_some(),
+            "blood IS translucent — this static was classified from the ORIGINAL \
+             graphic instead of the drawn one: {s}"
+        );
+        // …and the pathing graphic is still the mushroom, as always.
+        assert_eq!(s["g"].as_u64(), Some(MUSHROOM));
+    }
+}

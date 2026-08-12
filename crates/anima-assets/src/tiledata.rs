@@ -13,7 +13,20 @@ pub mod flags {
     pub const IMPASSABLE: u64 = 0x0000_0040;
     pub const SURFACE: u64 = 0x0000_0200;
     pub const BRIDGE: u64 = 0x0000_0400;
-    pub const WET: u64 = 0x0000_0008;
+    /// ClassicUO `TileFlag.Translucent` (`TileDataLoader.cs:425`) — the art is
+    /// drawn at partial alpha: spiderwebs, blood, curtains, energy fields, ocean
+    /// waves. ClassicUO eases such an object's `AlphaHue` to **178/255**
+    /// (`GameSceneDrawingSorting.ProcessAlpha`), not to a half.
+    ///
+    /// This constant was named `WET` and had no readers, so nothing was ever
+    /// wrong at runtime — but the name was: ClassicUO's `Wet` is **0x80**
+    /// (`TileDataLoader.cs:441`), one nibble away. Worth recording rather than
+    /// deleting, because we will genuinely need `Wet` later: ServUO gates
+    /// *movement onto water* on it (`Server/Map.cs:1480`, `:1505`:
+    /// `id.Surface || (id.Flags & TileFlag.Wet) != 0`), and 109 of the 272
+    /// translucent graphics carry it too, so the two are easy to confuse in
+    /// exactly the places it matters.
+    pub const TRANSLUCENT: u64 = 0x0000_0008;
     /// ClassicUO `TileFlag.Container` — the item is a container (chest/bag/corpse);
     /// double-clicking it opens a loot/content window (doors etc. are NOT this).
     pub const CONTAINER: u64 = 0x0020_0000;

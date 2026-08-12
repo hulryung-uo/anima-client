@@ -264,6 +264,15 @@ pub(super) fn emit_multi_component(
     } else {
         ""
     };
+    // Translucent, off the seasonal `dflags` exactly as in the real-statics loop
+    // — house windows and the magical-door graphics are multi components, so a
+    // multi that skipped this would fade inconsistently against identical statics
+    // standing beside it.
+    let translucent = if dflags & FLAG_TRANSLUCENT != 0 {
+        ",\"tr\":1"
+    } else {
+        ""
+    };
     // No `fh` here on purpose: ClassicUO's foliage-hide rule exempts multi
     // pieces (`!IsMultiMovable`), so a house's decorative shrub survives winter.
     let season_g = if draw_g != graphic {
@@ -283,8 +292,8 @@ pub(super) fn emit_multi_component(
     );
     let _ = write!(
         statics,
-        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{},\"ms\":{}{}{}{}{}}},",
-        x, y, cz, graphic, spz, multi_serial, foliage, anim, path, season_g
+        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{},\"ms\":{}{}{}{}{}{}}},",
+        x, y, cz, graphic, spz, multi_serial, foliage, anim, path, season_g, translucent
     );
     *n_statics += 1;
     if lights.len() < light_cap && map.item_is_light(draw_g) {

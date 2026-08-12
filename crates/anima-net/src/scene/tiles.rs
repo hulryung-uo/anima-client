@@ -89,6 +89,32 @@ pub(super) const FLAG_ROOF: u64 = 0x1000_0000;
 /// player, like ClassicUO's foliage transparency.
 pub(super) const FLAG_FOLIAGE: u64 = 0x2_0000;
 
+/// `TileFlag.Translucent` (ClassicUO `TileDataLoader.cs:425`) — draw the art at
+/// partial alpha. ClassicUO runs the object through `ProcessAlpha` and eases its
+/// `AlphaHue` to **178** (`GameSceneDrawingSorting.cs:367-371`), consumed as
+/// `AlphaHue / 255f` (`StaticView.cs:63`, `ItemView.cs:49`) — so 0.698, not the
+/// half you would guess. (The `0.5` in ClassicUO is `GameEffectView.cs:118`, a
+/// different mechanism on a different path.)
+///
+/// Purely cosmetic: no walk decision reads it, which is why it rides as a
+/// sibling `tr` field and never touches `h`/`pf`/`w`/`sz`.
+///
+/// Scope, measured against this machine's `tiledata.mul`: **272 of 65536**
+/// static/item graphics carry it and **0 of 16384** land graphics do — so the
+/// land `write!` gains nothing. Land is also structurally exempt: ClassicUO's
+/// `case Land land:` (`GameSceneDrawingSorting.cs:624`) goes straight to the
+/// render queue and never calls `ProcessAlpha` at all. Mobiles likewise cannot
+/// be translucent — `:838` builds an empty `StaticTiles` and passes *that*
+/// (`:843`), so `IsTranslucent` is unconditionally false for them.
+///
+/// World sprites only. A spiderweb sitting in your backpack is drawn opaque,
+/// exactly as in ClassicUO: `ProcessAlpha` is world-render, and container
+/// grids/paperdoll/vendor rows never see it.
+///
+/// Neighbouring bit worth knowing, since it bit us once: `Wet` is **0x80**
+/// (`TileDataLoader.cs:441`), and 109 of the 272 carry both.
+pub(super) const FLAG_TRANSLUCENT: u64 = 0x8;
+
 /// `TileFlag.MultiMovable` (ClassicUO `TileDataLoader.cs`) — the piece belongs
 /// to a movable multi (a boat's own foliage/deco). Only read by
 /// [`foliage_hidden`], which must NOT strip a boat bare when winter comes.

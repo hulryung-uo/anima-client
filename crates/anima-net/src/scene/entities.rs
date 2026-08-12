@@ -104,6 +104,15 @@ pub(super) fn items_json(world: &World, look: &Look, px: i64, py: i64, max_z: i3
             if look.item_foliage(it.graphic) {
                 v["f"] = json!(1);
             }
+            // Translucent (blood, spiderweb, curtain): ClassicUO runs dynamic
+            // items through the same alpha chain as statics (`case Item item:`
+            // → ProcessAlpha, GameSceneDrawingSorting.cs:901). ServUO's `Blood`
+            // (Scripts/Items/Decorative/Blood.cs) is an Item, so skipping this
+            // site would draw the most common translucent object on a live
+            // shard opaque while identical map statics faded beside it.
+            if look.item_translucent(it.graphic) {
+                v["tr"] = json!(1);
+            }
             // …and in winter/desolation, hide it outright — but not for a multi
             // (ClassicUO's `!item.IsMulti` guard); a placed house keeps its shrubs.
             if !it.is_multi

@@ -688,6 +688,8 @@ function renderFrame(dt) {
   tickAnimatedStatics(now);
   // Fade statics/foliage that would hide the avatar (circle-of-transparency).
   transparencyPass();
+  // …then compose every sprite's alpha from its resting value + active sources.
+  easeAlphas();
   // Request a redraw only when something is actually animating: self moving (camera
   // scrolls), a gliding mobile, or floating speech. Idle ⇒ no redraw ⇒ ~0 GPU.
   if (overLayer.children.length) markDirty();
@@ -755,6 +757,80 @@ const fadedSprites = new Set();
 const OCC_RADIUS = 4;                    // tile pre-filter; nothing further can overlap
 const A_OCC = 0.35, A_OCC_FOLIAGE = 0.45; // faded alpha: solids / foliage
 const OCC_FADE = 0.18;                    // per-frame lerp toward the target alpha
+
+// --- alpha: ONE owner, one rule -------------------------------------------
+//
+// Every pooled world sprite has a RESTING alpha it belongs at when nothing is
+// fading it (`_baseAlpha`: 1 normally, `A_TRANSLUCENT` for a TileFlag.Translucent
+// static), plus any number of transient fade SOURCES keyed by name. The sprite
+// eases toward the MINIMUM of its resting alpha and every active source, and
+// `easeAlphas` is the only thing that assigns `.alpha` on a pooled sprite.
+//
+// Minimum rather than a priority chain, deliberately. ClassicUO's `ProcessAlpha`
+// (GameSceneDrawingSorting.cs:326-387) is an if/else-if chain, but read its
+// targets in priority order — 0 (above maxZ), 0 (roof), 178 (translucent), 255
+// (default), plus 76 for foliage-behind-a-tree (GameScene.cs:641-655) — and it
+// is monotonically decreasing: the higher-priority branch always wants the
+// LOWER alpha. A priority chain whose targets descend with priority IS a
+// minimum. Its one non-monotone branch is the circle of transparency, which
+// ClassicUO ships DISABLED by default (Profile.cs:126), so `min` agrees with a
+// default-profile ClassicUO on every branch that actually fires — and unlike a
+// chain it is order-free, so a new source is one `setAlphaSource` call and
+// nothing else moves.
+//
+// Each source owns its own membership: a producer decides which sprites it
+// applies to and clears itself from the rest. That is the part that matters for
+// what comes next — `transparencyPass` below only ever *looks* at sprites within
+// OCC_RADIUS that overlap the avatar, so a future roof fade (which is a
+// `z >= maxZ` predicate over the whole window, occluding nothing) could never
+// have piggybacked on its iteration set. It brings its own.
+//
+// NOTE for this row: `min` never actually binds yet — A_OCC (0.35) and
+// A_OCC_FOLIAGE (0.45) are both below A_TRANSLUCENT (0.698), so an occluding
+// translucent static lands on the occlusion value either way. This is
+// scaffolding that pays off at the next fade source, not a behaviour change.
+const alphaActive = new Set(); // sprites with a live source, or still easing home
+
+// The composed target: resting alpha, pulled down by whichever source wants it
+// darkest. Used by `easeAlphas` (which eases toward it) and by `drawMobs`
+// (which snaps to it), so both go through one definition of "correct alpha".
+function alphaTarget(sp) {
+  let t = sp._baseAlpha ?? 1;
+  const src = sp._aSrc;
+  if (src) for (const a of src.values()) if (a < t) t = a;
+  return t;
+}
+
+// Add, update (`a` = alpha) or clear (`a` = null) one named fade source.
+function setAlphaSource(sp, key, a) {
+  if (!sp || sp.destroyed) return;
+  if (a == null) {
+    if (!sp._aSrc || !sp._aSrc.delete(key)) return; // wasn't set: nothing to ease
+  } else {
+    (sp._aSrc || (sp._aSrc = new Map())).set(key, a);
+  }
+  alphaActive.add(sp);
+}
+
+// Ease every tracked sprite toward its composed target. Runs unconditionally
+// each frame — NOT inside `transparencyPass`, which returns early when there is
+// no player position and would otherwise strand a half-faded sprite.
+function easeAlphas() {
+  if (!alphaActive.size) return;
+  let changed = false;
+  for (const sp of alphaActive) {
+    if (sp.destroyed) { alphaActive.delete(sp); continue; }
+    const target = alphaTarget(sp);
+    let a = sp.alpha + (target - sp.alpha) * OCC_FADE;
+    if (Math.abs(a - target) < 0.01) a = target;
+    if (a !== sp.alpha) { sp.alpha = a; changed = true; }
+    // Settled AND nothing pulling on it → stop tracking. A translucent static
+    // that never gets occluded is therefore never in this set at all: it just
+    // sits at the `_baseAlpha` stamped when its sprite was built.
+    if (a === target && (!sp._aSrc || sp._aSrc.size === 0)) alphaActive.delete(sp);
+  }
+  if (changed) markDirty();
+}
 // A sprite has to genuinely COVER the avatar, not merely touch its box. The
 // floor tile of the tile in front sits directly under your feet and grazes the
 // avatar's bottom edge by a pixel or two — measured live at (847,2272): floor
@@ -767,13 +843,15 @@ const OCC_FADE = 0.18;                    // per-frame lerp toward the target al
 const OCC_MIN_PX = 6;                     // px: overlap must be at least this wide AND tall
 const OCC_MIN_FRAC = 0.05;                // …and cover at least this much of the avatar
 function transparencyPass() {
+  const newFaded = new Set();
   let ptx, pty, pz;
   if (sitting) { ptx = sitting.x; pty = sitting.y; pz = sitting.z; } // seated: use the chair, not the (unmoved) real tile
   else if (pred) { ptx = Math.round(pred.rx); pty = Math.round(pred.ry); pz = pred.z; }
   else if (scene && scene.player) { ptx = scene.player.x; pty = scene.player.y; pz = scene.player.z; }
-  else return;
-  const newFaded = new Set();
-  const body = mobSprites.get("self#body");
+  // No position? Fall through with an empty `newFaded` rather than returning:
+  // that releases the source from everything currently faded, so nothing is
+  // stranded translucent while the player position is momentarily unknown.
+  const body = ptx === undefined ? null : mobSprites.get("self#body");
   if (body && !body.destroyed && body.visible) {
     // The avatar's real on-screen rectangle. Bounds are global, so they already
     // account for the camera and zoom — the same space the statics report in.
@@ -799,19 +877,16 @@ function transparencyPass() {
     for (const sp of staticPool.values()) consider(sp);
     for (const e of itemPool.values()) consider(e.sp);
   }
-  // Ease every sprite that is occluding now, or is still recovering from having
-  // occluded. Sprites are pooled/persistent, so anything we touched must be
-  // walked back to alpha 1 or it would stay stuck translucent.
-  let changed = false;
-  for (const sp of new Set([...fadedSprites, ...newFaded])) {
-    if (sp.destroyed) { fadedSprites.delete(sp); continue; }
-    const target = newFaded.has(sp) ? (sp._foliage ? A_OCC_FOLIAGE : A_OCC) : 1;
-    let a = sp.alpha + (target - sp.alpha) * OCC_FADE;
-    if (Math.abs(a - target) < 0.01) a = target;
-    if (a !== sp.alpha) { sp.alpha = a; changed = true; }
-    if (a === 1) fadedSprites.delete(sp); else fadedSprites.add(sp);
-  }
-  if (changed) markDirty();
+  // Publish the "occ" source: release it from whatever stopped occluding, set it
+  // on whatever is. `fadedSprites` is this producer's own membership set — the
+  // sprites it currently claims — and easing is `easeAlphas`' job, not ours.
+  // Note the resting alpha is never mentioned here: walking a sprite "back to
+  // 1" was the old rule, and it is exactly what would have flattened a
+  // translucent static to opaque the first time the player stepped behind it.
+  for (const sp of fadedSprites) if (!newFaded.has(sp)) setAlphaSource(sp, "occ", null);
+  for (const sp of newFaded) setAlphaSource(sp, "occ", sp._foliage ? A_OCC_FOLIAGE : A_OCC);
+  fadedSprites.clear();
+  for (const sp of newFaded) fadedSprites.add(sp);
 }
 
 // Dressed humans composite as a STACK of hued sprites (body + worn equipment),
@@ -1211,8 +1286,16 @@ function drawMobs() {
         // former ghost/hidden mobile stays faint after it dies again/unhides).
         // The shadow shader is `color.rgb = 0; alpha = 0.4` over the sprite's
         // own alpha mask — a flat black silhouette, not a dimmed copy.
-        if (e.shadow) { sp.alpha = 0.4; sp.tint = 0x000000; }
-        else sp.alpha = ghost ? 0.45 : (hidden ? 0.5 : 1);
+        // Written as a RESTING alpha and composed, not assigned: `mobSprites` is
+        // a pool no fade source touches today, so `alphaTarget` returns exactly
+        // the old value and this is a no-op — but it means there is genuinely
+        // one definition of a sprite's alpha rather than two, and when ClassicUO's
+        // mobile fade (`z + DEFAULT_CHARACTER_HEIGHT > maxZ`,
+        // GameSceneDrawingSorting.cs:829-853) does arrive it has somewhere to go
+        // instead of being erased by this unconditional per-frame write.
+        if (e.shadow) { sp._baseAlpha = 0.4; sp.tint = 0x000000; }
+        else sp._baseAlpha = ghost ? 0.45 : (hidden ? 0.5 : 1);
+        sp.alpha = alphaTarget(sp);
         const z = zi + e.rank / 256;
         if (sp.zIndex !== z) sp.zIndex = z;
         seen.add(key);

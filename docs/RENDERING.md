@@ -119,7 +119,9 @@ depth-sorts by `(x+y)` + Z.
 
 ### Deferred / cosmetic (not needed for correct floors)
 - Alpha fade-in/out instead of instant hide (ProcessAlpha smoothing).
-- Translucent (alpha 178) and foliage circle-of-transparency.
+- ~~Translucent (alpha 178)~~ — **done**; only the foliage circle-of-transparency
+  half of this bullet remains (and our occlusion pass is its own rule, not
+  ClassicUO's CoT, which ships disabled by default).
 - The static "tall wall pokes through the ceiling" height exception (`(z-maxZ)<height`).
   We currently hard-cull at `z >= maxZ`; revisit if wall tops clip oddly at a ceiling.
 

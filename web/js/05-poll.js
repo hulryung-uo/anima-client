@@ -548,6 +548,21 @@ function syncWorld(s) {
     }
     // Tile + foliage flag for the transparency pass (circle-of-transparency / foliage fade).
     sp._tx = st.x; sp._ty = st.y; sp._foliage = !!st.f;
+    // Resting alpha (see the alpha model above `easeAlphas`). Stamped at
+    // CREATION rather than pushed through a fade source, because the occlusion
+    // producer only ever visits sprites that overlap the avatar — a spiderweb
+    // the player never walks behind would otherwise stay opaque forever.
+    //
+    // Safe to latch once, for two reasons worth writing down. (1) The pool key
+    // above carries the DRAWN graphic, so a graphic change — season remap or a
+    // StaticFilters toggle — mints a new sprite instead of mutating this one.
+    // (2) An animated static swaps `sp.texture` between frames but keeps this
+    // value, which is what ClassicUO does: `AnimatedStaticsManager` writes the
+    // ART entry's AnimOffset, never `Static.Graphic`, so translucency follows
+    // the base graphic for the whole cycle. That matters for 46 of the 272
+    // translucent graphics, including all 40 ocean waves.
+    sp._baseAlpha = st.tr ? A_TRANSLUCENT : 1;
+    if (sp._baseAlpha !== 1) sp.alpha = sp._baseAlpha;
     sp._texUrl = texUrl; // so the "still on screen" branch above can keep it LRU-fresh
     // Animated static (flames/fountains/water wheels): the server baked the ART
     // tile-id frame sequence (`a`) + per-frame interval ms (`ai`). Prefetch each
@@ -662,6 +677,11 @@ function syncWorld(s) {
     sp._boatPzOffset = (it.pz ?? iz) - iz; sp._boatDepthBias = 5;
     // Tile + foliage flag for the transparency pass (circle-of-transparency / foliage fade).
     sp._tx = it.x; sp._ty = it.y; sp._foliage = !!it.f;
+    // Same resting alpha as a static (see that stamp for why it latches once).
+    // The item pool destroys and rebuilds the sprite on any graphic change, so
+    // this cannot outlive the graphic it was derived from.
+    sp._baseAlpha = it.tr ? A_TRANSLUCENT : 1;
+    if (sp._baseAlpha !== 1) sp.alpha = sp._baseAlpha;
     sp.eventMode = "static"; sp.cursor = "pointer";
     // Per-pixel hit-testing (see pixelHitArea above). The closure re-reads the
     // CURRENT frame because an animated item's texture is swapped under it by

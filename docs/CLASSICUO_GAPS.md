@@ -767,7 +767,8 @@ The receive side is generally complete; there is no way to *act*.
 live-verified** — see below); ~~`light.mul` light shapes and colours~~ and ~~directional lighting on stretched
 land~~ (**CLOSED, live-verified** — see below); ~~seasonal
 land/static graphic remap~~ (**CLOSED, live-verified** — see below);
-`TileFlag.Translucent` statics drawn opaque; static hue from `statics.mul` discarded
+~~`TileFlag.Translucent` statics drawn opaque~~ (**CLOSED, live-verified** — see
+below); static hue from `statics.mul` discarded
 at decode; mount rider vertical offset; seated-character deformation; roof/ceiling
 fading; 0x23 DragEffect decoded but never drawn; GameEffect blend modes and
 projectile rotation; ~~StaticFilters (tree→stumps, hide vegetation)~~
@@ -1063,6 +1064,84 @@ proven in the running client and not just the unit test. **Spring (180) and
 fall (271)** statics remapped via the same override, zero mismatches. Summer is
 identity by construction. The shard was left on its native season and the
 override defaults off.
+
+Closed 2026-08-12 (`TileFlag.Translucent` statics): the eighth Tier 3 row, taken
+ahead of roof/ceiling fading on purpose — translucency forces a single-owner
+alpha refactor in the renderer that roof fading needs too, so doing it first pays
+for both. The flag turned out to be *already in the tree*, under the wrong name.
+
+- **`WET` was Translucent all along.** `anima-assets`'s tiledata module declared
+  `WET = 0x0000_0008`. ClassicUO's `Wet` is **0x80** (`TileDataLoader.cs:441`);
+  **0x8 is `Translucent`** (`:425`), confirmed independently by ServUO
+  (`Server/TileData.cs:135`) and by the data — classic water statics 0x1796+
+  carry 0x80 and not 0x8, and **0 of 16384 land graphics** carry 0x8 at all.
+  The constant had exactly one occurrence repo-wide (its own declaration), so
+  nothing ever misbehaved; it was a trap, not a bug. Renamed rather than deleted,
+  and the doc now records that `Wet` is a bit we will genuinely want later —
+  ServUO gates *movement onto water* on it (`Server/Map.cs:1480`) — and that 109
+  of the 272 translucent graphics carry both, which is how they get confused.
+  Every other flag constant was audited against ClassicUO's enum and is correct;
+  a unit test now pins all nine.
+- **The alpha is 178/255 = 0.698, not a half.** `ProcessAlpha` eases `AlphaHue`
+  to 178 (`GameSceneDrawingSorting.cs:371`) and the shader consumes it as
+  `AlphaHue / 255f` (`StaticView.cs:63`, `ItemView.cs:49`). ClassicUO's `0.5`
+  lives at `GameEffectView.cs:118` — a different mechanism on the effects path,
+  and the easy wrong answer.
+- **One alpha owner, sources that each carry their own membership.** The old
+  transparency pass hardcoded `1` as every pooled sprite's resting alpha in three
+  places, so the first time the player stepped behind a spiderweb it would have
+  been walked to *opaque* and left there. Sprites now have a `_baseAlpha` they
+  rest at plus named fade sources; `easeAlphas` composes `min(resting, …sources)`
+  and is the only thing that assigns `.alpha`. **Minimum, not a priority chain**,
+  because ClassicUO's chain is monotone in its shipped targets (0 above maxZ, 0
+  roof, 178 translucent, 255 default, 76 foliage-behind-tree) — a priority order
+  whose targets descend with priority *is* a minimum — and its one non-monotone
+  branch, the circle of transparency, ships disabled (`Profile.cs:126`). `min`
+  therefore agrees with a default-profile ClassicUO on every branch that fires,
+  and is order-free so the next source is one call. `drawMobs` was rewritten to
+  set a resting alpha and compose too — a literal no-op today (nothing fades
+  mobiles yet), but it means the claim "one owner" is true rather than nearly true.
+- **Honest about what this does NOT buy.** `min` never actually binds in this
+  row: `A_OCC` 0.35 and `A_OCC_FOLIAGE` 0.45 are both below 0.698, so an
+  occluding translucent static lands on the occlusion value either way. And roof
+  fading will need more than one extra term, because the occlusion pass only ever
+  *visits* sprites that overlap the avatar — a ceiling occludes nothing. It needs
+  its own collector (hence "each source owns its membership"), plus a server
+  change: statics at/above `max_z` are currently culled out of the stream
+  entirely, so there is no sprite left to fade. `docs/RENDERING.md`'s deferred
+  `(z-maxZ)<height` wall-top exception is a third prerequisite.
+- **Three emit sites, and the graphic each reads.** Statics and multi components
+  classify off the SEASONAL `dflags`; dynamic items off the raw graphic, because
+  ClassicUO overrides `UpdateGraphicBySeason` on `Land`/`Static`/`Multi` only and
+  an `Item` never gets substituted. That is not a formality: desolation remaps
+  mushrooms 3345/3348/3351 → blood 4651, and blood *is* translucent while a
+  mushroom is not, so reading `s.flags` would draw exactly those three opaque in
+  the one season that produces them. A `#[ignore]`d test pins it at a real
+  mushroom on the map, and fault-injecting `s.flags` makes it fail.
+- **Not done, deliberately.** Land (structurally exempt — ClassicUO's
+  `case Land land:` never calls `ProcessAlpha`, `:624`), mobiles (`:838` passes an
+  *empty* `StaticTiles`, so `IsTranslucent` is unconditionally false for them),
+  container/paperdoll/vendor art (world render only — a spiderweb in your backpack
+  is opaque in ClassicUO too), and `GameEffect` — a fifth `ProcessAlpha` call site
+  (`:967`) that belongs to the still-open *GameEffect blend modes* row. We also do
+  not reproduce the 0→178 fade-IN (`CalculateAlpha`, ±25/20ms), which would make
+  translucent statics the only objects in the game that ease in. One more
+  divergence worth knowing: ClassicUO gates picking on `AlphaHue >= 127`
+  (`:423`), so 178 stays clickable but an occlusion-faded 89 does not; our statics
+  set no hit area at all, so there is nothing to diverge from yet.
+
+Verified live against the running ServUO, at a blood-soaked cultist chamber
+(956, 700) chosen because every dense spiderweb cluster sits at x > 5120, i.e. in
+Lost Lands a shard may not have loaded. **89 translucent statics in view, every
+one rendering at exactly 0.698**, 1838 opaque beside them, and `alphaActive`
+empty — a translucent sprite that never occludes is never even tracked. Spawning
+a web with `[add static 4282` in front of the avatar exercised the *item* path
+(`tr:1` on a dynamic item) and it genuinely occluded: base 0.698, pulled to 0.35.
+Walking three tiles away, it settled back at **0.698, not 1.0** — the exact
+regression the old hardcoded resting value would have produced. Against a control
+with every `_baseAlpha` forced to 1, **52,641 pixels changed**, and the
+translucent frame is *less red and greyer* over them, i.e. blood blending toward
+the stone floor beneath it. The spawned web was removed afterwards.
 
 ---
 

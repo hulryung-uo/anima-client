@@ -7,6 +7,12 @@
 // frame at their interpolated positions with walk/idle animation frames.
 
 const HALF = 22, ZSTEP = 4;
+// Resting alpha for a `TileFlag.Translucent` static/item (scene field `tr`).
+// ClassicUO eases such an object's AlphaHue to 178 and the shader consumes it as
+// `AlphaHue / 255f` (GameSceneDrawingSorting.cs:371, StaticView.cs:63,
+// ItemView.cs:49) — so 0.698, not a half. (ClassicUO's 0.5 lives at
+// GameEffectView.cs:118, a different mechanism on the effects path.)
+const A_TRANSLUCENT = 178 / 255;
 // Shared filter for statics drawn in the grayed-out beyond-view ring (see
 // syncWorld's statics loop): grayscale + a brightness lift so it reads as a
 // light gray matching the lifted land-tile gray below, rather than a dim/dark
