@@ -689,7 +689,7 @@ function renderFrame(dt) {
   // Fade statics/foliage that would hide the avatar (circle-of-transparency).
   transparencyPass();
   // …then compose every sprite's alpha from its resting value + active sources.
-  easeAlphas();
+  easeAlphas(dt);
   // Request a redraw only when something is actually animating: self moving (camera
   // scrolls), a gliding mobile, or floating speech. Idle ⇒ no redraw ⇒ ~0 GPU.
   if (overLayer.children.length) markDirty();
@@ -815,18 +815,36 @@ function setAlphaSource(sp, key, a) {
 // Ease every tracked sprite toward its composed target. Runs unconditionally
 // each frame — NOT inside `transparencyPass`, which returns early when there is
 // no player position and would otherwise strand a half-faded sprite.
-function easeAlphas() {
+function easeAlphas(dt) {
   if (!alphaActive.size) return;
+  // Frame-rate independent. `OCC_FADE` was tuned as a per-frame factor, so it is
+  // re-anchored to 60 Hz rather than retuned: at 60 fps `k === OCC_FADE` exactly,
+  // and at 120 fps the fade now takes the same wall-clock time instead of half.
+  // (Before this the fade was ~400 ms at 60 Hz and ~200 ms at 120 Hz. Occlusion
+  // hid that; a whole roof fading makes it obvious.) `dt` is clamped so a
+  // backgrounded tab resuming after seconds eases instead of snapping.
+  const k = 1 - Math.pow(1 - OCC_FADE, Math.min(dt || 16.67, 100) / 16.67);
   let changed = false;
   for (const sp of alphaActive) {
     if (sp.destroyed) { alphaActive.delete(sp); continue; }
     const target = alphaTarget(sp);
-    let a = sp.alpha + (target - sp.alpha) * OCC_FADE;
+    let a = sp.alpha + (target - sp.alpha) * k;
     if (Math.abs(a - target) < 0.01) a = target;
+    // `visible` is written UNCONDITIONALLY, not inside the alpha branch below.
+    // A ceiling-hidden sprite is created at alpha 0 and stays there, so
+    // `a === sp.alpha` on every frame — folding this into that branch would mean
+    // it never ran, and the whole point of hiding (hundreds of alpha-0 sprites
+    // leaving the batch, each with its own gray-ring filter pass) would quietly
+    // never happen. PIXI v8 does NOT skip an alpha-0 sprite; only `visible`
+    // removes it from the instruction set.
+    const vis = a > 0;
+    if (sp.visible !== vis) { sp.visible = vis; changed = true; }
     if (a !== sp.alpha) { sp.alpha = a; changed = true; }
     // Settled AND nothing pulling on it → stop tracking. A translucent static
     // that never gets occluded is therefore never in this set at all: it just
-    // sits at the `_baseAlpha` stamped when its sprite was built.
+    // sits at the `_baseAlpha` stamped when its sprite was built. A
+    // ceiling-hidden one keeps a live source, so it stays — but it has settled,
+    // so it costs one `alphaTarget` walk and no writes.
     if (a === target && (!sp._aSrc || sp._aSrc.size === 0)) alphaActive.delete(sp);
   }
   if (changed) markDirty();
@@ -1278,7 +1296,9 @@ function drawMobs() {
           sp.anchor.set(0.5, 1.0);
           sp.x = x; sp.y = y - 3;
         }
-        sp.visible = true;
+        // Visibility follows the composed alpha, so a mobile hidden by the
+        // ceiling leaves the batch instead of being drawn fully transparent.
+        // (Set after the alpha below, so this reads what that computed.)
         // Dead humans render as translucent ghosts; a hidden mobile (still visible to
         // us, per the scene's `hidden` flag) renders semi-transparent too, so we know
         // we're hidden even though we can see ourselves. Sprites are pooled/persistent,
@@ -1295,7 +1315,22 @@ function drawMobs() {
         // instead of being erased by this unconditional per-frame write.
         if (e.shadow) { sp._baseAlpha = 0.4; sp.tint = 0x000000; }
         else sp._baseAlpha = ghost ? 0.45 : (hidden ? 0.5 : 1);
+        // Mobiles fade under a ceiling too. ClassicUO runs them through the very
+        // same `ProcessAlpha` as statics, passing an EMPTY `StaticTiles`
+        // (GameSceneDrawingSorting.cs:840-850) — so only the `obj.Z >= _maxZ`
+        // branch can fire for a mobile, never the roof or translucent ones.
+        // (RENDERING.md used to cite `z + DEFAULT_CHARACTER_HEIGHT > maxZ`; that
+        // is the branch compared against the literal 150, i.e. dead code.)
+        // Needs no server change — `scene.map.maxZ` and each mobile's `z` have
+        // both been on the wire all along.
+        const mz = scene.map && scene.map.maxZ;
+        setAlphaSource(sp, "ceil", mz != null && (st.z | 0) >= mz ? 0 : null);
+        // `_baseAlpha` is rewritten every frame here, so re-arm the easer when it
+        // actually moves; otherwise a ghost/hidden transition could settle out of
+        // `alphaActive` and never be applied.
+        if (sp._baseAlphaPrev !== sp._baseAlpha) { alphaActive.add(sp); sp._baseAlphaPrev = sp._baseAlpha; }
         sp.alpha = alphaTarget(sp);
+        sp.visible = sp.alpha > 0;
         const z = zi + e.rank / 256;
         if (sp.zIndex !== z) sp.zIndex = z;
         seen.add(key);

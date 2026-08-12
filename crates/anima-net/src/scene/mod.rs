@@ -152,7 +152,7 @@ pub fn build_scene(
         .collect();
 
     let mobiles = mobiles_json(&s.world, &look, &p);
-    let items = items_json(&s.world, &look, px, py, max_z);
+    let items = items_json(&s.world, &look, px, py, max_z, max_z < 127);
     let mut lights = lights_json(&s.world, &look, px, py, pz);
     // `Equipconv.def` is keyed by the wearer's REMAPPED body.
     let (equip_body, _) = look.remap(p.body, p.hue);

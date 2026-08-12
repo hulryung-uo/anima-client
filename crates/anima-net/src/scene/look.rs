@@ -116,6 +116,14 @@ impl Look<'_> {
             .is_some_and(|m| m.item_flags(g) & FLAG_FOLIAGE != 0)
     }
 
+    /// Is this item graphic roof art (`TileFlag.Roof`)? ClassicUO runs dynamic
+    /// items through the same `ProcessAlpha` chain as statics, so the
+    /// `_noDrawRoofs && itemData.IsRoof` branch applies to an item lying on a
+    /// roof too (`GameSceneDrawingSorting.cs:901`, `:355`).
+    pub(super) fn item_roof(&self, g: u16) -> bool {
+        self.map.is_some_and(|m| m.item_flags(g) & FLAG_ROOF != 0)
+    }
+
     /// `TileFlag.Translucent` — draw this item's art at partial alpha (ClassicUO
     /// `ProcessAlpha` → 178/255). Read off the RAW graphic, unlike the statics
     /// and multi emitters: ClassicUO overrides `UpdateGraphicBySeason` on

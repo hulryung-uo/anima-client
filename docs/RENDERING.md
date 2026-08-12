@@ -67,15 +67,25 @@ So a whole connected roof within ±6 Z collapses to its minimum Z → `maxZ`.
 
 For an object on screen, it is **hidden** when:
 
+**The fade IS the cull — this table used to say the opposite.** `AddTileToRenderList`'s
+`maxZ` parameter is the literal **`150`** passed by its only call site
+(`GameScene.cs:629-635`), which also discards the `bool` it returns — so every
+`if (maxObjectZ > maxZ)` branch inside it is dead twice over. The live ceiling rule is
+`ProcessAlpha` easing `AlphaHue` to 0, and an object only stops being drawn once it
+*reaches* 0 (`PushToRenderQueue` returns early `if (obj.AlphaHue == 0)`, `:566-571`).
+ClassicUO never removes the object from the tile's chain — which is exactly why its own
+`Pathfinder.CreateItemList` is untouched by the ceiling (`Pathfinder.cs` contains no
+`_maxZ`/`AlphaHue`/`AllowedToDraw` at all).
+
 | type | hidden if |
 |------|-----------|
-| **Land** | `land.PriorityZ > maxZ` |
-| **Static / Item** | `z >= maxZ` (cull) **or** `noDrawRoofs && IsRoof`. Exception: a static taller than the overflow is still drawn — `z > maxZ` keeps it iff `height != 0 && (z - maxZ) < height` (a wall whose base is below the ceiling but top pokes through still draws). |
-| **Mobile** | `z + DEFAULT_CHARACTER_HEIGHT(16) > maxZ`, or it's behind the roof-cull. |
+| **Land** | Not by `_maxZ`. But `_maxGroundZ` (set only by Scan A's Land branch, `:99`) gates **every** render list via `DrawRenderList`'s `if (obj.Z <= maxGroundZ)` (`RenderLists.cs:127-133`) — so land *is* hidden at `pz+16` in the terrain-overhang case, which is what `terrain.rs:227` ports. |
+| **Static / Item** | `ProcessAlpha`: `obj.Z >= _maxZ` → ease to 0, **else if** `_noDrawRoofs && IsRoof` → ease to 0 (`:337`, `:355`; the chain is `else if`, so the Z rule wins). The old "tall wall pokes through" exception (`height != 0 && (z - maxZ) < height`) is part of the dead-against-`150` code and is **not** a rule to port. |
+| **Mobile** | Same `ProcessAlpha`, called with an **empty** `StaticTiles` (`:840-850`) — so only the `obj.Z >= _maxZ` branch can fire for a mobile, never the roof or translucent ones. (`z + DEFAULT_CHARACTER_HEIGHT(16) > maxZ` is the dead branch.) |
 
-`ProcessAlpha` does this as a smooth fade (alpha→0 over a few frames) rather than a
-hard pop, and also: translucent statics → alpha 178; foliage the player stands behind →
-fades (circle-of-transparency). Those are cosmetic; the hard rule is the table above.
+`CalculateAlpha` steps ±25 per 20 ms tick, symmetric both ways — 255→0 in 11 steps,
+a ~220 ms floor. Two user toggles we do not model: `UseObjectsFading` (default true;
+off makes it snap) and `DrawRoofs`/"Hide roof tiles" (default true).
 
 ## 4. Why this yields correct multi-floor
 
@@ -104,7 +114,13 @@ depth-sorts by `(x+y)` + Z.
 - **`scene::max_draw_z(map, px, py, pz)`** → `maxZ`. Ports Scans A & B + CalculateNearZ +
   the `pz16` clamp. (`MapData` already exposes `land(x,y)` and `statics(x,y)` with
   tiledata flags incl. `Roof 0x10000000`, `Surface 0x200`.)
-- **scene static cull**: skip a static when `z >= maxZ` **or** `(under_cover && IsRoof)`
+- **scene ceiling flag** (was a cull): a static with `z >= maxZ` **or**
+  `(under_cover && IsRoof)` is still EMITTED, carrying `"hz":1` and **no** `h`/`pf`
+  pathing suffix, no `a`/`ai` animation frames, and contributing no light. The renderer
+  eases it to alpha 0 and sets `visible = false`. Dropping it was what made a roof pop:
+  there was no sprite left to fade. Two predicates are kept separate in the emitters
+  (`hz` for drawing, `path_withheld` for the frozen pathing parity) so a later fidelity
+  fix to *what* is hidden cannot move a pathing byte
   where `under_cover = maxZ < 127`. (Roof tiles flagged `0x10000000`.) The persistent
   tile pool in the renderer then drops the hidden statics automatically.
 - **Renderer depth order** (ClassicUO `Chunk.AddGameObject` priority): a single sorted

@@ -529,6 +529,16 @@ function syncWorld(s) {
         ex.filters = beyondView ? [STATIC_GRAY] : null;
         ex._gray = beyondView;
       }
+      // Ceiling state can flip on an existing sprite without changing its
+      // identity — walking under a roof, or out from under one. Flip the fade
+      // source in place; `easeAlphas` does the rest. This is the whole reason
+      // the server now sends the object instead of dropping it: there is a
+      // sprite here to ease.
+      const hzNow = st.hz ? 1 : 0;
+      if (ex && ex._hz !== hzNow) {
+        setAlphaSource(ex, "ceil", hzNow ? 0 : null);
+        ex._hz = hzNow;
+      }
       continue; // unchanged; see the blanket LRU-touch note above
     }
     const texUrl = `art/static/${drawG}.png`;
@@ -563,6 +573,10 @@ function syncWorld(s) {
     // translucent graphics, including all 40 ocean waves.
     sp._baseAlpha = st.tr ? A_TRANSLUCENT : 1;
     if (sp._baseAlpha !== 1) sp.alpha = sp._baseAlpha;
+    // Born under a ceiling: start at 0 and hidden, so a roof that was already
+    // over you when the sprite streamed in doesn't fade IN from nowhere.
+    sp._hz = st.hz ? 1 : 0;
+    if (sp._hz) { sp.alpha = 0; sp.visible = false; setAlphaSource(sp, "ceil", 0); }
     sp._texUrl = texUrl; // so the "still on screen" branch above can keep it LRU-fresh
     // Animated static (flames/fountains/water wheels): the server baked the ART
     // tile-id frame sequence (`a`) + per-frame interval ms (`ai`). Prefetch each
@@ -643,7 +657,17 @@ function syncWorld(s) {
     // the equipment is part of the change key, not just the body frame.
     const corpseEquipSig = corpseUrl ? corpseLayerSig(it) : "";
     if (e && e.g === stackG && e.hue === iHue && e.x === it.x && e.y === it.y && e.z === iz
-        && e.corpseUrl === corpseUrl && e.equipSig === corpseEquipSig) continue; // unchanged; see the blanket LRU-touch note above
+        && e.corpseUrl === corpseUrl && e.equipSig === corpseEquipSig) {
+      // Ceiling state is deliberately NOT in the change key above: it must flip
+      // the fade source on the LIVING sprite, not rebuild it — rebuilding is
+      // what popped. Same shape as the statics loop.
+      const hzNow = it.hz ? 1 : 0;
+      if (e.sp && e.sp._hz !== hzNow) {
+        setAlphaSource(e.sp, "ceil", hzNow ? 0 : null);
+        e.sp._hz = hzNow;
+      }
+      continue; // unchanged; see the blanket LRU-touch note above
+    }
     const itemTexUrl = corpseUrl || `art/static/${stackG}.png${hueQ}`;
     const tex = corpseTex || texFor(itemTexUrl);
     if (!tex) continue; // await art, retry next poll
@@ -682,6 +706,8 @@ function syncWorld(s) {
     // this cannot outlive the graphic it was derived from.
     sp._baseAlpha = it.tr ? A_TRANSLUCENT : 1;
     if (sp._baseAlpha !== 1) sp.alpha = sp._baseAlpha;
+    sp._hz = it.hz ? 1 : 0;
+    if (sp._hz) { sp.alpha = 0; sp.visible = false; setAlphaSource(sp, "ceil", 0); }
     sp.eventMode = "static"; sp.cursor = "pointer";
     // Per-pixel hit-testing (see pixelHitArea above). The closure re-reads the
     // CURRENT frame because an animated item's texture is swapped under it by

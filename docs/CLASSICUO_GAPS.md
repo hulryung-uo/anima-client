@@ -769,8 +769,10 @@ land~~ (**CLOSED, live-verified** — see below); ~~seasonal
 land/static graphic remap~~ (**CLOSED, live-verified** — see below);
 ~~`TileFlag.Translucent` statics drawn opaque~~ (**CLOSED, live-verified** — see
 below); static hue from `statics.mul` discarded
-at decode; mount rider vertical offset; seated-character deformation; roof/ceiling
-fading; 0x23 DragEffect decoded but never drawn; GameEffect blend modes and
+at decode; mount rider vertical offset; seated-character deformation; ~~roof/ceiling
+fading~~ (**CLOSED, live-verified** — see below); the pathing half of the ceiling
+rule (ceiling-hidden objects still ship without `h`/`pf` — NEW, see below);
+0x23 DragEffect decoded but never drawn; GameEffect blend modes and
 projectile rotation; ~~StaticFilters (tree→stumps, hide vegetation)~~
 (**CLOSED, live-verified** — see below).
 
@@ -1142,6 +1144,89 @@ regression the old hardcoded resting value would have produced. Against a contro
 with every `_baseAlpha` forced to 1, **52,641 pixels changed**, and the
 translucent frame is *less red and greyer* over them, i.e. blood blending toward
 the stone floor beneath it. The spawned web was removed afterwards.
+
+Closed 2026-08-12 (roof/ceiling fading): the ninth Tier 3 row, and the one the
+previous row's alpha refactor was built for. It turned out to be a row about
+**what the server refuses to send**, not about easing.
+
+- **The fade IS the cull — our own doc had it backwards.** `RENDERING.md` §3
+  described ClassicUO as hard-culling above the ceiling with a fade "bolted on as
+  cosmetic polish". In fact `AddTileToRenderList`'s `maxZ` parameter is the
+  literal **`150`** passed by its only call site (`GameScene.cs:629-635`), which
+  also discards the `bool` it returns — so every `if (maxObjectZ > maxZ)` branch
+  inside it is dead twice over. The live rule is `ProcessAlpha` easing `AlphaHue`
+  to 0, and the object is only skipped once it *reaches* 0. ClassicUO never
+  removes it from the tile's object chain, which is exactly why its own
+  `Pathfinder.CreateItemList` is untouched by the ceiling — `Pathfinder.cs`
+  contains no `_maxZ`, `AlphaHue` or `AllowedToDraw` anywhere.
+- **So OUR architecture had inverted the reference's guarantee.** ClassicUO holds
+  one world model and filters only in the renderer; we made the draw filter the
+  *transport* filter, `continue`-ing ceiling-hidden objects out of a stream the
+  browser also uses for walk math. Sending them back does not violate the house
+  rule — it restores ClassicUO's invariant.
+- **The scope was wrong as this file stated it.** `z >= max_z` withholds not just
+  roofs but indoor **staircases and upper-floor slabs**: at a Britain house 381 of
+  381 dropped statics inside `PATH_RADIUS` carried real pathing bits. "Send the
+  roof back" would have been the wrong fix; "stop dropping anything, flag it
+  instead" is the right one.
+- **Two predicates, deliberately not one.** `hz` is the DRAW decision; a separate
+  `path_withheld` is byte-for-byte the old cull and alone gates the `h`/`pf`
+  suffix. That split is the whole safety argument, and it is what lets a
+  ceiling-hidden object be *emitted* while remaining provably inert: the browser
+  builds its path list with `tiledataPathObj(z, h|0, pf|0)`, which returns `null`
+  whenever `pf == 0`, so a record without `pf` contributes **zero elements** to
+  `createItemList` — `calculate_new_z` is identical element-for-element. Not
+  measured: proved at the source, then pinned by a golden.
+- **A faded object must also stop lighting, animating and evicting.** Three traps,
+  all of which "flag instead of continue" walks straight into, because the old
+  `continue` sat *above* them. (1) The light push: ceiling-hidden lamps began
+  lighting the room from the storey you just hid, and since `LIGHT_CAP` is a hard
+  64 with static lights appended last, they evicted the nearest real ones —
+  regressing two closed rows. ClassicUO calls `AddLight` only from
+  `StaticView.Draw`, which a faded object never reaches. (2) Animated statics kept
+  the on-demand renderer repainting forever for invisible sprites. (3) Hidden
+  objects shared the 4000-entry emit budget and truncated the DRAWN set — measured
+  live at Blackthorn, 4000 exactly, silently restoring the very pop this row
+  removes. They now have their own `HIDDEN_STATIC_CAP`.
+- **`easeAlphas` was frame-rate dependent** (a fixed per-frame factor, no `dt`) —
+  ~400 ms at 60 Hz, ~200 ms at 120 Hz. Occlusion hid that; a whole roof fading
+  makes it obvious, so the ease is now `dt`-anchored to 60 Hz. It also now owns
+  `visible`, written *unconditionally*: a ceiling-hidden sprite is created at
+  alpha 0 and stays there, so folding that write into the "alpha changed" branch
+  would have meant it never ran and hundreds of alpha-0 sprites stayed in the batch.
+- **Deliberately NOT done, each recorded rather than silently skipped.** The
+  tall-wall `(z-maxZ)<height` exception is part of the dead-against-`150` code —
+  porting it would ADD a divergence. `_noDrawRoofs` stays inferred from
+  `max_z < 127` rather than carried as its own bool (a real fidelity gap: we lift a
+  town's roofs from inside a cave, and fail to lift them above z=111) because
+  changing *which* objects are hidden is a separate, separately-verifiable change —
+  the `hz`/`path_withheld` split exists precisely so it can land safely later. Land
+  still pops (its sprite is destroyed outright). `HasSurfaceOverhead` and the
+  `_maxGroundZ` gate are unported. And the **pathing half is deferred as its own
+  new row**: ceiling-hidden objects still ship without `h`/`pf`, so the browser's
+  predicted Z stays blind to indoor staircases. Measured across three independent
+  sweeps at 0.019% / 0.026% / 0.064% of step resolutions, always one-directional
+  (browser more permissive, never a shifted Z) and never on a tile the server marks
+  walkable — because walk *denial* is the server-computed `w`, which reads unculled
+  `MapData`. Real, bounded, and a fix that must prove the browser's new answer
+  matches the server's.
+
+Verified live against the running ServUO at a Britain house (1618,1556,30 → walk
+south). The discriminating measurement is the transition, since a fade and a pop
+share an end state: a per-frame sampler recorded `maxZ` dropping 127 → 67 and 352
+statics becoming ceiling-hidden, then alpha decaying **0.905 → 0.820 → 0.743 → … →
+0.011** across ~47 distinct intermediate values over ~390 ms, at a constant 0.905
+ratio per frame — exactly the `dt`-anchored law, where a pop emits no intermediates
+at all. They settled at alpha 0 with `visible: 0` (352 sprites out of the batch),
+and walking back out returned every one of them: `invisible: 0`, with the only
+sub-1.0 sprites left at **0.698** and **0.35** — translucent and occluding — i.e.
+the shared alpha model composing three sources correctly. Payload **+5.4 KB
+(+2.8%)**, scene build 9.0–9.4 ms, fps 120 / worst 9 ms. Zero hidden statics carried
+a pathing field on the wire, and walking E,E,W,W under the roof returned to the
+exact start tile with no denials. The pathing golden is captured from the
+*pre-change* emitter (159/157/32 path-bearing and 437/1567/471 drawn statics at
+three under-cover centers) so it cannot certify itself — a first attempt passed
+vacuously at `max_z = 127` until its positive control caught it.
 
 ---
 

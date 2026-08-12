@@ -2788,3 +2788,200 @@ fn translucency_follows_the_seasonal_draw_graphic() {
         assert_eq!(s["g"].as_u64(), Some(MUSHROOM));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Ceiling hiding: the pathing-parity golden.
+//
+// The invariant this row must not break is "which objects carry pathing fields,
+// and what those fields say". A golden derived from the NEW emitter could not
+// certify that — `filter(new) == filter(new)` is vacuous — so this fixture is
+// captured from the emitter as it stood BEFORE ceiling-hidden objects were
+// emitted at all, and is checked in. Regenerating it requires an explicit
+// `ANIMA_BLESS_GOLDEN=1`, because a silent regeneration turns the row's central
+// safety proof back into a tautology.
+// ---------------------------------------------------------------------------
+
+/// Centers chosen to fire different halves of the ceiling rule: a Britain house
+/// (roof overhead), Blackthorn's castle (the densest under-cover window found),
+/// and a Trinsic staircase (an upper-floor slab, not a roof).
+const CEILING_CENTERS: [(&str, i64, i64, i32); 3] = [
+    ("britain_house", 1585, 1560, 20),
+    ("blackthorn", 1522, 1431, 15),
+    ("trinsic_stair", 1922, 2689, 0),
+];
+
+fn ceiling_golden_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src/scene/testdata/ceiling_pathing_golden.json")
+}
+
+/// The projection that must be byte-identical across this change: every static
+/// that carries a pathing field, with its values. A ceiling-hidden static is
+/// allowed to APPEAR in the stream (that is the row's whole point) but must
+/// never bring `h`/`pf` with it, so it can never enter this set.
+fn ceiling_pathing_projection(map: &mut MapData, c: (i64, i64, i32)) -> Vec<String> {
+    let world = anima_core::World::new();
+    let mut lights = Vec::new();
+    // The REAL ceiling. Passing a literal 127 here would mean `max_z` never
+    // fires, nothing is ever ceiling-hidden, and both this golden and its
+    // positive control pass vacuously — which is precisely the failure mode the
+    // golden exists to rule out.
+    let max_z = max_draw_z(&world, map, None, c.0, c.1, c.2);
+    let e = emit_tiles(
+        &world,
+        map,
+        None,
+        None,
+        &mut None,
+        (c.0, c.1, c.2),
+        max_z,
+        &mut lights,
+    );
+    let statics: Vec<Value> =
+        serde_json::from_str(&format!("[{}]", e.statics.trim_end_matches(',')))
+            .expect("statics json");
+    // Two projections, guarding two different regressions.
+    // `path:` — the pathing fields themselves, which must never move.
+    // `draw:` — the set of DRAWN statics, which must not shrink either: hidden
+    //           objects share the emit loop, and if they also shared its 4000-entry
+    //           budget they would truncate the drawn set and silently restore the
+    //           very pop this row removes. (Measured: they did, until they got
+    //           their own counter.)
+    let mut out: Vec<String> = statics
+        .iter()
+        .filter(|s| s.get("h").is_some() || s.get("pf").is_some())
+        .map(|s| {
+            format!(
+                "path:{},{},{},{},{},{}",
+                s["x"],
+                s["y"],
+                s["z"],
+                s["g"],
+                s.get("h").map_or(-1, |v| v.as_i64().unwrap_or(-1)),
+                s.get("pf").map_or(-1, |v| v.as_i64().unwrap_or(-1))
+            )
+        })
+        .chain(
+            statics
+                .iter()
+                .filter(|s| s.get("hz").is_none())
+                .map(|s| format!("draw:{},{},{},{}", s["x"], s["y"], s["z"], s["g"])),
+        )
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+#[ignore] // needs ~/dev/uo/uo-resource
+fn ceiling_hidden_objects_move_no_pathing_field() {
+    let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+    let mut map = MapData::open(&dir).expect("open map data");
+    let path = ceiling_golden_path();
+
+    let mut fresh = serde_json::Map::new();
+    for (name, x, y, z) in CEILING_CENTERS {
+        fresh.insert(
+            name.to_string(),
+            json!(ceiling_pathing_projection(&mut map, (x, y, z))),
+        );
+    }
+
+    if std::env::var("ANIMA_BLESS_GOLDEN").is_ok() {
+        std::fs::write(&path, serde_json::to_string_pretty(&fresh).unwrap()).unwrap();
+        eprintln!("blessed {} centers into {}", fresh.len(), path.display());
+        return;
+    }
+
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!("missing golden {} ({e}) — regenerate with ANIMA_BLESS_GOLDEN=1 on a build that PREDATES the change", path.display())
+    });
+    let golden: serde_json::Map<String, Value> = serde_json::from_str(&raw).unwrap();
+    for (name, _, _, _) in CEILING_CENTERS {
+        let want = golden
+            .get(name)
+            .unwrap_or_else(|| panic!("golden lacks {name}"));
+        let got = &fresh[name];
+        assert!(
+            want.as_array().is_some_and(|a| !a.is_empty()),
+            "golden for {name} is empty — it would pass vacuously"
+        );
+        assert_eq!(want, got, "pathing fields moved at {name}");
+    }
+}
+
+/// Positive control for [`ceiling_hidden_objects_move_no_pathing_field`]: the
+/// golden above would pass vacuously if the ceiling rule had simply stopped
+/// firing. This asserts the hidden objects are really there, really flagged, and
+/// really stripped of everything a faded object must not carry.
+#[test]
+#[ignore] // needs ~/dev/uo/uo-resource
+fn ceiling_hidden_objects_are_emitted_and_inert() {
+    let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+    let mut map = MapData::open(&dir).expect("open map data");
+    for (name, x, y, z) in CEILING_CENTERS {
+        let world = anima_core::World::new();
+        let mut lights = Vec::new();
+        let max_z = max_draw_z(&world, &mut map, None, x, y, z);
+        let e = emit_tiles(
+            &world,
+            &mut map,
+            None,
+            None,
+            &mut None,
+            (x, y, z),
+            max_z,
+            &mut lights,
+        );
+        assert!(
+            max_z < 127,
+            "{name}: max_z is 127 — this center is not under cover"
+        );
+        let statics: Vec<Value> =
+            serde_json::from_str(&format!("[{}]", e.statics.trim_end_matches(',')))
+                .expect("statics json");
+        let hidden: Vec<&Value> = statics.iter().filter(|s| s.get("hz").is_some()).collect();
+        assert!(
+            hidden.len() > 50,
+            "{name}: only {} ceiling-hidden statics emitted — the rule stopped firing, \
+             which would make the pathing golden pass vacuously",
+            hidden.len()
+        );
+        for s in &hidden {
+            // The whole safety argument: no pathing fields ride along.
+            assert!(
+                s.get("h").is_none() && s.get("pf").is_none(),
+                "{name}: hidden static kept pathing fields: {s}"
+            );
+            // A faded object animates nothing (ClassicUO returns before every
+            // render list when AlphaHue == 0), and an invisible animated sprite
+            // would keep the browser's on-demand renderer awake forever.
+            assert!(
+                s.get("a").is_none() && s.get("ai").is_none(),
+                "{name}: hidden static kept anim frames: {s}"
+            );
+        }
+        // …and it must not light the room either. A ceiling-hidden lamp reaching
+        // `lights` would both illuminate from a hidden storey and, since LIGHT_CAP
+        // is a hard 64 with static lights appended last, evict the nearest real ones.
+        for l in &lights {
+            let (lx, ly, lz) = (
+                l["x"].as_i64().unwrap(),
+                l["y"].as_i64().unwrap(),
+                l["z"].as_i64().unwrap(),
+            );
+            assert!(
+                !hidden.iter().any(|s| s["x"].as_i64() == Some(lx)
+                    && s["y"].as_i64() == Some(ly)
+                    && s["z"].as_i64() == Some(lz)),
+                "{name}: a ceiling-hidden object at ({lx},{ly},{lz}) is still lighting the scene"
+            );
+        }
+        eprintln!(
+            "{name}: {} statics, {} ceiling-hidden, {} lights",
+            statics.len(),
+            hidden.len(),
+            lights.len()
+        );
+    }
+}

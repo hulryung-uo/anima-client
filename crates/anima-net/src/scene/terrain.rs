@@ -42,6 +42,11 @@ pub(super) fn emit_tiles(
     let mut tiles = String::with_capacity(64 * 1024);
     let mut statics = String::with_capacity(16 * 1024);
     let mut n_statics = 0usize;
+    // Ceiling-hidden statics carry their OWN budget so they can never evict a
+    // path-bearing static from `n_statics`. Sized past the densest under-cover
+    // window measured (Blackthorn castle, 2616 hidden in one 49x49 window).
+    const HIDDEN_STATIC_CAP: usize = 3200;
+    let mut n_hidden = 0usize;
     let mut dbg: Vec<Value> = Vec::new();
     // `max_z` (computed up front, see the top of this fn) hides the roof /
     // upper floors when the player is under cover (ClassicUO UpdateMaxDrawZ):
@@ -350,9 +355,32 @@ pub(super) fn emit_tiles(
                     if map.item_is_nodraw(s.graphic) {
                         continue;
                     }
+                    // CEILING HIDING. Two predicates, deliberately separate.
+                    //
+                    // `hz` is a DRAW decision: the object is hidden by the ceiling,
+                    // so the renderer eases it to alpha 0 instead of losing its
+                    // sprite. This used to be a `continue`, which is exactly why a
+                    // roof popped — there was nothing left on screen to fade.
+                    //
+                    // `path_withheld` is BYTE-FOR-BYTE the old cull, and it alone
+                    // gates the `h`/`pf` suffix below. Keeping the two apart is the
+                    // whole safety argument: when a later fidelity fix changes WHICH
+                    // objects are hidden, it moves `hz` only, and no pathing byte can
+                    // follow it. (A ceiling-hidden static reaches the browser with no
+                    // `pf`, and `tiledataPathObj` returns null for `pf == 0`, so it
+                    // contributes nothing to `createItemList` — `calculate_new_z` is
+                    // identical element-for-element.)
+                    //
+                    // This is also what ClassicUO does, where the fade IS the cull:
+                    // it never edits the tile's object chain, it eases `AlphaHue` to
+                    // 0 (`ProcessAlpha`, GameSceneDrawingSorting.cs:337/:355), which
+                    // is precisely why its own `Pathfinder.CreateItemList` is
+                    // untouched by the ceiling. `hz` is our `AlphaHue = 0`.
                     let is_roof = s.flags & 0x1000_0000 != 0;
-                    if (s.z as i32) >= max_z || (under_cover && is_roof) {
-                        continue;
+                    let hz = (s.z as i32) >= max_z || (under_cover && is_roof);
+                    let path_withheld = hz;
+                    if hz && n_hidden >= HIDDEN_STATIC_CAP {
+                        continue; // budget spent — this one falls back to the old pop
                     }
                     // Seasonal draw graphic — see the land site above for why this
                     // is a local and not a rebound `StaticTile`. Note what stays on
@@ -406,6 +434,14 @@ pub(super) fn emit_tiles(
                     // DESOLATION_STATIC rows remap a mushroom (3345/3348/3351) to
                     // blood 4651, which IS translucent. Reading `s.flags` would draw
                     // exactly those three opaque in the one season that produces them.
+                    // A ceiling-hidden object is drawn at alpha 0, so it animates
+                    // nothing: ClassicUO's `PushToRenderQueue` returns before every
+                    // render list `if (obj.AlphaHue == 0)`
+                    // (GameSceneDrawingSorting.cs:566-571). Suppressing `a`/`ai` also
+                    // keeps the browser's on-demand renderer asleep — an invisible
+                    // animated static would otherwise repaint the whole scene on
+                    // every frame interval, forever.
+                    let hidden_suffix = if hz { ",\"hz\":1" } else { "" };
                     let translucent = if dflags & FLAG_TRANSLUCENT != 0 {
                         ",\"tr\":1"
                     } else {
@@ -421,18 +457,22 @@ pub(super) fn emit_tiles(
                     // Bake the frame tile-id sequence (`a`) + per-frame interval in
                     // ms (`ai`) so the renderer just swaps textures. Only emit when
                     // the tile is animated AND animdata gives more than one frame.
-                    let anim = anim_suffix(map, animdata, draw_g);
+                    let anim = if hz {
+                        String::new()
+                    } else {
+                        anim_suffix(map, animdata, draw_g)
+                    };
                     // `h`/`pf` (PATH_RADIUS-gated): `s.height`/`s.flags` are already
                     // fetched by `map.statics()` above, so this is free — see
                     // `path_suffix`'s doc.
                     let path = path_suffix(
-                        dx.abs() <= PATH_RADIUS && dy.abs() <= PATH_RADIUS,
+                        !path_withheld && dx.abs() <= PATH_RADIUS && dy.abs() <= PATH_RADIUS,
                         s.height,
                         s.flags,
                     );
                     let _ = write!(
                         statics,
-                        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}{}{}{}{}}},",
+                        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}{}{}{}{}{}}},",
                         x,
                         y,
                         s.z,
@@ -443,12 +483,30 @@ pub(super) fn emit_tiles(
                         path,
                         season_g,
                         fol_hidden,
-                        translucent
+                        translucent,
+                        hidden_suffix
                     );
-                    n_statics += 1;
+                    // Ceiling-hidden objects count against their OWN budget and
+                    // never against `n_statics`. If they shared it, a dense
+                    // under-cover window (Blackthorn: 2510 hidden) would spend the
+                    // 4000-entry budget on invisible sprites and truncate the DRAWN
+                    // set — silently re-introducing the hard pop this row removes,
+                    // and dropping `h`/`pf` records with it.
+                    if hz {
+                        n_hidden += 1;
+                    } else {
+                        n_statics += 1;
+                    }
                     // A static light source (wall torch, lamp, brazier) glows
                     // at night — same shape as dynamic-item lights (r:3).
-                    if lights.len() < LIGHT_CAP && map.item_is_light(draw_g) {
+                    // `!hz`: a ceiling-hidden object must not light the scene.
+                    // ClassicUO calls `AddLight` only from `StaticView.Draw`
+                    // (StaticView.cs:85-88), and a fully-faded object never reaches
+                    // Draw — hiding a storey puts out its lamps too. Without this the
+                    // fade would light the room you are standing in from candles on
+                    // the floor you just hid, and — `LIGHT_CAP` being a hard 64 with
+                    // static lights appended last — evict the real lights nearest you.
+                    if !hz && lights.len() < LIGHT_CAP && map.item_is_light(draw_g) {
                         let lid = map.item_light_id(draw_g);
                         let (lid, lc) = if lid > 200 {
                             (1, lid as u16 - 200)

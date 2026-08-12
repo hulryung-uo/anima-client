@@ -242,10 +242,13 @@ pub(super) fn emit_multi_component(
     // `path_suffix`; `dflags`/`dheight` drive what is drawn.
     let flags = map.item_flags(graphic);
     let height = map.item_height(graphic);
+    // Ceiling hiding — the same two-predicate split as the real-statics loop in
+    // terrain.rs; see that comment for why `hz` and `path_withheld` must not be
+    // one variable. A placed house's own roof comes through here, so missing this
+    // site would leave houses popping while map statics faded.
     let is_roof = flags & FLAG_ROOF != 0;
-    if cz >= max_z || (under_cover && is_roof) {
-        return;
-    }
+    let hz = cz >= max_z || (under_cover && is_roof);
+    let path_withheld = hz;
     let draw_g = season::static_draw_graphic(season, graphic);
     let (dflags, dheight) = if draw_g == graphic {
         (flags, height)
@@ -268,6 +271,7 @@ pub(super) fn emit_multi_component(
     // — house windows and the magical-door graphics are multi components, so a
     // multi that skipped this would fade inconsistently against identical statics
     // standing beside it.
+    let hidden_suffix = if hz { ",\"hz\":1" } else { "" };
     let translucent = if dflags & FLAG_TRANSLUCENT != 0 {
         ",\"tr\":1"
     } else {
@@ -284,19 +288,36 @@ pub(super) fn emit_multi_component(
     // shared `anim_suffix`) — an animated component (mill wheel, pennant) or
     // design tile must cycle frames exactly like the identical graphic would
     // as a real static, not freeze on frame 0.
-    let anim = anim_suffix(map, animdata, draw_g);
+    let anim = if hz {
+        String::new()
+    } else {
+        anim_suffix(map, animdata, draw_g)
+    };
     let path = path_suffix(
-        (x - px).abs() <= PATH_RADIUS && (y - py).abs() <= PATH_RADIUS,
+        !path_withheld && (x - px).abs() <= PATH_RADIUS && (y - py).abs() <= PATH_RADIUS,
         height,
         flags,
     );
     let _ = write!(
         statics,
-        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{},\"ms\":{}{}{}{}{}{}}},",
-        x, y, cz, graphic, spz, multi_serial, foliage, anim, path, season_g, translucent
+        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{},\"ms\":{}{}{}{}{}{}{}}},",
+        x,
+        y,
+        cz,
+        graphic,
+        spz,
+        multi_serial,
+        foliage,
+        anim,
+        path,
+        season_g,
+        translucent,
+        hidden_suffix
     );
     *n_statics += 1;
-    if lights.len() < light_cap && map.item_is_light(draw_g) {
+    // `!hz` — see the real-statics light push in terrain.rs: a faded object never
+    // reaches ClassicUO's Draw, so it never calls AddLight.
+    if !hz && lights.len() < light_cap && map.item_is_light(draw_g) {
         let lid = map.item_light_id(draw_g);
         let (lid, lc) = if lid > 200 {
             (1, lid as u16 - 200)

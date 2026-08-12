@@ -80,20 +80,25 @@ pub(super) fn mobiles_json(world: &World, look: &Look, player: &Mobile) -> Vec<V
 
 /// Ground items in view: the sprite, its draw-sort priority, and the
 /// pathfinding bits a nearby one contributes to the browser's own Z resolution.
-pub(super) fn items_json(world: &World, look: &Look, px: i64, py: i64, max_z: i32) -> Vec<Value> {
+pub(super) fn items_json(
+    world: &World,
+    look: &Look,
+    px: i64,
+    py: i64,
+    max_z: i32,
+    under_cover: bool,
+) -> Vec<Value> {
     world
         .items
         .values()
         .filter(|it| {
-            // Same z-ceiling rule the statics loop applies: at/above max_z is
-            // hidden (roof lifted / cave ceiling), so no floating items. A multi
-            // (`is_multi`) isn't a drawable item at all — its `graphic` is a
-            // multi id, not an ART graphic; it's expanded into the statics
+            // No z-ceiling filter here any more: an item hidden by the ceiling is
+            // EMITTED with `hz` and eased to alpha 0 by the renderer, like every
+            // other ceiling-hidden object (see terrain.rs's split-predicate note).
+            // A multi (`is_multi`) isn't a drawable item at all — its `graphic` is
+            // a multi id, not an ART graphic; it's expanded into the statics
             // stream (see the tile loop below) instead of drawn directly here.
-            !it.is_multi
-                && it.container.is_none()
-                && !look.item_nodraw(it.graphic)
-                && (it.pos.z as i32) < max_z
+            !it.is_multi && it.container.is_none() && !look.item_nodraw(it.graphic)
         })
         .map(|it| {
             let mut v = json!({
@@ -103,6 +108,18 @@ pub(super) fn items_json(world: &World, look: &Look, px: i64, py: i64, max_z: i3
             // Mark foliage so the renderer can fade it (only when true, small payload).
             if look.item_foliage(it.graphic) {
                 v["f"] = json!(1);
+            }
+            // Ceiling hiding, split exactly as in terrain.rs. Note the asymmetry
+            // that the split exists to make safe: `hz` gains a ROOF clause that
+            // `path_withheld` does not, because ClassicUO applies the
+            // `_noDrawRoofs && IsRoof` branch to items too — so a roof-flagged item
+            // now fades with the roof it sits on, while its `h`/`pf` stay exactly
+            // as today's `z < max_z` cull left them. One is a new draw rule; the
+            // other is frozen pathing parity.
+            let hz_item = (it.pos.z as i32) >= max_z || (under_cover && look.item_roof(it.graphic));
+            let path_withheld = (it.pos.z as i32) >= max_z;
+            if hz_item {
+                v["hz"] = json!(1);
             }
             // Translucent (blood, spiderweb, curtain): ClassicUO runs dynamic
             // items through the same alpha chain as statics (`case Item item:`
@@ -127,7 +144,8 @@ pub(super) fn items_json(world: &World, look: &Look, px: i64, py: i64, max_z: i3
             // `h`/`pf` (PATH_RADIUS-gated, see `item_path_bits`'s doc): omitted
             // whenever out of radius or zero, so this is purely additive —
             // an item outside PATH_RADIUS serializes exactly as before.
-            let in_radius = (it.pos.x as i64 - px).abs() <= PATH_RADIUS
+            let in_radius = !path_withheld
+                && (it.pos.x as i64 - px).abs() <= PATH_RADIUS
                 && (it.pos.y as i64 - py).abs() <= PATH_RADIUS;
             let (h, pf) = look.item_path_bits(it.graphic, in_radius);
             if let Some(h) = h {

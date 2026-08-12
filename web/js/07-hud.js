@@ -1102,7 +1102,12 @@ function inspectTile(x, y) {
   const on = (typeof staticsAt === "function" && staticsAt(x | 0, y | 0)) || [];
   rows.push(["Statics", String(on.length)]);
   on.slice(0, 12).forEach((s, i) => {
-    rows.push([`Static ${i}`, `${hex4(s.g)} z=${s.z}${s.h != null ? ` h=${s.h}` : ""}${s.ms ? " (multi)" : ""}`]);
+    // `hidden` = ceiling-hidden (`hz`): drawn at alpha 0, and deliberately
+    // shipped without `h`/`pf`, so the inspector says so rather than letting a
+    // reader conclude the tiledata is missing. Before this row these statics
+    // were absent from the stream entirely, so the inspector under-reported what
+    // was on a tile whenever the player was indoors.
+    rows.push([`Static ${i}`, `${hex4(s.g)} z=${s.z}${s.h != null ? ` h=${s.h}` : ""}${s.ms ? " (multi)" : ""}${s.hz ? " (ceiling-hidden)" : ""}`]);
   });
   return { kind: "Land tile", title: `${x}, ${y}`, rows, raw: { tile: t, statics: on } };
 }
