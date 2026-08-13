@@ -159,6 +159,11 @@ pub fn build_scene(
     let equip = equip_json(&s.world, &look, &p, equip_body);
     let player_mount_anim = player_mount_anim(&s.world, &look, &p);
     let cont_items = container_items_json(&s.world, &look);
+    // Per-open-container title/icon metadata — resolved here while `look` (and so
+    // the tiledata name lookup) is alive, before the tile loop takes the mutable
+    // map borrow. See `container_info_json`.
+    let cont_info = serde_json::to_string(&container_info_json(&s.world, &look))
+        .unwrap_or_else(|_| "{}".into());
     mark("entities", &mut t);
     // Vendor shop windows. `buy` (0x74) lists the vendor's for-sale prices in
     // packet order — the renderer matches them to that container's `contItems` by
@@ -548,7 +553,7 @@ pub fn build_scene(
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
          \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"logoutAck\":{logout_ack},\"boatMoves\":{boat_moves},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
-         \"armedAbility\":{armed_ability},\"activeSpells\":{active_spells},\"chat\":{chat},\"bboard\":{bboard},\"contGumps\":{container_gumps},\
+         \"armedAbility\":{armed_ability},\"activeSpells\":{active_spells},\"chat\":{chat},\"bboard\":{bboard},\"contGumps\":{container_gumps},\"contInfo\":{cont_info},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
          \"paperdoll\":{paperdoll},\"openUrls\":{open_urls},\"facet\":{facet},\"trades\":{trades},\"maps\":{maps}{placement_field}{house_design_field},\
          \"deaths\":{deaths},\"net\":{net},\

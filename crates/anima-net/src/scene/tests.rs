@@ -3262,3 +3262,61 @@ fn multi_components_reach_the_browser_when_authoritative_but_invisible() {
         nd.len()
     );
 }
+
+#[test]
+fn container_info_resolves_graphic_and_falls_back() {
+    // The container info map titles a window from the container ITEM's graphic,
+    // which is why a pouch and a backpack (same gump 0x3C) can be told apart.
+    let mut w = World::default();
+    const BAG: u32 = 0x4000_0001;
+    const BANK: u32 = 0x4000_0002;
+    w.items.insert(
+        BAG,
+        anima_core::world::Item {
+            serial: BAG,
+            graphic: 0x0E75, // backpack
+            amount: 1,
+            pos: anima_core::types::Position { x: 0, y: 0, z: 0 },
+            container: None,
+            layer: 21,
+            hue: 0,
+            name: String::new(),
+            direction: 0,
+            is_multi: false,
+        },
+    );
+    w.push_container_open(BAG, 0x003C);
+    // A bank box opened purely via 0x24, never seen as an item.
+    w.push_container_open(BANK, 0x0048);
+
+    let look = Look {
+        map: None,
+        anim: None,
+        animdata: None,
+    };
+    let info = container_info_json(&w, &look);
+    assert_eq!(
+        info[&BAG.to_string()]["g"].as_u64(),
+        Some(0x0E75),
+        "backpack graphic resolved"
+    );
+    // No map in this test → tiledata name is empty, but the graphic is what
+    // distinguishes containers; the name is verified against real data below.
+    assert_eq!(info[&BAG.to_string()]["name"].as_str(), Some(""));
+    // The bank box has no item entry → g=0 fallback, window still draws from its gump.
+    assert_eq!(
+        info[&BANK.to_string()]["g"].as_u64(),
+        Some(0),
+        "absent item → g=0 fallback"
+    );
+}
+
+#[test]
+#[ignore] // needs ~/dev/uo/uo-resource
+fn map_item_name_reads_tiledata() {
+    let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+    let map = MapData::open(&dir).expect("open map data");
+    assert_eq!(map.item_name(0x0E75), "backpack");
+    assert_eq!(map.item_name(0x0E79), "pouch");
+    assert_eq!(map.item_name(0x2006), "corpse");
+}

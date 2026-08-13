@@ -245,6 +245,7 @@ const SETTINGS_DEFAULTS = {
   debugMove: false,               // movement/Z debug HUD (WalkTo rejects, predicted vs server pos)
   autoOpenDoors: true,            // walking into a closed door opens it (ClassicUO TryOpenDoors) — on by default
   gridLoot: true,                 // corpses open a click-to-loot grid instead of the authentic corpse gump
+  gridContainers: false,          // ALL containers as a titled grid (icon+name) vs the authentic gump art (default)
   shadows: true,                  // mobile shadows (ClassicUO's ShadowsEnabled, on by default there too)
   // Terrain shading strength — ClassicUO's TerrainShadowsLevel (Profile.cs:237,
   // default 15, slider 5..25 per Constants.cs:27-28). The shader multiplies by
@@ -285,6 +286,7 @@ function renderOptions() {
     + cb("debugMove", "Movement debug")
     + cb("autoOpenDoors", "Auto-open doors")
     + cb("gridLoot", "Click-to-loot corpses")
+    + cb("gridContainers", "Grid container view")
     + cb("shadows", "Character shadows")
     + cb("shadowsStatics", "…and tree/rock shadows")
     + cb("treeStumps", "Trees as stumps")

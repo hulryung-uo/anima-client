@@ -390,6 +390,14 @@ impl MapData {
         self.tiledata.item_flags(graphic)
     }
 
+    /// The per-GRAPHIC English name from tiledata ("backpack", "pouch", "wooden
+    /// box", "corpse") — NOT an OPL name (no magical prefix / dye / crafter).
+    /// Used to title a container window so a player can tell a pouch from a
+    /// backpack, which share the same 0x24 gump id.
+    pub fn item_name(&self, graphic: u16) -> String {
+        self.tiledata.item_name(graphic)
+    }
+
     /// Texmap id of a land graphic — the seamless texture a *stretched* (sloped)
     /// tile is drawn with. [`LandTile::tex_id`] already carries this for the tile
     /// as it sits on the map; this by-graphic accessor exists for the seasonal

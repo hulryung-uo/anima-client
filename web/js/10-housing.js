@@ -453,6 +453,11 @@ function hueQuery(hue) {
 // `scene.contGumps` carries the id ServUO named on 0x24 — rather than the
 // corpse item's graphic, which we may not have in view.
 const CORPSE_GUMP = 9;
+// Natural pixel width of each container gump, learned from the loaded <img> and
+// cached by gump id so an authentic window sizes to the art synchronously on
+// reopen (no 252→art flash). Browser-side because the play server ships no gump
+// dimensions and the texture is already loaded for free.
+const gumpArtSize = new Map();
 function isCorpseContainer(serial) {
   return ((scene && scene.contGumps && scene.contGumps[String(serial >>> 0)]) | 0) === CORPSE_GUMP;
 }
@@ -476,14 +481,14 @@ function openContainer(serial) {
   serial = serial >>> 0;
   const existing = dialogWindow("containers", serial);
   if (existing) { bringToFront(existing.el); existing._sig = null; refreshContainer(serial); return; }
-  const { el, body } = makeWindowFrame({
+  const { el, body, label } = makeWindowFrame({
     cls: "container-win", title: "Container", bodyCls: "cont-grid", cascade: containerCascade,
     onClose: () => closeContainer(serial),
   });
   // Leaving the window entirely clears any item OPL tooltip it was showing (there's
   // no PIXI pointerout for DOM cells to fall back on).
   el.addEventListener("mouseleave", () => { if (tipSerial != null) { tipSerial = null; hideTip(); } });
-  dialogWindows("containers").set(serial, { el, body, _sig: null });
+  dialogWindows("containers").set(serial, { el, body, label, _sig: null });
   refreshContainer(serial);
 }
 function closeContainer(serial) {
@@ -493,7 +498,15 @@ function closeContainer(serial) {
 // use it; also openContainer(itemSerial) so nested bags pop open (a non-container
 // just opens an empty window the user can close — acceptable).
 function containerSignature(scene, serial) {
-  return ((scene && scene.contItems) || [])
+  // The gump id, the container's own graphic/name, and the two view toggles all
+  // change how the window renders WITHOUT changing the item set — so they must
+  // be in the signature or `syncDialogFamily` skips the redraw. Bug found live:
+  // a late 0x24 arriving after the items were stable left the window stuck as a
+  // grid because the item-only signature never changed.
+  const gid = (scene && scene.contGumps && scene.contGumps[String(serial)]) | 0;
+  const info = (scene && scene.contInfo && scene.contInfo[String(serial)]) || {};
+  const head = `${gid}:${info.g | 0}:${info.name || ""}:${settings.gridContainers ? 1 : 0}:${settings.gridLoot ? 1 : 0}`;
+  return head + "|" + ((scene && scene.contItems) || [])
     .filter((it) => (it.cont >>> 0) === serial)
     // `hue` belongs here for the same reason the amount does: a dye changes the
     // icon's art request without touching serial/graphic/amount, and a signature
@@ -527,13 +540,39 @@ function refreshContainer(serial) {
   // 78-entry table to be ported and cannot disagree with the server about
   // where the item actually is.
   const gump = (scene && scene.contGumps && scene.contGumps[String(serial)]) | 0;
+  // Which container this is — its own item graphic + tiledata name (`contInfo`,
+  // resolved server-side from `world.items` because a pouch and a backpack share
+  // gump 0x3C and only the item can tell them apart). `oplName` beats the
+  // tiledata baseline when a dyed/renamed container's OPL has landed.
+  const info = (scene && scene.contInfo && scene.contInfo[String(serial)]) || {};
+  const cname = (typeof oplName === "function" && oplName(serial)) || info.name || "";
   // Grid loot: a corpse's authentic layout is exactly the wrong shape for
   // looting — items scattered under a body sprite, each needing a drag. So a
   // corpse falls back to the uniform grid and gains click-to-take, which is
   // what ClassicUO's separate `GridLootGump` exists to do. Switchable in
   // Options for anyone who wants the real corpse art back.
   const loot = settings.gridLoot && isCorpseContainer(serial);
-  const authentic = gump > 0 && !loot;
+  // `gridContainers` forces the titled grid for EVERY container (the owner's
+  // customized view); authentic is the traditional gump otherwise.
+  const authentic = gump > 0 && !loot && !settings.gridContainers;
+  // Title bar: the container's name, and — in grid mode — a small icon of the
+  // container itself so a pouch reads differently from a box. Authentic mode
+  // stays icon-less (its whole window IS the container art). The title is set
+  // here every refresh so a late-arriving name/OPL repaints it (the signature
+  // includes the name, so this refresh actually runs).
+  if (win.label) {
+    win.label.textContent = cname || "Container";
+    const old = win.label.querySelector(".cont-title-icon");
+    if (old) old.remove();
+    if (!authentic && (info.g | 0) > 0) {
+      const ic = document.createElement("img");
+      ic.className = "cont-title-icon";
+      ic.src = `art/static/${info.g | 0}.png` + (typeof hueQuery === "function" ? hueQuery(info.hue | 0) : "");
+      ic.draggable = false;
+      ic.onerror = () => { ic.style.display = "none"; };
+      win.label.insertBefore(ic, win.label.firstChild);
+    }
+  }
   body.classList.toggle("cont-loot", loot);
   if (loot) {
     const bar = document.createElement("div");
@@ -554,19 +593,34 @@ function refreshContainer(serial) {
   }
   body.classList.toggle("cont-art", authentic);
   body.classList.toggle("cont-grid", !authentic);
+  win.el.classList.toggle("cont-authentic", authentic);
   if (authentic) {
     const bg = document.createElement("img");
     bg.className = "cont-bg";
     bg.src = `gump/${gump}.png`;
     bg.draggable = false;
+    // Size the window to the gump texture, like ClassicUO's ContainerGump
+    // (`Width = _gumpPicContainer.Width`), instead of a fixed 252px that clips a
+    // wide gump (a 282px chessboard) and gutters a narrow one. The natural size
+    // is only known after the image loads, so use a per-gump cache to size
+    // synchronously on reopen (no flash) and learn it on first load.
+    const known = gumpArtSize.get(gump);
+    const sizeTo = (w) => { win.el.style.width = (w + 2) + "px"; body.style.width = w + "px"; };
+    if (known) sizeTo(known);
+    bg.onload = () => { gumpArtSize.set(gump, bg.naturalWidth); if (authentic) sizeTo(bg.naturalWidth); };
     // A gump we cannot fetch must not leave an empty window: fall back to the
-    // grid rather than to nothing.
+    // grid rather than to nothing, and drop the authentic sizing with it.
     bg.onerror = () => {
       bg.remove();
       body.classList.remove("cont-art");
       body.classList.add("cont-grid");
+      win.el.classList.remove("cont-authentic");
+      win.el.style.width = ""; body.style.width = "";
     };
     body.appendChild(bg);
+  } else {
+    // Grid mode: shed any authentic sizing left from a previous mode.
+    win.el.style.width = ""; body.style.width = "";
   }
   if (!items.length) {
     if (!authentic) body.innerHTML = '<div class="cont-empty">(empty)</div>';

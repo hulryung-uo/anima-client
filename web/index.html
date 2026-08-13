@@ -828,6 +828,22 @@
       .book-btn:hover:not(:disabled) { background: rgba(138, 180, 248, .28); }
       .book-btn:disabled { opacity: .4; cursor: default; }
       .container-win { width: 252px; }
+      /* Authentic mode sizes the window to the gump texture (set inline from the
+         loaded <img>), like ClassicUO's ContainerGump. `width:auto` alone would
+         shrink-to-fit the title's max-content and let a long name widen the
+         window past the art, so the JS drives an explicit width and the title
+         label below is made shrinkable so its ellipsis actually engages. */
+      .container-win.cont-authentic { min-width: 0; }
+      /* The small container icon in the GRID-mode title bar (pouch vs box). */
+      .container-win .cont-title-icon {
+        width: 18px; height: 18px; object-fit: contain; image-rendering: pixelated;
+        vertical-align: middle; margin-right: 6px; pointer-events: none;
+      }
+      /* Keep a long container name from widening the window past its art: the
+         title label shrinks and ellipsises instead. */
+      .container-win .gump-title > span {
+        flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
       .cont-grid { display: flex; flex-wrap: wrap; gap: 4px; max-height: 320px; overflow-y: auto; padding: 8px; }
       /* Authentic layout: the container's own gump art with items at the
          positions the server stores. Sized by the art itself; `overflow:hidden`

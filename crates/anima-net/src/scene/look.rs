@@ -162,6 +162,12 @@ impl Look<'_> {
         g == 0x2006 || self.map.is_some_and(|m| m.item_is_container(g))
     }
 
+    /// The tiledata English name of a graphic ("backpack"/"pouch"/…), used to
+    /// title a container window. Empty when there is no map (headless/test).
+    pub(super) fn item_name(&self, g: u16) -> String {
+        self.map.map_or(String::new(), |m| m.item_name(g))
+    }
+
     /// STACKABLE tiledata — the split-stack dialog should only ever offer to
     /// split an item the server would actually accept a partial amount from.
     pub(super) fn item_stackable(&self, g: u16) -> bool {

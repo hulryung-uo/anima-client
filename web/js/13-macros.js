@@ -479,6 +479,14 @@ function setupInput() {
   optBody.addEventListener("change", (e) => {
     const k = e.target.dataset.k; if (!k || e.target.type !== "checkbox") return;
     settings[k] = e.target.checked; saveSettings(); applyAudioSettings();
+    // The container-view toggles change how OPEN container windows render, so
+    // re-draw each one (clearing `_sig` so the guarded refresh actually runs).
+    if (k === "gridContainers" || k === "gridLoot") {
+      for (const cs of dialogWindows("containers").keys()) {
+        const w = dialogWindow("containers", cs);
+        if (w) { w._sig = null; refreshContainer(cs); }
+      }
+    }
     if (k === "tooltips" && !settings.tooltips) { tipSerial = null; hideTip(); }
     // These change which statics are drawn (or what they are drawn as), so the
     // pool has to be thrown away — its keys encode the drawn graphic.

@@ -351,6 +351,46 @@ pub(super) fn container_items_json(world: &World, look: &Look) -> Vec<Value> {
         .collect()
 }
 
+/// Per-open-container metadata the renderer needs to TITLE and ICON a container
+/// window, keyed by container serial. Emitted beside (not folded into)
+/// `contGumps` so that map's two readers stay untouched.
+///
+/// The crux this exists for: ServUO gives a pouch (item 0x0E79) and a backpack
+/// (0x0E75) the SAME 0x24 gump id 0x3C (neither is in `Data/containers.cfg`, so
+/// both fall to the default — `Container.cs`), so a window keyed on the gump id
+/// alone literally cannot tell them apart. Only the container ITEM's graphic and
+/// its tiledata name can, and those live in `World` (the single source of truth),
+/// not scattered across the browser's equip/items/contItems arrays — so the
+/// resolution belongs here.
+pub(super) fn container_info_json(
+    world: &World,
+    look: &Look,
+) -> std::collections::BTreeMap<String, Value> {
+    world
+        .container_gumps
+        .keys()
+        .map(|&serial| {
+            // The container is an ordinary item tracked by serial whether it is
+            // worn (the backpack), on the ground, or nested in another bag. A
+            // container opened purely by a server 0x24 we never saw as an item
+            // (a bank box) falls back to g=0 / no name — the window still draws
+            // from its gump id, just without the icon/title refinement.
+            let v = match world.items.get(&serial) {
+                Some(it) => {
+                    let mut m = json!({ "g": it.graphic, "name": look.item_name(it.graphic) });
+                    let hue = look.item_hue(it.graphic, it.hue);
+                    if hue != 0 {
+                        m["hue"] = json!(hue);
+                    }
+                    m
+                }
+                None => json!({ "g": 0, "name": "" }),
+            };
+            (serial.to_string(), v)
+        })
+        .collect()
+}
+
 /// The player's mount item (layer 25) AnimID — the animal body to draw under
 /// the rider when mounted; 0 = on foot.
 pub(super) fn player_mount_anim(world: &World, look: &Look, player: &Mobile) -> u16 {
