@@ -45,6 +45,38 @@ jobs:
       # tagName) creates/updates the GitHub Release with the bundles attached.
       # No frontend build step: the web/ renderer is embedded in anima-net at
       # compile time and frontendDist is a static placeholder.
+      # Turn on real signing + notarization ONLY when a Developer ID is actually
+      # configured. This has to be a separate step that writes $GITHUB_ENV rather
+      # than plain `env:` passthroughs on the build below: an unset secret arrives
+      # as an EMPTY string, and tauri-action reads an empty APPLE_CERTIFICATE as
+      # "present", then dies at `security import` ("parameters not valid"). So the
+      # variables must be ABSENT, not empty — which a passthrough cannot express.
+      # With this, adding the repo secrets is the whole switch; nothing to uncomment.
+      - name: Configure Apple signing (no-op until the secrets exist)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID_: ${{ secrets.APPLE_ID }}
+          APPLE_PW: ${{ secrets.APPLE_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$CERT" ] || [ -z "$APPLE_ID_" ] || [ -z "$APPLE_PW" ] || [ -z "$TEAM_ID" ]; then
+            echo "No Developer ID configured — shipping an ad-hoc signed bundle."
+            echo "Gatekeeper will refuse it; see docs/DISTRIBUTION.md."
+            exit 0
+          fi
+          # Heredoc delimiters: the .p12 is multi-line base64.
+          {
+            echo "APPLE_CERTIFICATE<<__ANIMA_EOF__"; echo "$CERT"; echo "__ANIMA_EOF__"
+            echo "APPLE_CERTIFICATE_PASSWORD<<__ANIMA_EOF__"; echo "$CERT_PW"; echo "__ANIMA_EOF__"
+            echo "APPLE_ID<<__ANIMA_EOF__"; echo "$APPLE_ID_"; echo "__ANIMA_EOF__"
+            echo "APPLE_PASSWORD<<__ANIMA_EOF__"; echo "$APPLE_PW"; echo "__ANIMA_EOF__"
+            echo "APPLE_TEAM_ID<<__ANIMA_EOF__"; echo "$TEAM_ID"; echo "__ANIMA_EOF__"
+          } >> "$GITHUB_ENV"
+          echo "Developer ID configured — the bundle will be signed and notarized."
+
       - name: Build & publish bundle
         uses: tauri-apps/tauri-action@v0
         env:
@@ -55,19 +87,9 @@ jobs:
           # scripts/build-app.sh. A real identity (if the secret is ever set)
           # wins; `-` claims nothing and does not get past Gatekeeper.
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
-          # --- macOS signing + notarization (OPT-IN) ---
-          # Do NOT list the APPLE_* secrets here as plain passthroughs: when a
-          # secret is unset it arrives as an EMPTY string, and Tauri treats an
-          # empty APPLE_CERTIFICATE as "present" and dies at `security import`
-          # ("parameters not valid"). Leaving the block out yields an unsigned
-          # (adhoc) bundle, which is what we ship until a Developer ID exists.
-          # To sign: add the secrets to the repo and UNCOMMENT these lines
-          # (see docs/DISTRIBUTION.md).
-          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          # APPLE_ID: ${{ secrets.APPLE_ID }}
-          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # The APPLE_* signing/notarization variables are injected by the step
+          # above, and only when a real Developer ID is configured — see there
+          # for why they must be absent rather than empty.
         with:
           projectPath: crates/anima-desktop
           args: ${{ matrix.args }}

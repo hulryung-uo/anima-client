@@ -105,7 +105,25 @@ a real `APPLE_SIGNING_IDENTITY` overrides it.
   ```
 
   Tauri signs the app with a hardened runtime and submits it to Apple's
-  notary service, stapling the ticket into the `.dmg`. See Tauri's macOS
+  notary service, stapling the ticket into the `.dmg`.
+
+  **In CI this is now automatic.** `release.yml` has a "Configure Apple signing"
+  step that injects the five variables only when they are all non-empty, so
+  adding the repo secrets is the entire switch — there is nothing to uncomment,
+  and a half-configured repo degrades to the ad-hoc bundle instead of failing
+  the build. The five secrets:
+
+  | secret | where it comes from |
+  |---|---|
+  | `APPLE_CERTIFICATE` | `base64 -i DeveloperID.p12` — a **Developer ID Application** cert exported from Keychain Access |
+  | `APPLE_CERTIFICATE_PASSWORD` | the password you set on that `.p12` export |
+  | `APPLE_ID` | the Apple ID enrolled in the Developer Program |
+  | `APPLE_PASSWORD` | an **app-specific password** (appleid.apple.com → App-Specific Passwords), NOT the account password |
+  | `APPLE_TEAM_ID` | developer.apple.com → Membership details |
+
+  An app-specific password on its own does nothing: it authenticates the
+  *submission*, it does not sign anything, and Apple only notarizes software
+  already signed with a Developer ID. See Tauri's macOS
   code-signing guide for CI keychain setup (`APPLE_CERTIFICATE` +
   `APPLE_CERTIFICATE_PASSWORD` to import a base64 `.p12`). If you later need
   entitlements, add `bundle.macOS.entitlements` in `tauri.conf.json`.
