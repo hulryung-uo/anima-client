@@ -52,17 +52,33 @@ jobs:
       # "present", then dies at `security import` ("parameters not valid"). So the
       # variables must be ABSENT, not empty — which a passthrough cannot express.
       # With this, adding the repo secrets is the whole switch; nothing to uncomment.
+      # Turn on real signing (+ notarization) ONLY when the secrets exist. This
+      # must write $GITHUB_ENV rather than use plain `env:` passthroughs on the
+      # build: an unset secret arrives as an EMPTY string, and tauri-action reads
+      # an empty APPLE_CERTIFICATE as "present", then dies at `security import`
+      # ("parameters not valid"). The variables must be ABSENT, not empty — which
+      # a passthrough cannot express. So adding the repo secrets is the whole
+      # switch; there is nothing to uncomment, and a half-configured repo degrades
+      # to the ad-hoc bundle instead of failing the release.
+      #
+      # Signing and notarization are decoupled: with the cert+team but no API key,
+      # the bundle is signed (Gatekeeper still refuses an un-notarized Developer
+      # ID app on first launch, but `spctl` after notarization is the goal). With
+      # all five, it is signed AND notarized. Notarization uses an App Store
+      # Connect API key (.p8) rather than an app-specific password: the key
+      # authenticates the submission without a human password in a secret.
       - name: Configure Apple signing (no-op until the secrets exist)
         if: matrix.os == 'macos-latest'
         shell: bash
         env:
           CERT: ${{ secrets.APPLE_CERTIFICATE }}
           CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID_: ${{ secrets.APPLE_ID }}
-          APPLE_PW: ${{ secrets.APPLE_PASSWORD }}
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY }}
+          API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          API_KEY_B64: ${{ secrets.APPLE_API_KEY_BASE64 }}
         run: |
-          if [ -z "$CERT" ] || [ -z "$APPLE_ID_" ] || [ -z "$APPLE_PW" ] || [ -z "$TEAM_ID" ]; then
+          if [ -z "$CERT" ] || [ -z "$CERT_PW" ] || [ -z "$TEAM_ID" ]; then
             echo "No Developer ID configured — shipping an ad-hoc signed bundle."
             echo "Gatekeeper will refuse it; see docs/DISTRIBUTION.md."
             exit 0
@@ -71,11 +87,23 @@ jobs:
           {
             echo "APPLE_CERTIFICATE<<__ANIMA_EOF__"; echo "$CERT"; echo "__ANIMA_EOF__"
             echo "APPLE_CERTIFICATE_PASSWORD<<__ANIMA_EOF__"; echo "$CERT_PW"; echo "__ANIMA_EOF__"
-            echo "APPLE_ID<<__ANIMA_EOF__"; echo "$APPLE_ID_"; echo "__ANIMA_EOF__"
-            echo "APPLE_PASSWORD<<__ANIMA_EOF__"; echo "$APPLE_PW"; echo "__ANIMA_EOF__"
             echo "APPLE_TEAM_ID<<__ANIMA_EOF__"; echo "$TEAM_ID"; echo "__ANIMA_EOF__"
           } >> "$GITHUB_ENV"
-          echo "Developer ID configured — the bundle will be signed and notarized."
+          if [ -n "$API_KEY_ID" ] && [ -n "$API_ISSUER" ] && [ -n "$API_KEY_B64" ]; then
+            # Reconstruct the .p8 on the runner and point Tauri at it. The path is
+            # what Tauri's notarizer reads (APPLE_API_KEY_PATH); the key id and
+            # issuer identify it to Apple's notary service.
+            mkdir -p "$RUNNER_TEMP/appstore"
+            printf '%s' "$API_KEY_B64" | base64 --decode > "$RUNNER_TEMP/appstore/AuthKey.p8"
+            {
+              echo "APPLE_API_KEY<<__ANIMA_EOF__"; echo "$API_KEY_ID"; echo "__ANIMA_EOF__"
+              echo "APPLE_API_ISSUER<<__ANIMA_EOF__"; echo "$API_ISSUER"; echo "__ANIMA_EOF__"
+              echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/appstore/AuthKey.p8"
+            } >> "$GITHUB_ENV"
+            echo "Developer ID + API key configured — the bundle will be signed and notarized."
+          else
+            echo "Developer ID configured (signing only) — no API key, so NOT notarized."
+          fi
 
       - name: Build & publish bundle
         uses: tauri-apps/tauri-action@v0
