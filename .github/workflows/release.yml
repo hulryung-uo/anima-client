@@ -125,3 +125,27 @@ jobs:
           releaseName: "Anima ${{ github.ref_name }}"
           releaseDraft: true
           prerelease: false
+
+      # Tauri notarizes and staples the .app, but NOT the .dmg that contains it.
+      # macOS checks the .dmg too when it carries the download quarantine, and a
+      # signed-but-unnotarized .dmg still trips "Apple could not verify" on open
+      # (verified: v0.4.1's first .dmg was `spctl -t open` REJECTED while the app
+      # inside was accepted). So notarize + staple the container and replace the
+      # asset tauri-action just uploaded. Runs only when notarization is actually
+      # configured (APPLE_API_KEY_PATH is set by the configure step above).
+      - name: Notarize & staple the macOS dmg
+        if: matrix.os == 'macos-latest' && env.APPLE_API_KEY_PATH != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          dmg=$(ls crates/anima-desktop/target/*/release/bundle/dmg/*.dmg 2>/dev/null | head -1 || true)
+          if [ -z "${dmg:-}" ]; then echo "no dmg produced — nothing to notarize"; exit 0; fi
+          echo "notarizing $dmg"
+          xcrun notarytool submit "$dmg" \
+            --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" \
+            --wait
+          xcrun stapler staple "$dmg"
+          spctl -a -vvv -t open --context context:primary-signature "$dmg"
+          gh release upload "$GITHUB_REF_NAME" "$dmg" --clobber -R "$GITHUB_REPOSITORY"
