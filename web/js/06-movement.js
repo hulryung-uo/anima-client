@@ -1286,7 +1286,11 @@ function drawMobs() {
           sp.anchor.set(0, 0);
           sp.skew.x = -Math.PI / 4;
           sp.scale.set(1, Math.SQRT1_2);
-          sp.x = x - e.cx;
+          // +h/2 for the same reason as the static shadow: the shear moves the
+          // top right by h/2 while the base must stay under the feet, so the base
+          // x (= sprite x, `Position2.X = position.X`) is recovered by adding it
+          // back into the translation. Was missing, sliding the shadow h/2 left.
+          sp.x = (x - e.cx) + h / 2;
           sp.y = ((y - 3) - h - e.cy) + h / 2 - 10 + (e.mounted ? 10 : 0);
         } else if (e.cx != null) {
           sp.anchor.set(0, 0);
@@ -1432,9 +1436,13 @@ function attachStaticShadow(sp, tex) {
   shadow.alpha = 0.4;
   shadow.tint = 0x000000;
   shadow.eventMode = "none";
-  // The parent is anchored (0.5, 1.0), so its local origin sits at the sprite's
-  // bottom-centre: the top-left this transform expects is (-w/2, -h).
-  shadow.x = -tex.width / 2;
-  shadow.y = -tex.height + tex.height / 2 - 10;
+  // The parent is anchored (0.5, 1.0), so its local origin is the sprite's
+  // bottom-centre. ClassicUO's shear pushes the TOP right by h/2 while the base
+  // (`Position2.X = position.X`) stays under the sprite, so the base only lands
+  // under the trunk when tx carries that +h/2 back: (h - w)/2, not -w/2. Without
+  // it the whole shadow slid h/2 to the left of the trunk — worse the taller the
+  // art (verified on the dead-tree cluster).
+  shadow.x = (tex.height - tex.width) / 2;
+  shadow.y = -tex.height / 2 - 10;
   sp.addChildAt(shadow, 0);   // behind the static itself
 }
