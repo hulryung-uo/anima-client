@@ -240,7 +240,14 @@ function drawMinimap(s) {
     if (px < -2 || py < -2 || px > w + 2 || py > h + 2) return;
     ctx.fillStyle = color; ctx.beginPath(); ctx.arc(px, py, size, 0, 7); ctx.fill();
   };
-  for (const it of s.items || []) isoDot(it.x, it.y, "#e2b340", 1.4);
+  // Skip what the world layer never draws: never-drawn pathing records (`nd` —
+  // invisible tiles, ladder rungs, nodraw art) and season-culled foliage (`fh`).
+  // The radar is a second draw path over the same array, so a record that is not
+  // on screen must not be on the map either. (`fh` leaked here before this row.)
+  for (const it of s.items || []) {
+    if (it.nd || it.fh) continue;
+    isoDot(it.x, it.y, "#e2b340", 1.4);
+  }
   for (const mb of s.mobiles || []) isoDot(mb.x, mb.y, cssColor(notoColor(mb.noto)), 2);
   // player: white dot + facing tick (also iso-projected so it points where you face).
   ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(cx, cy, 2.6, 0, 7); ctx.fill();
@@ -1107,7 +1114,7 @@ function inspectTile(x, y) {
     // reader conclude the tiledata is missing. Before this row these statics
     // were absent from the stream entirely, so the inspector under-reported what
     // was on a tile whenever the player was indoors.
-    rows.push([`Static ${i}`, `${hex4(s.g)} z=${s.z}${s.h != null ? ` h=${s.h}` : ""}${s.ms ? " (multi)" : ""}${s.hz ? " (ceiling-hidden)" : ""}`]);
+    rows.push([`Static ${i}`, `${hex4(s.g)} z=${s.z}${s.h != null ? ` h=${s.h}` : ""}${s.ms ? " (multi)" : ""}${s.hz ? " (ceiling-hidden)" : ""}${s.nd ? " (never drawn)" : ""}`]);
   });
   return { kind: "Land tile", title: `${x}, ${y}`, rows, raw: { tile: t, statics: on } };
 }

@@ -260,6 +260,56 @@ pub(super) fn path_suffix(in_radius: bool, height: u8, flags: u64) -> String {
     s
 }
 
+/// A budget for never-drawn (`nd`) records — the pathing-only entries emitted
+/// for objects the renderer must not draw. It is NOT a draw predicate: it
+/// exists to bound one poll's payload, and it is charged separately from the
+/// drawn budget precisely so a crowded screen can never spend the pathing one.
+pub(super) const PATH_ONLY_CAP: usize = 1500;
+
+/// One never-drawn record: an object the renderer must NOT draw, but whose
+/// pathing bits the browser's `calculate_new_z` still needs.
+///
+/// The whole class of bug this closes: `scene.statics` is both the draw list
+/// and the browser's pathing input, so every emitter that `continue`d an object
+/// out of the stream for a DRAWING reason also deleted its `h`/`pf`, blinding
+/// the browser to something the server can still see. ClassicUO has no such
+/// coupling — it holds one world model and filters only in the renderer, which
+/// is why `Pathfinder.CreateItemList` contains no `AllowedToDraw`/`AlphaHue`
+/// anywhere. This record is how we say "invisible, still solid".
+///
+/// Deliberately carries nothing a sprite would need — no `pz`, no `f`/`tr`/`dg`,
+/// no `a`/`ai` — so a renderer that ever *did* try to draw one would produce
+/// nothing rather than something wrong.
+///
+/// `None` when the object has no pathing flags at all. That is not a draw filter
+/// in disguise: it is the CONSUMER's own rule applied once at the source. The
+/// browser drops such an object anyway (`web/js/06-movement.js`,
+/// `tiledataPathObj`: `if (flags === 0) return null`), and so does the reference
+/// (`ClassicUO Game/Pathfinder.cs`: `if (flags != 0)` wraps the only non-land
+/// `list.Add`), so emitting it would be payload for provably zero behaviour.
+pub(super) fn path_only_record(
+    x: i64,
+    y: i64,
+    z: i8,
+    graphic: u16,
+    multi_serial: Option<u32>,
+    height: u8,
+    flags: u64,
+) -> Option<String> {
+    let (h, pf) = path_bits(true, height, flags);
+    let pf = pf?;
+    let mut s = format!("{{\"x\":{x},\"y\":{y},\"z\":{z},\"g\":{graphic}");
+    if let Some(ms) = multi_serial {
+        let _ = write!(s, ",\"ms\":{ms}");
+    }
+    let _ = write!(s, ",\"nd\":1");
+    if let Some(h) = h {
+        let _ = write!(s, ",\"h\":{}", h as i32);
+    }
+    let _ = write!(s, ",\"pf\":{pf}}},");
+    Some(s)
+}
+
 /// Optional `,"dr":<serial>` land-tile suffix naming the closed door sealing
 /// it — present only when the tile FAILS strict [`tile_walkable`] but PASSES
 /// [`tile_walkable_for_planning`] because every impassable dynamic item on it

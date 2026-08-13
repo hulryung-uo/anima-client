@@ -46,7 +46,13 @@ pub(super) fn emit_tiles(
     // path-bearing static from `n_statics`. Sized past the densest under-cover
     // window measured (Blackthorn castle, 2616 hidden in one 49x49 window).
     const HIDDEN_STATIC_CAP: usize = 3200;
+    /// The drawn-sprite budget. Named rather than a bare literal because it is
+    /// now one of three separate budgets, and only this one bounds pixels.
+    const DRAWN_STATIC_CAP: usize = 4000;
     let mut n_hidden = 0usize;
+    // Never-drawn (`nd`) pathing records — charged separately from both draw
+    // budgets so a crowded screen can never spend the pathing one.
+    let mut n_path = 0usize;
     let mut dbg: Vec<Value> = Vec::new();
     // `max_z` (computed up front, see the top of this fn) hides the roof /
     // upper floors when the player is under cover (ClassicUO UpdateMaxDrawZ):
@@ -345,14 +351,36 @@ pub(super) fn emit_tiles(
             // or above max_z so a roof/upper floor over the player vanishes.
             // Emitted across the whole land window; the client grays the ones
             // beyond the view range.
-            if n_statics < 4000 {
+            {
                 for s in &tstatics {
                     // "nodraw" void placeholders (tiledata name starts "nodraw",
                     // e.g. graphic 8600 whose art is a literal "NO DRAW" bitmap):
                     // ClassicUO culls them (GameObject.cs) — if we drew them the
                     // placeholder would show on the terrain. Detected by tiledata
                     // NAME, not a flag (8600 carries no NoDraw flag bit).
+                    // …but culling them USED TO delete their pathing bits too, and
+                    // that was wrong in the same way the ceiling cull was: ClassicUO
+                    // refuses these at DRAW time only (`GameObject.CanBeDrawn`), while
+                    // `Pathfinder.CreateItemList` never consults `AllowedToDraw` — and
+                    // ServUO's movement is name-blind entirely, gating on
+                    // `TileFlag.Impassable|Surface` (`Services/Pathing/Movement.cs`).
+                    // Measured on Felucca: 6,751 path-bearing nodraw statics, and at
+                    // (5575,810) 327 of the 760 path-bearing statics inside
+                    // PATH_RADIUS were being deleted — 43% of them. They are
+                    // regionally concentrated, which is why earlier sweeps missed it.
+                    // So: never drawn, still solid.
                     if map.item_is_nodraw(s.graphic) {
+                        if dx.abs() <= PATH_RADIUS
+                            && dy.abs() <= PATH_RADIUS
+                            && n_path < PATH_ONLY_CAP
+                        {
+                            if let Some(rec) =
+                                path_only_record(x, y, s.z, s.graphic, None, s.height, s.flags)
+                            {
+                                statics.push_str(&rec);
+                                n_path += 1;
+                            }
+                        }
                         continue;
                     }
                     // CEILING HIDING. Two predicates, deliberately separate.
@@ -382,8 +410,29 @@ pub(super) fn emit_tiles(
                     // untouched by the ceiling. `hz` is our `AlphaHue = 0`.
                     let is_roof = s.flags & 0x1000_0000 != 0;
                     let hz = (s.z as i32) >= max_z || (under_cover && is_roof);
-                    if hz && n_hidden >= HIDDEN_STATIC_CAP {
-                        continue; // budget spent — this one falls back to the old pop
+                    // A budget may stop us DRAWING an object; it must never stop us
+                    // SHIPPING its pathing bits. Before this, both budgets dropped the
+                    // whole record — measured to delete 294 path-bearing statics inside
+                    // PATH_RADIUS at map1 (1499,1455) and 3538 at map5 (750,3365).
+                    // Now an over-budget object degrades to a never-drawn record.
+                    let over_budget = if hz {
+                        n_hidden >= HIDDEN_STATIC_CAP
+                    } else {
+                        n_statics >= DRAWN_STATIC_CAP
+                    };
+                    if over_budget {
+                        if dx.abs() <= PATH_RADIUS
+                            && dy.abs() <= PATH_RADIUS
+                            && n_path < PATH_ONLY_CAP
+                        {
+                            if let Some(rec) =
+                                path_only_record(x, y, s.z, s.graphic, None, s.height, s.flags)
+                            {
+                                statics.push_str(&rec);
+                                n_path += 1;
+                            }
+                        }
+                        continue;
                     }
                     // Seasonal draw graphic — see the land site above for why this
                     // is a local and not a rebound `StaticTile`. Note what stays on
@@ -565,11 +614,15 @@ pub(super) fn emit_tiles(
                                             mserial,
                                             &mut statics,
                                             &mut n_statics,
+                                            &mut n_hidden,
                                             lights,
                                             LIGHT_CAP,
                                             px,
                                             py,
                                             season,
+                                            false,
+                                            true,
+                                            &mut n_path,
                                         );
                                     }
                                 }
@@ -577,7 +630,29 @@ pub(super) fn emit_tiles(
                             continue;
                         }
                         for c in multis.components_at(multi_id, cdx as i16, cdy as i16) {
-                            if !c.visible {
+                            // Emit on the UNION, then let each half decide for itself.
+                            //
+                            // `visible` drives DRAWING and `server_keeps || is_origin`
+                            // drives PATHING — they are different questions
+                            // (`anima_assets::multis::MultiComponent`'s own docs say so:
+                            // "Drives RENDERING only… Do NOT use this to decide
+                            // walkability"), and the authoritative walk path already
+                            // folds on the latter (`walk.rs`'s `multi_components_at`).
+                            // Emitting on `visible` alone withheld 1284 authoritative
+                            // components across 378 ids — 542 of them path-bearing,
+                            // including every boat's origin hull (0x58A5 'MainHull' is
+                            // pf=2 h=18, an 18 Z / 72 px error on the ship's own tile).
+                            //
+                            // Deliberately NOT `server_keeps || is_origin` as the emit
+                            // gate: that would promote a walkability field into a draw
+                            // gate, and `apply_uop_keep_overlay` assigns `server_keeps`
+                            // unconditionally, so one geometry-key collision would
+                            // silently delete a visible wall from the screen. The union
+                            // is provably identical today (`visible ⟹ server_keeps`
+                            // holds over all 179,220 merged components) and stays safe
+                            // if that ever stops holding.
+                            let paths = c.server_keeps || c.is_origin;
+                            if !c.visible && !paths {
                                 continue;
                             }
                             emit_multi_component(
@@ -592,11 +667,15 @@ pub(super) fn emit_tiles(
                                 mserial,
                                 &mut statics,
                                 &mut n_statics,
+                                &mut n_hidden,
                                 lights,
                                 LIGHT_CAP,
                                 px,
                                 py,
                                 season,
+                                !c.visible,
+                                paths,
+                                &mut n_path,
                             );
                         }
                     }

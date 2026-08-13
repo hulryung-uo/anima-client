@@ -223,13 +223,36 @@ pub(super) fn emit_multi_component(
     multi_serial: u32,
     statics: &mut String,
     n_statics: &mut usize,
+    n_hidden: &mut usize,
     lights: &mut Vec<Value>,
     light_cap: usize,
     px: i64,
     py: i64,
     season: u8,
+    never_draw: bool,
+    paths: bool,
+    n_path: &mut usize,
 ) {
-    if map.item_is_nodraw(graphic) {
+    // A component the caller says must not be drawn (an invisible-but-authoritative
+    // multi piece), or one tiledata calls "nodraw", still has to reach the browser
+    // with its pathing bits — see `path_only_record`. This `return` used to drop
+    // both, which is the same defect the ceiling and nodraw-statics sites had.
+    let never_draw = never_draw || map.item_is_nodraw(graphic);
+    if never_draw {
+        if paths
+            && *n_path < PATH_ONLY_CAP
+            && (x - px).abs() <= PATH_RADIUS
+            && (y - py).abs() <= PATH_RADIUS
+        {
+            let flags = map.item_flags(graphic);
+            let height = map.item_height(graphic);
+            if let Some(rec) =
+                path_only_record(x, y, cz as i8, graphic, Some(multi_serial), height, flags)
+            {
+                statics.push_str(&rec);
+                *n_path += 1;
+            }
+        }
         return;
     }
     // Fetched once and reused below (is_roof/background/height/foliage/path)
@@ -291,8 +314,10 @@ pub(super) fn emit_multi_component(
     } else {
         anim_suffix(map, animdata, draw_g)
     };
+    // `paths` is the AUTHORITY's own predicate (`server_keeps || is_origin`), not
+    // `visible` — see the emit site in terrain.rs for why the two are kept apart.
     let path = path_suffix(
-        (x - px).abs() <= PATH_RADIUS && (y - py).abs() <= PATH_RADIUS,
+        paths && (x - px).abs() <= PATH_RADIUS && (y - py).abs() <= PATH_RADIUS,
         height,
         flags,
     );
@@ -312,7 +337,14 @@ pub(super) fn emit_multi_component(
         translucent,
         hidden_suffix
     );
-    *n_statics += 1;
+    // Ceiling-hidden components charge their own budget, never the drawn one —
+    // the trap acf1b2e measured for real statics (Blackthorn, 4000 exactly) and
+    // that was never fixed here.
+    if hz {
+        *n_hidden += 1;
+    } else {
+        *n_statics += 1;
+    }
     // `!hz` — see the real-statics light push in terrain.rs: a faded object never
     // reaches ClassicUO's Draw, so it never calls AddLight.
     if !hz && lights.len() < light_cap && map.item_is_light(draw_g) {

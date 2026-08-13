@@ -123,6 +123,11 @@ depth-sorts by `(x+y)` + Z.
   draw ceiling). The renderer
   eases it to alpha 0 and sets `visible = false`. Dropping it was what made a roof pop:
   there was no sprite left to fade.  `hz` is purely a draw decision
+- **never-drawn records** (`"nd":1`): an object the renderer must not draw at all —
+  an invisible-but-authoritative multi component, a tiledata `nodraw` static/item,
+  or one past a draw budget — emitted with `h`/`pf` and nothing a sprite needs. The
+  browser skips it beside the `fh` guard. A budget may stop us drawing an object; it
+  may never stop us shipping its pathing bits
   where `under_cover = maxZ < 127`. (Roof tiles flagged `0x10000000`.) The persistent
   tile pool in the renderer then drops the hidden statics automatically.
 - **Renderer depth order** (ClassicUO `Chunk.AddGameObject` priority): a single sorted

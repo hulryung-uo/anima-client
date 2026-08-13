@@ -1270,6 +1270,79 @@ exactly, which is what would catch hidden objects starting to evict drawn ones f
 the emit budget. At the three under-cover centers 410 of 1751 ceiling-hidden statics
 now carry `pf` (the rest are outside `PATH_RADIUS`, as for any static).
 
+Closed 2026-08-13 (**the draw-predicate class**, six emit sites): the previous
+three rows each fixed one instance of the same defect and each turned out to be
+incomplete — the fourth site sat fifteen lines from three that had just been
+fixed. So this row censused the *class* instead of chasing the next instance.
+
+**The class.** `scene.statics` is both the draw list and the browser's pathing
+input, so any emitter that `continue`s an object out of the stream for a DRAWING
+reason also deletes its `h`/`pf`, blinding the browser's `calculate_new_z` to
+something the server still sees. ClassicUO has no such coupling: it holds one
+world model and filters only in the renderer, which is why
+`Pathfinder.CreateItemList` contains no `AllowedToDraw`/`AlphaHue`/`_maxZ`
+anywhere.
+
+**The mechanism**, one for all six: a never-drawn record, `"nd":1`, carrying
+`x,y,z,g[,ms]` plus `h`/`pf` and *nothing a sprite would need* — no `pz`, `f`,
+`tr`, `dg`, `a`/`ai`. The browser skips it in one line beside the existing `fh`
+guard. It is the third sibling of `fh` and `hz` rather than a new concept.
+
+Sites, with what each was withholding:
+
+| site | was | population |
+|---|---|---|
+| multi `!visible` (`terrain.rs`) | dropped | 1284 authoritative components / 378 ids, 542 path-bearing — incl. every boat's origin hull (0x58A5 `MainHull`, pf=2 h=18 → 18 Z / 72 px on the ship's own tile) |
+| tiledata `nodraw` statics | dropped | 6,751 path-bearing on Felucca; at (5575,810) **327 of 760** inside `PATH_RADIUS` |
+| `nodraw` in `emit_multi_component` | dropped | 16 components, 6 path-bearing |
+| `item_nodraw` filter (items) | dropped | ServUO ships path-bearing ones: `HouseLadder`'s climbable rung (0x3F28, SURFACE\|BRIDGE h=3), `InvisibleTile`/`ShipCannon` (0x2198) |
+| `n_statics < 4000` draw budget | dropped whole records | 294 path-bearing inside `PATH_RADIUS` at map1 (1499,1455), 3538 at map5 (750,3365) |
+| `*n_statics += 1` in multis | charged the drawn budget | the eviction trap acf1b2e fixed for statics and never here; roofs are 34% of some multis' components |
+
+Budgets now **degrade rather than drop**: an over-budget object falls through to a
+never-drawn record. A budget may stop us drawing something; it may never stop us
+shipping its pathing bits.
+
+**The review caught two FATALs, and the second is the interesting one.** The
+plan's multi fix made the emit gate `server_keeps || is_origin` — which promotes a
+*walkability* field into a **draw gate**. It holds today (`visible ⟹ server_keeps`,
+0 violations over every merged component, asserted by a new test) but
+`apply_uop_keep_overlay` assigns `server_keeps` unconditionally, so one
+geometry-key collision would silently delete a visible wall from the screen. The
+gate is therefore the UNION (`visible || server_keeps || is_origin`) with pathing
+gated separately on the authority's own predicate — draw and transport decoupled,
+which is this row's whole thesis. The first FATAL: the existing ceiling golden
+could not see *any* of the six sites (its three centers emit zero `nd` records,
+pass `multis: None`, and never reach the 4000 gate), so a new drawn-set golden was
+blessed from **pre-change** code at centers that do. A third finding, the radar at
+`07-hud.js`, drew a dot for every item with no `fh`/`nd` guard — it would have
+turned invisible tiles into phantom minimap dots, and was already leaking
+winter-culled foliage.
+
+Verified live at (5575,810): **327 never-drawn records** on the wire, every one
+carrying `pf`, none carrying a draw field; the browser's own `createItemList`
+returns 3 elements where it returned 1; **zero sprites** built for the never-drawn
+graphic; and `staticPool.size` **1018**, exactly the pre-change golden's drawn
+count — the drawn set is byte-identical. On real boat data the origin hull now
+reaches the wire as a never-drawn record (34 components, 1 never-drawn), and 649
+authoritative-but-invisible components exist across the containers.
+
+**Honest limit.** A full-window sweep at (5575,810) — 3,528 step resolutions —
+found **zero** changed answers. The 327 records were genuinely being deleted, but
+at that location they were redundant with other blockers. The census measured
+*records withheld*, not *answers changed*; the witnesses with measured
+behavioural impact are the multi origin (18 Z) and the ladder rung, not the
+nodraw statics. This row restores the data; it does not claim a visible fix at
+that site.
+
+After it, "no draw predicate deletes a pathing byte" is true of the emitters. What
+remains is bounded and none of it is a draw decision: `PATH_ONLY_CAP` and
+`PATH_RADIUS` (transport budgets), and `near_multis`' distance filter. Left open
+as their own rows: `HIDDEN_STATIC_CAP`'s value (the file contradicts itself on the
+measurement); ClassicUO drawing the invisible index-0 component as the parent
+Item's sprite (cosmetic, and it would move the drawn set this row's golden pins);
+and `near_multis` bounds for custom-house designs.
+
 ---
 
 ## Tier 4 — the AI contract

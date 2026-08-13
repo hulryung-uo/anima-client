@@ -98,7 +98,15 @@ pub(super) fn items_json(
             // A multi (`is_multi`) isn't a drawable item at all — its `graphic` is
             // a multi id, not an ART graphic; it's expanded into the statics
             // stream (see the tile loop below) instead of drawn directly here.
-            !it.is_multi && it.container.is_none() && !look.item_nodraw(it.graphic)
+            // `item_nodraw` is NOT in this filter any more: a nodraw item is
+            // emitted with `nd` and simply never drawn, because the authoritative
+            // walk path buckets EVERY uncontained non-multi item with no nodraw
+            // test at all (`walk.rs`). ServUO really does ship path-bearing ones
+            // as ordinary items — `HouseLadder` places graphic 0x3F28
+            // (SURFACE|BRIDGE, height 3: the climbable rung), and `InvisibleTile`
+            // /`ShipCannon` place 0x2198 (SURFACE) — so filtering them here made
+            // the browser blind to a ladder it is standing on.
+            !it.is_multi && it.container.is_none()
         })
         .map(|it| {
             let mut v = json!({
@@ -114,6 +122,10 @@ pub(super) fn items_json(
             // `_noDrawRoofs && IsRoof` branch as statics, so an item lying on a roof
             // fades with it. Pathing fields are unaffected: an invisible item still
             // blocks and still feeds the browser's `calculate_new_z`.
+            let nd_item = look.item_nodraw(it.graphic);
+            if nd_item {
+                v["nd"] = json!(1);
+            }
             let hz_item = (it.pos.z as i32) >= max_z || (under_cover && look.item_roof(it.graphic));
             if hz_item {
                 v["hz"] = json!(1);

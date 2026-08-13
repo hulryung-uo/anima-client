@@ -510,6 +510,14 @@ function syncWorld(s) {
     // `IsFoliageVisibleAtSeason`). A DRAW skip only — the static is still in
     // `s.statics`, so `calculate_new_z` and the blocker checks still see it.
     if (st.fh) continue;
+    // Never-drawn: a pathing-only record (an invisible multi piece, a tiledata
+    // "nodraw" static, or one past the draw budget). A DRAW skip only — the
+    // record is still in `s.statics`, which `rebuildStaticIndex` has already
+    // indexed, so `createItemList`/`calculateNewZ` and the blocker checks still
+    // see it. Must sit ABOVE the pool key below: a never-drawn record entering
+    // the `x,y,g,z` key space could collide with a real sprite's key and keep a
+    // stale sprite alive through the reaper.
+    if (st.nd) continue;
     // Seasonal substitution first, then the player's own StaticFilters on top of
     // the result — the filters classify by what is DRAWN (a winter-bare tree is
     // still a tree), and reading `st.g` here would silently regress them.
@@ -606,6 +614,7 @@ function syncWorld(s) {
   for (const it of s.items || []) {
     if (it.serial === undefined || !it.g) continue;
     if (it.fh) continue; // seasonal foliage cull, same rule as statics above
+    if (it.nd) continue; // never-drawn pathing record — see the statics loop
     const key = it.serial;
     seenI.add(key);
     const iz = it.z | 0;

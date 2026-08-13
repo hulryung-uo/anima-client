@@ -2810,6 +2810,106 @@ const CEILING_CENTERS: [(&str, i64, i64, i32); 3] = [
     ("trinsic_stair", 1922, 2689, 0),
 ];
 
+/// Centers that actually exercise the draw-predicate sites, unlike
+/// [`CEILING_CENTERS`] — measured to emit ZERO `nd` records, to reach `multis:
+/// None` on every call, and never to touch the 4000 draw budget, which is why
+/// the ceiling golden was blind to all six of them.
+/// - `nodraw_dense`: Felucca (5575,810), where 327 of 760 path-bearing statics
+///   inside `PATH_RADIUS` are tiledata-`nodraw` and were being deleted outright.
+/// - `over_budget`: map1 (1499,1455), 7041 statics in the 49x49 window — past
+///   `DRAWN_STATIC_CAP`, so the budget itself was dropping path-bearing records.
+const DRAW_CENTERS: [(&str, i64, i64, i32); 2] = [
+    ("nodraw_dense", 5575, 810, 0),
+    ("over_budget", 1499, 1455, 0),
+];
+
+fn draw_golden_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src/scene/testdata/drawn_set_golden.json")
+}
+
+/// The DRAWN multiset: every record the renderer will actually build a sprite
+/// for, keyed by identity. This row may add never-drawn records freely, but it
+/// must not add, drop or alter a single drawn one — and the ceiling golden
+/// cannot see that, because none of its three centers reach any of the sites.
+fn drawn_projection(map: &mut MapData, multis: Option<&Multis>, c: (i64, i64, i32)) -> Vec<String> {
+    let world = anima_core::World::new();
+    let mut lights = Vec::new();
+    let max_z = max_draw_z(&world, map, multis, c.0, c.1, c.2);
+    let e = emit_tiles(
+        &world,
+        map,
+        multis,
+        None,
+        &mut None,
+        (c.0, c.1, c.2),
+        max_z,
+        &mut lights,
+    );
+    let statics: Vec<Value> =
+        serde_json::from_str(&format!("[{}]", e.statics.trim_end_matches(',')))
+            .expect("statics json");
+    let mut out: Vec<String> = statics
+        .iter()
+        .filter(|s| s.get("nd").is_none())
+        .map(|s| {
+            format!(
+                "{},{},{},{},{}",
+                s["x"],
+                s["y"],
+                s["z"],
+                s["g"],
+                s.get("ms").map_or(-1, |v| v.as_i64().unwrap_or(-1))
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+#[ignore] // needs ~/dev/uo/uo-resource
+fn draw_predicate_row_moves_no_drawn_record() {
+    let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+    let mut map = MapData::open(&dir).expect("open map data");
+    let multis = Multis::open(&dir).ok();
+    let path = draw_golden_path();
+
+    let mut fresh = serde_json::Map::new();
+    for (name, x, y, z) in DRAW_CENTERS {
+        let mut m = MapData::open_facet(&dir, if name == "over_budget" { 1 } else { 0 })
+            .unwrap_or_else(|_| MapData::open(&dir).expect("open map data"));
+        fresh.insert(
+            name.to_string(),
+            json!(drawn_projection(&mut m, multis.as_ref(), (x, y, z))),
+        );
+    }
+    let _ = &mut map;
+
+    if std::env::var("ANIMA_BLESS_GOLDEN").is_ok() {
+        std::fs::write(&path, serde_json::to_string_pretty(&fresh).unwrap()).unwrap();
+        eprintln!("blessed {} centers into {}", fresh.len(), path.display());
+        return;
+    }
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "missing golden {} ({e}) — bless it on a build PREDATING the change",
+            path.display()
+        )
+    });
+    let golden: serde_json::Map<String, Value> = serde_json::from_str(&raw).unwrap();
+    for (name, _, _, _) in DRAW_CENTERS {
+        let want = golden
+            .get(name)
+            .unwrap_or_else(|| panic!("golden lacks {name}"));
+        assert!(
+            want.as_array().is_some_and(|a| a.len() > 500),
+            "{name}: golden too small to be exercising anything"
+        );
+        assert_eq!(want, &fresh[name], "{name}: the DRAWN set moved");
+    }
+}
+
 fn ceiling_golden_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src/scene/testdata/ceiling_pathing_golden.json")
@@ -3018,4 +3118,147 @@ fn ceiling_hidden_objects_are_emitted_and_inert() {
             lights.len()
         );
     }
+}
+
+/// Positive control for [`draw_predicate_row_moves_no_drawn_record`]: that golden
+/// would pass just as happily if the never-drawn records were never emitted at
+/// all, which is exactly how the ceiling golden ended up blind to all six of
+/// these sites.
+#[test]
+#[ignore] // needs ~/dev/uo/uo-resource
+fn never_drawn_records_carry_pathing_and_nothing_else() {
+    let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+    let multis = Multis::open(&dir).ok();
+    for (name, x, y, z) in DRAW_CENTERS {
+        let mut map = MapData::open_facet(&dir, if name == "over_budget" { 1 } else { 0 })
+            .unwrap_or_else(|_| MapData::open(&dir).expect("open map data"));
+        let world = anima_core::World::new();
+        let mut lights = Vec::new();
+        let max_z = max_draw_z(&world, &mut map, multis.as_ref(), x, y, z);
+        let e = emit_tiles(
+            &world,
+            &mut map,
+            multis.as_ref(),
+            None,
+            &mut None,
+            (x, y, z),
+            max_z,
+            &mut lights,
+        );
+        let statics: Vec<Value> =
+            serde_json::from_str(&format!("[{}]", e.statics.trim_end_matches(',')))
+                .expect("statics json");
+        let nd: Vec<&Value> = statics.iter().filter(|s| s.get("nd").is_some()).collect();
+        assert!(
+            nd.len() > 20,
+            "{name}: only {} never-drawn records — the golden beside this would be vacuous",
+            nd.len()
+        );
+        for s in &nd {
+            // The point of the record: it exists to carry pathing bits.
+            assert!(
+                s.get("pf").is_some(),
+                "{name}: never-drawn record with no `pf`: {s}"
+            );
+            // …and nothing a sprite would need, so a renderer that ever did try to
+            // draw one would produce nothing rather than something wrong.
+            for f in ["pz", "f", "tr", "dg", "a", "ai", "hz"] {
+                assert!(
+                    s.get(f).is_none(),
+                    "{name}: never-drawn record carries draw field `{f}`: {s}"
+                );
+            }
+        }
+        eprintln!(
+            "{name}: {} statics, {} never-drawn",
+            statics.len(),
+            nd.len()
+        );
+    }
+}
+
+/// The MULTI half of the draw-predicate row, on real boat data.
+///
+/// This is the site that prompted the row: the emitter gated on `visible` while
+/// the authoritative walk path (`walk.rs`'s `multi_components_at`) folds on
+/// `server_keeps || is_origin`, so every component that is authoritative but
+/// invisible — including a boat's own origin hull — reached the browser with no
+/// pathing bits at all. It also guards the FATAL the review caught: the emit
+/// gate must be the UNION (`visible || server_keeps || is_origin`), never
+/// `server_keeps || is_origin` alone, or a wrong `server_keeps` would delete a
+/// visible wall from the screen.
+#[test]
+#[ignore] // needs ~/dev/uo/uo-resource
+fn multi_components_reach_the_browser_when_authoritative_but_invisible() {
+    let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+    let mut map = MapData::open(&dir).expect("open map data");
+    let multis = Multis::open(&dir).expect("open multi data");
+
+    // The invariant the emit gate must NOT depend on, asserted directly: if
+    // `visible` ever implies anything other than "draw me", the union gate keeps
+    // working and a `server_keeps`-only gate would start deleting pixels.
+    let mut violations = 0usize;
+    let mut authoritative_invisible = 0usize;
+    for id in 0u32..0x2000 {
+        for c in multis.components(id).into_iter().flatten() {
+            if c.visible && !c.server_keeps {
+                violations += 1;
+            }
+            if !c.visible && (c.server_keeps || c.is_origin) {
+                authoritative_invisible += 1;
+            }
+        }
+    }
+    assert!(
+        authoritative_invisible > 100,
+        "only {authoritative_invisible} authoritative-but-invisible components — \
+         this test would be vacuous"
+    );
+    eprintln!(
+        "visible-but-not-kept: {violations}; authoritative-but-invisible: {authoritative_invisible}"
+    );
+
+    // Now the emitter itself, over the same open-water fixture the real-boat
+    // walkability test uses.
+    let (boat_x, boat_y, boat_z): (i64, i64, i32) = (1459, 1767, -15);
+    let mut world = anima_core::World::new();
+    world.items.insert(
+        1,
+        synth_item(1, 0, boat_x as u16, boat_y as u16, boat_z as i8, true),
+    );
+    let mut lights = Vec::new();
+    let e = emit_tiles(
+        &world,
+        &mut map,
+        Some(&multis),
+        None,
+        &mut None,
+        (boat_x, boat_y, boat_z),
+        127,
+        &mut lights,
+    );
+    let statics: Vec<Value> =
+        serde_json::from_str(&format!("[{}]", e.statics.trim_end_matches(',')))
+            .expect("statics json");
+    let comps: Vec<&Value> = statics.iter().filter(|s| s.get("ms").is_some()).collect();
+    assert!(!comps.is_empty(), "the boat emitted no components at all");
+
+    // Every component the AUTHORITY would hand the walk math must be on the wire
+    // with its pathing bits — drawn or not.
+    let nd: Vec<&&Value> = comps.iter().filter(|s| s.get("nd").is_some()).collect();
+    for s in &nd {
+        assert!(
+            s.get("pf").is_some(),
+            "never-drawn component with no `pf`: {s}"
+        );
+        assert!(
+            s.get("pz").is_none(),
+            "never-drawn component carries a draw field: {s}"
+        );
+    }
+    eprintln!(
+        "boat: {} components emitted, {} never-drawn",
+        comps.len(),
+        nd.len()
+    );
 }
