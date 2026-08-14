@@ -140,8 +140,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
-          dmg=$(ls crates/anima-desktop/target/*/release/bundle/dmg/*.dmg 2>/dev/null | head -1 || true)
-          if [ -z "${dmg:-}" ]; then echo "no dmg produced — nothing to notarize"; exit 0; fi
+          # The target dir is the WORKSPACE root's, not the crate's — this is a
+          # cargo workspace, so `crates/anima-desktop/target` never exists and a
+          # glob rooted there silently found nothing. v0.5.0 shipped an
+          # unnotarized dmg that way, so this now FAILS the build rather than
+          # exiting 0: a release that silently loses its notarization is worse
+          # than a red build.
+          dmg=$(ls target/*/release/bundle/dmg/*.dmg 2>/dev/null | head -1 || true)
+          if [ -z "${dmg:-}" ]; then
+            echo "::error::no dmg found to notarize (looked in target/*/release/bundle/dmg/)"
+            ls -R target/*/release/bundle 2>/dev/null | head -40 || true
+            exit 1
+          fi
           echo "notarizing $dmg"
           xcrun notarytool submit "$dmg" \
             --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" \
