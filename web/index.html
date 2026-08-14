@@ -844,6 +844,10 @@
       }
       .container-win.cont-authentic .gump-title { display: none; }
       .container-win.cont-authentic .cont-art { cursor: move; }
+      /* Containers close with right-click (UO default, ContainerGump.cs:151),
+         so the title-bar ✕ is redundant chrome — hiding it also removes the
+         awkward gap it left in the narrow grid title bar. */
+      .container-win .gump-close { display: none; }
       /* The container icon in the GRID-mode title bar (pouch vs box) — a proper
          header glyph, sized up from a thumbnail so the type reads at a glance. */
       .container-win .cont-title-icon {

@@ -577,6 +577,19 @@ function refreshContainer(serial) {
   // `gridContainers` forces the titled grid for EVERY container (the owner's
   // customized view); authentic is the traditional gump otherwise.
   const authentic = gump > 0 && !loot && !settings.gridContainers;
+  // Until the server's 0x24 gives us the gump id, an authentic container has
+  // nothing to draw. Show an empty chromeless window (transparent → invisible)
+  // rather than flashing the grid and then swapping to the art one poll later —
+  // the signature includes the gump id, so this refresh re-runs the instant it
+  // arrives. Grid mode and corpse-loot have their final look immediately, so
+  // they never hit this wait.
+  if (gump === 0 && !loot && !settings.gridContainers) {
+    win.el.classList.add("cont-authentic");
+    body.className = "gump-body cont-art";
+    win.el.style.width = ""; body.style.width = "";
+    if (win.label) win.label.textContent = "";
+    return;
+  }
   // Title bar: the container's name, and — in grid mode — a small icon of the
   // container itself so a pouch reads differently from a box. Authentic mode
   // stays icon-less (its whole window IS the container art). The title is set
