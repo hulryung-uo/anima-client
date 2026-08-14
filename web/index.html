@@ -828,16 +828,24 @@
       .book-btn:hover:not(:disabled) { background: rgba(138, 180, 248, .28); }
       .book-btn:disabled { opacity: .4; cursor: default; }
       .container-win { width: 252px; }
-      /* Authentic mode sizes the window to the gump texture (set inline from the
-         loaded <img>), like ClassicUO's ContainerGump. `width:auto` alone would
-         shrink-to-fit the title's max-content and let a long name widen the
-         window past the art, so the JS drives an explicit width and the title
-         label below is made shrinkable so its ellipsis actually engages. */
-      .container-win.cont-authentic { min-width: 0; }
-      /* The small container icon in the GRID-mode title bar (pouch vs box). */
+      /* Authentic mode is CHROMELESS — the container's gump art IS the window,
+         no box/border/title behind it, exactly UO's default look. The gump PNG
+         carries its own transparency, so only the bag/chest outline shows. The
+         JS sizes the window to the art (`width:auto` would shrink-to-fit the
+         title's max-content, but the title is hidden here anyway) and the art
+         itself is the drag surface (grab empty art to move, an item to lift,
+         right-click to close — see openContainer). */
+      .container-win.cont-authentic {
+        min-width: 0; background: transparent; border: 0; border-radius: 0;
+        box-shadow: none; backdrop-filter: none;
+      }
+      .container-win.cont-authentic .gump-title { display: none; }
+      .container-win.cont-authentic .cont-art { cursor: move; }
+      /* The container icon in the GRID-mode title bar (pouch vs box) — a proper
+         header glyph, sized up from a thumbnail so the type reads at a glance. */
       .container-win .cont-title-icon {
-        width: 18px; height: 18px; object-fit: contain; image-rendering: pixelated;
-        vertical-align: middle; margin-right: 6px; pointer-events: none;
+        width: 30px; height: 30px; object-fit: contain; image-rendering: pixelated;
+        vertical-align: middle; margin-right: 8px; pointer-events: none;
       }
       /* Keep a long container name from widening the window past its art: the
          title label shrinks and ellipsises instead. */

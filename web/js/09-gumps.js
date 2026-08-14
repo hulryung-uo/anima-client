@@ -31,6 +31,10 @@ function makeDraggable(win, handle, onMove) {
   restoreWinPos(win);
   handle.addEventListener("mousedown", (e) => {
     if (e.target.classList.contains("gump-close")) return; // let the ✕ click through
+    // Grabbing an item lifts it (the global pointerdown drag), it must not also
+    // drag the window — matters for the chromeless authentic container whose art
+    // is both the drag surface AND where the item cells live.
+    if (e.target.closest && e.target.closest(".cont-item")) return;
     e.preventDefault();
     bringToFront(win);
     const r = win.getBoundingClientRect();

@@ -488,6 +488,18 @@ function openContainer(serial) {
   // Leaving the window entirely clears any item OPL tooltip it was showing (there's
   // no PIXI pointerout for DOM cells to fall back on).
   el.addEventListener("mouseleave", () => { if (tipSerial != null) { tipSerial = null; hideTip(); } });
+  // Chromeless authentic mode hides the title bar, so the art itself is the drag
+  // handle: `makeDraggable` on the body moves the window (it already bails on a
+  // `.cont-item` so grabbing an item lifts it instead). Harmless in grid mode
+  // too (dragging empty grid space just moves the window).
+  makeDraggable(el, body);
+  // Right-click closes the container, as in ClassicUO (`CanCloseWithRightClick`,
+  // ContainerGump.cs:151) — the only close affordance once the title bar's ✕ is
+  // hidden. stopPropagation keeps it off the world canvas behind.
+  el.addEventListener("contextmenu", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    closeContainer(serial);
+  });
   dialogWindows("containers").set(serial, { el, body, label, _sig: null });
   refreshContainer(serial);
 }
