@@ -906,21 +906,41 @@ function invalidateJournal() {
   const j = document.getElementById("journal");
   if (j) j._sig = null;
 }
-// The log is `resize: vertical`, and a size the user chose should outlive the
-// tab. `ResizeObserver` rather than a mouseup handler because the drag is the
-// browser's own — there is no event of ours to hang it on.
-function restoreJournalHeight() {
-  const j = document.getElementById("journal");
-  if (!j) return;
-  const saved = parseInt(localStorage.getItem("anima.journalH") || "", 10);
-  if (saved > 0) j.style.height = saved + "px";
-  if (typeof ResizeObserver === "undefined") return;
-  new ResizeObserver(() => {
-    // offsetHeight, not the observed box: `resize` writes an inline height and
-    // that is what we want to restore verbatim next launch.
-    const h = j.offsetHeight;
-    if (h > 0) localStorage.setItem("anima.journalH", String(h));
-  }).observe(j);
+// The journal is its own window: draggable, resizable in BOTH directions, and
+// remembering its size and position like every other resizable window here (the
+// framework persists both, keyed by the window's class — `journal-win` is unique
+// to it, so its geometry is its own). This replaces the old bespoke
+// `resize: vertical` + `anima.journalH` on the log element, so there is exactly
+// one resize handle instead of two.
+//
+// The SAME `#jrnl-tabs` / `#journal` nodes are re-parented into the frame, ids
+// intact: every consumer (the hud() render, the tab bar builder, the filters,
+// timestamps and colours) addresses them by id, so the whole pipeline is
+// unchanged — only the container and who owns the sizing move.
+let journalWin = null;
+function buildJournalWindow() {
+  if (journalWin) return;
+  const tabs = document.getElementById("jrnl-tabs");
+  const log = document.getElementById("journal");
+  if (!tabs || !log) return;
+  const { el, body } = makeWindowFrame({
+    cls: "journal-win", title: "JOURNAL", bodyCls: "jrnl-body", resizable: true,
+    // ✕ goes through the same toggle the J key uses, so the remembered
+    // open/closed state stays in step however it was closed.
+    onClose: () => { if (!journalHidden) toggleJournal(); },
+  });
+  body.appendChild(tabs);
+  body.appendChild(log);
+  journalWin = el;
+  // First run only: seat it where the journal used to sit (under the HUD) at a
+  // usable default. A remembered geometry is applied by the framework and wins.
+  if (!body.style.width) { body.style.width = "330px"; body.style.height = "34vh"; }
+  if (!el.style.left) { el.style.left = "calc(100vw - 372px)"; el.style.top = "300px"; }
+  clampWindow(el);
+  applyJournalVisibility();
+}
+function applyJournalVisibility() {
+  if (journalWin) journalWin.style.display = journalHidden ? "none" : "";
 }
 
 function hud(s) {

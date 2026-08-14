@@ -304,14 +304,18 @@
       .bar > span { display: block; height: 100%; }
       .hp > span { background: #e5484d; } .mana > span { background: #4f8cf7; } .stam > span { background: #46a758; }
       .k { color: #6b7280; }
-      #journal {
-        margin-top: 6px; padding-top: 6px;
-        /* Resizable: the row asked for its own window, and `resize` on the log
-           itself is what a user actually wants — drag the corner to trade map
-           for text. The height is remembered in localStorage. */
-        height: 34vh; min-height: 60px; max-height: 70vh;
-        overflow: auto; resize: vertical;
-      }
+      /* The journal is its own window now: the LOG is a plain flex child that
+         fills whatever the window was resized to (the window owns the resize
+         handle and remembers its size), so no height/resize of its own here. */
+      #journal { flex: 1; min-height: 0; overflow: auto; }
+      .journal-win .gump-body { display: flex; flex-direction: column; padding: 8px 10px 10px; }
+      /* A floor so the window can't be dragged down to an unusable sliver — the
+         framework's `resize:both` has none of its own, and the bad size would
+         persist (ClassicUO's ResizableJournal has MIN_WIDTH/MIN_HEIGHT too). */
+      .journal-win .win-resizable { min-width: 220px; min-height: 120px; }
+      /* Fixed on top: without this the tab bar is a shrinkable flex child and
+         compresses instead of staying put at small heights. */
+      .journal-win #jrnl-tabs { flex: 0 0 auto; margin-top: 0; border-top: 0; padding-top: 0; }
       #journal div { margin: 2px 0; color: #b6bcc6; white-space: normal; overflow-wrap: anywhere; }
       #journal div.jrnl-sys { color: #6fb6ff; }   /* client system notices (skill gains, …) */
       #journal div.jrnl-none { color: #4b5563; font-style: italic; }
@@ -458,8 +462,20 @@
       .gump-win .row.st-sep { border-top: 1px solid #2a3140; margin-top: 4px; padding-top: 4px; }
       #paperdoll { top: 60px; left: 210px; width: 280px; display: none; }
       #paperdoll.on { display: block; }
-      #options { top: 80px; left: 50%; transform: translateX(-50%); width: 260px; display: none; }
+      /* Plain `left` (no translateX): makeDraggable writes an inline left but
+         never clears a transform, so the centring shifted the panel half its
+         width on the first drag. Wider now to seat the category rail. */
+      #options { top: 80px; left: 32%; width: 392px; display: none; }
       #options.on { display: block; }
+      .opt-shell { display: flex; align-items: stretch; max-height: calc(100vh - 140px); }
+      #opt-tabs { display: flex; flex-direction: column; gap: 2px; padding: 10px 0 10px 8px;
+        border-right: 1px solid #2a2f37; flex: 0 0 auto; }
+      .opt-tab { font: inherit; font-size: 11px; text-align: left; padding: 5px 10px; cursor: pointer;
+        border: 1px solid transparent; border-radius: 5px; background: none; color: #9aa0a6;
+        letter-spacing: .04em; white-space: nowrap; }
+      .opt-tab:hover { color: #d6dae0; background: rgba(255, 255, 255, .05); }
+      .opt-tab.sel { color: #8ab4f8; background: rgba(138, 180, 248, .12); border-color: #2f3b4d; }
+      .opt-shell #opt-body { flex: 1; min-width: 0; overflow-y: auto; }
       .opt-row { display: flex; align-items: center; gap: 8px; padding: 5px 2px; font-size: 12px; }
       .opt-row label { flex: 1; cursor: pointer; user-select: none; }
       .opt-row input[type=checkbox] { width: 15px; height: 15px; cursor: pointer; }
@@ -1312,7 +1328,7 @@
       <div id="status">connecting…</div>
       <div id="diag" class="legend" style="margin-top:6px; color:#6b7280"></div>
       <div class="legend" style="margin-top:10px">
-        <b>controls:</b> WASD/arrows move · Q/E/Z/C diagonals · Enter chat · M map · P doll · I bag · K spells · L skills · O macros · G all-names · R guard-zone lines · N <button id="mutebtn" type="button" style="cursor:pointer">sound</button> · <button id="optbtn" type="button" style="cursor:pointer">⚙ options</button> · <button id="logoutbtn" type="button" style="cursor:pointer">⎋ log out</button>
+        <b>controls:</b> WASD/arrows move · Q/E/Z/C diagonals · Enter chat · M map · P doll · I bag · K spells · L skills · O macros · G all-names · R guard-zone lines · J journal · N <button id="mutebtn" type="button" style="cursor:pointer">sound</button> · <button id="optbtn" type="button" style="cursor:pointer">⚙ options</button> · <button id="logoutbtn" type="button" style="cursor:pointer">⎋ log out</button>
       </div>
     </div>
     <div id="options" class="gump-win">
@@ -1320,7 +1336,7 @@
         <span>OPTIONS</span>
         <span class="gump-close" id="opt-close">✕</span>
       </div>
-      <div class="gump-body" id="opt-body"></div>
+      <div class="opt-shell"><div id="opt-tabs"></div><div class="gump-body" id="opt-body"></div></div>
     </div>
     <div id="paperdoll" class="gump-win">
       <div class="gump-title" id="pd-title">

@@ -67,6 +67,9 @@ async function main() {
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
+  // The journal window has to exist before `setupInput` restores the saved
+  // hidden/shown state (it calls loadHudVisibility → applyJournalVisibility).
+  buildJournalWindow(); // re-parents #jrnl-tabs/#journal into their own window
   setupInput();
   buildJournalTabs();   // filter chips above the log (All / Speech / Guild / System)
   buildInfoBarPicker();
@@ -122,7 +125,6 @@ async function main() {
   document.getElementById("insp-dump").addEventListener("click", inspectDump);
   renderInspector();
   loadStaticFilters();   // ClassicUO's tree/vegetation/cave tables, tiledata-resolved
-  restoreJournalHeight();
   setupItemDnD();
   initFx();
 }

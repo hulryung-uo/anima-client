@@ -476,44 +476,41 @@ function setupInput() {
   document.getElementById("opt-close")?.addEventListener("click", () => toggleOptions(false));
   makeDraggable(optEl, optEl.querySelector(".gump-title"));
   const optBody = document.getElementById("opt-body");
+  // The category rail: switching tabs just re-renders the body.
+  document.getElementById("opt-tabs")?.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-cat]");
+    if (!b) return;
+    optCat = b.dataset.cat;
+    renderOptions();
+  });
+  // One dispatcher per EVENT KIND, not one for both. A checkbox click fires
+  // `input` THEN `change`, and a range fires `input` on every move plus `change`
+  // on release — so a single listener bound to both would run each option's
+  // onChange twice (a double `rebuildStatics()` on every toggle, which is a
+  // visible hitch). Checkboxes therefore listen on `change` only, ranges on
+  // `input` only, each ignoring anything whose descriptor is the other kind.
+  const optDesc = (k) => OPTIONS.find((o) => o.key === k);
   optBody.addEventListener("change", (e) => {
-    const k = e.target.dataset.k; if (!k || e.target.type !== "checkbox") return;
-    settings[k] = e.target.checked; saveSettings(); applyAudioSettings();
-    // The container-view toggles change how OPEN container windows render, so
-    // re-draw each one (clearing `_sig` so the guarded refresh actually runs).
-    if (k === "gridContainers" || k === "gridLoot") {
-      for (const cs of dialogWindows("containers").keys()) {
-        const w = dialogWindow("containers", cs);
-        if (w) { w._sig = null; refreshContainer(cs); }
-      }
-    }
-    if (k === "tooltips" && !settings.tooltips) { tipSerial = null; hideTip(); }
-    // These change which statics are drawn (or what they are drawn as), so the
-    // pool has to be thrown away — its keys encode the drawn graphic.
-    if (k === "treeStumps" || k === "hideVegetation" || k === "shadows" || k === "shadowsStatics") rebuildStatics();
-    if (k === "abilities") refreshAbilities(true);
-    if (k === "guardZones") updateGuardZones(scene);
+    const k = e.target.dataset.k; if (!k) return;
+    const o = optDesc(k); if (!o || o.kind !== "checkbox") return;
+    settings[k] = e.target.checked;
+    saveSettings();
+    if (o.onChange) o.onChange();
     markDirty();
   });
   optBody.addEventListener("input", (e) => {
-    const k = e.target.dataset.k; if (!k || e.target.type !== "range") return;
-    // `data-int` sliders carry their own units (terrain shading is 5..25); the
-    // others are 0..1 values shown ×100.
-    if (e.target.dataset.int) {
-      settings[k] = +e.target.value;
-      const vi = document.getElementById("optv-" + k); if (vi) vi.textContent = e.target.value;
-      saveSettings();
-      // The light is baked into each tile's vertices when the sprite is built,
-      // so the pool has to go.
-      if (k === "terrainShadows") rebuildTiles();
-      markDirty();
-      return;
-    }
-    settings[k] = (+e.target.value) / 100;
-    const v = document.getElementById("optv-" + k); if (v) v.textContent = e.target.value;
-    saveSettings(); applyAudioSettings();
+    const k = e.target.dataset.k; if (!k) return;
+    const o = optDesc(k); if (!o || (o.kind !== "range" && o.kind !== "intRange")) return;
+    // `intRange` carries its own units; `range` is a 0..1 value shown ×100.
+    settings[k] = o.kind === "intRange" ? +e.target.value : (+e.target.value) / 100;
+    const span = document.getElementById("optv-" + k);
+    if (span) span.textContent = e.target.value;
+    saveSettings();
+    if (o.onChange) o.onChange();
+    markDirty();
   });
   optBody.addEventListener("click", (e) => {
+    if (e.target.closest(".opt-journal")) { toggleJournal(); return; }
     if (e.target.closest(".opt-infobar")) { toggleInfoBar(); return; }
     if (e.target.closest(".opt-counterbar")) { toggleCounterBar(); return; }
     if (e.target.closest(".opt-ignorelist")) { toggleIgnoreList(); return; }

@@ -258,50 +258,109 @@ const SETTINGS_DEFAULTS = {
 let settings = Object.assign({}, SETTINGS_DEFAULTS);
 try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}")); } catch (e) {}
 function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {} }
-// Build the Options panel body from the current settings (checkboxes + sliders).
+
+// ---- the options schema -----------------------------------------------------
+// One table describes every option: what it is, where it lives, and what has to
+// happen when it changes. `renderOptions` builds the DOM from it and the change
+// dispatcher in 13-macros.js reads the same rows, so adding an option is a
+// default plus a descriptor — one file — instead of the three hand-synced sites
+// it used to be (defaults, the markup string, and a side-effect if-chain).
+//
+// ClassicUO's own OptionsGump has a left nav of categories; this mirrors it.
+const OPTION_CATEGORIES = [
+  { key: "audio", label: "Audio" },
+  { key: "video", label: "Video" },
+  { key: "interface", label: "Interface" },
+  { key: "gameplay", label: "Gameplay" },
+  { key: "windows", label: "Windows" },
+  { key: "session", label: "Session" },
+];
+let optCat = "audio";
+// `onChange` is ALWAYS an arrow wrapper, never a bare function reference: this
+// array is evaluated while 00-state.js runs — the FIRST script — long before
+// rebuildStatics/refreshAbilities/… exist. The arrow defers the name lookup to
+// click time, by which point every script has loaded.
+//
+// `kind`: checkbox | range (0..1, shown ×100) | intRange (real units) | button
+// (a launcher/logout with no setting — its click stays in the existing handler,
+// matched by `cls`).
+const OPTIONS = [
+  { key: "sfx", kind: "checkbox", cat: "audio", label: "Sound effects", onChange: () => applyAudioSettings() },
+  { key: "sfxVol", kind: "range", cat: "audio", label: "SFX volume", onChange: () => applyAudioSettings() },
+  { key: "music", kind: "checkbox", cat: "audio", label: "Music", onChange: () => applyAudioSettings() },
+  { key: "musicVol", kind: "range", cat: "audio", label: "Music volume", onChange: () => applyAudioSettings() },
+
+  { key: "shadows", kind: "checkbox", cat: "video", label: "Character shadows", onChange: () => rebuildStatics() },
+  { key: "shadowsStatics", kind: "checkbox", cat: "video", label: "Tree & rock shadows", onChange: () => rebuildStatics() },
+  { key: "treeStumps", kind: "checkbox", cat: "video", label: "Trees as stumps", onChange: () => rebuildStatics() },
+  { key: "hideVegetation", kind: "checkbox", cat: "video", label: "Hide vegetation", onChange: () => rebuildStatics() },
+  // The light is baked into each tile's vertices when the sprite is built, so
+  // changing it has to throw the tile pool away (not the static pool).
+  { key: "terrainShadows", kind: "intRange", cat: "video", label: "Terrain shading", min: 5, max: 25, onChange: () => rebuildTiles() },
+
+  { key: "tooltips", kind: "checkbox", cat: "interface", label: "Item tooltips (OPL)",
+    onChange: () => { if (!settings.tooltips) { tipSerial = null; hideTip(); } } },
+  { key: "names", kind: "checkbox", cat: "interface", label: "Overhead names" },
+  { key: "bars", kind: "checkbox", cat: "interface", label: "HP bars" },
+  { key: "damage", kind: "checkbox", cat: "interface", label: "Damage numbers" },
+  { key: "guardZones", kind: "checkbox", cat: "interface", label: "Guard-zone lines (R)", onChange: () => updateGuardZones(scene) },
+  { key: "debugMove", kind: "checkbox", cat: "interface", label: "Movement debug" },
+
+  { key: "abilities", kind: "checkbox", cat: "gameplay", label: "Weapon abilities", onChange: () => refreshAbilities(true) },
+  { key: "autoOpenDoors", kind: "checkbox", cat: "gameplay", label: "Auto-open doors" },
+  { key: "gridLoot", kind: "checkbox", cat: "gameplay", label: "Click-to-loot corpses", onChange: () => refreshOpenContainers() },
+  { key: "gridContainers", kind: "checkbox", cat: "gameplay", label: "Grid container view", onChange: () => refreshOpenContainers() },
+
+  { kind: "button", cat: "windows", label: "Journal", cls: "opt-journal" },
+  { kind: "button", cat: "windows", label: "Info bar", cls: "opt-infobar" },
+  { kind: "button", cat: "windows", label: "Counter bar", cls: "opt-counterbar" },
+  { kind: "button", cat: "windows", label: "Ignore list", cls: "opt-ignorelist" },
+  { kind: "button", cat: "windows", label: "Combat book", cls: "opt-combatbook" },
+  { kind: "button", cat: "windows", label: "Racial abilities", cls: "opt-racialbook" },
+  { kind: "button", cat: "windows", label: "Network", cls: "opt-netstats" },
+  { kind: "button", cat: "windows", label: "Inspector", cls: "opt-inspector" },
+];
+// Build the Options panel from the OPTIONS schema: a category rail on the left,
+// and only the ACTIVE category's rows in the body. Only-active-in-DOM keeps the
+// panel short and keeps tab order equal to what you can see.
+//
+// The per-control markup is deliberately identical to what this used to emit by
+// hand — `id="opt-KEY"`, `data-k="KEY"`, the `optv-KEY` value span, the `.opt-*`
+// button classes — because the delegated listeners in 13-macros.js bind by those
+// and nothing else. Regrouping changes where a row appears, never how it works.
 function renderOptions() {
   const body = document.getElementById("opt-body");
+  const tabs = document.getElementById("opt-tabs");
   if (!body) return;
-  const cb = (key, label) => `<div class="opt-row"><label for="opt-${key}">${label}</label>`
-    + `<input type="checkbox" id="opt-${key}" data-k="${key}"${settings[key] ? " checked" : ""}></div>`;
-  const sl = (key, label) => `<div class="opt-row"><label for="opt-${key}">${label}</label>`
-    + `<input type="range" id="opt-${key}" data-k="${key}" min="0" max="100" value="${Math.round(settings[key] * 100)}">`
-    + `<span class="opt-val" id="optv-${key}">${Math.round(settings[key] * 100)}</span></div>`;
-  // Integer slider (a real range with real units), as against `sl`'s 0..1 ×100
-  // volume sliders — ClassicUO's terrain-shadow strength is 5..25.
-  const sli = (key, label, min, max) => `<div class="opt-row"><label for="opt-${key}">${label}</label>`
-    + `<input type="range" id="opt-${key}" data-k="${key}" data-int="1" min="${min}" max="${max}" value="${settings[key] | 0}">`
-    + `<span class="opt-val" id="optv-${key}">${settings[key] | 0}</span></div>`;
-  body.innerHTML =
-    '<div class="opt-sect">Audio</div>'
-    + cb("sfx", "Sound effects") + sl("sfxVol", "SFX volume")
-    + cb("music", "Music") + sl("musicVol", "Music volume")
-    + '<div class="opt-sect">Display</div>'
-    + cb("tooltips", "Item tooltips (OPL)")
-    + cb("names", "Overhead names")
-    + cb("bars", "HP bars")
-    + cb("damage", "Damage numbers")
-    + cb("abilities", "Weapon abilities")
-    + cb("guardZones", "Guard-zone lines (R)")
-    + cb("debugMove", "Movement debug")
-    + cb("autoOpenDoors", "Auto-open doors")
-    + cb("gridLoot", "Click-to-loot corpses")
-    + cb("gridContainers", "Grid container view")
-    + cb("shadows", "Character shadows")
-    + cb("shadowsStatics", "…and tree/rock shadows")
-    + cb("treeStumps", "Trees as stumps")
-    + cb("hideVegetation", "Hide vegetation")
-    + sli("terrainShadows", "Terrain shading", 5, 25)
-    + '<label class="opt-row"><button type="button" class="dlg-btn opt-infobar">Info bar</button></label>'
-    + '<label class="opt-row"><button type="button" class="dlg-btn opt-counterbar">Counter bar</button></label>'
-    + '<label class="opt-row"><button type="button" class="dlg-btn opt-ignorelist">Ignore list</button></label>'
-    + '<label class="opt-row"><button type="button" class="dlg-btn opt-combatbook">Combat book</button></label>'
-    + '<label class="opt-row"><button type="button" class="dlg-btn opt-racialbook">Racial abilities</button></label>'
-    + '<label class="opt-row"><button type="button" class="dlg-btn opt-netstats">Network</button></label>'
-    + '<label class="opt-row"><button type="button" class="dlg-btn opt-inspector">Inspector</button></label>'
-    + '<div class="opt-sect">Session</div>'
-    + `<button type="button" class="dlg-btn opt-logout"${logoutPending ? " disabled" : ""}>`
-    + (logoutPending ? "LOGGING OUT…" : "LOG OUT") + "</button>";
+  if (tabs) {
+    tabs.innerHTML = OPTION_CATEGORIES.map((c) =>
+      `<button type="button" class="opt-tab${c.key === optCat ? " sel" : ""}" data-cat="${c.key}">${c.label}</button>`
+    ).join("");
+  }
+  const cb = (o) => `<div class="opt-row"><label for="opt-${o.key}">${o.label}</label>`
+    + `<input type="checkbox" id="opt-${o.key}" data-k="${o.key}"${settings[o.key] ? " checked" : ""}></div>`;
+  // 0..1 value shown ×100 (the volume sliders).
+  const sl = (o) => `<div class="opt-row"><label for="opt-${o.key}">${o.label}</label>`
+    + `<input type="range" id="opt-${o.key}" data-k="${o.key}" min="0" max="100" value="${Math.round(settings[o.key] * 100)}">`
+    + `<span class="opt-val" id="optv-${o.key}">${Math.round(settings[o.key] * 100)}</span></div>`;
+  // A real range in real units (ClassicUO's terrain-shadow strength is 5..25).
+  const sli = (o) => `<div class="opt-row"><label for="opt-${o.key}">${o.label}</label>`
+    + `<input type="range" id="opt-${o.key}" data-k="${o.key}" data-int="1" min="${o.min}" max="${o.max}" value="${settings[o.key] | 0}">`
+    + `<span class="opt-val" id="optv-${o.key}">${settings[o.key] | 0}</span></div>`;
+  const btn = (o) => `<label class="opt-row"><button type="button" class="dlg-btn ${o.cls}">${o.label}</button></label>`;
+  let html = OPTIONS.filter((o) => o.cat === optCat).map((o) => {
+    if (o.kind === "checkbox") return cb(o);
+    if (o.kind === "range") return sl(o);
+    if (o.kind === "intRange") return sli(o);
+    return btn(o);
+  }).join("");
+  // Logout keeps its own rendering: it is the one control whose LABEL changes
+  // with state, and `setLogoutButtonsPending` finds it by `.opt-logout`.
+  if (optCat === "session") {
+    html += `<button type="button" class="dlg-btn opt-logout"${logoutPending ? " disabled" : ""}>`
+      + (logoutPending ? "LOGGING OUT…" : "LOG OUT") + "</button>";
+  }
+  body.innerHTML = html;
 }
 // Show/hide the Options panel (force=true open, false close, omitted = toggle).
 function toggleOptions(force) {

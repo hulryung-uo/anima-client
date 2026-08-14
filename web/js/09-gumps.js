@@ -841,20 +841,18 @@ function closeStatus() {
   document.getElementById("statusbar").classList.remove("on");
 }
 // HUD (top-right character status panel) + journal visibility toggles. Both persist.
-// The journal lives inside the HUD, so hiding the HUD hides it too; the journal
-// toggle hides just the log while the HUD stays. U = HUD, J = journal.
+// The journal is its OWN draggable, resizable window now (see buildJournalWindow),
+// so the two are independent: U hides the status panel, J shows/hides the journal
+// window. Hiding the HUD no longer takes the log with it.
 let hudHidden = false, journalHidden = false;
 function applyHudVisibility() {
   const hud = document.getElementById("hud"); if (hud) hud.style.display = hudHidden ? "none" : "";
-  const jr = document.getElementById("journal");
-  if (jr) jr.style.display = journalHidden ? "none" : "";
-  const jt = document.getElementById("jrnl-tabs");
-  if (jt) jt.style.display = journalHidden ? "none" : "";
 }
 function loadHudVisibility() {
   hudHidden = localStorage.getItem("anima.hudHidden") === "1";
   journalHidden = localStorage.getItem("anima.journalHidden") === "1";
   applyHudVisibility();
+  applyJournalVisibility();
 }
 function toggleHud() {
   hudHidden = !hudHidden;
@@ -865,7 +863,9 @@ function toggleHud() {
 function toggleJournal() {
   journalHidden = !journalHidden;
   localStorage.setItem("anima.journalHidden", journalHidden ? "1" : "0");
-  applyHudVisibility();
+  applyJournalVisibility();
+  if (!journalHidden && journalWin) bringToFront(journalWin);
+  setStatus(journalHidden ? "journal hidden (J)" : "journal shown");
 }
 function refreshStatus(s) {
   if (!statusOn || !s || !s.player) return;

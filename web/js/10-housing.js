@@ -523,6 +523,15 @@ function openContainer(serial) {
   dialogWindows("containers").set(serial, { el, body, label, _sig: null });
   refreshContainer(serial);
 }
+// Re-draw every OPEN container window. The container-view toggles change how an
+// already-open window renders, and the guarded refresh only runs when the
+// signature moved — so clear `_sig` first.
+function refreshOpenContainers() {
+  for (const cs of dialogWindows("containers").keys()) {
+    const w = dialogWindow("containers", cs);
+    if (w) { w._sig = null; refreshContainer(cs); }
+  }
+}
 function closeContainer(serial) {
   serial = serial >>> 0;
   // ClassicUO plays the container's ClosedSound on close, client-side — closing
