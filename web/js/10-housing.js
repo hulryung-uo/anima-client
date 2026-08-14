@@ -458,6 +458,26 @@ const CORPSE_GUMP = 9;
 // reopen (no 252→art flash). Browser-side because the play server ships no gump
 // dimensions and the texture is already loaded for free.
 const gumpArtSize = new Map();
+// Per-gump container open/close sounds, ported from ClassicUO's ContainerManager
+// defaults (`[gumpId] = new ContainerData(gump, OPEN, CLOSE, ...)`). Only the
+// non-silent gumps are listed; anything absent is silent, exactly as ClassicUO's
+// `Get()` returns a default with sound 0. The sounds are keyed by the 0x24 gump
+// id, which is what we already hold in `scene.contGumps`. Corpses (gump 9) and
+// most special gumps are silent and so simply not here.
+const CONTAINER_SOUNDS = {
+  0x3C:[0x48,0x58], 0x3D:[0x48,0x58], 0x3E:[0x2F,0x2E], 0x3F:[0x4F,0x58], 0x40:[0x2D,0x2C],
+  0x41:[0x4F,0x58], 0x42:[0x2D,0x2C], 0x43:[0x2D,0x2C], 0x44:[0x2D,0x2C], 0x48:[0x2F,0x2E],
+  0x49:[0x2D,0x2C], 0x4A:[0x2D,0x2C], 0x4B:[0x2D,0x2C], 0x4C:[0x2D,0x2C], 0x4D:[0x2F,0x2E],
+  0x4E:[0x2D,0x2C], 0x4F:[0x2D,0x2C], 0x51:[0x2F,0x2E], 0x102:[0x4F,0x58], 0x103:[0x48,0x58],
+  0x104:[0x2F,0x2E], 0x105:[0x2F,0x2E], 0x106:[0x2F,0x2E], 0x107:[0x2F,0x2E], 0x108:[0x4F,0x58],
+  0x109:[0x2D,0x2C], 0x10A:[0x2D,0x2C], 0x10B:[0x2D,0x2C], 0x10C:[0x2F,0x2E], 0x10D:[0x2F,0x2E],
+  0x10E:[0x2F,0x2E], 0x2A63:[0x187,0x1C9], 0x775E:[0x48,0x58], 0x7760:[0x48,0x58], 0x7762:[0x48,0x58],
+};
+// Play a container open/close sound, respecting the same mute/sfx gate the
+// server-sound path uses (playSfx itself does not check it).
+function containerSfx(id) {
+  if (id && !audioMuted && settings.sfx && typeof playSfx === "function") playSfx(id);
+}
 function isCorpseContainer(serial) {
   return ((scene && scene.contGumps && scene.contGumps[String(serial >>> 0)]) | 0) === CORPSE_GUMP;
 }
@@ -506,13 +526,13 @@ function openContainer(serial) {
 function closeContainer(serial) {
   serial = serial >>> 0;
   // ClassicUO plays the container's ClosedSound on close, client-side — closing
-  // sends no packet, so the server never sounds it (ContainerGump.cs:728). Nearly
-  // every container uses 0x58 (ContainerManager defaults); a corpse (gump 9) is
-  // silent (ClosedSound 0x0000). Only when a window is actually here to close and
-  // sfx is on (the same gate the server-sound path uses).
-  if (dialogWindow("containers", serial) && !isCorpseContainer(serial)
-      && !audioMuted && settings.sfx && typeof playSfx === "function") {
-    playSfx(0x58);
+  // sends no packet, so the server never sounds it (ContainerGump.cs:728). The
+  // sound is per-gump (CONTAINER_SOUNDS): a backpack thumps, a corpse is silent.
+  // Only when a window is actually here to close.
+  if (dialogWindow("containers", serial)) {
+    const gump = (scene && scene.contGumps && scene.contGumps[String(serial)]) | 0;
+    const snd = CONTAINER_SOUNDS[gump];
+    if (snd) containerSfx(snd[1]);
   }
   closeDialog("containers", serial);
 }
@@ -562,6 +582,15 @@ function refreshContainer(serial) {
   // 78-entry table to be ported and cannot disagree with the server about
   // where the item actually is.
   const gump = (scene && scene.contGumps && scene.contGumps[String(serial)]) | 0;
+  // ClassicUO plays the OpenSound when the container gump is created — which for
+  // us is the moment the 0x24 gump id first arrives (a locally-opened window
+  // waits in the pending state below until then). Play it once per open, for
+  // both views (opening makes the sound regardless of how it's drawn).
+  if (gump > 0 && !win._openSounded) {
+    win._openSounded = true;
+    const snd = CONTAINER_SOUNDS[gump];
+    if (snd) containerSfx(snd[0]);
+  }
   // Which container this is — its own item graphic + tiledata name (`contInfo`,
   // resolved server-side from `world.items` because a pouch and a backpack share
   // gump 0x3C and only the item can tell them apart). `oplName` beats the
