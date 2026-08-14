@@ -827,7 +827,10 @@
       }
       .book-btn:hover:not(:disabled) { background: rgba(138, 180, 248, .28); }
       .book-btn:disabled { opacity: .4; cursor: default; }
-      .container-win { width: 252px; }
+      /* Grid mode sizes to exactly 4 columns (4×44 + 3×4 gap + 2×8 padding +
+         2×1 border = 206) so there is no dead gutter to the right of the cells;
+         authentic mode overrides this inline with the gump-art width. */
+      .container-win { width: 206px; }
       /* Authentic mode is CHROMELESS — the container's gump art IS the window,
          no box/border/title behind it, exactly UO's default look. The gump PNG
          carries its own transparency, so only the bag/chest outline shows. The

@@ -504,7 +504,17 @@ function openContainer(serial) {
   refreshContainer(serial);
 }
 function closeContainer(serial) {
-  closeDialog("containers", serial >>> 0);
+  serial = serial >>> 0;
+  // ClassicUO plays the container's ClosedSound on close, client-side — closing
+  // sends no packet, so the server never sounds it (ContainerGump.cs:728). Nearly
+  // every container uses 0x58 (ContainerManager defaults); a corpse (gump 9) is
+  // silent (ClosedSound 0x0000). Only when a window is actually here to close and
+  // sfx is on (the same gate the server-sound path uses).
+  if (dialogWindow("containers", serial) && !isCorpseContainer(serial)
+      && !audioMuted && settings.sfx && typeof playSfx === "function") {
+    playSfx(0x58);
+  }
+  closeDialog("containers", serial);
 }
 // Rebuild a container's grid only when its contents changed. Double-click an item →
 // use it; also openContainer(itemSerial) so nested bags pop open (a non-container
