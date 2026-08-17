@@ -556,7 +556,7 @@ function containerSignature(scene, serial) {
   // grid because the item-only signature never changed.
   const gid = (scene && scene.contGumps && scene.contGumps[String(serial)]) | 0;
   const info = (scene && scene.contInfo && scene.contInfo[String(serial)]) || {};
-  const head = `${gid}:${info.g | 0}:${info.name || ""}:${settings.gridContainers ? 1 : 0}:${settings.gridLoot ? 1 : 0}`;
+  const head = `${gid}:${info.g | 0}:${info.name || ""}:${settings.gridContainers ? 1 : 0}:${settings.gridLoot ? 1 : 0}:${settings.containerScale | 0}`;
   return head + "|" + ((scene && scene.contItems) || [])
     .filter((it) => (it.cont >>> 0) === serial)
     // `hue` belongs here for the same reason the amount does: a dye changes the
@@ -677,9 +677,18 @@ function refreshContainer(serial) {
     // wide gump (a 282px chessboard) and gutters a narrow one. The natural size
     // is only known after the image loads, so use a per-gump cache to size
     // synchronously on reopen (no flash) and learn it on first load.
+    // Chess/backgammon stay at 1× (ClassicUO ContainerGump.GetScale).
+    const scale = (gump === 0x091A || gump === 0x092E)
+      ? 1
+      : Math.max(50, Math.min(200, (settings.containerScale | 0) || 100)) / 100;
+    const sizeTo = (w) => {
+      const sw = Math.round(w * scale);
+      win.el.style.width = (sw + 2) + "px";
+      body.style.width = w + "px";
+    };
     const known = gumpArtSize.get(gump);
-    const sizeTo = (w) => { win.el.style.width = (w + 2) + "px"; body.style.width = w + "px"; };
     if (known) sizeTo(known);
+    body.style.zoom = scale !== 1 ? String(scale) : "";
     bg.onload = () => { gumpArtSize.set(gump, bg.naturalWidth); if (authentic) sizeTo(bg.naturalWidth); };
     // A gump we cannot fetch must not leave an empty window: fall back to the
     // grid rather than to nothing, and drop the authentic sizing with it.
@@ -688,12 +697,21 @@ function refreshContainer(serial) {
       body.classList.remove("cont-art");
       body.classList.add("cont-grid");
       win.el.classList.remove("cont-authentic");
-      win.el.style.width = ""; body.style.width = "";
+      win.el.style.width = ""; body.style.width = ""; body.style.zoom = "";
     };
     body.appendChild(bg);
+    // ClassicUO corpse gump: blinking eye overlay (gump 0x45/0x46, 750ms).
+    if (gump === CORPSE_GUMP) {
+      const eye = document.createElement("img");
+      eye.className = "cont-eye";
+      eye.src = "gump/69.png";
+      eye.draggable = false;
+      eye.alt = "";
+      body.appendChild(eye);
+    }
   } else {
     // Grid mode: shed any authentic sizing left from a previous mode.
-    win.el.style.width = ""; body.style.width = "";
+    win.el.style.width = ""; body.style.width = ""; body.style.zoom = "";
   }
   if (!items.length) {
     if (!authentic) body.innerHTML = '<div class="cont-empty">(empty)</div>';

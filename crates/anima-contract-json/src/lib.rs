@@ -134,13 +134,17 @@
 //! distinguishes "absent" from "no bonuses". v29: added `TargetedSpell`
 //! (0xBF/0x2D), `TargetedSkill` (0xBF/0x2E) and `TargetByResource` (0xBF/0x30)
 //! — the bandage-target siblings. Spell ids are 1-based like `CastSpell`;
-//! skill ids are 0-based like `UseSkill`; `target` 0 is self.)
+//! skill ids are 0-based like `UseSkill`; `target` 0 is self. v30: ClassicUO
+//! `GameActions` verbs that had no Action — `OpenDoor` (0x12/0x58, facing-tile
+//! door, not a double-click), `EquipLastWeapon` (0xD7/0x1E), `InvokeVirtue`
+//! (0x12/0xF4, 1-based), `EmoteAction` (0x12/0xC7), `CastSpellFromBook`
+//! (0x12/0x27) and `AllNames` (a burst of single-clicks).)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 29;
+pub const SCHEMA_VERSION: u32 = 30;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
@@ -893,6 +897,19 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         "UseSkill" => Ok(Action::UseSkill {
             skill: v.get("skill").and_then(Value::as_u64).unwrap_or(0) as u16,
         }),
+        "OpenDoor" => Ok(Action::OpenDoor),
+        "EquipLastWeapon" => Ok(Action::EquipLastWeapon),
+        "InvokeVirtue" => Ok(Action::InvokeVirtue {
+            id: v.get("id").and_then(Value::as_u64).unwrap_or(0) as u8,
+        }),
+        "EmoteAction" => Ok(Action::EmoteAction {
+            action: text("action"),
+        }),
+        "CastSpellFromBook" => Ok(Action::CastSpellFromBook {
+            spell: v.get("spell").and_then(Value::as_u64).unwrap_or(0) as u16,
+            book: req_u32("book")?,
+        }),
+        "AllNames" => Ok(Action::AllNames),
         "OplRequest" => Ok(Action::OplRequest {
             serial: req_u32("serial")?,
         }),
@@ -1314,6 +1331,23 @@ mod tests {
                 json!({"type": "UseSkill", "skill": 21}),
                 Action::UseSkill { skill: 21 },
             ),
+            (json!({"type": "OpenDoor"}), Action::OpenDoor),
+            (json!({"type": "EquipLastWeapon"}), Action::EquipLastWeapon),
+            (
+                json!({"type": "InvokeVirtue", "id": 1}),
+                Action::InvokeVirtue { id: 1 },
+            ),
+            (
+                json!({"type": "EmoteAction", "action": "bow"}),
+                Action::EmoteAction {
+                    action: "bow".into(),
+                },
+            ),
+            (
+                json!({"type": "CastSpellFromBook", "spell": 8, "book": 12}),
+                Action::CastSpellFromBook { spell: 8, book: 12 },
+            ),
+            (json!({"type": "AllNames"}), Action::AllNames),
             (
                 json!({"type": "OplRequest", "serial": 8}),
                 Action::OplRequest { serial: 8 },
@@ -1716,8 +1750,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v29_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 29);
+    fn schema_v30_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 30);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,

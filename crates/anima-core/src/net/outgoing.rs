@@ -1229,6 +1229,55 @@ pub fn build_use_skill(skill_id: u16) -> Vec<u8> {
     data
 }
 
+/// ASCII 0x12 ActionRequest: `[0x12][len][type][body][NUL]`. Shared by
+/// skill-use, cast-from-book, emote, and virtue — ClassicUO's `WriteASCII`
+/// always appends the terminator.
+fn build_ascii_action(typ: u8, body: &str) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x12).u16(0);
+    w.u8(typ);
+    w.bytes(body.as_bytes()).u8(0);
+    finish_variable(w.into_vec())
+}
+
+/// OpenDoor `0x12` type `0x58` — ClassicUO `Send_OpenDoor`. The server opens
+/// the door on the tile the player is facing; there is no serial on the wire.
+/// Layout: `[0x12][len:u16=5][0x58][0x00]`.
+pub fn build_open_door() -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0x12).u16(0).u8(0x58).u8(0x00);
+    finish_variable(w.into_vec())
+}
+
+/// CastSpellFromBook `0x12` type `0x27`. ClassicUO `Send_CastSpellFromBook`.
+/// `spell` is 1-based (ServUO subtracts 1, same as [`build_cast_spell`]).
+/// Layout: `[0x12][len][0x27]["<spell> <bookSerial>"][0x00]`.
+pub fn build_cast_spell_from_book(spell: u16, book: u32) -> Vec<u8> {
+    build_ascii_action(0x27, &format!("{spell} {book}"))
+}
+
+/// EmoteAction `0x12` type `0xC7` — ClassicUO `Send_EmoteAction` (bow, salute, …).
+/// ServUO's Animate handler takes the ASCII verb. Clamped to 32 bytes so a
+/// runaway string cannot bloat the packet.
+pub fn build_emote_action(action: &str) -> Vec<u8> {
+    let clamped: String = action.trim().chars().take(32).collect();
+    build_ascii_action(0xC7, &clamped)
+}
+
+/// InvokeVirtue `0x12` type `0xF4`. ClassicUO `Send_InvokeVirtueRequest`.
+/// `id` is 1-based (Honor=1 … Spirituality=8); ServUO subtracts 1.
+pub fn build_invoke_virtue(id: u8) -> Vec<u8> {
+    build_ascii_action(0xF4, &id.to_string())
+}
+
+/// EquipLastWeapon `0xD7` subcommand `0x1E`. ClassicUO `Send_EquipLastWeapon`.
+/// Layout: `[0xD7][len][playerSerial:u32][0x001E][0x0A]`.
+pub fn build_equip_last_weapon(player_serial: u32) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xD7).u16(0).u32(player_serial).u16(0x001E).u8(0x0A);
+    finish_variable(w.into_vec())
+}
+
 /// UnicodePromptResponse `0xC2` (variable) — answer (or cancel) a pending server
 /// text prompt (0xC2 UnicodePrompt: pet rename, house sign, guild abbreviation, …).
 ///
@@ -1749,6 +1798,29 @@ mod tests {
         assert_eq!(&p[4..p.len() - 1], b"21 0"); // ASCII command body
         assert_eq!(*p.last().unwrap(), 0); // NUL terminator
         assert_eq!(p, vec![0x12, 0x00, 0x09, 0x24, b'2', b'1', b' ', b'0', 0]);
+    }
+
+    #[test]
+    fn open_door_and_related_action_request_layouts() {
+        assert_eq!(build_open_door(), vec![0x12, 0x00, 0x05, 0x58, 0x00]);
+
+        let from_book = build_cast_spell_from_book(8, 0x4000_0001);
+        assert_eq!(from_book[0], 0x12);
+        assert_eq!(from_book[3], 0x27);
+        assert_eq!(&from_book[4..from_book.len() - 1], b"8 1073741825");
+        assert_eq!(*from_book.last().unwrap(), 0);
+
+        let emote = build_emote_action("bow");
+        assert_eq!(emote, vec![0x12, 0x00, 0x08, 0xC7, b'b', b'o', b'w', 0]);
+
+        let virtue = build_invoke_virtue(1);
+        assert_eq!(virtue, vec![0x12, 0x00, 0x06, 0xF4, b'1', 0]);
+
+        let last = build_equip_last_weapon(0x0102_0304);
+        assert_eq!(
+            last,
+            vec![0xD7, 0x00, 0x0A, 0x01, 0x02, 0x03, 0x04, 0x00, 0x1E, 0x0A]
+        );
     }
 
     #[test]

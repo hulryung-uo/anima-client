@@ -247,6 +247,9 @@ const SETTINGS_DEFAULTS = {
   autoOpenDoors: true,            // walking into a closed door opens it (ClassicUO TryOpenDoors) — on by default
   gridLoot: true,                 // corpses open a click-to-loot grid instead of the authentic corpse gump
   gridContainers: false,          // ALL containers as a titled grid (icon+name) vs the authentic gump art (default)
+  // ClassicUO ContainersScale (OptionsGump, 50–200, default 100). Applied to
+  // authentic container gumps (not chess/backgammon, which ClassicUO leaves at 1).
+  containerScale: 100,
   shadows: true,                  // mobile shadows (ClassicUO's ShadowsEnabled, on by default there too)
   // Terrain shading strength — ClassicUO's TerrainShadowsLevel (Profile.cs:237,
   // default 15, slider 5..25 per Constants.cs:27-28). The shader multiplies by
@@ -311,6 +314,7 @@ const OPTIONS = [
   { key: "autoOpenDoors", kind: "checkbox", cat: "gameplay", label: "Auto-open doors" },
   { key: "gridLoot", kind: "checkbox", cat: "gameplay", label: "Click-to-loot corpses", onChange: () => refreshOpenContainers() },
   { key: "gridContainers", kind: "checkbox", cat: "gameplay", label: "Grid container view", onChange: () => refreshOpenContainers() },
+  { key: "containerScale", kind: "intRange", cat: "gameplay", label: "Container scale %", min: 50, max: 200, onChange: () => refreshOpenContainers() },
 
   { kind: "button", cat: "windows", label: "Journal", cls: "opt-journal" },
   { kind: "button", cat: "windows", label: "Info bar", cls: "opt-infobar" },
