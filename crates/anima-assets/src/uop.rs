@@ -316,6 +316,18 @@ impl UopReader {
         self.by_hash(uop_hash(&path))
     }
 
+    /// Whether `build/artlegacymul/{index:08}.tga` is listed (no decompress).
+    pub fn has_art(&self, index: usize) -> bool {
+        let path = format!("build/artlegacymul/{index:08}.tga");
+        self.entries.contains_key(&uop_hash(&path))
+    }
+
+    /// Whether `build/gumpartlegacymul/{index:08}.tga` is listed (no decompress).
+    pub fn has_gump(&self, index: usize) -> bool {
+        let path = format!("build/gumpartlegacymul/{index:08}.tga");
+        self.entries.contains_key(&uop_hash(&path))
+    }
+
     /// Decompressed bytes for a sound entry (`build/soundlegacymul/{:08}.dat`).
     /// `index` = the sound id used by the 0x54 PlaySoundEffect packet.
     pub fn by_sound(&self, index: usize) -> Option<Vec<u8>> {

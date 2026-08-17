@@ -157,7 +157,7 @@ pub fn build_scene(
     // `Equipconv.def` is keyed by the wearer's REMAPPED body.
     let (equip_body, _) = look.remap(p.body, p.hue);
     let equip = equip_json(&s.world, &look, &p, equip_body);
-    let player_mount_anim = player_mount_anim(&s.world, &look, &p);
+    let (player_mount_anim, player_mount_off) = player_mount_info(&s.world, &look, &p);
     let cont_items = container_items_json(&s.world, &look);
     // Per-open-container title/icon metadata — resolved here while `look` (and so
     // the tiledata name lookup) is alive, before the tile loop takes the mutable
@@ -268,7 +268,7 @@ pub fn build_scene(
         "body": p_body, "dead": player_is_ghost(&s.world), "at": p_atype, "name": p.name,
         "noto": p.notoriety,  // self notoriety (innocent/criminal/murderer…) → name-overhead colour
         "hue": p_hue,
-        "mounted": mounted, "mountAnim": player_mount_anim,
+        "mounted": mounted, "mountAnim": player_mount_anim, "mountOff": player_mount_off,
         "hits": p.hits, "hitsMax": p.hits_max, "mana": p.mana, "manaMax": p.mana_max,
         "stam": p.stam, "stamMax": p.stam_max,
         "str": st.strength, "dex": st.dexterity, "int": st.intelligence, "gold": st.gold,
@@ -318,6 +318,7 @@ pub fn build_scene(
     let tanims = json_array(&typed_anims_json(&s.world));
     let damage = json_array(&damage_json(&s.world));
     let effects = json_array(&effects_json(&s.world, animdata));
+    let drag_anims = json_array(&drag_anims_json(&s.world));
     let music = match s.world.current_music {
         Some(id) => id.to_string(),
         None => "null".to_string(),
@@ -549,7 +550,7 @@ pub fn build_scene(
         "{{\"player\":{player},\
          \"map\":{{\"cx\":{px},\"cy\":{py},\"radius\":{LAND_RADIUS},\"viewRange\":{RADIUS},\"tiles\":[{tiles}],\"maxZ\":{max_z},\"dbg\":{dbg}}},\
          \"statics\":[{statics}],\"mobiles\":{mobiles},\"items\":{items},\"contItems\":{cont_items},\
-         \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"tanims\":{tanims},\"damage\":{damage},\"effects\":{effects},\"music\":{music},\
+         \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"tanims\":{tanims},\"damage\":{damage},\"effects\":{effects},\"dragAnims\":{drag_anims},\"music\":{music},\
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
          \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"logoutAck\":{logout_ack},\"boatMoves\":{boat_moves},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\

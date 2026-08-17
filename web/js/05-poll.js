@@ -29,6 +29,7 @@ function primeSeqRings(s) {
   lastTypedAnimSeq = Math.max(lastTypedAnimSeq, maxSeq(s.tanims));
   lastDamageSeq = Math.max(lastDamageSeq, maxSeq(s.damage));
   lastEffectSeq = Math.max(lastEffectSeq, maxSeq(s.effects));
+  lastDragAnimSeq = Math.max(lastDragAnimSeq, maxSeq(s.dragAnims));
   lastLiftRejectSeq = Math.max(lastLiftRejectSeq, maxSeq(s.liftRejects));
   lastDragCompletionSeq = Math.max(lastDragCompletionSeq, maxSeq(s.dragCompletions));
   if (s.deathScreen) lastDeathScreenSeq = Math.max(lastDeathScreenSeq, s.deathScreen.seq | 0);
@@ -82,6 +83,7 @@ async function poll() {
     ingestTypedAnims(scene); // play new typed animations (0xE2: emotes, gestures, alerts…)
     ingestDamage(scene); // float new combat damage numbers (0x0B)
     ingestEffects(scene); // spawn new graphical effects (0x70/0xC0/0xC7)
+    ingestDragAnims(scene); // spawn new 0x23 item-flight sprites
     ingestLiftRejects(scene); // clear the held item + show a message (0x27 LiftRej)
     ingestDragCompletions(scene); // reconcile held-item cursor acknowledgements (0x28/0x29)
     ingestDeathScreen(scene); // start ClassicUO's short death banner timer (0x2C)
@@ -257,8 +259,10 @@ function updateAnimStates(s) {
   // The chair we're seated on disappeared/moved/changed graphic (someone else used
   // it, a GM deleted it, …) — stand up rather than leave the avatar seated on thin
   // air. Cheap: once per poll (~150ms), not per rendered frame.
-  if (sitting && !(s.items || []).some((it) => (it.x | 0) === sitting.x && (it.y | 0) === sitting.y && (it.g | 0) === sitting.graphic)) {
-    standUp();
+  if (sitting) {
+    const onItem = (s.items || []).some((it) => (it.x | 0) === sitting.x && (it.y | 0) === sitting.y && (it.g | 0) === sitting.graphic);
+    const onStatic = (staticsAt(sitting.x, sitting.y) || []).some((st) => (st.g | 0) === sitting.graphic && Math.abs((st.z | 0) - sitting.z) <= 1);
+    if (!onItem && !onStatic) standUp();
   }
   const touch = (id, x, y, z, dir, body, fb) => {
     seen.add(id);
@@ -526,7 +530,11 @@ function syncWorld(s) {
     if (drawG === null) continue;
     // The key carries the DRAWN graphic so flipping "trees as stumps" rebuilds
     // the sprite instead of leaving the old tree art in place.
-    const key = `${st.x},${st.y},${drawG},${st.z}`;
+    const iHue = st.hue | 0;
+    const hueQ = hueQuery(iHue);
+    // Hue is part of identity: two same-graphic statics on one tile can
+    // differ only by dye (a stained-glass pane next to a clear one).
+    const key = `${st.x},${st.y},${drawG},${st.z},${iHue}`;
     seenS.add(key);
     const beyondView = Math.max(Math.abs(st.x - P.x), Math.abs(st.y - P.y)) > VR;
     if (staticPool.has(key)) {
@@ -549,7 +557,7 @@ function syncWorld(s) {
       }
       continue; // unchanged; see the blanket LRU-touch note above
     }
-    const texUrl = `art/static/${drawG}.png`;
+    const texUrl = `art/static/${drawG}.png${hueQ}`;
     const tex = texFor(texUrl);
     if (!tex) continue;
     const sp = new PIXI.Sprite(tex);
@@ -590,7 +598,7 @@ function syncWorld(s) {
     // tile-id frame sequence (`a`) + per-frame interval ms (`ai`). Prefetch each
     // frame's texture and store them so the animation pass can swap sp.texture.
     if (Array.isArray(st.a) && st.a.length > 1) {
-      const frameUrls = st.a.map((id) => `art/static/${id}.png`);
+      const frameUrls = st.a.map((id) => `art/static/${id}.png${hueQ}`);
       sp._frames = frameUrls.map((u) => texFor(u));
       sp._frameUrls = frameUrls;   // so tickAnimatedStatics/touch can re-resolve/re-stamp by url
       sp._afids = st.a;            // keep ids so late-loading frames can be resolved

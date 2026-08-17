@@ -59,8 +59,8 @@ pub(super) fn mobiles_json(world: &World, look: &Look, player: &Mobile) -> Vec<V
                 .items
                 .values()
                 .find(|it| it.container == Some(m.serial) && it.layer == 25);
-            let mount_anim = mount.map_or(0u16, |it| {
-                mount_anim_for(it.graphic, &|g| look.item_anim(g))
+            let (mount_anim, mount_off) = mount.map_or((0u16, 0i8), |it| {
+                mount_info_for(it.graphic, &|g| look.item_anim(g))
             });
             let mut v = json!({
                 "serial": m.serial,
@@ -68,7 +68,8 @@ pub(super) fn mobiles_json(world: &World, look: &Look, player: &Mobile) -> Vec<V
                 "body": body, "at": look.atype(body), "noto": m.notoriety, "name": m.name,
                 "hits": m.hits, "hitsMax": m.hits_max,
                 "hue": hue, "equip": equip,
-                "mounted": mount.is_some() as u8, "mountAnim": mount_anim
+                "mounted": mount.is_some() as u8, "mountAnim": mount_anim,
+                "mountOff": mount_off
             });
             merge_obj(&mut v, hidden_field(m.hidden));
             merge_obj(&mut v, poisoned_field(m.poisoned));
@@ -391,14 +392,14 @@ pub(super) fn container_info_json(
         .collect()
 }
 
-/// The player's mount item (layer 25) AnimID — the animal body to draw under
-/// the rider when mounted; 0 = on foot.
-pub(super) fn player_mount_anim(world: &World, look: &Look, player: &Mobile) -> u16 {
+/// The player's mount item (layer 25): animal body to draw under the rider,
+/// plus the table's vertical rider offset. `(0, 0)` = on foot.
+pub(super) fn player_mount_info(world: &World, look: &Look, player: &Mobile) -> (u16, i8) {
     world
         .items
         .values()
         .find(|it| it.container == Some(player.serial) && it.layer == 25)
-        .map_or(0u16, |it| {
-            mount_anim_for(it.graphic, &|g| look.item_anim(g))
+        .map_or((0, 0), |it| {
+            mount_info_for(it.graphic, &|g| look.item_anim(g))
         })
 }

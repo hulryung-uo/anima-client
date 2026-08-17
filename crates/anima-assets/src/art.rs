@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::def::parse_alias_def;
+use crate::idxmul::IdxMul;
 use crate::uop::UopReader;
 
 const LAND_DIM: usize = 44;
@@ -80,23 +82,78 @@ fn rd_u16(d: &[u8], p: usize) -> u16 {
     u16::from_le_bytes([d[p], d[p + 1]])
 }
 
+enum ArtSource {
+    Uop(UopReader),
+    Mul(IdxMul),
+}
+
 pub struct Art {
-    uop: UopReader,
+    source: ArtSource,
+    /// `art.def`: missing index → first present group member + hue.
+    aliases: HashMap<u32, (Vec<u32>, u16)>,
     avg_cache: HashMap<u16, [u8; 4]>,
 }
 
 impl Art {
     pub fn open(resource_dir: impl AsRef<Path>) -> std::io::Result<Art> {
-        let path = resource_dir.as_ref().join("artLegacyMUL.uop");
+        let dir = resource_dir.as_ref();
+        let source = if dir.join("artLegacyMUL.uop").is_file() {
+            ArtSource::Uop(UopReader::open(&dir.join("artLegacyMUL.uop"))?)
+        } else {
+            ArtSource::Mul(IdxMul::open(dir.join("artidx.mul"), dir.join("art.mul"))?)
+        };
         Ok(Art {
-            uop: UopReader::open(&path)?,
+            source,
+            aliases: std::fs::read_to_string(dir.join("art.def"))
+                .map(|t| parse_alias_def(&t))
+                .unwrap_or_default(),
             avg_cache: HashMap::new(),
         })
     }
 
+    fn raw(&self, index: usize) -> Option<Vec<u8>> {
+        match &self.source {
+            ArtSource::Uop(u) => u.by_art(index),
+            ArtSource::Mul(m) => m.read(index).map(|(b, _)| b),
+        }
+    }
+
+    /// Bytes for `index`, or the first `art.def` alias that exists.
+    /// The `u16` is the def hue (0 when the primary index was present).
+    fn resolve(&self, index: usize) -> Option<(Vec<u8>, u16)> {
+        if let Some(data) = self.raw(index) {
+            return Some((data, 0));
+        }
+        let (group, hue) = self.aliases.get(&(index as u32))?;
+        for &alt in group {
+            if let Some(data) = self.raw(alt as usize) {
+                return Some((data, *hue));
+            }
+        }
+        None
+    }
+
+    fn has(&self, index: usize) -> bool {
+        match &self.source {
+            ArtSource::Uop(u) => u.has_art(index),
+            ArtSource::Mul(m) => m.entry(index).is_some(),
+        }
+    }
+
+    /// Hue `art.def` wants applied when this index was missing and aliased.
+    pub fn def_hue(&self, index: usize) -> u16 {
+        if self.has(index) {
+            return 0;
+        }
+        self.aliases
+            .get(&(index as u32))
+            .map(|(_, h)| *h)
+            .unwrap_or(0)
+    }
+
     /// Decode a land tile (graphic 0..0x3FFF) to a 44×44 RGBA image.
     pub fn land(&self, graphic: u16) -> Option<Image> {
-        let data = self.uop.by_art((graphic & 0x3FFF) as usize)?;
+        let (data, _) = self.resolve((graphic & 0x3FFF) as usize)?;
         let mut rgba = vec![0u8; LAND_DIM * LAND_DIM * 4];
         let mut p = 0usize;
         let put = |x: usize, y: usize, c: u16, rgba: &mut [u8]| {
@@ -158,7 +215,7 @@ impl Art {
 
     /// Decode a static tile (graphic, art index 0x4000+graphic) to RGBA.
     pub fn static_tile(&self, graphic: u16) -> Option<Image> {
-        let data = self.uop.by_art(0x4000 + graphic as usize)?;
+        let (data, _) = self.resolve(0x4000 + graphic as usize)?;
         if data.len() < 8 {
             return None;
         }

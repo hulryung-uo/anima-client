@@ -462,6 +462,43 @@ fn corpse_fields_carries_remapped_body_dir_and_death_group() {
 }
 
 #[test]
+fn mount_info_for_keeps_the_table_offset() {
+    // Offsets the previous `mount_anim_for` discarded. Ethereal horse -9,
+    // cu sidhe +18 — the two signs the rider would sit wrong without.
+    assert_eq!(mount_info_for(0x3E9B, &|_| 0xFFFF), (0x00C0, -9));
+    assert_eq!(mount_info_for(0x3EC7, &|_| 0xFFFF), (0x04E6, 18));
+    assert_eq!(mount_info_for(0x0001, &|g| g.wrapping_add(1)), (2, 0));
+}
+
+#[test]
+fn drag_anims_json_mirrors_the_world_ring() {
+    let mut w = World::default();
+    w.push_drag_anim(anima_core::world::DragAnimation {
+        seq: 0,
+        graphic: 0x0EEF,
+        hue: 5,
+        count: 1,
+        source: 0xAAAA,
+        source_x: 10,
+        source_y: 20,
+        source_z: 3,
+        dest: 0,
+        dest_x: 111,
+        dest_y: 222,
+        dest_z: 4,
+    });
+    let v = drag_anims_json(&w);
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0]["seq"], 1);
+    assert_eq!(v[0]["g"], 0x0EEF);
+    assert_eq!(v[0]["hue"], 5);
+    assert_eq!(v[0]["src"], 0xAAAA);
+    assert_eq!(v[0]["sx"], 10);
+    assert_eq!(v[0]["tx"], 111);
+    assert_eq!(v[0]["tz"], 4);
+}
+
+#[test]
 fn party_json_reports_members_leader_and_pending_invite() {
     let mut w = World::default();
     // Not in a party: empty members, leader 0, no invite.
@@ -2041,6 +2078,14 @@ fn item_art_hue_marks_partial_hue_items_and_leaves_undyed_ones_alone() {
     // …and an undyed item stays "no hue" whatever tiledata says, or the
     // renderer would request a hue of 0x8000 (= partial hue id 0).
     assert_eq!(item_art_hue(0, FLAG_PARTIAL_HUE), 0);
+}
+
+#[test]
+fn static_hue_suffix_omits_undyed_and_marks_partial() {
+    assert_eq!(static_hue_suffix(0, 0), "");
+    assert_eq!(static_hue_suffix(0, FLAG_PARTIAL_HUE), "");
+    assert_eq!(static_hue_suffix(0x21, 0), ",\"hue\":33");
+    assert_eq!(static_hue_suffix(0x21, FLAG_PARTIAL_HUE), ",\"hue\":32801");
 }
 
 /// Real bug regression (see `blocking_item_at`'s doc for the full live

@@ -62,6 +62,9 @@ pub struct StaticTile {
     pub z: i8,
     pub height: u8,
     pub flags: u64,
+    /// Dye from the 7-byte `statics.mul` record (little-endian u16 after Z).
+    /// 0 = undyed. Never consulted by pathing — draw only.
+    pub hue: u16,
 }
 
 impl StaticTile {
@@ -184,6 +187,21 @@ pub struct MapData {
     blocks_y: u32,
 }
 
+/// One 7-byte `statics.mul` record: graphic, in-block x/y, z, hue.
+/// ClassicUO `MapLoader` keeps the hue; we used to skip the last two bytes.
+pub(crate) fn parse_static_record(b: &[u8]) -> Option<(u16, u32, u32, i8, u16)> {
+    if b.len() < 7 {
+        return None;
+    }
+    Some((
+        u16::from_le_bytes([b[0], b[1]]),
+        b[2] as u32,
+        b[3] as u32,
+        b[4] as i8,
+        u16::from_le_bytes([b[5], b[6]]),
+    ))
+}
+
 impl MapData {
     /// Open **facet 0** (Felucca) from a UO data directory. Back-compat shorthand
     /// for [`Self::open_facet`]`(dir, 0)` — most callers only ever touch facet 0.
@@ -302,16 +320,18 @@ impl MapData {
                 let mut pos = data_off;
                 let end = (data_off + data_len).min(self.statics.len());
                 while pos + 7 <= end {
-                    let graphic = u16::from_le_bytes([self.statics[pos], self.statics[pos + 1]]);
-                    let cx = self.statics[pos + 2] as u32;
-                    let cy = self.statics[pos + 3] as u32;
-                    let z = self.statics[pos + 4] as i8;
+                    let Some((graphic, cx, cy, z, hue)) =
+                        parse_static_record(&self.statics[pos..pos + 7])
+                    else {
+                        break;
+                    };
                     pos += 7;
                     let tile = StaticTile {
                         graphic,
                         z,
                         height: self.tiledata.item_height(graphic),
                         flags: self.tiledata.item_flags(graphic),
+                        hue,
                     };
                     if cx < BLOCK_SIZE && cy < BLOCK_SIZE {
                         out[(cy * BLOCK_SIZE + cx) as usize].push(tile);
@@ -498,6 +518,15 @@ impl MapData {
 mod tests {
     use super::*;
 
+    #[test]
+    fn parse_static_record_reads_the_hue_the_old_decoder_skipped() {
+        // graphic 0x06A5, cell (3,4), z=10, hue 0x0021 — the two hue bytes
+        // sit after Z and used to be consumed only by `pos += 7`.
+        let rec = parse_static_record(&[0xA5, 0x06, 3, 4, 10, 0x21, 0x00]).unwrap();
+        assert_eq!(rec, (0x06A5, 3, 4, 10, 0x0021));
+        assert!(parse_static_record(&[0; 6]).is_none());
+    }
+
     /// `TileFlag.Generic` (0x800, ClassicUO `ItemData.IsStackable`) distinguishes
     /// a real stack (gold coins) from an `amount`-bearing-but-unstackable item
     /// (a backpack's `amount` is unused/1); `scene.rs`'s split-stack dialog needs
@@ -622,6 +651,7 @@ mod tests {
             z: 40,
             height: 0,
             flags: flags::SURFACE,
+            hue: 0,
         }];
         assert_eq!(
             score_walkable_z(land, &statics, 0),
@@ -664,6 +694,7 @@ mod tests {
             z: -2,
             height: 20,
             flags: flags::IMPASSABLE,
+            hue: 0,
         }];
         assert_eq!(
             score_walkable_z(land, &statics, 0),
@@ -699,6 +730,7 @@ mod tests {
             z: -15,
             height: 4,
             flags: flags::SURFACE,
+            hue: 0,
         };
         assert_eq!(
             score_walkable_z(land, &[deck], -15),
@@ -724,12 +756,14 @@ mod tests {
             z: 0,
             height: 0,
             flags: flags::SURFACE,
+            hue: 0,
         };
         let hull = StaticTile {
             graphic: 0x0999,
             z: -2,
             height: 20,
             flags: flags::IMPASSABLE,
+            hue: 0,
         };
         assert_eq!(
             score_walkable_z(land, &[deck, hull], 0),
@@ -757,6 +791,7 @@ mod tests {
             z: 40,
             height: 10,
             flags: 0,
+            hue: 0,
         };
         assert_eq!(
             map.walkable_z_explain(3503, 2574, land.z as i32, &[]),

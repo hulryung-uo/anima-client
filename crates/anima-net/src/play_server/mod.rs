@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use anima_assets::{
     Anim, AnimData, Art, Cliloc, CustomHouseCatalog, Gumps, Hues, Lights, MapData, Multis,
-    RadarCol, Sounds, Texmaps, TileData,
+    RadarCol, Skills, Sounds, Speeches, Texmaps, TileData,
 };
 use anima_core::agent::{HouseDesignAction, SpeechMode};
 use anima_core::net::{
@@ -149,6 +149,8 @@ pub struct PlayServer {
     facet: Arc<AtomicU8>,
     /// Epoch-millis of the last `/scene.json` fetch — see [`Monitor::watching`].
     watch: Arc<AtomicU64>,
+    /// `speech.mul` — attached to each new [`Session`] so Say encodes keywords.
+    speech: Option<Speeches>,
 }
 
 /// Load assets, bind the HTTP server (workers included), and return a
@@ -188,6 +190,22 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     // Cliloc table (Cliloc.enu): localized text for context-menu labels (and reusable
     // for gump/system-message clilocs). Resolved into the scene when present.
     let cliloc: Option<Arc<Cliloc>> = Cliloc::open(&data_dir).ok().map(Arc::new);
+    let speech: Option<Speeches> = Speeches::open(&data_dir).ok();
+    eprintln!(
+        "play: speech {}",
+        speech.as_ref().map_or("not loaded".into(), |s| format!(
+            "loaded ({} keywords)",
+            s.len()
+        ))
+    );
+    let skillinfo: Arc<String> = Arc::new(
+        Skills::open(&data_dir)
+            .map(|s| {
+                eprintln!("play: skills loaded ({} names)", s.entries.len());
+                s.to_json()
+            })
+            .unwrap_or_else(|_| "[]".into()),
+    );
     // light.mul/lightidx.mul — the per-light glow shapes. Optional like every
     // other art file: without it the renderer keeps its plain radial falloff.
     let lights: Option<Arc<Lights>> = Lights::open(&data_dir).ok().map(Arc::new);
@@ -347,6 +365,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
             facet: facet.clone(),
             read_only: cfg.read_only,
             watch: watch.clone(),
+            skillinfo,
         },
     );
 
@@ -367,6 +386,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
         sse_hub,
         facet,
         watch,
+        speech,
     })
 }
 
@@ -571,6 +591,7 @@ impl PlayServer {
             sse_hub,
             facet,
             watch: _watch,
+            speech,
         } = self;
 
         // Starting city for a newly-created character (ServUO honors the selection):
@@ -754,6 +775,9 @@ impl PlayServer {
                     }
                 }
             };
+            if let Some(ref table) = speech {
+                session.set_speech(table.clone());
+            }
             eprintln!(
                 "play: in world. open http://127.0.0.1:{port}/  (WASD/arrows move, T to talk)"
             );

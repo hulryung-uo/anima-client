@@ -6,11 +6,11 @@
 > architecture, the current state, the roadmap, and the concrete protocol/asset
 > knowledge needed to implement Phase 1.
 
-Last updated: 2026-07-02 · Status: **Phases 1–3 COMPLETE, including the Phase 3
+Last updated: 2026-08-17 · Status: **Phases 1–3 COMPLETE, including the Phase 3
 "human-playable polish" tail** (iso sprite blitting, walk/attack/typed animations
-incl. UOP + monster body remap, gumps, audio, secure trading, AI contract). 7 crates
+incl. UOP + monster body remap, gumps, audio, secure trading, AI contract). 8 crates
 (anima-core / anima-assets / anima-contract-json / anima-net / anima-wasm /
-anima-agent / anima-desktop) + web/; workspace tests and quality gates are green (including 7 golden-packet
+anima-agent / anima-desktop / anima-relay) + web/; workspace tests and quality gates are green (including 7 golden-packet
 regression tests replaying real `uo_proxy` captures, §7); real-data-file tests are
 `#[ignore]`d by default; wasm32 builds.
 - **Phase 1:** headless agent connects to a live ServUO, logs in (create + select),
@@ -80,8 +80,9 @@ treasure maps, and **custom housing** (0xD8 viewing: plane parse/zlib → deferr
 mode-0/1/2 decode against multi.mul bounds → design tiles replace the foundation's
 components in both scene emission and the walkability fold; auto 0xBF/0x1E refresh
 on 0xBF/0x1D revision notices; live-verified against ServUO placement → DesignInsert
-→ delete). What actually remains (see §6 Phase 3 for detail): richer/RL/LLM brains and the
-browser WASM + WebSocket↔TCP relay (`anima-wasm` exists; the relay service doesn't).
+→ delete). What actually remains (see §6 Phase 3 for detail): richer/RL/LLM brains and
+browser-side asset delivery for a genuine WASM client (`anima-relay` exists; the
+page still renders from the play server's `scene.json`).
 delete-character (0x83) is done too: `build_delete_character` (30 zeroed bytes —
 NOT the password, ClassicUO parity) + a `LoginConfig::delete_existing` flow that
 deletes-once then re-runs select/create against the refreshed 0x86 list, with 0x85
@@ -200,7 +201,7 @@ standalone/relay split:
 
 ```
 anima-client/
-├── Cargo.toml                 # Rust workspace (5 members, see below)
+├── Cargo.toml                 # Rust workspace (8 members, see below)
 ├── README.md · CLAUDE.md · .gitignore
 ├── docs/DESIGN.md · RENDERING.md · MOVEMENT.md
 └── crates/
@@ -389,7 +390,9 @@ The driver is the only code that knows about sockets — write it once for nativ
    between opening with a special and wasting the mana. It is written
    optimistically by the driver on send and cleared by the packet; the same
    version added `active_spell_icons` (0xBF/0x25 stances) and the
-   `DisarmRequest`/`StunRequest`/`BandageTarget` actions.
+   `DisarmRequest`/`StunRequest`/`BandageTarget` actions. Schema v29 added the
+   bandage siblings `TargetedSpell`/`TargetedSkill`/`TargetByResource`
+   (0xBF/0x2D, 0x2E, 0x30).
    **`Observation.terrain`** (schema v17) is the one field that does not come from
    a packet: local walkability (walkable / standing Z / the serial of a closed door
    in the way), so a brain can tell a wall from open ground rather than delegating
@@ -455,12 +458,14 @@ honest shape of the remaining work is asset delivery, not transport.
   Python brain; `Session::advance_route` gives any driver a non-blocking
   `Action::WalkTo`.
 
-**Remaining tail:** richer brains (RL/LLM over the contract); browser WASM +
-WebSocket↔TCP relay (`anima-wasm` itself is done — the relay service and its
-browser wiring aren't). (Previously listed here and since
-completed: delete-character (0x83), the `multi.mul` reader + placed-multi resolution, sitting, treasure
-maps, the Tauri shell, and custom housing — 0xD8 viewing with design tiles
-replacing foundation components in scene + walkability, live-verified.)
+**Remaining tail:** richer brains (RL/LLM over the contract); browser *page*
+wiring for `anima-wasm` + the existing `anima-relay` (the relay itself is done —
+what is left is asset delivery into the browser, §4). ClassicUO Tier 3 is closed
+(including seated-character deformation). Remaining asset rows are the large
+optional formats (`verdata`, `mapdif`, `fonts.mul`, `tileart.uop`, BWT cliloc)
+— see CLASSICUO_GAPS.md Tier 5. (Previously listed here and since completed:
+delete-character, `multi.mul`, sitting, treasure maps, Tauri, custom housing,
+the relay, `speech.mul` keywords, skills.mul / *.def aliases / MUL fallback.)
 
 ---
 

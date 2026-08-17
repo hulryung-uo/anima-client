@@ -177,6 +177,7 @@ const DAMAGE_RISE = 20;        // px it rises over its life
 // from animdata.mul; we just cycle them, tint by hue, and position per kind. ----
 const fxEffects = [];          // { seq, kind, frames[], fm, born, totalMs, sprite, hue, anchors… }
 let lastEffectSeq = 0;         // highest effect event seq we've already spawned
+let lastDragAnimSeq = 0;       // highest 0x23 DragAnimation seq we've spawned
 
 // ---- lift-rejection events (0x27 LiftRej) ----
 let lastLiftRejectSeq = 0;     // highest lift-reject event seq we've already handled

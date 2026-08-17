@@ -131,13 +131,16 @@
 //! whole `type >= 6` tail of 0x11 — the five resistance caps and the ten
 //! combat/casting modifiers — flat on `player`. All zero unless the shard is
 //! ML+ and the client asked for the extended status; nothing on the wire
-//! distinguishes "absent" from "no bonuses".)
+//! distinguishes "absent" from "no bonuses". v29: added `TargetedSpell`
+//! (0xBF/0x2D), `TargetedSkill` (0xBF/0x2E) and `TargetByResource` (0xBF/0x30)
+//! — the bandage-target siblings. Spell ids are 1-based like `CastSpell`;
+//! skill ids are 0-based like `UseSkill`; `target` 0 is self.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 28;
+pub const SCHEMA_VERSION: u32 = 29;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
@@ -867,6 +870,18 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
             bandage: req_u32("bandage")?,
             target: req_u32("target")?,
         }),
+        "TargetedSpell" => Ok(Action::TargetedSpell {
+            spell: req_u32("spell")? as u16,
+            target: req_u32("target")?,
+        }),
+        "TargetedSkill" => Ok(Action::TargetedSkill {
+            skill: req_u32("skill")? as u16,
+            target: req_u32("target")?,
+        }),
+        "TargetByResource" => Ok(Action::TargetByResource {
+            tool: req_u32("tool")?,
+            resource: req_u32("resource")? as u16,
+        }),
         "StatLock" => Ok(Action::StatLock {
             stat: v.get("stat").and_then(Value::as_u64).unwrap_or(0) as u8,
             lock: v.get("lock").and_then(Value::as_u64).unwrap_or(0) as u8,
@@ -1268,6 +1283,27 @@ mod tests {
                 Action::BandageTarget {
                     bandage: 12,
                     target: 34,
+                },
+            ),
+            (
+                json!({"type": "TargetedSpell", "spell": 1, "target": 34}),
+                Action::TargetedSpell {
+                    spell: 1,
+                    target: 34,
+                },
+            ),
+            (
+                json!({"type": "TargetedSkill", "skill": 1, "target": 34}),
+                Action::TargetedSkill {
+                    skill: 1,
+                    target: 34,
+                },
+            ),
+            (
+                json!({"type": "TargetByResource", "tool": 12, "resource": 2}),
+                Action::TargetByResource {
+                    tool: 12,
+                    resource: 2,
                 },
             ),
             (
@@ -1680,8 +1716,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v28_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 28);
+    fn schema_v29_retains_waypoint_exact_shape() {
+        assert_eq!(SCHEMA_VERSION, 29);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,

@@ -807,13 +807,30 @@ const SKILL_NAMES = [
   "Meditation", "Stealth", "Remove Trap", "Necromancy", "Focus", "Chivalry", "Bushido",
   "Ninjitsu", "Spellweaving", "Mysticism", "Imbuing", "Throwing",
 ];
-function skillName(id) { return SKILL_NAMES[id] || ("Skill #" + id); }
+let skillInfo = null; // id → {name, use} from skills.mul
+function skillName(id) {
+  const s = skillInfo && skillInfo.get(id | 0);
+  return (s && s.name) || SKILL_NAMES[id] || ("Skill #" + id);
+}
 // Active skills that do something on "use" (most via a target cursor). Other ids
-// are still double-clickable but the ▸ button is hidden for them.
+// are still double-clickable but the ▸ button is hidden for them. Replaced by
+// skills.mul HasAction when /skillinfo.json loads.
 const USABLE_SKILLS = new Set([
   1, 2, 3, 4, 6, 9, 12, 14, 15, 16, 17, 19, 20, 21, 22, 23, 24, 28, 30, 32, 33, 35,
   36, 38, 46, 47, 48, 56,
 ]);
+async function loadSkillInfo() {
+  try {
+    const r = await fetch("skillinfo.json");
+    if (!r.ok) return;
+    const arr = await r.json();
+    if (!Array.isArray(arr) || !arr.length) return;
+    skillInfo = new Map(arr.map((s) => [s.id | 0, s]));
+    USABLE_SKILLS.clear();
+    for (const s of arr) if (s.use) USABLE_SKILLS.add(s.id | 0);
+  } catch (e) { /* keep the hardcoded table */ }
+}
+loadSkillInfo();
 const LOCK_ICONS = ["↑", "↓", "🔒"]; // up ↑ / down ↓ / locked 🔒
 const LOCK_TITLES = ["raise (click: lower)", "lower (click: lock)", "locked (click: raise)"];
 let skillsOn = false;

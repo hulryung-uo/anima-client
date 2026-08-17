@@ -4,26 +4,98 @@
 //! table (one u32 offset per row, in u32 units) followed by `(color16, run)`
 //! RLE pairs. Ported from ClassicUO `GumpsLoader`.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::art::Image;
+use crate::def::parse_alias_def;
+use crate::idxmul::IdxMul;
 use crate::uop::UopReader;
 
+enum GumpSource {
+    Uop(UopReader),
+    Mul(IdxMul),
+}
+
 pub struct Gumps {
-    uop: UopReader,
+    source: GumpSource,
+    /// `gump.def`: missing index → first present group member + hue.
+    aliases: HashMap<u32, (Vec<u32>, u16)>,
 }
 
 impl Gumps {
     pub fn open(resource_dir: impl AsRef<Path>) -> std::io::Result<Gumps> {
         let dir = resource_dir.as_ref();
+        let uop = dir.join("gumpartLegacyMUL.uop");
+        let source = if uop.is_file() {
+            GumpSource::Uop(UopReader::open(&uop)?)
+        } else {
+            let mul = ["gumpart.mul", "Gumpart.mul"]
+                .iter()
+                .map(|n| dir.join(n))
+                .find(|p| p.is_file())
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "gumpart.mul"))?;
+            let idx = ["gumpidx.mul", "Gumpidx.mul"]
+                .iter()
+                .map(|n| dir.join(n))
+                .find(|p| p.is_file())
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "gumpidx.mul"))?;
+            GumpSource::Mul(IdxMul::open(idx, mul)?)
+        };
         Ok(Gumps {
-            uop: UopReader::open(&dir.join("gumpartLegacyMUL.uop"))?,
+            source,
+            aliases: std::fs::read_to_string(dir.join("gump.def"))
+                .map(|t| parse_alias_def(&t))
+                .unwrap_or_default(),
         })
+    }
+
+    fn raw(&self, index: usize) -> Option<(Vec<u8>, u32, u32)> {
+        match &self.source {
+            GumpSource::Uop(u) => u.by_gump(index),
+            GumpSource::Mul(m) => {
+                let (data, extra) = m.read(index)?;
+                let w = extra & 0xFFFF;
+                let h = extra >> 16;
+                Some((data, w, h))
+            }
+        }
+    }
+
+    fn resolve(&self, index: usize) -> Option<(Vec<u8>, u32, u32, u16)> {
+        if let Some((data, w, h)) = self.raw(index) {
+            return Some((data, w, h, 0));
+        }
+        let (group, hue) = self.aliases.get(&(index as u32))?;
+        for &alt in group {
+            if let Some((data, w, h)) = self.raw(alt as usize) {
+                return Some((data, w, h, *hue));
+            }
+        }
+        None
+    }
+
+    fn has(&self, index: usize) -> bool {
+        match &self.source {
+            GumpSource::Uop(u) => u.has_gump(index),
+            GumpSource::Mul(m) => m.entry(index).is_some(),
+        }
+    }
+
+    /// Hue `gump.def` wants applied when this index was missing and aliased.
+    pub fn def_hue(&self, index: usize) -> u16 {
+        if self.has(index) {
+            return 0;
+        }
+        self.aliases
+            .get(&(index as u32))
+            .map(|(_, h)| *h)
+            .unwrap_or(0)
     }
 
     /// Decode gump `index` to RGBA, or `None` if absent/empty.
     pub fn get(&self, index: usize) -> Option<Image> {
-        let (data, w, h) = self.uop.by_gump(index)?;
+        let (data, w, h, _) = self.resolve(index)?;
         let (w, h) = (w as usize, h as usize);
         if data.len() < h * 4 {
             return None;

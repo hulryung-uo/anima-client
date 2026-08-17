@@ -74,6 +74,7 @@ impl<'a> TileScan<'a> {
                         z: it.pos.z,
                         height: map.item_height(it.graphic),
                         flags: map.item_flags(it.graphic),
+                        hue: 0,
                     });
             }
         }
@@ -216,6 +217,7 @@ pub(super) fn multi_statics_at(
             z: z.clamp(i8::MIN as i32, i8::MAX as i32) as i8,
             height: map.item_height(graphic),
             flags: map.item_flags(graphic),
+            hue: 0,
         })
         .collect()
 }

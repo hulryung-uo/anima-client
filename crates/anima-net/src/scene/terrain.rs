@@ -522,9 +522,13 @@ pub(super) fn emit_tiles(
                         s.height,
                         s.flags,
                     );
+                    // Dye from statics.mul. Off `dflags` so a seasonal remap that
+                    // lands on a PartialHue graphic (desolation mushroom → blood)
+                    // recolors only the gray pixels, same rule as items.
+                    let hue = static_hue_suffix(s.hue, dflags);
                     let _ = write!(
                         statics,
-                        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}{}{}{}{}{}}},",
+                        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}{}{}{}{}{}{}}},",
                         x,
                         y,
                         s.z,
@@ -536,7 +540,8 @@ pub(super) fn emit_tiles(
                         season_g,
                         fol_hidden,
                         translucent,
-                        hidden_suffix
+                        hidden_suffix,
+                        hue
                     );
                     // Ceiling-hidden objects count against their OWN budget and
                     // never against `n_statics`. If they shared it, a dense

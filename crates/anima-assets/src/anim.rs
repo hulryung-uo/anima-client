@@ -54,7 +54,13 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::art::Image;
+use crate::def::parse_group_replace;
 use crate::uop::{uop_hash, LazyUopReader, UopReader};
+
+/// ClassicUO `HighAnimationGroup.AnimationCount` / `Low` / `People`.
+const HIGH_ANIM_COUNT: u8 = 22;
+const LOW_ANIM_COUNT: u8 = 13;
+const PEOPLE_ANIM_COUNT: u8 = 35;
 
 /// People animation groups (35 groups × 5 dirs = 175 entries/body): Stand=4.
 pub const PEOPLE_WALK: u8 = 0;
@@ -125,6 +131,12 @@ pub struct Anim {
     /// an unlisted `(body, group)` pair keeps its own group (identity), which
     /// is why this is a plain map rather than a per-body fixed-size array.
     uop_replace: HashMap<(u16, u8), i32>,
+    /// `Anim1.def` group replacements for **low** (animal) bodies.
+    /// ClassicUO `GroupReplaces[0]`. `0xFF` means "use walk".
+    anim1: Vec<(u16, u8)>,
+    /// `Anim2.def` group replacements for **people** bodies.
+    /// ClassicUO `GroupReplaces[1]`.
+    anim2: Vec<(u16, u8)>,
     /// Bounded cache of decompressed `.bin` payloads for the UOP path, keyed
     /// by `(body, resolved action)`. One `.bin` holds ALL 5 directions × every
     /// frame of a single group, and a renderer/play-server burst-requests many
@@ -234,8 +246,21 @@ impl Anim {
                 .ok()
                 .map(|r| parse_anim_sequence(&r))
                 .unwrap_or_default(),
+            anim1: std::fs::read_to_string(dir.join("Anim1.def"))
+                .map(|t| parse_group_replace(&t))
+                .unwrap_or_default(),
+            anim2: std::fs::read_to_string(dir.join("Anim2.def"))
+                .map(|t| parse_group_replace(&t))
+                .unwrap_or_default(),
             uop_cache: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// ClassicUO `GetReplacedObjectAnimation`: apply `Anim1.def`/`Anim2.def`
+    /// then `% AnimationCount` so an out-of-range group cannot walk into the
+    /// next body's idx block.
+    pub fn replaced_group(&self, body: u16, group: u8) -> u8 {
+        apply_group_replace(self.anim_type(body), group, &self.anim1, &self.anim2)
     }
 
     /// Apply `Body.def` remapping: return the real animation `(body, hue)` to draw
@@ -335,6 +360,7 @@ impl Anim {
     /// (file + graphic), pick the group `kind` (`mobtypes.txt` or graphic range),
     /// compute the block, and read `(file index, pos, size)` from that file's idx.
     fn entry(&self, body: u16, group: u8, dir: u8) -> Option<(usize, u32, u32)> {
+        let group = self.replaced_group(body, group);
         let (fi, graphic) = self.resolve(body);
         let kind = self.offset_kind(body, graphic, fi);
         let file = self.files.get(fi)?.as_ref()?;
@@ -509,6 +535,7 @@ impl Anim {
     /// nothing (see [`Self::uop_action`]), or no installed UOP file has this
     /// entry. Cached — see `uop_cache`'s doc comment on the eviction policy.
     fn uop_bin(&self, body: u16, group: u8) -> Option<Arc<Vec<u8>>> {
+        let group = self.replaced_group(body, group);
         let action = self.uop_action(body, group)?;
         let key = (body, action);
         if let Ok(cache) = self.uop_cache.lock() {
@@ -881,6 +908,23 @@ fn apply_mirror(img: Image, center_x: i16, center_y: i16, mirror: bool) -> (Imag
         (flip_h(&img), cx, center_y)
     } else {
         (img, center_x, center_y)
+    }
+}
+
+/// ClassicUO `MobileAnimation.GetReplacedObjectAnimation`.
+fn apply_group_replace(kind: u8, group: u8, anim1: &[(u16, u8)], anim2: &[(u16, u8)]) -> u8 {
+    let lookup = |table: &[(u16, u8)], walk: u8| -> u8 {
+        for &(g, r) in table {
+            if g == group as u16 {
+                return if r == 0xFF { walk } else { r };
+            }
+        }
+        group
+    };
+    match kind {
+        1 => lookup(anim1, 0) % LOW_ANIM_COUNT,
+        2 => lookup(anim2, 0) % PEOPLE_ANIM_COUNT,
+        _ => group % HIGH_ANIM_COUNT,
     }
 }
 
@@ -1305,6 +1349,8 @@ bad line without braces
             equipconv: HashMap::new(),
             uop_files: Vec::new(),
             uop_replace: HashMap::new(),
+            anim1: Vec::new(),
+            anim2: Vec::new(),
             uop_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -1510,6 +1556,23 @@ bad line
         assert_eq!(type_by_graphic(250, 2), 1);
         assert_eq!(type_by_graphic(350, 2), 0);
         assert_eq!(type_by_graphic(400, 2), 2);
+    }
+
+    #[test]
+    fn group_replace_clamps_and_maps_walk_sentinel() {
+        // Anim1.def: 13→5, 20→0. Anim2.def: 35→0xFF (walk), 43→23.
+        let anim1 = parse_group_replace("13 {5} 0\n20 {0} 0\n");
+        let anim2 = parse_group_replace("35 {-1} 0\n43 {23} 0\n");
+        // Animal: table hit, then % 13.
+        assert_eq!(apply_group_replace(1, 13, &anim1, &anim2), 5);
+        assert_eq!(apply_group_replace(1, 20, &anim1, &anim2), 0);
+        // Animal: no table hit, still clamp (25 % 13 = 12).
+        assert_eq!(apply_group_replace(1, 25, &anim1, &anim2), 12);
+        // People: −1 → walk (0), then % 35.
+        assert_eq!(apply_group_replace(2, 35, &anim1, &anim2), 0);
+        assert_eq!(apply_group_replace(2, 43, &anim1, &anim2), 23);
+        // Monster: no table, % 22.
+        assert_eq!(apply_group_replace(0, 23, &anim1, &anim2), 1);
     }
 
     #[test]

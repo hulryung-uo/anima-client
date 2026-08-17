@@ -3,16 +3,20 @@
 //! `tex_id` from tiledata). 64×64 when the entry is 0x2000 bytes, else 128×128.
 //! Pixels are opaque ARGB1555. From ClassicUO `TexmapsLoader`.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Mutex;
 
 use crate::art::Image;
+use crate::def::parse_alias_def;
 
 pub struct Texmaps {
     idx: Vec<u8>,
     mul: Mutex<File>,
+    /// `TexTerr.def`: missing texmap id → first present group member.
+    aliases: HashMap<u32, (Vec<u32>, u16)>,
 }
 
 impl Texmaps {
@@ -21,11 +25,33 @@ impl Texmaps {
         Ok(Texmaps {
             idx: std::fs::read(dir.join("texidx.mul"))?,
             mul: Mutex::new(File::open(dir.join("texmaps.mul"))?),
+            aliases: std::fs::read_to_string(dir.join("TexTerr.def"))
+                .map(|t| parse_alias_def(&t))
+                .unwrap_or_default(),
         })
+    }
+
+    fn raw_id(&self, id: u16) -> Option<Image> {
+        self.decode(id)
     }
 
     /// Decode texmap `id` to an opaque RGBA square image.
     pub fn texmap(&self, id: u16) -> Option<Image> {
+        if let Some(img) = self.raw_id(id) {
+            return Some(img);
+        }
+        let (group, _) = self.aliases.get(&(id as u32))?;
+        for &alt in group {
+            if alt <= u16::MAX as u32 {
+                if let Some(img) = self.raw_id(alt as u16) {
+                    return Some(img);
+                }
+            }
+        }
+        None
+    }
+
+    fn decode(&self, id: u16) -> Option<Image> {
         let o = id as usize * 12;
         if o + 8 > self.idx.len() {
             return None;

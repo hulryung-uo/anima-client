@@ -8,13 +8,14 @@
 use super::*;
 
 /// Resolve a layer-25 mount item's *graphic* to the animal body to draw under the
-/// rider. UO mounts map item graphic → creature body via a fixed table; the
-/// item's own tiledata AnimID is a tiny equipment overlay, not the mount, so the
-/// table wins. Falls back to the tiledata AnimID for anything not in the table.
-pub(super) fn mount_anim_for(graphic: u16, item_anim: &impl Fn(u16) -> u16) -> u16 {
+/// rider, plus the table's vertical rider offset. UO mounts map item graphic →
+/// creature body via a fixed table; the item's own tiledata AnimID is a tiny
+/// equipment overlay, not the mount, so the table wins. Falls back to the
+/// tiledata AnimID (offset 0) for anything not in the table.
+pub(super) fn mount_info_for(graphic: u16, item_anim: &impl Fn(u16) -> u16) -> (u16, i8) {
     match anima_assets::mounts::mount_body(graphic) {
-        Some((body, _off)) => body,
-        None => item_anim(graphic),
+        Some(pair) => pair,
+        None => (item_anim(graphic), 0),
     }
 }
 
@@ -162,6 +163,19 @@ pub(super) fn item_art_hue(hue: u16, flags: u64) -> u16 {
         hue | 0x8000
     } else {
         hue
+    }
+}
+
+/// `,"hue":N` when a static carries a dye from `statics.mul`, PartialHue-encoded
+/// the same way items are. Empty when hue is 0 so the payload stays small —
+/// most statics are undyed. `flags` are the *drawn* graphic's (seasonal `dflags`),
+/// because PartialHue is a property of the art being recolored.
+pub(super) fn static_hue_suffix(hue: u16, flags: u64) -> String {
+    let h = item_art_hue(hue, flags);
+    if h == 0 {
+        String::new()
+    } else {
+        format!(",\"hue\":{h}")
     }
 }
 

@@ -193,24 +193,105 @@ pub fn build_say(text: &str, msg_type: u8, hue: u16, font: u16) -> Vec<u8> {
     data
 }
 
+/// `MessageType.Encoded` — set on 0xAD when the body carries packed `speech.mul`
+/// keyword ids. ServUO's `UnicodeSpeech` keys `e.Keywords` off this bit.
+pub const SPEECH_ENCODED: u8 = 0xC0;
+
+/// Pack keyword ids the way ClassicUO `Send_UnicodeSpeechRequest` does, which
+/// is the exact nibble layout ServUO's `UnicodeSpeech` unpacks:
+/// first byte `count >> 4`, then alternating 12-bit ids stuffed through a
+/// leftover nibble. Cap is 50 — ServUO drops the packet above that.
+pub fn pack_speech_keywords(ids: &[u16]) -> Vec<u8> {
+    let len = ids.len().min(50);
+    let mut code = Vec::new();
+    code.push((len >> 4) as u8);
+    let mut num3 = (len & 15) as u16;
+    let mut flag = false;
+    for &id in ids.iter().take(len) {
+        if flag {
+            code.push((id >> 4) as u8);
+            num3 = id & 15;
+        } else {
+            code.push(((num3 << 4) | ((id >> 8) & 15)) as u8);
+            code.push(id as u8);
+        }
+        flag = !flag;
+    }
+    if !flag {
+        code.push((num3 << 4) as u8);
+    }
+    code
+}
+
+/// Unpack [`pack_speech_keywords`] the way ServUO `UnicodeSpeech` does, so the
+/// builder test can prove the two sides agree.
+#[cfg(test)]
+fn unpack_speech_keywords(bytes: &[u8]) -> Option<Vec<u16>> {
+    if bytes.len() < 2 {
+        return None;
+    }
+    let value = u16::from_be_bytes([bytes[0], bytes[1]]);
+    let count = ((value & 0xFFF0) >> 4) as usize;
+    let mut hold = value & 0xF;
+    if count > 50 {
+        return None;
+    }
+    let mut p = 2usize;
+    let mut ids = Vec::with_capacity(count);
+    for i in 0..count {
+        let speech_id = if i % 2 == 0 {
+            if p >= bytes.len() {
+                return None;
+            }
+            hold = (hold << 8) | bytes[p] as u16;
+            p += 1;
+            let id = hold;
+            hold = 0;
+            id
+        } else {
+            if p + 2 > bytes.len() {
+                return None;
+            }
+            let value = u16::from_be_bytes([bytes[p], bytes[p + 1]]);
+            p += 2;
+            let id = (value & 0xFFF0) >> 4;
+            hold = value & 0xF;
+            id
+        };
+        ids.push(speech_id);
+    }
+    Some(ids)
+}
+
 /// UnicodeSpeech `0xAD` (variable): say `text` in-game as UNICODE so non-ASCII
-/// (e.g. Korean/한글) survives. `[0xAD][len u16][type u8][hue u16][font u16]
-/// [lang 4=ASCII "ENU\0"][utf16-be…][0x0000]`. Plain text only (no keyword bits).
-pub fn build_unicode_say(text: &str, msg_type: u8, hue: u16, font: u16) -> Vec<u8> {
+/// (e.g. Korean/한글) survives. When `keyword_ids` is non-empty the type byte
+/// gets [`SPEECH_ENCODED`] and the body is packed ids + UTF-8 + NUL (ClassicUO
+/// `Send_UnicodeSpeechRequest`); otherwise UTF-16 BE + 0x0000.
+/// `[0xAD][len u16][type u8][hue u16][font u16][lang 4=ASCII "ENU\0"][…]`.
+pub fn build_unicode_say(
+    text: &str,
+    msg_type: u8,
+    hue: u16,
+    font: u16,
+    keyword_ids: &[u16],
+) -> Vec<u8> {
     let clamped: String = text.trim().chars().take(128).collect();
     let mut w = PacketWriter::new();
     w.u8(0xAD).u16(0); // id + length placeholder
-    w.u8(msg_type).u16(hue).u16(font);
-    w.bytes(b"ENU\0"); // language tag
-    for unit in clamped.encode_utf16() {
-        w.u16(unit);
+    if keyword_ids.is_empty() {
+        w.u8(msg_type).u16(hue).u16(font);
+        w.bytes(b"ENU\0");
+        for unit in clamped.encode_utf16() {
+            w.u16(unit);
+        }
+        w.u16(0x0000);
+    } else {
+        w.u8(msg_type | SPEECH_ENCODED).u16(hue).u16(font);
+        w.bytes(b"ENU\0");
+        w.bytes(&pack_speech_keywords(keyword_ids));
+        w.bytes(clamped.as_bytes()).u8(0);
     }
-    w.u16(0x0000); // UNICODE NUL terminator
-    let mut data = w.into_vec();
-    let len = data.len() as u16;
-    data[1] = (len >> 8) as u8;
-    data[2] = (len & 0xFF) as u8;
-    data
+    finish_variable(w.into_vec())
 }
 
 /// CastSpell GeneralInfo `0xBF`, subcommand `0x001C` (modern client path).
@@ -639,6 +720,44 @@ pub fn build_bandage_target(bandage: u32, target: u32) -> Vec<u8> {
     finish_variable(w.into_vec())
 }
 
+/// TargetedSpell — GeneralInfo `0xBF`, subcommand `0x002D`: cast `spell` at
+/// `target` in a single packet, with no target cursor round-trip.
+///
+/// Same idea as [`build_bandage_target`]. ServUO `TargetedSpell` reads a
+/// 1-based spell id (subtracts 1, matching [`build_cast_spell`]) then a
+/// serial. `[0xBF][len:u16=0x000B][0x002D][spell:u16][target:u32]`.
+pub fn build_targeted_spell(spell: u16, target: u32) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x002D);
+    w.u16(spell).u32(target);
+    finish_variable(w.into_vec())
+}
+
+/// TargetedSkillUse — GeneralInfo `0xBF`, subcommand `0x002E`: use `skill`
+/// on `target` in a single packet.
+///
+/// `skill` is 0-based (Alchemy = 0), the same numbering [`build_use_skill`]
+/// uses — ServUO does **not** subtract 1 here. `[0xBF][len:u16=0x000B]
+/// [0x002E][skill:u16][target:u32]`.
+pub fn build_targeted_skill(skill: u16, target: u32) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x002E);
+    w.u16(skill).u32(target);
+    finish_variable(w.into_vec())
+}
+
+/// TargetByResourceMacro — GeneralInfo `0xBF`, subcommand `0x0030`: harvest
+/// with `tool` for `resource`.
+///
+/// ServUO `HarvestSystem.TargetByResource`: 0 ore, 1 sand, 2 wood, 3 grave,
+/// 4 red mushrooms. `[0xBF][len:u16=0x000B][0x0030][tool:u32][resource:u16]`.
+pub fn build_target_by_resource(tool: u32, resource: u16) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x0030);
+    w.u32(tool).u16(resource);
+    finish_variable(w.into_vec())
+}
+
 /// Boat pilot speed: one step per slow tick (ClassicUO sends this for a walk).
 pub const BOAT_SPEED_SLOW: u8 = 1;
 /// Boat pilot speed: fast tick (ClassicUO sends this for a run).
@@ -675,11 +794,10 @@ pub const BOAT_SPEED_STOP: u8 = 0;
 /// double-clicking the tiller man or a ship wheel. A brain must do that first;
 /// nothing reports the omission.
 ///
-/// Note the *other* boat-control path, tiller-man speech ("forward", "stop"),
-/// is **not reachable from this client at all**: `BaseBoat.OnSpeech` dispatches
-/// on `e.Keywords`, which requires the `speech.mul` keyword encoding this
-/// project does not implement (see CLASSICUO_GAPS.md Tier 5). Mouse piloting is
-/// the whole of our boat control, not a convenience on top of speech.
+/// The other boat-control path is tiller-man speech ("forward", "stop"):
+/// `BaseBoat.OnSpeech` dispatches on `e.Keywords`, which this client now
+/// fills by matching `speech.mul` and sending 0xAD with [`SPEECH_ENCODED`].
+/// Mouse piloting remains the held-key path; speech is the typed one.
 pub fn build_boat_move_request(player_serial: u32, dir: u8, speed: u8) -> Vec<u8> {
     let d = dir & 0x07;
     let mut w = PacketWriter::new();
@@ -1926,6 +2044,29 @@ mod tests {
     }
 
     #[test]
+    fn targeted_spell_skill_resource_layout() {
+        let p = build_targeted_spell(1, 0x0000_ABCD);
+        assert_eq!(p[0], 0xBF);
+        assert_eq!(u16::from_be_bytes([p[1], p[2]]) as usize, p.len());
+        assert_eq!(p.len(), 11);
+        assert_eq!(u16::from_be_bytes([p[3], p[4]]), 0x002D);
+        assert_eq!(u16::from_be_bytes([p[5], p[6]]), 1);
+        assert_eq!(u32::from_be_bytes([p[7], p[8], p[9], p[10]]), 0x0000_ABCD);
+
+        let p = build_targeted_skill(1, 0x0000_ABCE);
+        assert_eq!(p.len(), 11);
+        assert_eq!(u16::from_be_bytes([p[3], p[4]]), 0x002E);
+        assert_eq!(u16::from_be_bytes([p[5], p[6]]), 1);
+        assert_eq!(u32::from_be_bytes([p[7], p[8], p[9], p[10]]), 0x0000_ABCE);
+
+        let p = build_target_by_resource(0x4000_1234, 2);
+        assert_eq!(p.len(), 11);
+        assert_eq!(u16::from_be_bytes([p[3], p[4]]), 0x0030);
+        assert_eq!(u32::from_be_bytes([p[5], p[6], p[7], p[8]]), 0x4000_1234);
+        assert_eq!(u16::from_be_bytes([p[9], p[10]]), 2);
+    }
+
+    #[test]
     fn house_design_commit_layout() {
         // No-arg command: [0xD7][len][serial][subcmd][0x0A] = 10 bytes.
         let p = build_house_design_commit(0xDEAD_BEEF);
@@ -2177,6 +2318,36 @@ mod tests {
         assert_eq!(say[0], 0x03);
         assert_eq!(u16::from_be_bytes([say[1], say[2]]) as usize, say.len());
         assert_eq!(&say[8..say.len() - 1], b"hi");
+    }
+
+    #[test]
+    fn pack_speech_keywords_roundtrips_servuo_nibble_layout() {
+        // One id 0x0123 → bytes 00 11 23. ServUO: value=0x0011, count=1, hold=1,
+        // then hold<<8|0x23 = 0x0123.
+        assert_eq!(pack_speech_keywords(&[0x0123]), vec![0x00, 0x11, 0x23]);
+        assert_eq!(
+            unpack_speech_keywords(&[0x00, 0x11, 0x23]),
+            Some(vec![0x0123])
+        );
+        // Two ids: 00 21 23 45 60 → 0x0123, 0x0456.
+        let two = pack_speech_keywords(&[0x0123, 0x0456]);
+        assert_eq!(two, vec![0x00, 0x21, 0x23, 0x45, 0x60]);
+        assert_eq!(unpack_speech_keywords(&two), Some(vec![0x0123, 0x0456]));
+    }
+
+    #[test]
+    fn unicode_say_encoded_sets_type_bit_and_utf8_body() {
+        let p = build_unicode_say("vendor buy", 0, 0x34, 3, &[0x0009, 0x000C]);
+        assert_eq!(p[0], 0xAD);
+        assert_eq!(p[3] & SPEECH_ENCODED, SPEECH_ENCODED);
+        assert_eq!(&p[8..12], b"ENU\0");
+        let packed = pack_speech_keywords(&[0x0009, 0x000C]);
+        assert_eq!(&p[12..12 + packed.len()], packed.as_slice());
+        assert_eq!(&p[12 + packed.len()..], b"vendor buy\0");
+        // No keywords → UTF-16 BE, Encoded bit clear.
+        let plain = build_unicode_say("hi", 0, 0x34, 3, &[]);
+        assert_eq!(plain[3] & SPEECH_ENCODED, 0);
+        assert_eq!(&plain[12..], &[0x00, b'h', 0x00, b'i', 0x00, 0x00]);
     }
 
     #[test]

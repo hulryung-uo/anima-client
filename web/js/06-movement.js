@@ -996,6 +996,41 @@ function isCovered(byLayer, layer) {
   return false;
 }
 
+// ClassicUO `Mobile.TryGetSittingInfo`: a human standing on a chair static/item
+// (|Z| ≤ 1, not mounted, not flying, not mid-step) sits. The double-click
+// overlay (`sitting`) still wins for the local player (adjacent chairs).
+const GARGOYLE_BODIES = new Set([666, 667, 0x02B6, 0x02B7]);
+function chairUnder(x, y, z) {
+  const scan = (list) => {
+    for (const o of list || []) {
+      if (Math.abs((o.z | 0) - z) > 1) continue;
+      const entry = CHAIR_TABLE.get(o.g | 0);
+      if (entry) return { graphic: o.g | 0, z: o.z | 0, entry };
+    }
+    return null;
+  };
+  return scan(staticsAt(x, y)) || scan(itemsAt(x, y));
+}
+function seatForEntity(st, ent, faceDir, isSelf) {
+  if (isSelf && sitting) return sitting;
+  if (st.animMoving) return null;
+  if (!ent || ent.mounted || ent.dead) return null;
+  if (GARGOYLE_BODIES.has(st.body | 0)) return null;
+  // People only (ClassicUO `IsHuman`). Scene `at` is mobtypes (2 = people);
+  // self defaults to people until the field lands.
+  const at = (ent && ent.at != null) ? (ent.at | 0) : (st.at != null ? (st.at | 0) : null);
+  if (isSelf) {
+    if (at != null && at !== 2) return null;
+  } else if (at !== 2) {
+    return null;
+  }
+  const mx = Math.round(st.rx), my = Math.round(st.ry);
+  const mz = (st.rz ?? st.z) | 0;
+  const found = chairUnder(mx, my, mz);
+  if (!found) return null;
+  return { x: mx, y: my, z: found.z, graphic: found.graphic, ...chairSeatFor(faceDir, found.entry) };
+}
+
 function drawMobs() {
   // Mobiles live *inside* the depth-sorted `world` container (not a top layer) so
   // statics in front occlude them. Sprites are PERSISTENT and updated in place —
@@ -1040,23 +1075,28 @@ function drawMobs() {
     }
     // We only know run/mount state for our own player; other mobiles walk/stand.
     const isSelf = id === "self";
-    // Sitting (chair double-click, see trySit()) is a pure render overlay: while
-    // seated, the local avatar's facing/pose come from the chair-table resolution
-    // instead of the real predicted state — nothing below this ever touches World
-    // or `pred`.
-    const d = (isSelf && sitting) ? sitting.dir : (faceDir & 7);
-    const moving = (isSelf && sitting) ? false : !!st.animMoving; // set in renderFrame (glide + held/mouse)
-    const running = isSelf && !!(moveIntent && moveIntent.run);
     // Look up this entity's scene record (self → player; else mobile) for skin hue,
     // worn equipment, and mount state. Mount is per-entity: self uses player.mounted,
     // others use their own `mounted`/`mountAnim` fields.
     const ent = isSelf ? scene.player : mobById.get(id);
     const mounted = !!(ent && ent.mounted);
     const mountAnim = (ent && (ent.mountAnim | 0)) || 0;
+    // ClassicUO `MobileView`: after the mount is drawn, `drawY += OffsetY` so
+    // the rider (body + equipment) sits on the animal. The mount itself stays
+    // put; a negative offset lifts the rider (ethereal horse -9), a positive
+    // one drops them (cu sidhe +18).
+    const mountOff = (ent && (ent.mountOff | 0)) || 0;
     // Ghost bodies use their race/sex-equivalent living people animation, rendered
     // translucent with equipment hidden. Self uses the bridge's authoritative dead
     // bit; nearby mobiles fall back to the same complete body mapping.
     const ghost = ent && typeof ent.dead === "boolean" ? ent.dead : isGhostBody(st.body);
+    // Sitting: local double-click overlay, else ClassicUO TryGetSittingInfo on
+    // whoever is standing on a chair. Pose/facing come from the chair table —
+    // nothing below this ever touches World or `pred`.
+    const seat = (!ghost && !mounted) ? seatForEntity(st, ent, faceDir & 7, isSelf) : null;
+    const d = seat ? seat.dir : (faceDir & 7);
+    const moving = seat ? false : !!st.animMoving; // set in renderFrame (glide + held/mouse)
+    const running = isSelf && !!(moveIntent && moveIntent.run);
     const bodyAnim = ghost ? ghostAnimationBody(st.body) : (st.body | 0);
     // Hidden (mobile-update status-flags 0x80: Hiding/stealth skill, or a GM
     // `[set Hidden true`). Seeing it at all means the server allows us to
@@ -1136,8 +1176,8 @@ function drawMobs() {
     // too): frame 0 of chairSeatFor()'s group, always. framesFor() here just kicks
     // off loading that (group,d)'s frame-count/centers so centerFor() below
     // positions the sprite correctly instead of falling back to the foot anchor.
-    if (isSelf && sitting) {
-      group = sitting.group;
+    if (seat) {
+      group = seat.group;
       frames = framesFor(bodyAnim, group, d);
       frame = 0;
     }
@@ -1226,15 +1266,15 @@ function drawMobs() {
     // Seated: draw at the chair's tile + ClassicUO's pixel nudge (chairSeatFor())
     // instead of the real predicted position — the avatar visually "sits down" onto
     // the seat while the actual World/prediction state never changes (trySit()).
-    const x = (isSelf && sitting) ? isoX(sitting.x, sitting.y) + sitting.dx : isoX(st.rx, st.ry);
-    const y = (isSelf && sitting) ? isoY(sitting.x, sitting.y, sitting.z) + sitting.dy : isoY(st.rx, st.ry, st.rz ?? st.z);
+    const x = seat ? isoX(seat.x, seat.y) + seat.dx : isoX(st.rx, st.ry);
+    const y = seat ? isoY(seat.x, seat.y, seat.z) + seat.dy : isoY(st.rx, st.ry, st.rz ?? st.z);
     if (entries.length) {
       entries.sort((a, b) => a.rank - b.rank);
       // zIndex only changes when the mobile crosses a tile (assigning it forces a
       // re-sort). All parts share the body's depth; a rank epsilon (≪ the per-z step
       // of 16) keeps them back→front regardless of which parts are present this frame.
-      const zi = (isSelf && sitting)
-        ? mobDepthZ(sitting.x, sitting.y, sitting.z)
+      const zi = seat
+        ? mobDepthZ(seat.x, seat.y, seat.z)
         : mobDepthZ(Math.round(st.rx), Math.round(st.ry), st.z);
       for (const e of entries) {
         const key = id + "#" + e.key;
@@ -1294,11 +1334,13 @@ function drawMobs() {
           sp.y = ((y - 3) - h - e.cy) + h / 2 - 10 + (e.mounted ? 10 : 0);
         } else if (e.cx != null) {
           sp.anchor.set(0, 0);
+          const riderOff = (e.key !== "mount" && e.key !== "shadow") ? mountOff : 0;
           sp.x = x - e.cx;
-          sp.y = (y - 3) - e.tex.height - e.cy;
+          sp.y = (y - 3) - e.tex.height - e.cy + riderOff;
         } else {
           sp.anchor.set(0.5, 1.0);
-          sp.x = x; sp.y = y - 3;
+          const riderOff = (e.key !== "mount" && e.key !== "shadow") ? mountOff : 0;
+          sp.x = x; sp.y = y - 3 + riderOff;
         }
         // Visibility follows the composed alpha, so a mobile hidden by the
         // ceiling leaves the batch instead of being drawn fully transparent.
@@ -1337,6 +1379,17 @@ function drawMobs() {
         sp.visible = sp.alpha > 0;
         const z = zi + e.rank / 256;
         if (sp.zIndex !== z) sp.zIndex = z;
+        // Seated lean: ClassicUO `DrawCharacterSitted` — three vertical bands,
+        // upper shifted ±8px (`flip ? -8 : 8`), mid a trapezoid, lower unshifted.
+        // Shadow and the mount stay undeformed (CUO draws the shadow before the
+        // sit pass and the mount is a separate animal). The sprite stays for
+        // hit-testing; the mesh is the visible draw.
+        // Three-band lean is only for E/S (Stand group 4). N/W already use
+        // ONMOUNT_STAND (group 25), which is ClassicUO's dedicated sit art —
+        // DrawCharacterSitted does not run on those facings.
+        const sitThis = seat && seat.group === 4 && !e.shadow && e.key !== "mount";
+        if (sitThis) applySitDeform(sp, e.tex, !!seat.flip, sp.x, sp.y, z, sp.alpha, 0xffffff);
+        else clearSitDeform(sp);
         seen.add(key);
       }
     } else if (st.body) {
@@ -1346,8 +1399,61 @@ function drawMobs() {
   }
   // Drop layer sprites for entities/slots that left view (or shed equipment).
   for (const [key, sp] of mobSprites) {
-    if (!seen.has(key)) { world.removeChild(sp); sp.destroy(); mobSprites.delete(key); }
+    if (!seen.has(key)) { clearSitDeform(sp); world.removeChild(sp); sp.destroy(); mobSprites.delete(key); }
   }
+}
+
+// ClassicUO `Batcher2D.DrawCharacterSitted`: three quads over the stand frame.
+// Ratios 0.35 / 0.60 / 0.94 of the frame height; `sittingOffset` is −8 when the
+// facing is mirrored (N/E), +8 otherwise.
+function makeSitMesh(tex, flip) {
+  const w = tex.width, h = tex.height;
+  const off = flip ? -8 : 8;
+  const h03 = h * 0.35, h06 = h * 0.60, h09 = h * 0.94;
+  const aPosition = [
+    off, 0,   w + off, 0,   w + off, h03,  off, h03,
+    off, h03, w + off, h03, w, h06,        0, h06,
+    0, h06,   w, h06,       w, h09,        0, h09,
+  ];
+  const aUV = [
+    0, 0,    1, 0,    1, 0.35,  0, 0.35,
+    0, 0.35, 1, 0.35, 1, 0.60,  0, 0.60,
+    0, 0.60, 1, 0.60, 1, 0.94,  0, 0.94,
+  ];
+  const geometry = new PIXI.Geometry({
+    attributes: { aPosition, aUV },
+    indexBuffer: [0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 8, 9, 10, 8, 10, 11],
+  });
+  const mesh = new PIXI.Mesh({ geometry, texture: tex });
+  mesh.eventMode = "none";
+  mesh._sitFlip = flip;
+  mesh._sitTex = tex;
+  return mesh;
+}
+function applySitDeform(sp, tex, flip, x, y, zIndex, alpha, tint) {
+  let mesh = sp._sitMesh;
+  if (!mesh || mesh._sitTex !== tex || mesh._sitFlip !== flip) {
+    if (mesh) { world.removeChild(mesh); mesh.destroy(); }
+    mesh = makeSitMesh(tex, flip);
+    world.addChild(mesh);
+    sp._sitMesh = mesh;
+  }
+  // Sprites with a draw-center use anchor (0,0); the fallback foot-anchor
+  // is (0.5, 1). The mesh is always top-left local, so undo the anchor.
+  mesh.position.set(x - (sp.anchor?.x || 0) * tex.width, y - (sp.anchor?.y || 0) * tex.height);
+  mesh.zIndex = zIndex;
+  mesh.alpha = alpha;
+  mesh.tint = tint;
+  mesh.visible = true;
+  sp.renderable = false;
+}
+function clearSitDeform(sp) {
+  if (sp._sitMesh) {
+    world.removeChild(sp._sitMesh);
+    sp._sitMesh.destroy();
+    sp._sitMesh = null;
+  }
+  sp.renderable = true;
 }
 
 // Notoriety → name color (ClassicUO NotorietyFlag): 1 Innocent=blue, 2 Ally=green,

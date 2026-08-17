@@ -1620,14 +1620,14 @@ fn graphic_effect_0x70_parsed() {
     assert_eq!(e.graphic, 0x36D4);
     assert_eq!((e.sx, e.sy, e.sz), (100, 200, 5));
     assert_eq!((e.tx, e.ty, e.tz), (110, 210, 5));
-    assert_eq!((e.speed, e.duration, e.hue), (7, 30, 0));
+    assert_eq!((e.speed, e.duration, e.hue, e.blend), (7, 30, 0, 0));
 }
 
 #[test]
 fn hued_effect_0xc0_carries_hue() {
     let mut w = World::new();
     // 0xC0: a FixedFrom effect on serial 0xCAFE with hue 0x0021 (low 16 bits
-    // of the u32) and a renderMode u32 the client ignores.
+    // of the u32) and renderMode 2 (Screen).
     let mut p = PacketWriter::new();
     p.u8(0xC0)
         .u8(3) // type = FixedFrom
@@ -1646,13 +1646,40 @@ fn hued_effect_0xc0_carries_hue() {
         .u8(0)
         .u8(0)
         .u32(0x0000_0021) // hue u32
-        .u32(0); // renderMode (ignored)
+        .u32(2); // renderMode = Screen
     let frame = p.into_vec();
     assert_eq!(frame.len(), 36); // 0xC0 is 36 bytes
     assert!(apply_packet(&mut w, &frame));
     let e = w.recent_effects.last().expect("effect queued");
     assert_eq!(e.kind, 3);
     assert_eq!(e.hue, 0x0021);
+    assert_eq!(e.blend, 2);
+}
+
+#[test]
+fn hued_effect_0xc0_blend_wraps_mod_7() {
+    let mut w = World::new();
+    let mut p = PacketWriter::new();
+    p.u8(0xC0)
+        .u8(0)
+        .u32(1)
+        .u32(2)
+        .u16(0x36D4)
+        .u16(1)
+        .u16(1)
+        .u8(0)
+        .u16(2)
+        .u16(2)
+        .u8(0)
+        .u8(1)
+        .u8(1)
+        .u16(0)
+        .u8(0)
+        .u8(0)
+        .u32(0)
+        .u32(9); // 9 % 7 = 2
+    assert!(apply_packet(&mut w, &p.into_vec()));
+    assert_eq!(w.recent_effects.last().unwrap().blend, 2);
 }
 
 #[test]

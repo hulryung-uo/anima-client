@@ -35,6 +35,8 @@ pub(super) struct SpawnHttp {
     pub(super) read_only: bool,
     /// Epoch-millis of the last `/scene.json` fetch.
     pub(super) watch: Arc<AtomicU64>,
+    /// Prebuilt `skills.mul` JSON for `GET /skillinfo.json`.
+    pub(super) skillinfo: Arc<String>,
 }
 
 /// Spawn the worker-thread pool serving `server` (already bound by [`bind`]).
@@ -63,6 +65,7 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         facet,
         read_only,
         watch,
+        skillinfo,
     } = args;
     let tile_cache: TileCache = Arc::new(Mutex::new(ByteCache::new(TILE_CACHE_BYTES)));
     let anim_cache: AnimCache = Arc::new(Mutex::new(ByteCache::new(ANIM_CACHE_BYTES)));
@@ -98,6 +101,7 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         let house_catalog = house_catalog.clone();
         let watch = watch.clone();
         let facet = facet.clone();
+        let skillinfo = skillinfo.clone();
         thread::spawn(move || {
             while let Ok(req) = server.recv() {
                 handle_request(Ctx {
@@ -129,6 +133,7 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
                     facet: &facet,
                     read_only,
                     watch: &watch,
+                    skillinfo: &skillinfo,
                 });
             }
         });
@@ -165,6 +170,7 @@ pub(super) struct Ctx<'a> {
     pub(super) facet: &'a Arc<AtomicU8>,
     pub(super) read_only: bool,
     pub(super) watch: &'a Arc<AtomicU64>,
+    pub(super) skillinfo: &'a Arc<String>,
 }
 
 pub(super) fn handle_request(ctx: Ctx) {
@@ -198,6 +204,7 @@ pub(super) fn handle_request(ctx: Ctx) {
         guard_rects,
         house_catalog,
         facet,
+        skillinfo,
     } = ctx;
     let raw_url = req.url().to_string();
     // Parse the optional `?hue=<n>` query before stripping it. 0 = no hue.
@@ -393,6 +400,12 @@ pub(super) fn handle_request(ctx: Ctx) {
                 let _ = req.respond(Response::from_string("building").with_status_code(503));
             }
         }
+    } else if url == "/skillinfo.json" {
+        // Skill names + HasAction from skills.mul. Static per data dir.
+        let mut r = Response::from_string(skillinfo.as_str());
+        r.add_header(ctype("application/json"));
+        r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=3600"[..]).unwrap());
+        let _ = req.respond(r);
     } else if url == "/pois.json" {
         // World-map points of interest (towns/banks/shops/dungeons/…). Static — built
         // once at startup; the client fetches it once when the world map opens.

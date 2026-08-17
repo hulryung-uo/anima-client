@@ -417,9 +417,8 @@ const CHAIR_TABLE = new Map([
 // other 6 of the 8 facings are mirrors) — N/W reuse the ONMOUNT_STAND group (a
 // seated-leg pose that happens to read as "sitting" even off a horse); E/S have no
 // good sit art at all, so CUO's fallback is "hold the plain Stand frame at the
-// chair's pixel offset", which is what we do for those two (skipping ClassicUO's
-// further per-pixel vertical-band squish shader — a deliberate, documented loss of
-// fidelity; the task brief explicitly sanctions this "hold a stand frame" fallback).
+// chair's pixel offset" plus `DrawCharacterSitted`'s three-band lean (upper
+// 35% shifted ±8px, mid a trapezoid, lower unshifted). We port that deform.
 // Offsets below fold in FixSittingDirection's SITTING_OFFSET_X=8 / SIT_OFFSET_Y=4
 // constants, so the caller just adds {dx,dy} to the chair tile's screen position.
 function chairSeatFor(rawDir, entry) {
@@ -432,10 +431,10 @@ function chairSeatFor(rawDir, entry) {
     default:        dir = d4 !== -1 ? d4 : (rawDir === 5 ? d3 : d1); break; // 5, 6
   }
   switch (dir) {
-    case 0: return { dir, group: 25, dx: 4, dy: 29 + mirrorOffsetY };  // North: mirror=true
-    case 6: return { dir, group: 25, dx: -3, dy: 27 + mirrorOffsetY }; // West: mirror=false
-    case 2: return { dir, group: 4, dx: 0, dy: 13 + offsetY };         // East: mirror=true
-    default: return { dir, group: 4, dx: -9, dy: 14 + offsetY };       // South (4): mirror=false
+    case 0: return { dir, group: 25, dx: 4, dy: 29 + mirrorOffsetY, flip: true };  // North
+    case 6: return { dir, group: 25, dx: -3, dy: 27 + mirrorOffsetY, flip: false }; // West
+    case 2: return { dir, group: 4, dx: 0, dy: 13 + offsetY, flip: true };         // East
+    default: return { dir, group: 4, dx: -9, dy: 14 + offsetY, flip: false };       // South
   }
 }
 

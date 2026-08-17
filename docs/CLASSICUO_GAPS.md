@@ -95,12 +95,9 @@ v24 → v25. Two findings worth keeping:
   exist. It works on this T2A shard anyway — the script registers
   unconditionally — so this is one expansion-flavoured feature the shard *can*
   prove, unlike the three listed below.
-- **The other boat-control path is unreachable from this client, and that is a
-  Tier 5 gap, not a boat gap.** `BaseBoat.OnSpeech` dispatches the tiller-man
-  commands ("forward", "stop") on `e.Keywords`, which needs the `speech.mul`
-  keyword encoding this project does not implement. The same wall stops
-  "vendor buy" from working. Mouse piloting is therefore the whole of our boat
-  control rather than a convenience on top of speech.
+- **The other boat-control path is tiller-man speech**, which dispatches on
+  `e.Keywords`. That is now implemented (`speech.mul` + encoded 0xAD); mouse
+  piloting remains the held-key path. See the closed Tier 5 speech row.
 
 Closed 2026-08-08 (bulletin boards): the **last** Tier 1 row. Contract schema
 v25 → v26. Tier 1 is now closed out entirely. Three findings:
@@ -146,8 +143,8 @@ Two things it surfaced rather than caused:
   `GrabItem` sends it. Fixed; measured live, a return now lands at a
   server-chosen (98, 66) instead of (0, 0). No bounds table needed after all.
 
-Tier 2 is **not** finished — still open: the 0x11 `type >= 6` combat tail
-(unobservable on this shard, see the expansion note below), journal
+Tier 2 recap at this point (historical — every item named here closed in the
+notes that follow): the 0x11 `type >= 6` combat tail, journal
 filters/tabs/timestamps, grid loot, the info bar, the counter bar and friends,
 and window management.
 
@@ -171,8 +168,9 @@ things worth keeping:
   journal's signature, the same way it already refreshed the equip tip and the
   dye swatches.
 
-Tier 2 still open: the 0x11 `type >= 6` combat tail (unobservable here), grid
-loot, the info bar, the counter bar and friends, and window management.
+Tier 2 recap at this point (historical — closed below): the 0x11 `type >= 6`
+combat tail, grid loot, the info bar, the counter bar and friends, and window
+management.
 
 Closed 2026-08-09 (grid loot): the third Tier 2 row. No contract change — the
 one-click take is two packets we already had. Two notes:
@@ -185,8 +183,8 @@ one-click take is two packets we already had. Two notes:
   item back. Raising STR made the same click work. Worth knowing before
   debugging the client: the server refuses silently here too.
 
-Tier 2 still open: the 0x11 `type >= 6` combat tail (unobservable here), the
-info bar, the counter bar and friends, and window management.
+Tier 2 recap at this point (historical — closed below): the 0x11 `type >= 6`
+combat tail, the info bar, the counter bar and friends, and window management.
 
 Closed 2026-08-09 (window management): the fourth Tier 2 row. Purely client
 work — no packet is involved. One trap, hit twice:
@@ -207,7 +205,7 @@ a concrete list of nine readouts a player can see are missing. Those two rows
 are the same gap seen from either end.
 
 Closed 2026-08-09 (counter bar): the sixth Tier 2 row, and the first of the
-grab-bag row above (the other five are still open). Client-only again — the bar
+grab-bag row above (the other five closed in the notes that follow). Client-only again — the bar
 sends nothing but the `use` behind a double-click. Two things worth recording:
 
 - **The client already knows everything it needs to count.** The obvious worry
@@ -227,9 +225,9 @@ sends nothing but the `use` behind a double-click. Two things worth recording:
   pile it was split from; an exact-coordinate drop is `OnDroppedInto` and would
   leave a second little pile on top of the first. Verified live both ways.
 
-Tier 2 still open: the 0x11 `type >= 6` combat tail (unobservable here), and the
-ignore list / combat book / racial-abilities book / network stats / inspector
-remainder of the grab-bag row.
+Tier 2 recap at this point (historical — closed below): the 0x11 `type >= 6`
+combat tail, and the ignore list / combat book / racial-abilities book /
+network stats / inspector remainder of the grab-bag row.
 
 Closed 2026-08-09 (ignore list): the second entry of the grab-bag row (four
 left). One scene field, no packet, and one ClassicUO bug found by trying to
@@ -366,7 +364,7 @@ climb monotonically across both.
 
 Closed 2026-08-10 (inspector): the last entry of the grab-bag row, and with it
 everything in Tier 2 except the 0x11 `type >= 6` combat tail, which this shard
-cannot show at all. Client-only — the inspector reads the scene and sends
+could not show until a later ML-flipped session closed that row too. Client-only — the inspector reads the scene and sends
 nothing.
 
 - **The picking is ours, the dump is ClassicUO's.** Its inspector opens from a
@@ -725,7 +723,8 @@ The receive side is generally complete; there is no way to *act*.
 | ~~**Stat locks** (0xBF/0x1A)~~ — **CLOSED** | `build_stat_lock` + `Action::StatLock` + `statlock:<stat>:<lock>`, with the same optimistic local update the skill-lock twin does | S |
 | ~~**Armed weapon ability state** (0xBF/0x21 clear, 0xBF/0x25 toggle)~~ — **CLOSED** (unit-tested; not live-verifiable on a T2A shard — see the note under "Audit baseline") | Both directions now land. `World::armed_ability` is written optimistically by the driver on 0xD7 (an arm is *never* acknowledged — the only message about it is the one revoking it) and cleared by 0xBF/0x21; 0xBF/0x25 fills `World::active_spell_icons`, which despite the packet's name carries **spell** ids (ServUO sends `moveID + 1` / `spellID + 1`), so it lights up the spellbook, not the bar. Both reach `Observation` and `scene.json`. The renderer keeps a 500ms optimistic window before believing the server, because `scene.json` is polled every 150ms and the snapshot answering a click predates it (the D11 hazard); outside that window the server simply wins, since a swing can resolve before its own echo arrives | S |
 | ~~Pre-AOS stun / disarm (0xBF/0x09, 0x0A)~~ — **CLOSED, live-verified** | `build_disarm_request`/`build_stun_request` + `Action::DisarmRequest`/`StunRequest` + `disarm`/`stun` commands. **Watch the subcommand numbering:** ClassicUO has the two swapped — its `Send_StunRequest` writes 0x09 and `Send_DisarmRequest` writes 0x0A, while ServUO registers `RegisterExtended(0x09, DisarmRequest)`/`(0x0A, StunRequest)` and Razor (`Razor/Network/Packets.cs`) writes the same pairing as ServUO. **Settled empirically, not by majority vote:** the two handlers gate on *different* skills, so skills alone identify which one a subcommand reached. With hands free, ArmsLore+Wrestling 100 / Anatomy 0 → `disarm` answered "You get yourself ready to disarm your opponent" and `stun` answered "You are not skilled enough to stun your opponent"; inverting to ArmsLore 0 / Anatomy 100 inverted both replies exactly. ClassicUO's numbering would have swapped them. A byte-exact test pins it so the divergence can't be "corrected" back into a silent wrong-move bug | S |
-| ~~Targeted use (0xBF/0x2C) — bandage self/target in one packet~~ — **CLOSED, live-verified** | `build_bandage_target` + `Action::BandageTarget { bandage, target }` + `bandage:<serial>[:<target>]`. `target` 0 = self (the `PartyAccept` sentinel convention), which is the case worth the shortcut. Skips the double-click → 0x6C cursor → reply round-trip, which is what makes reliable self-healing under pressure possible. Live: `bandage:<serial>` with no target healed the player, with `scene.target.active == 0` throughout — **no cursor is ever raised**. Note ServUO still emits cliloc 500948 "Who will you use the bandages on?" from inside the 0x2C handler before invoking the target itself (`Bandage.cs BandageTargetRequest`), so that line in the journal is not evidence of a cursor. ServUO's siblings 0x2D TargetedSpell / 0x2E TargetedSkillUse / 0x30 TargetByResourceMacro are the same idea and still absent | S |
+| ~~Targeted use (0xBF/0x2C) — bandage self/target in one packet~~ — **CLOSED, live-verified** | `build_bandage_target` + `Action::BandageTarget { bandage, target }` + `bandage:<serial>[:<target>]`. `target` 0 = self (the `PartyAccept` sentinel convention), which is the case worth the shortcut. Skips the double-click → 0x6C cursor → reply round-trip, which is what makes reliable self-healing under pressure possible. Live: `bandage:<serial>` with no target healed the player, with `scene.target.active == 0` throughout — **no cursor is ever raised**. Note ServUO still emits cliloc 500948 "Who will you use the bandages on?" from inside the 0x2C handler before invoking the target itself (`Bandage.cs BandageTargetRequest`), so that line in the journal is not evidence of a cursor. ServUO's siblings 0x2D/0x2E/0x30 closed in the next row | S |
+| ~~Targeted spell / skill / harvest (0xBF/0x2D, 0x2E, 0x30)~~ — **CLOSED** | Same one-packet shortcut as bandage. `build_targeted_spell`/`build_targeted_skill`/`build_target_by_resource` + `Action::TargetedSpell`/`TargetedSkill`/`TargetByResource` + `tspell:<id>:<target>` / `tskill:<id>:<target>` / `tharvest:<tool>:<resource>`. Spell ids are 1-based (ServUO subtracts 1, matching `cast:`); skill ids are 0-based (no subtract, matching `useskill:`); resource is ServUO's 0 ore / 1 sand / 2 wood / 3 grave / 4 mushrooms. `target` 0 = self. Contract schema v28 → v29 | S |
 | ~~**Auto-walk always runs at unmounted-walk speed**~~ — **CLOSED** | new `movement::walk_pacing(world, want_run)` returns `(run, ms)` from live state — ClassicUO `PlayerMobile.Walk`'s rules, including `SpeedMode >= CantRun`, spent stamina (ghosts exempt), and `FastUnmount` taking the mounted tier without a mount. Both auto-walkers (`Route::step_delay`, `play_server`'s loop) consult it per tick and now run | S |
 | ~~**Shard list**~~ — **CLOSED** | `parse_server_list` (0xA8) + `LoginMachine::servers()`; `cfg.server_index` names the shard's *own* index and an unlisted one fails with the shard names instead of hanging. 0x8C now yields a `GameServerAddress`, which the native driver dials first (5s timeout) before falling back to the login endpoint — ClassicUO's `IgnoreRelayIp`/`ip == 0` case, available as `Endpoint::ignore_relay_ip`. **Watch the byte order:** 0xA8's address is reversed, 0x8C's is not | M |
 | ~~**Login/character rejection reasons**~~ — **CLOSED** | 0x82 gained `account_denied_text`, 0x53 became `LoginError::CharacterLoginRejected` with `character_login_rejected_text`, and 0xFD's queue window is stored and quoted by 0x53 codes 13/14. `LoginError` now implements `Display`, so the browser login page and CLI show the server's stated reason instead of a Debug dump | S |
@@ -769,13 +768,75 @@ live-verified** — see below); ~~`light.mul` light shapes and colours~~ and ~~d
 land~~ (**CLOSED, live-verified** — see below); ~~seasonal
 land/static graphic remap~~ (**CLOSED, live-verified** — see below);
 ~~`TileFlag.Translucent` statics drawn opaque~~ (**CLOSED, live-verified** — see
-below); static hue from `statics.mul` discarded
-at decode; mount rider vertical offset; seated-character deformation; ~~roof/ceiling
+below); ~~static hue from `statics.mul` discarded
+at decode~~ (**CLOSED** — see below); ~~mount rider vertical offset~~ (**CLOSED** —
+see below); ~~seated-character deformation~~ (**CLOSED** — see below); ~~roof/ceiling
 fading~~ and ~~the pathing half of the ceiling rule~~ (**both CLOSED,
 live-verified** — see below);
-0x23 DragEffect decoded but never drawn; GameEffect blend modes and
-projectile rotation; ~~StaticFilters (tree→stumps, hide vegetation)~~
+~~0x23 DragEffect decoded but never drawn~~ (**CLOSED** — see below);
+~~GameEffect blend modes and projectile rotation~~ (**CLOSED** — see below);
+~~StaticFilters (tree→stumps, hide vegetation)~~
 (**CLOSED, live-verified** — see below).
+
+Closed 2026-08-17 (static hue): the `statics.mul` record is 7 bytes —
+graphic, in-block x/y, z, **hue** — and the last two were consumed only by
+`pos += 7`. `StaticTile` now keeps the dye; the scene emits it PartialHue-encoded
+the same way items are (`item_art_hue` on the *drawn* graphic's flags, so a
+desolation mushroom→blood remap recolors only gray pixels); the renderer asks
+`?hue=` and keys the static pool by dye so two same-graphic panes on one tile
+do not collapse. Pathing never sees it. Most statics are undyed, so the field
+is omitted when 0.
+
+Closed 2026-08-17 (mount rider offset): `mount_body` already returned
+`(body, OffsetY)` and `mount_anim_for` threw the second half away. ClassicUO
+draws the mount at the original `drawY`, then `drawY += OffsetY` for the rider
+and every worn layer (`MobileView.cs:256`). Wired through as `mountOff`; the
+renderer applies it to body and equipment only, never the mount or the shadow
+(the shadow is drawn *before* that add). Ethereal horse −9, cu sidhe +18 —
+the two signs a rider would sit inside or float above the animal without.
+
+Closed 2026-08-17 (0x23 DragEffect): the packet was parsed and queued
+(`World::recent_drag_anims`) with no consumer. It now leaves as `scene.dragAnims`
+and the renderer interpolates the item graphic source→dest the way a kind-0
+moving effect does. Gold/gem flight remaps were already in the decoder.
+
+Closed 2026-08-17 (GameEffect blend + rotation): 0xC0/0xC7's `renderMode` u32
+was left unread. ClassicUO takes it `% 7` as `GraphicEffectBlendMode`. Stored
+on `Effect::blend`, shipped, and mapped onto PIXI blend modes (Normal /
+Multiply / Screen+ScreenMore / approximations for ScreenLess, half-transparent,
+and ShadowBlue). Moving projectiles (kind 0) now rotate with ClassicUO's
+`AngleToTarget = atan2(-dY, -dX)` on the iso delta, pivoted at the art center.
+Lightning stays additive regardless — it is a gump flash, not this table.
+0x70 has no renderMode and stays blend 0.
+
+Closed 2026-08-17 (seated-character deformation): E/S chairs still hold the
+Stand frame (people have no dedicated sit art for those facings), but the
+renderer now runs ClassicUO `DrawCharacterSitted` — three quads at 0.35 / 0.60
+/ 0.94 of the frame, upper band shifted `flip ? -8 : 8`, mid a trapezoid,
+lower unshifted. Shadow and mount stay undeformed. N/W keep the ONMOUNT_STAND
+group they already used. Any human standing on a chair static/item
+(`TryGetSittingInfo`: same tile, `|Z| ≤ 1`, not mounted, not mid-step) sits,
+not just the local double-click overlay — so an NPC on an east-facing chair
+leans too. Gargoyle bodies (666/667/0x02B6/0x02B7) are skipped; ClassicUO uses
+group 42 for those rather than the three-band lean.
+
+Closed 2026-08-17 (`speech.mul` keywords): `SpeechesLoader` records are
+big-endian `id`/`length` + UTF-8. Matching ports `IsMatch` (`*`-split,
+CheckStart/CheckEnd, word-bounded, case-insensitive). A hit forces Unicode
+0xAD with `MessageType.Encoded` (0xC0) and ClassicUO's nibble-packed ids +
+UTF-8 text — ServUO's 0x03 path never fills `e.Keywords`, so "vendor buy" and
+tiller "forward"/"stop" must take this route even for ASCII. The core stays
+file-free: the driver loads `speech.mul` and hands ids to `build_unicode_say`.
+
+Closed 2026-08-17 (skills.mul / art.def / gump.def / TexTerr.def / Anim1.def /
+Anim2.def / MUL fallback / hues ramp): `skills.mul` names + HasAction are
+served at `/skillinfo.json` and replace the hardcoded skill table. Missing
+art/gump/texmap indexes follow the first present `{group}` member and optional
+hue. `Anim1.def`/`Anim2.def` remap then `% AnimationCount` (13/35/22) so an
+out-of-range animal group cannot walk into the next body's idx block. Art and
+gumps open `*.mul`+`*.idx` when the UOP is absent. Hue ramp index is the
+pixel's 5-bit red field (`GetColor16`'s `(c >> 10) & 0x1F`; after 5→8
+expansion that is `px[0] >> 3`), not `max(r,g,b)` and not `* 31 / 255`.
 
 Closed 2026-08-10 (corpse equipment layers): the first Tier 3 row. A corpse
 already drew the dead thing's held death-pose frame; now it wears what it died
@@ -1398,16 +1459,16 @@ This is the one that cuts against the project's own thesis.
 ## Tier 5 — assets (`crates/anima-assets`)
 
 Beyond T0.1 and T0.7 above: `verdata.mul` patching; `mapdif`/`stadif` map-diff files
-and 0xBF/0x18; `speech.mul` keyword encoding (so NPC keyword commands can never be
-sent); `Multimap.rle`/`facet0N.mul` (the map window shows only its gump frame and
-pins, no terrain raster); `fonts.mul` + `unifont*.mul`; `art.def`/`TexTerr.def` alias
-tables; `gump.def` alias table; `skills.mul` (skill names + HasAction);
+and 0xBF/0x18; ~~`speech.mul` keyword encoding~~ (**CLOSED** — see above);
+`Multimap.rle`/`facet0N.mul` (the world map already rasters from map+radarcol;
+this is the classic client’s own facet bitmap, unused while that path works);
+`fonts.mul` + `unifont*.mul`; ~~`art.def`/`TexTerr.def` alias tables~~ (**CLOSED**);
+~~`gump.def` alias table~~ (**CLOSED**); ~~`skills.mul`~~ (**CLOSED**);
 `Prof.txt`/`Professn.enu` professions (0xF8's profession byte is hardcoded 0);
-`tileart.uop`; `Anim1.def`/`Anim2.def` group-replacement tables **and** the missing
-`% AnimationCount` clamp for animals/monsters; `light.mul`; cliloc language selection
-and BWT-compressed clilocs; `Client.Version`-driven format selection; MUL fallback
-when a UOP is absent; and `hues.mul` ramp-index selection (we pick the ramp by pixel
-brightness where ClassicUO uses the red channel).
+`tileart.uop`; ~~`Anim1.def`/`Anim2.def` + `% AnimationCount`~~ (**CLOSED**);
+~~`light.mul`~~ (**CLOSED**, Tier 3); cliloc language selection and BWT-compressed
+clilocs; `Client.Version`-driven format selection; ~~MUL fallback when a UOP is
+absent~~ (**CLOSED**); ~~`hues.mul` ramp-index (red channel)~~ (**CLOSED**).
 
 ---
 

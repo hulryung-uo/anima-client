@@ -95,6 +95,10 @@ pub(super) fn parse_house_design_command(body: &str) -> Option<Action> {
 /// `war:<0|1>` · `cast:<spellId>` · `ability:<id>` (arm a weapon special move,
 /// 0 disarms) · `disarm` / `stun` (the pre-AOS wrestling specials, no argument) ·
 /// `bandage:<bandageSerial>[:<targetSerial>]` (target defaults to self) ·
+/// `tspell:<spellId>:<targetSerial>` (0xBF/0x2D; target 0 = self) ·
+/// `tskill:<skillId>:<targetSerial>` (0xBF/0x2E; target 0 = self) ·
+/// `tharvest:<toolSerial>:<resource>` (0xBF/0x30; 0 ore / 1 sand / 2 wood /
+/// 3 grave / 4 mushrooms) ·
 /// `target:<serial>` · `targetxy:<x>:<y>:<z>:<graphic>` ·
 /// `gump:<serial>:<gumpId>:<button>[:sw=1,2][:e=<id>=<text>,…]` (gump reply; text
 /// entries can't contain `:`, `,`, or `=`) · `menusel:<serial>:<index>` (legacy
@@ -236,6 +240,33 @@ pub(super) fn parse_command(body: &str) -> Option<Action> {
                 None => (parse_serial(arg)?, 0),
             };
             Some(Action::BandageTarget { bandage, target })
+        }
+        // tspell:<spell-id>:<target-serial> — 0xBF/0x2D, cast at a target with
+        // no cursor. Spell id is 1-based like `cast:`. Target 0 = self.
+        "tspell" => {
+            let (spell, target) = arg.split_once(':')?;
+            Some(Action::TargetedSpell {
+                spell: spell.parse().ok()?,
+                target: parse_serial(target)?,
+            })
+        }
+        // tskill:<skill-id>:<target-serial> — 0xBF/0x2E. Skill id is 0-based
+        // like `useskill:`. Target 0 = self.
+        "tskill" => {
+            let (skill, target) = arg.split_once(':')?;
+            Some(Action::TargetedSkill {
+                skill: skill.parse().ok()?,
+                target: parse_serial(target)?,
+            })
+        }
+        // tharvest:<tool-serial>:<resource> — 0xBF/0x30. resource 0=ore, 1=sand,
+        // 2=wood, 3=grave, 4=mushrooms.
+        "tharvest" => {
+            let (tool, resource) = arg.split_once(':')?;
+            Some(Action::TargetByResource {
+                tool: parse_serial(tool)?,
+                resource: resource.parse().ok()?,
+            })
         }
         // buy:<vendor>:<serial>x<amt>,<serial>x<amt>,…  (amount defaults to 1)
         "buy" => {
@@ -1075,6 +1106,41 @@ mod command_tests {
             })
         );
         assert!(parse_command("bandage").is_none());
+    }
+
+    #[test]
+    fn targeted_spell_skill_harvest_commands() {
+        assert_eq!(
+            parse_command("tspell:1:0xABCD"),
+            Some(Action::TargetedSpell {
+                spell: 1,
+                target: 0xABCD,
+            })
+        );
+        assert_eq!(
+            parse_command("tspell:8:0"),
+            Some(Action::TargetedSpell {
+                spell: 8,
+                target: 0,
+            })
+        );
+        assert_eq!(
+            parse_command("tskill:1:0xABCD"),
+            Some(Action::TargetedSkill {
+                skill: 1,
+                target: 0xABCD,
+            })
+        );
+        assert_eq!(
+            parse_command("tharvest:0x40001234:2"),
+            Some(Action::TargetByResource {
+                tool: 0x4000_1234,
+                resource: 2,
+            })
+        );
+        assert!(parse_command("tspell:1").is_none());
+        assert!(parse_command("tskill:1").is_none());
+        assert!(parse_command("tharvest:0x40001234").is_none());
     }
 
     #[test]

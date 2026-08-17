@@ -21,7 +21,7 @@ pub mod regions;
 pub mod scene;
 pub mod uo_dir;
 
-use anima_assets::{Cliloc, MapData};
+use anima_assets::{Cliloc, MapData, Speeches};
 use anima_core::agent::{survey_terrain, Action, HouseDesignAction, Observation};
 use anima_core::net::outgoing::{
     build_ascii_prompt_response, build_attack, build_bandage_target, build_boat_move_request,
@@ -43,7 +43,8 @@ use anima_core::net::outgoing::{
     build_pick_up, build_ping, build_popup_request, build_popup_select, build_profile_request,
     build_profile_update, build_prompt_response, build_quest_arrow_click, build_quest_menu_request,
     build_rename_request, build_say, build_sell, build_single_click, build_skill_lock,
-    build_stat_lock, build_status_request, build_stun_request, build_target_response,
+    build_stat_lock, build_status_request, build_stun_request, build_target_by_resource,
+    build_target_response, build_targeted_skill, build_targeted_spell,
     build_text_entry_dialog_response, build_tip_request, build_toggle_flying, build_trade_accept,
     build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability, build_use_skill,
     build_war_mode, BOAT_SPEED_FAST, BOAT_SPEED_SLOW, BOAT_SPEED_STOP, OPL_REQUEST_BATCH,
@@ -538,6 +539,9 @@ pub struct Session {
     ping_seq: u8,
     /// Traffic + latency counters for the UO socket (see [`NetStats`]).
     pub stats: NetStats,
+    /// `speech.mul` keyword table. When set, [`Action::Say`] that matches a
+    /// keyword goes out as encoded 0xAD so ServUO fills `e.Keywords`.
+    speech: Option<Speeches>,
 }
 
 /// What the link to the game server is actually doing — ClassicUO's
@@ -658,6 +662,7 @@ impl Session {
             last_ping: Instant::now(),
             ping_seq: 0,
             stats: NetStats::default(),
+            speech: None,
         };
         // ServUO doesn't push our stats/skills unsolicited — request them so the
         // first Observation carries them (ClassicUO does the same on login).
@@ -669,6 +674,13 @@ impl Session {
         session.send(&build_client_view_range(DEFAULT_VIEW_RANGE))?;
         session.world.client_view_range = DEFAULT_VIEW_RANGE;
         Ok(session)
+    }
+
+    /// Attach a `speech.mul` table so [`Action::Say`] can send encoded keywords.
+    /// Without this, speech still works as plain text; NPC/boat keyword commands
+    /// will not.
+    pub fn set_speech(&mut self, speech: Speeches) {
+        self.speech = Some(speech);
     }
 
     /// Build a perception [`Observation`] for a brain (advances the journal cursor
@@ -718,14 +730,22 @@ impl Session {
                 self.route = None;
                 self.walk(*dir, *run)?;
             }
-            // ASCII stays on the classic 0x03 path; anything else (Korean/한글…)
-            // goes out as UNICODE 0xAD so it isn't mangled to '?'.
+            // Keywords (from speech.mul) force encoded 0xAD even for ASCII —
+            // ServUO's 0x03 path never fills e.Keywords. No match: ASCII stays
+            // on 0x03, everything else is unencoded 0xAD so Korean survives.
             Action::Say { text, mode } => {
                 let msg_type = mode.wire();
-                if text.is_ascii() {
+                let ids = self
+                    .speech
+                    .as_ref()
+                    .map(|s| s.keywords(text))
+                    .unwrap_or_default();
+                if !ids.is_empty() {
+                    self.send(&build_unicode_say(text, msg_type, 0x0034, 3, &ids))?
+                } else if text.is_ascii() {
                     self.send(&build_say(text, msg_type, 0x0034, 3))?
                 } else {
-                    self.send(&build_unicode_say(text, msg_type, 0x0034, 3))?
+                    self.send(&build_unicode_say(text, msg_type, 0x0034, 3, &[]))?
                 }
             }
             Action::PartySay { text } => self.send(&build_party_message(text))?,
@@ -853,6 +873,25 @@ impl Session {
                     self.world.player_mobile().map(|p| p.serial).unwrap_or(0)
                 };
                 self.send(&build_bandage_target(*bandage, target))?;
+            }
+            Action::TargetedSpell { spell, target } => {
+                let target = if *target != 0 {
+                    *target
+                } else {
+                    self.world.player_mobile().map(|p| p.serial).unwrap_or(0)
+                };
+                self.send(&build_targeted_spell(*spell, target))?;
+            }
+            Action::TargetedSkill { skill, target } => {
+                let target = if *target != 0 {
+                    *target
+                } else {
+                    self.world.player_mobile().map(|p| p.serial).unwrap_or(0)
+                };
+                self.send(&build_targeted_skill(*skill, target))?;
+            }
+            Action::TargetByResource { tool, resource } => {
+                self.send(&build_target_by_resource(*tool, *resource))?;
             }
             Action::SkillLock { skill, lock } => {
                 self.send(&build_skill_lock(*skill, *lock))?;

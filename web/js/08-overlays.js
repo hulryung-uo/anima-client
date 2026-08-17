@@ -278,6 +278,33 @@ function ingestEffects(s) {
   }
 }
 
+function ingestDragAnims(s) {
+  if (!s || !s.dragAnims) return;
+  const now = performance.now();
+  for (const ev of s.dragAnims) {
+    const seq = ev.seq | 0;
+    if (seq <= lastDragAnimSeq) continue;
+    lastDragAnimSeq = seq;
+    spawnDragAnim(ev, now);
+  }
+}
+
+// ClassicUO `GraphicEffectBlendMode` (0xC0/0xC7 renderMode % 7). Lightning
+// (kind 1) stays additive regardless — it is a gump flash, not this table.
+// Modes 4–6 have no exact PIXI equivalent; the nearest named blend is used.
+function effectBlendMode(mode, kind) {
+  if ((kind | 0) === 1) return "add";
+  switch (mode | 0) {
+    case 1: return "multiply";
+    case 2:
+    case 3: return "screen";
+    case 4: return "color-burn";
+    case 5: return "multiply";
+    case 6: return "difference";
+    default: return "normal";
+  }
+}
+
 // The server refused our last pickup (0x27 LiftRej): the item never left its
 // source, so just clear the held drag-ghost locally — NOT a drop (nothing ever
 // moved, so sending one would wrongly ask the server to place an item it never
@@ -451,11 +478,39 @@ function spawnEffect(ev, now) {
 
   const sprite = new PIXI.Sprite();
   sprite.anchor.set(0.5, 1.0); // foot-anchored like statics; hue baked via ?hue=
-  if ((ev.kind | 0) === 1) sprite.blendMode = "add"; // lightning: additive flash, like ClassicUO
+  sprite.blendMode = effectBlendMode(ev.blend, ev.kind);
+  // Moving projectile: rotate toward the target in screen space, ClassicUO
+  // `AngleToTarget = atan2(-dY, -dX)` on the iso delta. Pivot at the art
+  // center so the bolt spins around itself rather than its feet.
+  if ((ev.kind | 0) === 0) {
+    sprite.anchor.set(0.5, 0.5);
+    const dx = isoX(tgtPos.x, tgtPos.y) - isoX(srcPos.x, srcPos.y);
+    const dy = isoY(tgtPos.x, tgtPos.y, tgtPos.z | 0) - isoY(srcPos.x, srcPos.y, srcPos.z | 0);
+    sprite.rotation = Math.atan2(-dy, -dx);
+  }
   overLayer.addChild(sprite);
   fxEffects.push({ kind: ev.kind | 0, src: ev.src >>> 0, tgt: ev.tgt >>> 0,
     frames, fm, hue, born: now, totalMs, sprite, srcPos, tgtPos, pserial });
   // Bound the pool so a burst of effects can't leak sprites.
+  while (fxEffects.length > 48) { const o = fxEffects.shift(); overLayer.removeChild(o.sprite); o.sprite.destroy(); }
+  markDirty();
+}
+
+function spawnDragAnim(ev, now) {
+  const hue = ev.hue | 0;
+  const pserial = (scene && scene.player) ? (scene.player.serial >>> 0) : 0;
+  const srcPos = fxEntityPos(ev.src, pserial) || { x: ev.sx, y: ev.sy, z: ev.sz | 0 };
+  const tgtPos = fxEntityPos(ev.tgt, pserial) || { x: ev.tx, y: ev.ty, z: ev.tz | 0 };
+  const dist = Math.hypot(tgtPos.x - srcPos.x, tgtPos.y - srcPos.y);
+  const totalMs = Math.min(2000, Math.max(200, dist * 80));
+  const sprite = new PIXI.Sprite();
+  sprite.anchor.set(0.5, 1.0);
+  overLayer.addChild(sprite);
+  fxEffects.push({
+    kind: 0, src: ev.src >>> 0, tgt: ev.tgt >>> 0,
+    frames: [ev.g | 0], fm: 80, hue, born: now, totalMs, sprite,
+    srcPos, tgtPos, pserial, drag: true
+  });
   while (fxEffects.length > 48) { const o = fxEffects.shift(); overLayer.removeChild(o.sprite); o.sprite.destroy(); }
   markDirty();
 }

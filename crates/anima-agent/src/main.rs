@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use anima_agent::WanderBrain;
-use anima_assets::{Cliloc, MapData};
+use anima_assets::{Cliloc, MapData, Speeches};
 use anima_core::net::LoginConfig;
 use anima_core::{Action, Brain};
 use anima_net::{Endpoint, Session};
@@ -59,6 +59,10 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if let Ok(speech) = Speeches::open(&data_dir) {
+        println!("agent: speech.mul loaded ({} keywords)", speech.len());
+        s.set_speech(speech);
+    }
     let p0 = s.world.player_mobile().cloned().unwrap_or_default();
     println!(
         "agent: in world as {} at ({}, {})",
@@ -141,6 +145,15 @@ fn main() {
                 Action::ToggleFlying => "flying".into(),
                 Action::BandageTarget { bandage, target } => {
                     format!("bandage(0x{bandage:08X}→0x{target:08X})")
+                }
+                Action::TargetedSpell { spell, target } => {
+                    format!("tspell({spell}→0x{target:08X})")
+                }
+                Action::TargetedSkill { skill, target } => {
+                    format!("tskill({skill}→0x{target:08X})")
+                }
+                Action::TargetByResource { tool, resource } => {
+                    format!("tharvest(0x{tool:08X}/{resource})")
                 }
                 Action::SkillLock { skill, lock } => format!("skilllock({skill}={lock})"),
                 Action::StatLock { stat, lock } => format!("statlock({stat}={lock})"),

@@ -1,8 +1,10 @@
 //! `hues.mul` reader and sprite recoloring (UO "hues").
 //!
-//! UO recolors sprites by mapping a pixel's brightness to one of 32 gradient
-//! colors held in a hue. The file is a flat array of groups (ClassicUO
-//! `HuesLoader`): each group = `[header u32][8 × HuesBlock]`, and each block =
+//! UO recolors sprites by mapping a pixel's **5-bit red** field to one of 32
+//! gradient colors held in a hue (ClassicUO `GetColor16` uses `(c >> 10) &
+//! 0x1F` on the original 16-bit colour; after 5→8 expansion that is
+//! `px[0] >> 3`). The file is a flat array of groups (ClassicUO `HuesLoader`):
+//! each group = `[header u32][8 × HuesBlock]`, and each block =
 //! `[32 × u16 RGB1555 color][TableStart u16][TableEnd u16][name 20B]` (88 B).
 //!
 //! The hue index in packets is 1-based: `id = hue & 0x3FFF`, then `id - 1`
@@ -79,8 +81,10 @@ impl Hues {
 /// `hue` is the packet-form value: `id = hue & 0x3FFF` (0 = no-op), and
 /// `0x8000` flags a *partial* hue (only gray pixels — `r==g==b` — are
 /// recolored). For each affected opaque pixel the ramp index is the pixel's
-/// brightness (`max(r,g,b)` scaled to 0..31); RGB is replaced with the hue's
-/// color while the original alpha is kept. Matches ClassicUO's hue translation.
+/// **5-bit red** field — ClassicUO `GetColor16` uses `(c >> 10) & 0x1F` on the
+/// original 16-bit colour. After our 5→8 expansion (`(r << 3) | (r >> 2)`)
+/// that is `px[0] >> 3`, not a 0..255 rescale, which would map dark reds
+/// (5-bit 1 → 8-bit 8) onto ramp 0.
 pub fn apply_hue(img: &mut crate::art::Image, hues: &Hues, hue: u16) {
     let id = hue & 0x3FFF;
     if id == 0 {
@@ -94,8 +98,7 @@ pub fn apply_hue(img: &mut crate::art::Image, hues: &Hues, hue: u16) {
         if partial && !(px[0] == px[1] && px[1] == px[2]) {
             continue; // partial hue: leave non-gray pixels untouched
         }
-        let brightness = px[0].max(px[1]).max(px[2]) as u16;
-        let ramp = (brightness * 31 / 255) as u8;
+        let ramp = px[0] >> 3;
         let c = hues.color(id, ramp);
         px[0] = c[0];
         px[1] = c[1];
@@ -107,6 +110,36 @@ pub fn apply_hue(img: &mut crate::art::Image, hues: &Hues, hue: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_hues(ramp: [[u8; 4]; BLOCK_COLORS]) -> Hues {
+        Hues { table: vec![ramp] }
+    }
+
+    #[test]
+    fn apply_hue_indexes_ramp_by_red_channel() {
+        // Ramp slot i is tagged in green so we can see which one was picked.
+        let mut ramp = [[0u8; 4]; BLOCK_COLORS];
+        for (i, slot) in ramp.iter_mut().enumerate() {
+            *slot = [0, i as u8, 0, 255];
+        }
+        let hues = test_hues(ramp);
+        let mut img = crate::art::Image {
+            width: 1,
+            height: 1,
+            rgba: vec![255, 10, 10, 255], // red = 255 → ramp 31
+        };
+        apply_hue(&mut img, &hues, 1);
+        assert_eq!(img.rgba[1], 31, "red 255 must pick the last ramp slot");
+        // 5-bit red 1 expands to 8-bit 8 (`(r << 3) | (r >> 2)`); >> 3 recovers 1.
+        // `* 31 / 255` would pick ramp 0.
+        img.rgba = vec![8, 0, 0, 255];
+        apply_hue(&mut img, &hues, 1);
+        assert_eq!(img.rgba[1], 1, "5-bit red 1 must pick ramp 1, not 0");
+        // Green-only pixel: red=0 → ramp 0, not brightness (which would be 31).
+        img.rgba = vec![0, 255, 0, 255];
+        apply_hue(&mut img, &hues, 1);
+        assert_eq!(img.rgba[1], 0, "ramp follows red, not max(r,g,b)");
+    }
 
     #[test]
     #[ignore] // needs ~/dev/uo/uo-resource

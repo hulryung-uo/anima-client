@@ -160,7 +160,8 @@ pub(super) fn effects_json(world: &World, animdata: Option<&AnimData>) -> Vec<Va
             json!({
                 "seq": e.seq, "kind": e.kind, "src": e.src_serial, "tgt": e.tgt_serial,
                 "sx": e.sx, "sy": e.sy, "sz": e.sz, "tx": e.tx, "ty": e.ty, "tz": e.tz,
-                "g": e.graphic, "hue": e.hue, "speed": e.speed, "dur": e.duration,
+                "g": e.graphic, "hue": e.hue, "blend": e.blend,
+                "speed": e.speed, "dur": e.duration,
                 "frames": frames, "interval": interval
             })
         })
@@ -196,7 +197,25 @@ pub(super) fn buffs_json(world: &World, cliloc: Option<&Cliloc>) -> Vec<Value> {
         .collect()
 }
 
-/// The player's skills (0x3A), sorted by id. Values stay in tenths (wire
+/// 0x23 DragAnimation: an item graphic flying source→dest (stack split, loot
+/// pull). Same seq-stamped ring as [`effects_json`]; the renderer interpolates
+/// in world tiles the way a kind-0 moving effect does.
+pub(super) fn drag_anims_json(world: &World) -> Vec<Value> {
+    world
+        .recent_drag_anims
+        .iter()
+        .map(|a| {
+            json!({
+                "seq": a.seq, "g": a.graphic, "hue": a.hue, "n": a.count,
+                "src": a.source, "tgt": a.dest,
+                "sx": a.source_x, "sy": a.source_y, "sz": a.source_z,
+                "tx": a.dest_x, "ty": a.dest_y, "tz": a.dest_z
+            })
+        })
+        .collect()
+}
+
+/// The player's skills (0x3A), sorted by id. Values stay in tenths (wire)
 /// units): 500 == 50.0, and the client divides by 10 for display.
 /// `lock`: 0 = up, 1 = down, 2 = locked.
 pub(super) fn skills_json(world: &World) -> Vec<Value> {

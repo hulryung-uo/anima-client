@@ -268,7 +268,9 @@ pub struct Skill {
 /// `GraphicEffectType`: 0 = Moving (a projectile src→tgt), 1 = Lightning (a bolt
 /// at the target), 2 = FixedXYZ (stays at src x/y/z), 3 = FixedFrom (stays on the
 /// src/tgt serial). Positions are tiles; `graphic` is the ART tile id (animated
-/// via animdata.mul); `hue` is 0 for 0x70 (0xC0/0xC7 carry one).
+/// via animdata.mul); `hue` is 0 for 0x70 (0xC0/0xC7 carry one). `blend` is
+/// the 0xC0/0xC7 renderMode taken `% 7` (ClassicUO `GraphicEffectBlendMode`);
+/// 0x70 has no such field and stays 0 = Normal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Effect {
     pub seq: u64,
@@ -285,6 +287,9 @@ pub struct Effect {
     pub speed: u8,
     pub duration: u8,
     pub hue: u16,
+    /// 0xC0/0xC7 `renderMode % 7` (ClassicUO `GraphicEffectBlendMode`).
+    /// 0x70 has no field and stays 0 = Normal.
+    pub blend: u8,
 }
 
 /// One server acknowledgement that ends an item-drag operation. ClassicUO

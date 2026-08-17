@@ -327,11 +327,19 @@ pub(super) fn serve_gump(
     }
     let bytes = gumps
         .as_ref()
-        .and_then(|g| g.get(id as usize))
-        .map(|mut i| {
-            if hue != 0 {
+        .and_then(|g| {
+            let img = g.get(id as usize);
+            let paint = if hue != 0 {
+                hue
+            } else {
+                g.def_hue(id as usize)
+            };
+            img.map(|i| (i, paint))
+        })
+        .map(|(mut i, paint)| {
+            if paint != 0 {
                 if let Some(h) = hues.as_ref() {
-                    anima_assets::apply_hue(&mut i, h, hue);
+                    anima_assets::apply_hue(&mut i, h, paint);
                 }
             }
             i.to_png()
@@ -449,20 +457,28 @@ pub(super) fn serve_art(
     }
     // Hold the Art lock only for the raw decode, not the PNG encode. A nonzero hue
     // (graphical effects pass `?hue=`) recolors the tile like /anim and /gump do.
+    // `art.def` supplies a fallback hue when the requested index was missing.
     let bytes = art
         .as_ref()
         .and_then(|a| {
             let guard = a.lock().unwrap();
-            if is_static {
+            let img = if is_static {
                 guard.static_tile(g)
             } else {
                 guard.land(g)
-            }
+            };
+            let idx = if is_static {
+                0x4000 + g as usize
+            } else {
+                (g & 0x3FFF) as usize
+            };
+            let paint = if hue != 0 { hue } else { guard.def_hue(idx) };
+            img.map(|i| (i, paint))
         })
-        .map(|mut i| {
-            if hue != 0 {
+        .map(|(mut i, paint)| {
+            if paint != 0 {
                 if let Some(h) = hues.as_ref() {
-                    anima_assets::apply_hue(&mut i, h, hue);
+                    anima_assets::apply_hue(&mut i, h, paint);
                 }
             }
             i.to_png()

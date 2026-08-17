@@ -39,7 +39,7 @@
 use std::io::{BufRead, Write};
 use std::time::Duration;
 
-use anima_assets::{Cliloc, MapData};
+use anima_assets::{Cliloc, MapData, Speeches};
 use anima_core::agent::Action;
 use anima_core::net::LoginConfig;
 use anima_net::json::{action_from_json, observation_to_json, SCHEMA_VERSION};
@@ -86,6 +86,13 @@ fn main() {
     let mut map = MapData::open(&data_dir).ok();
     // Localizes the journal for the brain — see `resolve_journal`.
     let cliloc = Cliloc::open(&data_dir).ok();
+    if let Ok(speech) = Speeches::open(&data_dir) {
+        eprintln!(
+            "[anima-agent] speech.mul loaded ({} keywords)",
+            speech.len()
+        );
+        session.set_speech(speech);
+    }
     eprintln!(
         "[anima-agent] map data {}",
         if map.is_some() {

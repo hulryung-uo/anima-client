@@ -653,6 +653,24 @@ pub enum Action {
     /// server's `NextActionTime`, so a brain should pace it rather than retry
     /// on silence.
     BandageTarget { bandage: u32, target: u32 },
+    /// Cast spell `spell` at mobile/item `target` in one packet (UO 0xBF/0x2D),
+    /// skipping the cast → 0x6C cursor → reply round-trip. `spell` is 1-based,
+    /// the same id [`Action::CastSpell`] takes (ServUO subtracts 1 on the wire).
+    /// `target` 0 means the player themselves — the [`Action::BandageTarget`]
+    /// sentinel. A shard without the Enhanced-Client handlers drops this
+    /// silently; ServUO registers it.
+    TargetedSpell { spell: u16, target: u32 },
+    /// Use skill `skill` on `target` in one packet (UO 0xBF/0x2E). `skill` is
+    /// 0-based, the same id [`Action::UseSkill`] takes. `target` 0 = self.
+    /// ServUO's handler `UseSkill`s and, if a cursor opened, immediately
+    /// `Invoke`s it on `target` — Anatomy on a nearby mobile, Animal Taming
+    /// on a creature, without the player ever seeing the cursor.
+    TargetedSkill { skill: u16, target: u32 },
+    /// Harvest with `tool` for `resource` (UO 0xBF/0x30 TargetByResourceMacro).
+    /// ServUO's `HarvestSystem.TargetByResource`: 0 = ore, 1 = sand, 2 = wood,
+    /// 3 = grave, 4 = red mushrooms. The tool must be a harvest tool the
+    /// player is holding or carrying; the server picks a valid tile in range.
+    TargetByResource { tool: u32, resource: u16 },
     /// Change a skill's lock state (UO 0x3A SkillStatusChangeRequest). `lock` is
     /// 0 = up (raise on gain), 1 = down (lower on gain), 2 = locked. The driver
     /// optimistically updates the world's skill lock so the UI reflects it at once.
@@ -752,9 +770,9 @@ pub enum Action {
     /// double-clicked. `Observation::player.mounted` becomes true when it
     /// takes, because the pilot lock equips a virtual mount item.
     ///
-    /// The other boat-control path — tiller-man speech ("forward", "stop") —
-    /// is unreachable from this client: it dispatches on `speech.mul` keyword
-    /// ids, which are not implemented (CLASSICUO_GAPS.md Tier 5).
+    /// The other boat-control path is tiller-man speech ("forward", "stop"):
+    /// `Action::Say` with those words matches `speech.mul` and goes out as
+    /// encoded 0xAD so ServUO fills `e.Keywords`.
     BoatMove { dir: u8, run: bool },
     /// Stop the boat we are piloting (0xBF/0x33 with speed 0).
     ///

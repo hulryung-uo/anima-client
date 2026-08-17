@@ -20,8 +20,9 @@ terrain + full iso sprites, walk/attack/typed mobile animation (legacy + UOP,
 Body/Bodyconv/Corpse/Equipconv.def remap), gumps, audio, and secure trading. 7
 crates (core/assets/contract-json/net/wasm/agent/desktop) + `web/`.
 **Remaining:** richer/RL/LLM brains, browser WASM+relay.
-(Tauri shell, `multi.mul` houses/boats, sitting, treasure maps, custom housing
-(0xD8 viewing), and delete-character (0x83) are done.) See DESIGN.md §6.
+(Tauri shell, `multi.mul` houses/boats, sitting + seated lean, treasure maps,
+custom housing (0xD8 viewing), delete-character (0x83), `speech.mul` keywords,
+and skills.mul / `*.def` aliases / MUL fallback are done.) See DESIGN.md §6.
 
 ## Conventions
 - **Rust**, edition 2021. Core stays **near-zero-dep: one documented exception**
