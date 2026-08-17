@@ -643,6 +643,13 @@ function knownSpellbookFor(school) {
   const list = (scene && scene.spellbooks) || [];
   return list.find((b) => ((b.graphic | 0) & 0xffff) === school.graphic) || null;
 }
+function castSpell(id) {
+  const school = VISIBLE_SCHOOLS.find((s) => s.key === spellSchool) || VISIBLE_SCHOOLS[0];
+  const known = school && knownSpellbookFor(school);
+  const serial = (known && known.serial) || (school && findOwnSpellbook(school.graphic));
+  if (serial) sendInput("castbook:" + id + ":" + (serial >>> 0));
+  else sendInput("cast:" + id);
+}
 // Is global spell id `id` ABSENT from `book`'s 64-bit content mask? `content`
 // arrives from anima-net split into two u32 halves, `lo` (bits 0..31) and `hi`
 // (bits 32..63) — see `build_scene`'s doc for why (JS Number precision).
@@ -748,9 +755,9 @@ function buildSpellbook() {
   document.getElementById("sb-book").addEventListener("click", (e) => {
     const row = e.target.closest(".sp-row");
     if (!row) return;
-    // Cast → server replies with a target cursor when the spell needs one; the
-    // existing target UI (scene.target) lets the player click the target.
-    sendInput("cast:" + row.dataset.id);
+    // Cast from the open book when we know its serial (0x12 type 0x27);
+    // otherwise the macro path (`cast:`, 0xBF/0x1C).
+    castSpell(row.dataset.id);
   });
   wireSpellDragOut();   // dragging a spell icon out spawns a quick-cast button
   renderSpellSchool();
@@ -1099,19 +1106,13 @@ function makeSkillButton(id, x, y) {
 function addSkillButton(id) { makeSkillButton(id, null, null); saveSkillButtons(); }
 
 // "Show all names" (G key — ClassicUO's Ctrl+Shift all-names): single-click every
-// in-view character — self, players, NPCs and animals — so the server returns each
-// name. The names arrive as overhead text (shown regardless of the name-label
-// setting) and also fill the persistent labels. Capped so it never floods the link.
+// in-view mobile except ourselves, plus every corpse (graphic 0x2006), so the
+// server returns each name. Names arrive as overhead text (shown regardless of
+// the name-label setting) and also fill the persistent labels. Capped at 60.
 function requestAllNames() {
   if (!scene) return;
-  let n = 0;
-  if (scene.player) { sendInput("click:" + (scene.player.serial >>> 0)); n++; }
-  for (const m of scene.mobiles || []) {
-    if (n >= 60) break;
-    sendInput("click:" + (m.serial >>> 0));
-    n++;
-  }
-  setStatus(`querying ${n} name${n === 1 ? "" : "s"}…`);
+  sendInput("allnames");
+  setStatus("querying names…");
 }
 function loadSkillButtons() {
   let arr = [];
@@ -1157,7 +1158,7 @@ function makeSpellButton(id, icon, name, x, y) {
     const up = () => {
       window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up);
       if (moved) saveSpellButtons();
-      else { sendInput("cast:" + (id | 0)); el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 160); }
+      else { castSpell(id | 0); el.classList.add("flash"); setTimeout(() => el.classList.remove("flash"), 160); }
     };
     window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
   });

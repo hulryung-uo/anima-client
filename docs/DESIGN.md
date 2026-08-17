@@ -379,8 +379,8 @@ The driver is the only code that knows about sockets — write it once for nativ
    mobtypes.txt), art, gump art, hues, sound, cliloc, texmap, radar colors, mounts.
 8. ✅ Pathfinding (`path/`): A* + `Terrain` trait, Z-aware, diagonal-safe.
 9. ✅ Observation/Action contract (`agent.rs`) + `Session::apply_action` / `navigate_to`.
-   `agent.rs`'s `Action` enum now has 79 variants; `anima-contract-json` mirrors the
-   full `Observation`/`Action` surface as versioned JSON (schema **v26**) for the
+   `agent.rs`'s `Action` enum now has 89 variants; `anima-contract-json` mirrors the
+   full `Observation`/`Action` surface as versioned JSON (schema **v30**) for the
    out-of-process Python brain (`anima2`), table-tested for every variant.
    **Combat state a brain can act on** (v19): `armed_ability` — the weapon
    special move armed for the next swing — is the one piece of state the arming
@@ -392,7 +392,9 @@ The driver is the only code that knows about sockets — write it once for nativ
    version added `active_spell_icons` (0xBF/0x25 stances) and the
    `DisarmRequest`/`StunRequest`/`BandageTarget` actions. Schema v29 added the
    bandage siblings `TargetedSpell`/`TargetedSkill`/`TargetByResource`
-   (0xBF/0x2D, 0x2E, 0x30).
+   (0xBF/0x2D, 0x2E, 0x30). Schema v30 added ClassicUO `GameActions` verbs that
+   had no Action: `OpenDoor` (0x12/0x58), `EquipLastWeapon` (0xD7/0x1E),
+   `InvokeVirtue`, `EmoteAction`, `CastSpellFromBook`, `AllNames`.
    **`Observation.terrain`** (schema v17) is the one field that does not come from
    a packet: local walkability (walkable / standing Z / the serial of a closed door
    in the way), so a brain can tell a wall from open ground rather than delegating

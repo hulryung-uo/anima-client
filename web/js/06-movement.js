@@ -323,13 +323,14 @@ function calculateNewZ(x, y, currentZ, direction) {
 // Real UO lets you walk INTO a closed door: it opens instead of just stopping you.
 // We have no equivalent, so a closed door (tileWalkable → w=0) reads as a solid
 // wall and manual (keyboard) walking could never enter a house through one. This
-// asks the server to open it, but deliberately does NOT predict the step through
-// the still-closed door — canWalk still returns null this same frame, so the step
-// stays refused. Only once the server actually opens it does the NEXT poll's tile
-// report w=1 and the ordinary walk proceed on its own; since the key is usually
-// still held, that reads as "bump the door, it opens, you walk through". Throttled
-// per-door so a step refused every frame (while the key is held) doesn't spam a
-// `use:` packet each time.
+// asks the server to open it (ClassicUO `GameActions.OpenDoor` / 0x12 type
+// 0x58 — the door on the facing tile, no serial), but deliberately does NOT
+// predict the step through the still-closed door — canWalk still returns null
+// this same frame, so the step stays refused. Only once the server actually
+// opens it does the NEXT poll's tile report w=1 and the ordinary walk proceed
+// on its own; since the key is usually still held, that reads as "bump the
+// door, it opens, you walk through". Throttled per-door so a step refused
+// every frame (while the key is held) doesn't spam an `opendoor` packet.
 const DOOR_REOPEN_MS = 700;
 let lastDoorOpen = { serial: 0, t: 0 };
 function tryAutoOpenDoor(x, y) {
@@ -339,7 +340,7 @@ function tryAutoOpenDoor(x, y) {
   const now = performance.now();
   if (serial === lastDoorOpen.serial && now - lastDoorOpen.t < DOOR_REOPEN_MS) return;
   lastDoorOpen = { serial, t: now };
-  sendInput("use:" + serial);
+  sendInput("opendoor");
 }
 
 // ClassicUO Pathfinder.CanWalk: resolve a step from (x,y) facing `dir`. Returns

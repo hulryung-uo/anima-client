@@ -158,6 +158,14 @@ fn main() {
                 Action::SkillLock { skill, lock } => format!("skilllock({skill}={lock})"),
                 Action::StatLock { stat, lock } => format!("statlock({stat}={lock})"),
                 Action::UseSkill { skill } => format!("useskill({skill})"),
+                Action::OpenDoor => "opendoor".into(),
+                Action::EquipLastWeapon => "lastweapon".into(),
+                Action::InvokeVirtue { id } => format!("virtue({id})"),
+                Action::EmoteAction { action } => format!("emote({action:?})"),
+                Action::CastSpellFromBook { spell, book } => {
+                    format!("castbook({spell}@0x{book:08X})")
+                }
+                Action::AllNames => "allnames".into(),
                 Action::OplRequest { serial } => format!("oplreq(0x{serial:08X})"),
                 Action::PartyInvite => "partyinvite".into(),
                 Action::PartyAccept { leader } => format!("partyaccept(0x{leader:08X})"),

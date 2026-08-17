@@ -3,6 +3,7 @@
 // `e.code` and `action` is one of:
 //   { t:"say", text } · { t:"cast", id } · { t:"skill", id } · { t:"ability", id }
 //   { t:"war", on:0|1|"toggle" } · { t:"open", win:"paperdoll|backpack|spellbook|skills|minimap|worldmap" }
+//   { t:"opendoor" } · { t:"lastweapon" } · { t:"allnames" } · { t:"virtue", id } · { t:"emote", text }
 // Execution reuses the existing sendInput(...) commands + window toggles, so this is
 // purely a client-side layer with no server changes.
 const MACRO_KEY = "anima.macros";
@@ -56,6 +57,11 @@ function actionSummary(a) {
     case "ability": return `ability #${a.id}`;
     case "war": return `war ${a.on}`;
     case "open": return `open ${a.win}`;
+    case "opendoor": return "open door";
+    case "lastweapon": return "equip last weapon";
+    case "allnames": return "all names";
+    case "virtue": return `virtue #${a.id}`;
+    case "emote": return `emote ${a.text}`;
     default: return a.t;
   }
 }
@@ -70,9 +76,14 @@ function macroFor(e) {
 function runMacroAction(a) {
   switch (a.t) {
     case "say": if (a.text) sendInput("say:" + a.text); break;
-    case "cast": sendInput("cast:" + a.id); break;
+    case "cast": castSpell(a.id); break;
     case "skill": sendInput("useskill:" + a.id); break;
     case "ability": sendInput("ability:" + a.id); break;
+    case "opendoor": sendInput("opendoor"); break;
+    case "lastweapon": sendInput("lastweapon"); break;
+    case "allnames": sendInput("allnames"); break;
+    case "virtue": sendInput("virtue:" + a.id); break;
+    case "emote": if (a.text) sendInput("animate:" + a.text); break;
     case "war": {
       let on = a.on;
       if (on === "toggle") { warOn = warOn ? 0 : 1; on = warOn; }
@@ -109,12 +120,14 @@ function mcBuildParam() {
   const t = document.getElementById("mc-type").value;
   const p = document.getElementById("mc-param");
   if (t === "say") p.innerHTML = '<input id="mc-pv" class="mc-input" type="text" maxlength="128" placeholder="text to say" />';
-  else if (t === "cast" || t === "skill" || t === "ability")
+  else if (t === "emote") p.innerHTML = '<input id="mc-pv" class="mc-input" type="text" maxlength="32" placeholder="bow, salute, …" />';
+  else if (t === "cast" || t === "skill" || t === "ability" || t === "virtue")
     p.innerHTML = '<input id="mc-pv" class="mc-input" type="number" min="0" placeholder="id" />';
   else if (t === "war")
     p.innerHTML = '<select id="mc-pv" class="mc-input"><option value="toggle">toggle</option><option value="1">on</option><option value="0">off</option></select>';
   else if (t === "open")
     p.innerHTML = '<select id="mc-pv" class="mc-input"><option>paperdoll</option><option>backpack</option><option>spellbook</option><option>skills</option><option>minimap</option><option>worldmap</option><option>status</option></select>';
+  else p.innerHTML = "";
 }
 function setupMacroEditor() {
   const win = document.getElementById("macros");
@@ -148,10 +161,16 @@ function setupMacroEditor() {
       const text = pv.value.trim();
       if (!text) { msg.textContent = "Enter the text to say."; return; }
       action = { t: "say", text };
-    } else if (t === "cast" || t === "skill" || t === "ability") {
+    } else if (t === "cast" || t === "skill" || t === "ability" || t === "virtue") {
       const id = parseInt(pv.value, 10);
       if (!Number.isFinite(id) || id < 0) { msg.textContent = "Enter a valid numeric id."; return; }
       action = { t, id };
+    } else if (t === "emote") {
+      const text = pv.value.trim();
+      if (!text) { msg.textContent = "Enter the emote verb (bow, salute, …)."; return; }
+      action = { t: "emote", text };
+    } else if (t === "opendoor" || t === "lastweapon" || t === "allnames") {
+      action = { t };
     } else if (t === "war") {
       const v = pv.value;
       action = { t: "war", on: v === "toggle" ? "toggle" : (v === "1" ? 1 : 0) };
@@ -211,7 +230,7 @@ function setupInput() {
           if (spellChord.circle == null) { spellChord.circle = d; spellChord.t = performance.now(); setStatus(`Spell ${d}-_`); }
           else {
             const id = (spellChord.circle - 1) * 8 + d;   // Magery spell 1..64
-            sendInput("cast:" + id);
+            castSpell(id);
             setStatus(`cast ${spellChord.circle}-${d} (${MAGERY_SPELLS[id - 1] || "spell " + id})`);
             spellChord = null;
           }

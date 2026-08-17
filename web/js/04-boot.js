@@ -1,3 +1,15 @@
+// ClassicUO corpse-gump eye (gump 0x45/0x46) blinks every 750ms.
+let corpseEyeOn = 0, corpseEyeAt = 0;
+function tickCorpseEyes(now) {
+  const eyes = document.querySelectorAll(".cont-eye");
+  if (!eyes.length) return;
+  if (now - corpseEyeAt < 750) return;
+  corpseEyeAt = now;
+  corpseEyeOn ^= 1;
+  const src = "gump/" + (0x45 + corpseEyeOn) + ".png";
+  for (const eye of eyes) eye.src = src;
+}
+
 async function main() {
   app = new PIXI.Application();
   const rs = renderSize();
@@ -55,6 +67,7 @@ async function main() {
   const RENDER_MS = 22; // ~45fps redraw ceiling
   function frame(now) {
     renderFrame(now - lastT); lastT = now;
+    tickCorpseEyes(now);
     if (dirty && now - lastDraw >= RENDER_MS) {
       // A render throw (e.g. a texture destroyed out from under a still-live
       // sprite — see the texture-cache eviction comments above) must not kill

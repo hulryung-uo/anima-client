@@ -220,6 +220,27 @@ pub(super) fn parse_command(body: &str) -> Option<Action> {
         "cast" => Some(Action::CastSpell {
             spell: arg.parse().ok()?,
         }),
+        // castbook:<spell-id>:<book-serial> — 0x12 type 0x27, cast from a
+        // specific spellbook. Spell id is 1-based like `cast:`.
+        "castbook" => {
+            let (spell, book) = arg.split_once(':')?;
+            Some(Action::CastSpellFromBook {
+                spell: spell.parse().ok()?,
+                book: parse_serial(book)?,
+            })
+        }
+        "opendoor" => arg.is_empty().then_some(Action::OpenDoor),
+        "lastweapon" => arg.is_empty().then_some(Action::EquipLastWeapon),
+        "allnames" => arg.is_empty().then_some(Action::AllNames),
+        // virtue:<id> — 1 Honor … 8 Spirituality (0x12 type 0xF4).
+        "virtue" => Some(Action::InvokeVirtue {
+            id: arg.parse().ok()?,
+        }),
+        // animate:<verb> — 0x12 type 0xC7 (bow, salute, …). Named apart from
+        // `emote:` which is SpeechMode (saying *text* as an emote).
+        "animate" => (!arg.is_empty()).then_some(Action::EmoteAction {
+            action: arg.to_string(),
+        }),
         // ability:<id> — arm a weapon special move (0 disarms). 0xD7 UseCombatAbility.
         "ability" => Some(Action::UseAbility {
             ability: arg.parse().ok()?,
@@ -1141,6 +1162,32 @@ mod command_tests {
         assert!(parse_command("tspell:1").is_none());
         assert!(parse_command("tskill:1").is_none());
         assert!(parse_command("tharvest:0x40001234").is_none());
+    }
+
+    #[test]
+    fn classicuo_game_action_commands() {
+        assert_eq!(parse_command("opendoor"), Some(Action::OpenDoor));
+        assert!(parse_command("opendoor:1").is_none());
+        assert_eq!(parse_command("lastweapon"), Some(Action::EquipLastWeapon));
+        assert_eq!(parse_command("allnames"), Some(Action::AllNames));
+        assert_eq!(
+            parse_command("virtue:1"),
+            Some(Action::InvokeVirtue { id: 1 })
+        );
+        assert_eq!(
+            parse_command("animate:bow"),
+            Some(Action::EmoteAction {
+                action: "bow".into()
+            })
+        );
+        assert!(parse_command("animate").is_none());
+        assert_eq!(
+            parse_command("castbook:8:0x40000001"),
+            Some(Action::CastSpellFromBook {
+                spell: 8,
+                book: 0x4000_0001,
+            })
+        );
     }
 
     #[test]

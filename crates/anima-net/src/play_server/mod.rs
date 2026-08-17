@@ -1139,8 +1139,7 @@ impl PlayServer {
                                                         graphic_at_send,
                                                     },
                                                 );
-                                                let _ =
-                                                    session.apply_action(&Action::Use { serial });
+                                                let _ = session.apply_action(&Action::OpenDoor);
                                             }
                                             BlockedStepAction::AwaitDoor => {
                                                 // A `Use` for this door hasn't had time to land / show

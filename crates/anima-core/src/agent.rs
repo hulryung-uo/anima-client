@@ -684,6 +684,30 @@ pub enum Action {
     /// Works for active skills (Hiding, Meditation, Anatomy, Animal Lore, …);
     /// passive skills are a no-op server-side.
     UseSkill { skill: u16 },
+    /// Open the door the player is facing (UO 0x12 type 0x58). ClassicUO
+    /// `GameActions.OpenDoor` / `PlayerMobile.TryOpenDoors` — no serial on the
+    /// wire; ServUO looks at facing. Distinct from [`Action::Use`] on a door,
+    /// which double-clicks a specific serial.
+    OpenDoor,
+    /// Re-equip the weapon most recently worn (UO 0xD7 sub 0x1E). ServUO's
+    /// `EquipLastWeaponRequest` swaps it back onto the one-hand layer.
+    EquipLastWeapon,
+    /// Invoke a virtue by 1-based id (UO 0x12 type 0xF4): Honor=1, Sacrifice=2,
+    /// Valor=3, Compassion=4, Honesty=5, Humility=6, Justice=7, Spirituality=8.
+    /// ServUO subtracts 1. A T2A shard without the virtue system drops it.
+    InvokeVirtue { id: u8 },
+    /// Play a named emote (UO 0x12 type 0xC7): `"bow"`, `"salute"`, … ClassicUO
+    /// `GameActions.EmoteAction`. The server animates the player; unknown verbs
+    /// are ignored.
+    EmoteAction { action: String },
+    /// Cast `spell` (1-based, same id as [`Action::CastSpell`]) from spellbook
+    /// `book` (UO 0x12 type 0x27). ServUO looks the book up and casts from it;
+    /// [`Action::CastSpell`] is the macro path with no book.
+    CastSpellFromBook { spell: u16, book: u32 },
+    /// Single-click every in-view mobile (except ourselves) and every corpse,
+    /// ClassicUO `GameActions.AllNames`. Names arrive as overhead text. The
+    /// driver caps the burst so it cannot flood the link.
+    AllNames,
     /// Request an entity's Object Property List / tooltip (UO 0xD6 MegaClilocRequest).
     /// The server replies with a 0xD6 MegaCliloc stored in `World::opl`. Sent on
     /// hover so the client can show the item/mobile's full properties.
