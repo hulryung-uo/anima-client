@@ -1082,8 +1082,10 @@ registerDialog({
     return p && p.entries && p.entries.length ? [p] : [];
   },
   key: (p) => p.serial >>> 0,
-  // No sig: the menu is anchored at the cursor position it was opened with, so
-  // leave an open one exactly where the player put it.
+  // Entries only: the menu is anchored at the cursor it opened with, so a
+  // stable signature must not include position. Same entries → leave it;
+  // a different list rebuilds once (still at lastMenuX/Y).
+  sig: (p) => JSON.stringify((p.entries || []).map((e) => [e.index, e.text, e.hl])),
   dismiss: "session",
   build: buildPopupMenu,
   close: (win) => { win.el.remove(); if (popupEl === win.el) { popupEl = null; popupSerial = 0; } },

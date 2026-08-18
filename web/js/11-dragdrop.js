@@ -176,20 +176,21 @@ function placeCursorItem(clientX, clientY) {
 // Resolve which mobile (the player's own body, or another) sits under a
 // renderer-space point — used to target a held-item drop at a mobile instead
 // of the bare ground. `mobSprites` holds each entity's persistent part
-// sprites (see drawMobs); the "#body" part is the whole-character hit target.
+// sprites (see drawMobs); the "#body#N" strips together are the character hit target.
 // Prefers an exact hit inside the body sprite's screen bounds; a nearby-center
 // fallback (~28px) covers thin/foreshortened facing frames near the edges.
 function mobileAt(gx, gy) {
   const HIT_R = 28;
   let best = null, bestD = Infinity;
   const test = (id, serial) => {
-    const sp = mobSprites.get(id + "#body");
-    if (!sp || !sp.visible) return;
-    const b = sp.getBounds();
-    if (b.containsPoint(gx, gy)) { best = serial; bestD = -1; return; }
-    if (bestD === -1) return;                 // an exact hit already won
-    const d = Math.hypot(gx - (b.x + b.width / 2), gy - (b.y + b.height / 2));
-    if (d <= HIT_R && d < bestD) { best = serial; bestD = d; }
+    for (const sp of mobPartSprites(id, "body")) {
+      if (!sp || !sp.visible) continue;
+      const b = sp.getBounds();
+      if (b.containsPoint(gx, gy)) { best = serial; bestD = -1; return; }
+      if (bestD === -1) return;                 // an exact hit already won
+      const d = Math.hypot(gx - (b.x + b.width / 2), gy - (b.y + b.height / 2));
+      if (d <= HIT_R && d < bestD) { best = serial; bestD = d; }
+    }
   };
   const pserial = scene && scene.player ? (scene.player.serial >>> 0) : 0;
   if (pserial) test("self", pserial);

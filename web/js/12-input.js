@@ -8,6 +8,34 @@ let wasMoving = false;   // last frame sent a walk → send one "stop" on releas
 // tick — otherwise the server keeps pacing for up to a tick and takes one extra
 // step (the "한 발자국 더" overshoot), worst at run cadence (200ms).
 function stopNow() { if (wasMoving) { sendInput("stop"); wasMoving = false; } }
+// Lost keyup (tab out, click a text field, Cursor/OS steals focus) leaves
+// `held` with W/↑ = dir 0, so the avatar keeps walking north. Clear every
+// movement latch; the next frame's `activeMove()` is then idle.
+function releaseMoveKeys() {
+  held.clear();
+  rightDown = false;
+  shiftHeld = false;
+  if (rmbEntity) {
+    if (rmbEntity.timer) { clearTimeout(rmbEntity.timer); rmbEntity.timer = null; }
+    rmbEntity = null;
+  }
+  stopNow();
+}
+// RMB steer / context-menu resolve. PIXI drag can suppress the compatibility
+// `mouseup`, so callers must also hook `pointerup` or rightDown stays true and
+// the avatar keeps running toward the cursor (iso-up = northwest).
+function endRightMouse(clientX, clientY) {
+  rightDown = false;
+  if (rmbEntity) {
+    if (rmbEntity.timer) { clearTimeout(rmbEntity.timer); rmbEntity.timer = null; }
+    if (!rmbEntity.steering) {
+      lastMenuX = clientX; lastMenuY = clientY;
+      undismissDialog("popup", rmbEntity.serial >>> 0);
+      sendInput("popupreq:" + rmbEntity.serial);
+    }
+    rmbEntity = null;
+  }
+}
 // Right-button "mouse move" (ClassicUO MoveCharacterByMouseInput): hold RMB and
 // the character walks toward the cursor; far from center → run.
 let rightDown = false, mouseX = 0, mouseY = 0;

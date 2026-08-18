@@ -870,14 +870,21 @@ function transparencyPass() {
   // No position? Fall through with an empty `newFaded` rather than returning:
   // that releases the source from everything currently faded, so nothing is
   // stranded translucent while the player position is momentarily unknown.
-  const body = ptx === undefined ? null : mobSprites.get("self#body");
-  if (body && !body.destroyed && body.visible) {
-    // The avatar's real on-screen rectangle. Bounds are global, so they already
-    // account for the camera and zoom — the same space the statics report in.
-    const pb = body.getBounds();
-    const ax0 = pb.x, ay0 = pb.y;
-    const ax1 = pb.x + pb.width, ay1 = pb.y + pb.height;
-    const minArea = pb.width * pb.height * OCC_MIN_FRAC;
+  const bodyParts = ptx === undefined ? [] : mobPartSprites("self", "body");
+  const body = bodyParts.find((sp) => sp && !sp.destroyed && sp.visible);
+  if (body) {
+    // Union of every depth strip — the avatar's real on-screen rectangle.
+    // Bounds are global, so they already account for the camera and zoom.
+    let ax0 = Infinity, ay0 = Infinity, ax1 = -Infinity, ay1 = -Infinity;
+    for (const sp of bodyParts) {
+      if (!sp || sp.destroyed || !sp.visible) continue;
+      const b = sp.getBounds();
+      if (b.x < ax0) ax0 = b.x;
+      if (b.y < ay0) ay0 = b.y;
+      if (b.x + b.width > ax1) ax1 = b.x + b.width;
+      if (b.y + b.height > ay1) ay1 = b.y + b.height;
+    }
+    const minArea = (ax1 - ax0) * (ay1 - ay0) * OCC_MIN_FRAC;
     // Same depth formula drawMobs uses for "self": anything sorting at or below
     // this draws behind us and cannot hide us, whatever its bounds.
     const playerZi = mobDepthZ(ptx, pty, pz | 0); // same key drawMobs sorts the avatar with
@@ -912,7 +919,13 @@ function transparencyPass() {
 // all sharing the body's screen position / anchor / depth. mobSprites is keyed by
 // "<id>#<slot>" so each stack layer is a persistent sprite (no per-frame re-create
 // → no full world re-sort), reused/pruned exactly like the single body was before.
-const mobSprites = new Map(); // "<id>#<slot>" -> persistent layer sprite in the sorted world layer
+const mobSprites = new Map(); // "<id>#<slot>#<slice>" -> persistent layer sprite in the sorted world layer
+function mobPartSprites(id, slot) {
+  const prefix = id + "#" + slot + "#";
+  const out = [];
+  for (const [key, sp] of mobSprites) if (key.startsWith(prefix)) out.push(sp);
+  return out;
+}
 const itemHits = new Map();   // "i"+serial -> invisible click target over a ground-item dot
 
 // UO equipment draw order (back → front). Lower index = drawn earlier/behind, so
@@ -926,6 +939,74 @@ const _LO_0 = [5, 4, 3, 24, 13, 8, 9, 14, 15, 19, 7, 23, 17, 22, 10, 11, 12, 16,
 const _LO_3 = [20, 5, 4, 3, 24, 13, 8, 9, 14, 15, 19, 7, 23, 17, 22, 12, 10, 11, 16, 18, 6, 1, 2]; // facing viewer → cloak behind
 const LAYER_ORDER_DIR = [_LO_0, _LO_DEF, _LO_DEF, _LO_3, _LO_DEF, _LO_DEF, _LO_DEF, _LO_DEF];
 const layerRank = (l, dir) => LAYER_ORDER_DIR[dir & 7].indexOf(l | 0); // -1 = not drawn
+
+// ClassicUO `MobileView.DrawInternal` draws each mobile part as horizontal
+// strips whose depth increases toward the feet (`depth + 1 + i*2`). A raised
+// weapon's blade lives in the upper strip (lower depth) so the body's lower
+// strip paints over it — without this the whole sword sits in front of the
+// torso and reads as floating above the character. Stride stays inside one
+// z-step (16) so slices occlude each other without jumping a tile.
+function mobileSlicePlan(height, cy, mountOff) {
+  const h = height | 0;
+  if (h <= 1) return [{ i: 0, sy: 0, sh: Math.max(1, h) }];
+  const diffY = (h + (cy | 0)) - (mountOff | 0);
+  const value = Math.max(1, diffY);
+  let count = Math.max((h / value | 0) + 1, 2);
+  if (count > 8) count = 8;
+  const out = [];
+  let rectH = Math.min(value, h);
+  let remains = h - rectH;
+  let y = 0;
+  for (let i = 0; i < count && y < h; i++) {
+    const sh = Math.max(1, Math.min(rectH, h - y));
+    out.push({ i, sy: y, sh });
+    y += sh;
+    rectH = remains;
+    remains -= rectH;
+  }
+  if (y < h) out.push({ i: out.length, sy: y, sh: h - y });
+  return out;
+}
+function textureSlice(tex, sy, sh) {
+  const orig = tex.frame;
+  const fx = orig ? orig.x : 0;
+  const fy = (orig ? orig.y : 0) + sy;
+  const fw = orig ? orig.width : tex.width;
+  const Rect = PIXI.Rectangle;
+  const frame = Rect ? new Rect(fx, fy, fw, sh) : { x: fx, y: fy, width: fw, height: sh };
+  return new PIXI.Texture({ source: tex.source, frame });
+}
+function applySliceTexture(sp, base, sy, sh) {
+  const full = sy === 0 && sh >= (base.height | 0);
+  if (full) {
+    if (sp._ownSliceTex) { sp._ownSliceTex.destroy(false); sp._ownSliceTex = null; }
+    sp._sliceTag = null;
+    sp._sliceY = 0;
+    sp._sliceH = 0;
+    if (sp.texture !== base) sp.texture = base;
+    return;
+  }
+  const tag = `${(base.source && base.source.uid) || base.uid || 0}|${sy}|${sh}`;
+  if (sp._sliceTag === tag && sp._ownSliceTex) {
+    if (sp.texture !== sp._ownSliceTex) sp.texture = sp._ownSliceTex;
+    sp._sliceY = sy;
+    sp._sliceH = sh;
+    return;
+  }
+  if (sp._ownSliceTex) { sp._ownSliceTex.destroy(false); sp._ownSliceTex = null; }
+  const sliced = textureSlice(base, sy, sh);
+  sp._ownSliceTex = sliced;
+  sp._sliceTag = tag;
+  sp._sliceY = sy;
+  sp._sliceH = sh;
+  sp.texture = sliced;
+}
+function destroyMobSprite(sp) {
+  clearSitDeform(sp);
+  if (sp._ownSliceTex) { sp._ownSliceTex.destroy(false); sp._ownSliceTex = null; }
+  world.removeChild(sp);
+  sp.destroy();
+}
 
 // Every ServUO `Body.IsGhost` id and the living people body used to animate it.
 // 970 is the legacy male death-shroud body (`H_Male_Robe_Deathshroud`).
@@ -1161,7 +1242,8 @@ function drawMobs() {
         st.prevFrameKey = `${group}/${d}`;
       }
     } else {
-      group = animGroup(moving, running, mounted, bodyAnim, inWar, atype);
+      group = animGroup(moving, running, mounted, bodyAnim, inWar, atype,
+        !!(ent && ent.equip && ent.equip.some((e) => (e.layer | 0) === 2)));
       frames = framesFor(bodyAnim, group, d);
       // animPhase is a 0..1 cycle fraction (advanced per ground covered); map it to
       // the real frame count. Prefetch the whole cycle so frames don't pop in.
@@ -1202,10 +1284,21 @@ function drawMobs() {
     // position the part correctly (ClassicUO math) rather than foot-anchoring it.
     const part = (key, url, rank, interactive, bodyId, grp, frm) => {
       let t = url ? texFor(url) : null;
-      if (t) st.partTex.set(key, { tex: t, url });
-      else { const fb = st.partTex.get(key); t = fb ? fb.tex : null; }
+      const fromUrl = !!t;
+      const prev = st.partTex.get(key);
+      if (!t && prev) t = prev.tex;
+      // Prefer this frame's draw-center; if animinfo hasn't landed (or this
+      // layer has fewer frames than the body), keep the last good center so
+      // a tall weapon doesn't foot-anchor and stick up through the head.
+      let c = bodyId != null ? centerFor(bodyId, grp, d, frm) : null;
+      if (!c && prev && prev.cx != null) c = [prev.cx, prev.cy];
       if (t) {
-        const c = bodyId != null ? centerFor(bodyId, grp, d, frm) : null;
+        st.partTex.set(key, {
+          tex: t,
+          url: fromUrl ? url : (prev ? prev.url : url),
+          cx: c ? c[0] : null,
+          cy: c ? c[1] : null,
+        });
         entries.push({ key, tex: t, rank, interactive, cx: c ? c[0] : null, cy: c ? c[1] : null });
       }
     };
@@ -1260,8 +1353,15 @@ function drawMobs() {
         // real draw-center while clothes fall back to the foot anchor → the worn
         // layers appear shifted down off the body.
         framesFor(e.anim, group, d);
-        part("L" + e.layer, `anim/${e.anim}/${group}/${d}/${frame}.png${e.hue ? `?hue=${e.hue}` : ""}`,
-          1 + layerRank(e.layer, d), false, e.anim, group, frame);
+        // A worn layer can have fewer frames than the body's walk/run cycle.
+        // ClassicUO mods AnimIndex by that layer's own count (`% frames.Length`);
+        // using the body's index 404s the PNG and drops the center, which is
+        // how a held weapon jumped to the feet and stuck up through the head.
+        const fk = `${e.anim}/${group}/${d}`;
+        const n = frameCount.has(fk) ? Math.max(1, frameCount.get(fk)) : 0;
+        const idx = n > 0 ? (frame % n) : frame;
+        part("L" + e.layer, `anim/${e.anim}/${group}/${d}/${idx}.png${e.hue ? `?hue=${e.hue}` : ""}`,
+          1 + layerRank(e.layer, d), false, e.anim, group, idx);
       }
     }
     // Seated: draw at the chair's tile + ClassicUO's pixel nudge (chairSeatFor())
@@ -1278,120 +1378,141 @@ function drawMobs() {
         ? mobDepthZ(seat.x, seat.y, seat.z)
         : mobDepthZ(Math.round(st.rx), Math.round(st.ry), st.z);
       for (const e of entries) {
-        const key = id + "#" + e.key;
-        let sp = mobSprites.get(key);
-        if (!sp) {
-          sp = new PIXI.Sprite(e.tex);
-          sp.anchor.set(0.5, 1.0);
-          // Only the body is the click target; mount/clothing/hair never eat clicks.
-          // Clicking YOURSELF is a real interaction too (single-click = your name in
-          // your notoriety colour, double-click = your paperdoll), so the "self" body
-          // is a click target like any other mobile — its serial comes from scene.player.
-          const clickSerial = id === "self"
-            ? (scene.player ? ((scene.player.serial >>> 0) + "") : null)
-            : (e.interactive ? id.slice(1) : null);
-          if (clickSerial != null) {
-            sp.eventMode = "static";
-            sp.cursor = "pointer";
-            // Per-pixel hit-testing (see pixelHitArea above): a big transparent
-            // mount/robe frame must not steal clicks from whatever's actually
-            // drawn behind it. Unlike world items this sprite is persistent and
-            // its texture swaps every animation frame, so the URL is looked up
-            // live from st.partTex (kept current by part() above) rather than
-            // captured once here.
-            const partKey = e.key;
-            sp.hitArea = pixelHitArea(sp, () => { const p = st.partTex.get(partKey); return p ? p.url : null; });
-            sp.on("pointerdown", (ev) => onEntityPointerDown(clickSerial, ev));
-            // OPL tooltip on hover (same flow as world items) + target highlight.
-            sp.on("pointerover", () => { hoverEntity(clickSerial); targetHighlightOn(sp); });
-            sp.on("pointerout", () => { hoverOut(clickSerial); targetHighlightOff(sp); });
-          } else {
-            sp.eventMode = "none";
-          }
-          world.addChild(sp);
-          mobSprites.set(key, sp);
-        }
-        if (sp.texture !== e.tex) sp.texture = e.tex;
-        // Position by the frame's draw-center (ClassicUO: top-left at screenX - cx,
-        // screenY - height - cy). This is what seats a rider on a mount and aligns
-        // held items / armor / hair instead of stacking everything at the feet.
-        // Until the center loads, fall back to the foot anchor.
-        if (e.shadow) {
-          // ClassicUO `Batcher2D.DrawShadow`: the sprite as a parallelogram —
-          // half height, top edge pushed right by that same half-height, and
-          // lifted 10px so it starts at the feet rather than under them. As a
-          // matrix that is [1, 0, -0.5, 0.5], which PIXI expresses as a -45°
-          // x-skew with scaleY = cos(45°). Mounted riders drop it 10px more,
-          // matching the `drawY + 10` in the mounted branch there.
-          const h = e.tex.height;
-          sp.anchor.set(0, 0);
-          sp.skew.x = -Math.PI / 4;
-          sp.scale.set(1, Math.SQRT1_2);
-          // +h/2 for the same reason as the static shadow: the shear moves the
-          // top right by h/2 while the base must stay under the feet, so the base
-          // x (= sprite x, `Position2.X = position.X`) is recovered by adding it
-          // back into the translation. Was missing, sliding the shadow h/2 left.
-          sp.x = (x - e.cx) + h / 2;
-          sp.y = ((y - 3) - h - e.cy) + h / 2 - 10 + (e.mounted ? 10 : 0);
-        } else if (e.cx != null) {
-          sp.anchor.set(0, 0);
-          const riderOff = (e.key !== "mount" && e.key !== "shadow") ? mountOff : 0;
-          sp.x = x - e.cx;
-          sp.y = (y - 3) - e.tex.height - e.cy + riderOff;
-        } else {
-          sp.anchor.set(0.5, 1.0);
-          const riderOff = (e.key !== "mount" && e.key !== "shadow") ? mountOff : 0;
-          sp.x = x; sp.y = y - 3 + riderOff;
-        }
-        // Visibility follows the composed alpha, so a mobile hidden by the
-        // ceiling leaves the batch instead of being drawn fully transparent.
-        // (Set after the alpha below, so this reads what that computed.)
-        // Dead humans render as translucent ghosts; a hidden mobile (still visible to
-        // us, per the scene's `hidden` flag) renders semi-transparent too, so we know
-        // we're hidden even though we can see ourselves. Sprites are pooled/persistent,
-        // so alpha must be reset to 1 every frame for a body that is neither (else a
-        // former ghost/hidden mobile stays faint after it dies again/unhides).
-        // The shadow shader is `color.rgb = 0; alpha = 0.4` over the sprite's
-        // own alpha mask — a flat black silhouette, not a dimmed copy.
-        // Written as a RESTING alpha and composed, not assigned: `mobSprites` is
-        // a pool no fade source touches today, so `alphaTarget` returns exactly
-        // the old value and this is a no-op — but it means there is genuinely
-        // one definition of a sprite's alpha rather than two, and when ClassicUO's
-        // mobile fade (`z + DEFAULT_CHARACTER_HEIGHT > maxZ`,
-        // GameSceneDrawingSorting.cs:829-853) does arrive it has somewhere to go
-        // instead of being erased by this unconditional per-frame write.
-        if (e.shadow) { sp._baseAlpha = 0.4; sp.tint = 0x000000; }
-        else sp._baseAlpha = ghost ? 0.45 : (hidden ? 0.5 : 1);
-        // Mobiles fade under a ceiling too. ClassicUO runs them through the very
-        // same `ProcessAlpha` as statics, passing an EMPTY `StaticTiles`
-        // (GameSceneDrawingSorting.cs:840-850) — so only the `obj.Z >= _maxZ`
-        // branch can fire for a mobile, never the roof or translucent ones.
-        // (RENDERING.md used to cite `z + DEFAULT_CHARACTER_HEIGHT > maxZ`; that
-        // is the branch compared against the literal 150, i.e. dead code.)
-        // Needs no server change — `scene.map.maxZ` and each mobile's `z` have
-        // both been on the wire all along.
-        const mz = scene.map && scene.map.maxZ;
-        setAlphaSource(sp, "ceil", mz != null && (st.z | 0) >= mz ? 0 : null);
-        // `_baseAlpha` is rewritten every frame here, so re-arm the easer when it
-        // actually moves; otherwise a ghost/hidden transition could settle out of
-        // `alphaActive` and never be applied.
-        if (sp._baseAlphaPrev !== sp._baseAlpha) { alphaActive.add(sp); sp._baseAlphaPrev = sp._baseAlpha; }
-        sp.alpha = alphaTarget(sp);
-        sp.visible = sp.alpha > 0;
-        const z = zi + e.rank / 256;
-        if (sp.zIndex !== z) sp.zIndex = z;
-        // Seated lean: ClassicUO `DrawCharacterSitted` — three vertical bands,
-        // upper shifted ±8px (`flip ? -8 : 8`), mid a trapezoid, lower unshifted.
-        // Shadow and the mount stay undeformed (CUO draws the shadow before the
-        // sit pass and the mount is a separate animal). The sprite stays for
-        // hit-testing; the mesh is the visible draw.
-        // Three-band lean is only for E/S (Stand group 4). N/W already use
-        // ONMOUNT_STAND (group 25), which is ClassicUO's dedicated sit art —
-        // DrawCharacterSitted does not run on those facings.
+        // Seated lean uses a single full-frame mesh (DrawCharacterSitted), not
+        // the walking depth strips. Shadow is also one piece (DrawShadow).
         const sitThis = seat && seat.group === 4 && !e.shadow && e.key !== "mount";
-        if (sitThis) applySitDeform(sp, e.tex, !!seat.flip, sp.x, sp.y, z, sp.alpha, 0xffffff);
-        else clearSitDeform(sp);
-        seen.add(key);
+        const sliceOff = (e.key === "mount" || e.key === "shadow") ? 0 : mountOff;
+        const slices = (!e.shadow && !sitThis && e.cx != null)
+          ? mobileSlicePlan(e.tex.height, e.cy, sliceOff)
+          : [{ i: 0, sy: 0, sh: e.tex.height | 0 }];
+        const riderOff = (e.key !== "mount" && e.key !== "shadow") ? mountOff : 0;
+        const topY = e.cx != null ? (y - 3) - e.tex.height - e.cy + riderOff : (y - 3 + riderOff);
+        const clickSerial = id === "self"
+          ? (scene.player ? ((scene.player.serial >>> 0) + "") : null)
+          : (e.interactive ? id.slice(1) : null);
+        for (const sl of slices) {
+          const key = id + "#" + e.key + "#" + sl.i;
+          let sp = mobSprites.get(key);
+          if (!sp) {
+            sp = new PIXI.Sprite(e.tex);
+            sp.anchor.set(0.5, 1.0);
+            // Only the body is the click target; mount/clothing/hair never eat clicks.
+            // Clicking YOURSELF is a real interaction too (single-click = your name in
+            // your notoriety colour, double-click = your paperdoll), so the "self" body
+            // is a click target like any other mobile — its serial comes from scene.player.
+            if (clickSerial != null) {
+              sp.eventMode = "static";
+              sp.cursor = "pointer";
+              // Per-pixel hit-testing (see pixelHitArea above): a big transparent
+              // mount/robe frame must not steal clicks from whatever's actually
+              // drawn behind it. Unlike world items this sprite is persistent and
+              // its texture swaps every animation frame, so the URL is looked up
+              // live from st.partTex (kept current by part() above) rather than
+              // captured once here. Each depth strip tests its own band of the mask.
+              const partKey = e.key;
+              sp.hitArea = pixelHitArea(sp, () => { const p = st.partTex.get(partKey); return p ? p.url : null; });
+              sp.on("pointerdown", (ev) => onEntityPointerDown(clickSerial, ev));
+              // OPL tooltip on hover (same flow as world items) + target highlight.
+              sp.on("pointerover", () => {
+                hoverEntity(clickSerial);
+                for (const s of mobPartSprites(id, "body")) targetHighlightOn(s);
+              });
+              sp.on("pointerout", () => {
+                hoverOut(clickSerial);
+                for (const s of mobPartSprites(id, "body")) targetHighlightOff(s);
+              });
+            } else {
+              sp.eventMode = "none";
+            }
+            world.addChild(sp);
+            mobSprites.set(key, sp);
+          }
+          applySliceTexture(sp, e.tex, sl.sy, sl.sh);
+          // Position by the frame's draw-center (ClassicUO: top-left at screenX - cx,
+          // screenY - height - cy). This is what seats a rider on a mount and aligns
+          // held items / armor / hair instead of stacking everything at the feet.
+          // Until the center loads, fall back to the foot anchor.
+          if (e.shadow) {
+            // ClassicUO `Batcher2D.DrawShadow`: the sprite as a parallelogram —
+            // half height, top edge pushed right by that same half-height, and
+            // lifted 10px so it starts at the feet rather than under them. As a
+            // matrix that is [1, 0, -0.5, 0.5], which PIXI expresses as a -45°
+            // x-skew with scaleY = cos(45°). Mounted riders drop it 10px more,
+            // matching the `drawY + 10` in the mounted branch there.
+            const h = e.tex.height;
+            sp.anchor.set(0, 0);
+            sp.skew.x = -Math.PI / 4;
+            sp.scale.set(1, Math.SQRT1_2);
+            // +h/2 for the same reason as the static shadow: the shear moves the
+            // top right by h/2 while the base must stay under the feet, so the base
+            // x (= sprite x, `Position2.X = position.X`) is recovered by adding it
+            // back into the translation. Was missing, sliding the shadow h/2 left.
+            sp.x = (x - e.cx) + h / 2;
+            sp.y = ((y - 3) - h - e.cy) + h / 2 - 10 + (e.mounted ? 10 : 0);
+          } else if (e.cx != null) {
+            sp.anchor.set(0, 0);
+            sp.skew.x = 0;
+            sp.scale.set(1, 1);
+            sp.x = x - e.cx;
+            sp.y = topY + sl.sy;
+          } else {
+            sp.anchor.set(0.5, 1.0);
+            sp.skew.x = 0;
+            sp.scale.set(1, 1);
+            sp.x = x; sp.y = y - 3 + riderOff;
+          }
+          // Visibility follows the composed alpha, so a mobile hidden by the
+          // ceiling leaves the batch instead of being drawn fully transparent.
+          // (Set after the alpha below, so this reads what that computed.)
+          // Dead humans render as translucent ghosts; a hidden mobile (still visible to
+          // us, per the scene's `hidden` flag) renders semi-transparent too, so we know
+          // we're hidden even though we can see ourselves. Sprites are pooled/persistent,
+          // so alpha must be reset to 1 every frame for a body that is neither (else a
+          // former ghost/hidden mobile stays faint after it dies again/unhides).
+          // The shadow shader is `color.rgb = 0; alpha = 0.4` over the sprite's
+          // own alpha mask — a flat black silhouette, not a dimmed copy.
+          // Written as a RESTING alpha and composed, not assigned: `mobSprites` is
+          // a pool no fade source touches today, so `alphaTarget` returns exactly
+          // the old value and this is a no-op — but it means there is genuinely
+          // one definition of a sprite's alpha rather than two, and when ClassicUO's
+          // mobile fade (`z + DEFAULT_CHARACTER_HEIGHT > maxZ`,
+          // GameSceneDrawingSorting.cs:829-853) does arrive it has somewhere to go
+          // instead of being erased by this unconditional per-frame write.
+          if (e.shadow) { sp._baseAlpha = 0.4; sp.tint = 0x000000; }
+          else sp._baseAlpha = ghost ? 0.45 : (hidden ? 0.5 : 1);
+          // Mobiles fade under a ceiling too. ClassicUO runs them through the very
+          // same `ProcessAlpha` as statics, passing an EMPTY `StaticTiles`
+          // (GameSceneDrawingSorting.cs:840-850) — so only the `obj.Z >= _maxZ`
+          // branch can fire for a mobile, never the roof or translucent ones.
+          // (RENDERING.md used to cite `z + DEFAULT_CHARACTER_HEIGHT > maxZ`; that
+          // is the branch compared against the literal 150, i.e. dead code.)
+          // Needs no server change — `scene.map.maxZ` and each mobile's `z` have
+          // both been on the wire all along.
+          const mz = scene.map && scene.map.maxZ;
+          setAlphaSource(sp, "ceil", mz != null && (st.z | 0) >= mz ? 0 : null);
+          // `_baseAlpha` is rewritten every frame here, so re-arm the easer when it
+          // actually moves; otherwise a ghost/hidden transition could settle out of
+          // `alphaActive` and never be applied.
+          if (sp._baseAlphaPrev !== sp._baseAlpha) { alphaActive.add(sp); sp._baseAlphaPrev = sp._baseAlpha; }
+          sp.alpha = alphaTarget(sp);
+          sp.visible = sp.alpha > 0;
+          // ClassicUO `depth + 1 + i*2` (tiles=2). Shadow is unsliced (`DrawShadow`
+          // uses the mobile's base depth). Rank epsilon keeps clothes in front of
+          // the body inside the same strip.
+          const z = e.shadow ? zi + e.rank / 256 : zi + 1 + sl.i * 2 + e.rank / 256;
+          if (sp.zIndex !== z) sp.zIndex = z;
+          // Seated lean: ClassicUO `DrawCharacterSitted` — three vertical bands,
+          // upper shifted ±8px (`flip ? -8 : 8`), mid a trapezoid, lower unshifted.
+          // Shadow and the mount stay undeformed (CUO draws the shadow before the
+          // sit pass and the mount is a separate animal). The sprite stays for
+          // hit-testing; the mesh is the visible draw.
+          // Three-band lean is only for E/S (Stand group 4). N/W already use
+          // ONMOUNT_STAND (group 25), which is ClassicUO's dedicated sit art —
+          // DrawCharacterSitted does not run on those facings.
+          if (sitThis) applySitDeform(sp, e.tex, !!seat.flip, sp.x, sp.y, z, sp.alpha, 0xffffff);
+          else clearSitDeform(sp);
+          seen.add(key);
+        }
       }
     } else if (st.body) {
       // Nothing loaded yet → a small fallback dot until textures arrive.
@@ -1400,7 +1521,7 @@ function drawMobs() {
   }
   // Drop layer sprites for entities/slots that left view (or shed equipment).
   for (const [key, sp] of mobSprites) {
-    if (!seen.has(key)) { clearSitDeform(sp); world.removeChild(sp); sp.destroy(); mobSprites.delete(key); }
+    if (!seen.has(key)) { destroyMobSprite(sp); mobSprites.delete(key); }
   }
 }
 

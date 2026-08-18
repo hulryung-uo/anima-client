@@ -21,11 +21,12 @@ const A_TRANSLUCENT = 178 / 255;
 const STATIC_GRAY = new PIXI.ColorMatrixFilter();
 STATIC_GRAY.desaturate();
 STATIC_GRAY.brightness(1.1, true);
-// ClassicUO people animation groups
-const WALK = 0, RUN_UNARMED = 2, STAND = 4;
+// ClassicUO people animation groups (`PeopleAnimationGroup`)
+const WALK = 0, WALK_ARMED = 1, RUN_UNARMED = 2, RUN_ARMED = 3, STAND = 4;
 // War-mode idle stance: PAG_STAND_ONEHANDED_ATTACK (the combat-ready pose a person
 // holds while standing in war mode). ClassicUO swaps the plain Stand (4) for this.
 const PEOPLE_COMBAT_STAND = 7;
+const WALK_WARMODE = 15; // walking in war mode (not running)
 const ONMOUNT_WALK = 23, ONMOUNT_RUN = 24, ONMOUNT_STAND = 25;
 const CHAR_ANIM_DELAY = 80; // ClassicUO Constants.CHARACTER_ANIMATION_DELAY (ms/frame)
 // Animation GROUP NUMBERS differ by body type (ClassicUO): monster Walk=0/Stand=1,
@@ -36,14 +37,18 @@ const CHAR_ANIM_DELAY = 80; // ClassicUO Constants.CHARACTER_ANIMATION_DELAY (ms
 function bodyType(body, atype) {
   return atype != null ? atype : body < 200 ? 0 : body < 400 ? 1 : 2;
 }
-function animGroup(moving, running, mounted, body, war, atype) {
+function animGroup(moving, running, mounted, body, war, atype, armed) {
   if (mounted) return moving ? (running ? ONMOUNT_RUN : ONMOUNT_WALK) : ONMOUNT_STAND;
   const t = bodyType(body, atype);
   if (t === 0) return moving ? 0 : 1;                  // monster: no separate run
   if (t === 1) return moving ? (running ? 1 : 0) : 2;  // animal
-  // people: standing in war mode → combat-ready stance instead of the idle stand.
+  // people: ClassicUO `GetGroupForAnimation` (MobileAnimation.cs). Two-handed
+  // (layer 2) swaps Walk/Run for the armed groups so the body pose matches the
+  // weapon overlay; war-mode walking uses WalkWarmode rather than the idle walk.
   if (!moving) return war ? PEOPLE_COMBAT_STAND : STAND;
-  return running ? RUN_UNARMED : WALK;
+  if (war && !running) return WALK_WARMODE;
+  if (running) return armed ? RUN_ARMED : RUN_UNARMED;
+  return armed ? WALK_ARMED : WALK;
 }
 
 // People animation groups (ClassicUO PeopleAnimationGroup): 16 = CastDirected,

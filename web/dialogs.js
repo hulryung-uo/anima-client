@@ -206,6 +206,11 @@ function syncDialogFamily(family, scene) {
     if (family.update) {
       win._sig = sig;
       family.update(win, item, { key, sig, scene });
+    } else if (sig === null) {
+      // Omitted sig means "content never changes after build". The check above
+      // only skips when `sig !== null`, so a missing sig used to fall through
+      // and rebuild every poll — the right-click popup flickered open/closed.
+      continue;
     } else {
       // No in-place update: the layout is server-authored, so rebuild it — but
       // hand the outgoing window to build() so local ui state can survive.

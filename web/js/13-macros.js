@@ -315,8 +315,13 @@ function setupInput() {
   });
   window.addEventListener("keyup", (e) => {
     shiftHeld = e.shiftKey;
-    if (isTypingTarget(e.target)) return;
+    // Always drop a walk key, even if focus has moved into a text field —
+    // `isTypingTarget` on keyup is what left W/↑ latched and walking north.
     if (e.code in KEY_DIR) { held.delete(KEY_DIR[e.code]); if (!held.size) trace("KU"); }
+  });
+  window.addEventListener("blur", releaseMoveKeys);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) releaseMoveKeys();
   });
   // Right-button movement: suppress the context menu, track the cursor, and hold
   // state. Position is tracked window-wide so dragging off-canvas still steers.
@@ -410,16 +415,15 @@ function setupInput() {
   });
   window.addEventListener("mouseup", (e) => {
     if (e.button !== 2) return;
-    rightDown = false;
-    // Decide the pending entity-RMB: if it never promoted to steering (released
-    // before the hold timer + no drag), it was a quick tap → open the context menu.
-    // If it steered, the character moved and NO menu pops. Either way it's resolved.
-    if (rmbEntity) {
-      if (rmbEntity.timer) { clearTimeout(rmbEntity.timer); rmbEntity.timer = null; }
-      if (!rmbEntity.steering) { lastMenuX = e.clientX; lastMenuY = e.clientY; undismissDialog("popup", rmbEntity.serial >>> 0); sendInput("popupreq:" + rmbEntity.serial); }
-      rmbEntity = null;
-    }
+    endRightMouse(e.clientX, e.clientY);
   });
+  // Same release path as mouseup: a cancelled pointerdown (PIXI drag) never
+  // emits mouseup, which latched RMB-steer and ran the character unattended.
+  window.addEventListener("pointerup", (e) => {
+    if (e.button !== 2) return;
+    endRightMouse(e.clientX, e.clientY);
+  });
+  window.addEventListener("pointercancel", releaseMoveKeys);
   // Click anywhere outside an open context menu dismisses it (row clicks stop
   // propagation and dismiss themselves before this fires).
   window.addEventListener("mousedown", (e) => {

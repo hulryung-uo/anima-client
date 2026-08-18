@@ -162,8 +162,12 @@ function pixelHitArea(sp, getUrl) {
       if (mask === null) return boundsContains(sp, x, y);
       const w = sp.width, h = sp.height;
       if (!w || !h) return false;
+      // A depth-sliced mobile part is only a horizontal strip of the frame
+      // (`_sliceY`/`_sliceH`); map local y into that strip of the full mask.
+      const srcH = sp._sliceH || mask.h;
+      const srcY = sp._sliceY || 0;
       const px = Math.floor((x + sp.anchor.x * w) / w * mask.w);
-      const py = Math.floor((y + sp.anchor.y * h) / h * mask.h);
+      const py = Math.floor((y + sp.anchor.y * h) / h * srcH) + srcY;
       if (px < 0 || px >= mask.w || py < 0 || py >= mask.h) return false; // outside the texture rect
       return mask.bits[py * mask.w + px] !== 0;
     },
