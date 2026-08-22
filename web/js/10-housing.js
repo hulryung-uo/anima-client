@@ -473,6 +473,71 @@ const CONTAINER_SOUNDS = {
   0x109:[0x2D,0x2C], 0x10A:[0x2D,0x2C], 0x10B:[0x2D,0x2C], 0x10C:[0x2F,0x2E], 0x10D:[0x2F,0x2E],
   0x10E:[0x2F,0x2E], 0x2A63:[0x187,0x1C9], 0x775E:[0x48,0x58], 0x7760:[0x48,0x58], 0x7762:[0x48,0x58],
 };
+// ClassicUO `ContainerData.IconizedGraphic` + `MinimizerArea` (always 16×16).
+// Only the gumps that actually ship an iconized art + pin; the rest cannot
+// collapse (`IconizedGraphic == 0` → empty MinimizerArea).
+const CONTAINER_ICONIZE = {
+  0x3C: { icon: 0x50, mx: 105, my: 162 },
+  0x775E: { icon: 0x775F, mx: 105, my: 178 },
+  0x7760: { icon: 0x7761, mx: 105, my: 178 },
+  0x7762: { icon: 0x7763, mx: 105, my: 178 },
+};
+const CONT_MIN_DRAG = 5; // ClassicUO MIN_PICKUP_DRAG_DISTANCE_PIXELS
+function containerScaleFor(gump) {
+  return (gump === 0x091A || gump === 0x092E)
+    ? 1
+    : Math.max(50, Math.min(200, (settings.containerScale | 0) || 100)) / 100;
+}
+function sizeContainerToGump(win, gumpId, scale) {
+  const sizeTo = (w) => {
+    const sw = Math.round(w * scale);
+    win.el.style.width = (sw + 2) + "px";
+    win.body.style.width = w + "px";
+  };
+  const known = gumpArtSize.get(gumpId);
+  if (known) sizeTo(known);
+  return sizeTo;
+}
+function applyContainerMinimized(win, gump) {
+  const spec = CONTAINER_ICONIZE[gump];
+  if (!spec || !win.minimized) {
+    win.el.classList.remove("cont-iconized");
+    return;
+  }
+  win.el.classList.add("cont-iconized");
+  const scale = containerScaleFor(gump);
+  const sizeTo = sizeContainerToGump(win, spec.icon, scale);
+  const bg = win.body.querySelector(".cont-bg");
+  if (!bg) return;
+  bg.src = `gump/${spec.icon}.png`;
+  bg.onload = () => { gumpArtSize.set(spec.icon, bg.naturalWidth); sizeTo(bg.naturalWidth); };
+}
+function attachContainerMinimizer(win, gump) {
+  const spec = CONTAINER_ICONIZE[gump];
+  if (!spec) return;
+  const hit = document.createElement("div");
+  hit.className = "cont-min";
+  hit.style.left = spec.mx + "px";
+  hit.style.top = spec.my + "px";
+  hit.title = "Minimize";
+  hit.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    const ox = e.clientX, oy = e.clientY;
+    const up = (ev) => {
+      window.removeEventListener("mouseup", up);
+      if (ev.button !== 0) return;
+      // ClassicUO skips minimize while an item is on the cursor
+      // (`ItemHold.Enabled`) and when the press became a drag.
+      if (cursorItem) return;
+      if (Math.abs(ev.clientX - ox) < CONT_MIN_DRAG && Math.abs(ev.clientY - oy) < CONT_MIN_DRAG) {
+        win.minimized = true;
+        applyContainerMinimized(win, gump);
+      }
+    };
+    window.addEventListener("mouseup", up);
+  });
+  win.body.appendChild(hit);
+}
 // Play a container open/close sound, respecting the same mute/sfx gate the
 // server-sound path uses (playSfx itself does not check it).
 function containerSfx(id) {
@@ -519,6 +584,17 @@ function openContainer(serial) {
   el.addEventListener("contextmenu", (e) => {
     e.preventDefault(); e.stopPropagation();
     closeContainer(serial);
+  });
+  // ClassicUO restores an iconized container on double-click of the collapsed
+  // gump (`GumpPicContainerOnMouseDoubleClick`), not a single click — a single
+  // click still drags it out of the way.
+  el.addEventListener("dblclick", (e) => {
+    const w = dialogWindow("containers", serial);
+    if (!w || !w.minimized) return;
+    e.preventDefault(); e.stopPropagation();
+    w.minimized = false;
+    w._sig = null;
+    refreshContainer(serial);
   });
   dialogWindows("containers").set(serial, { el, body, label, _sig: null });
   refreshContainer(serial);
@@ -615,6 +691,10 @@ function refreshContainer(serial) {
   // `gridContainers` forces the titled grid for EVERY container (the owner's
   // customized view); authentic is the traditional gump otherwise.
   const authentic = gump > 0 && !loot && !settings.gridContainers;
+  if (!authentic || !CONTAINER_ICONIZE[gump]) {
+    win.minimized = false;
+    win.el.classList.remove("cont-iconized");
+  }
   // Until the server's 0x24 gives us the gump id, an authentic container has
   // nothing to draw. Show an empty chromeless window (transparent → invisible)
   // rather than flashing the grid and then swapping to the art one poll later —
@@ -678,18 +758,10 @@ function refreshContainer(serial) {
     // is only known after the image loads, so use a per-gump cache to size
     // synchronously on reopen (no flash) and learn it on first load.
     // Chess/backgammon stay at 1× (ClassicUO ContainerGump.GetScale).
-    const scale = (gump === 0x091A || gump === 0x092E)
-      ? 1
-      : Math.max(50, Math.min(200, (settings.containerScale | 0) || 100)) / 100;
-    const sizeTo = (w) => {
-      const sw = Math.round(w * scale);
-      win.el.style.width = (sw + 2) + "px";
-      body.style.width = w + "px";
-    };
-    const known = gumpArtSize.get(gump);
-    if (known) sizeTo(known);
+    const scale = containerScaleFor(gump);
+    const sizeTo = win.minimized ? null : sizeContainerToGump(win, gump, scale);
     body.style.zoom = scale !== 1 ? String(scale) : "";
-    bg.onload = () => { gumpArtSize.set(gump, bg.naturalWidth); if (authentic) sizeTo(bg.naturalWidth); };
+    bg.onload = () => { gumpArtSize.set(gump, bg.naturalWidth); if (sizeTo && !win.minimized) sizeTo(bg.naturalWidth); };
     // A gump we cannot fetch must not leave an empty window: fall back to the
     // grid rather than to nothing, and drop the authentic sizing with it.
     bg.onerror = () => {
@@ -709,6 +781,8 @@ function refreshContainer(serial) {
       eye.alt = "";
       body.appendChild(eye);
     }
+    if (!win.minimized) attachContainerMinimizer(win, gump);
+    applyContainerMinimized(win, gump);
   } else {
     // Grid mode: shed any authentic sizing left from a previous mode.
     win.el.style.width = ""; body.style.width = ""; body.style.zoom = "";

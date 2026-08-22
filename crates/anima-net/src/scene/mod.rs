@@ -151,7 +151,7 @@ pub fn build_scene(
         })
         .collect();
 
-    let mobiles = mobiles_json(&s.world, &look, &p);
+    let mut mobiles = mobiles_json(&s.world, &look, &p);
     let items = items_json(&s.world, &look, px, py, max_z, max_z < 127);
     let mut lights = lights_json(&s.world, &look, px, py, pz);
     // `Equipconv.def` is keyed by the wearer's REMAPPED body.
@@ -234,21 +234,28 @@ pub fn build_scene(
     // `placement` right above.
     let house_design = house_design_json(&s.world, multis);
 
+    // `Look` holds a shared borrow of the map; HasSurfaceOverhead needs `&mut`
+    // for the statics cache. Drop it before the tile loop, which wants the same.
+    drop(look);
+
     let TileEmission {
         mut tiles,
         mut statics,
         dbg,
     } = match map {
-        Some(map) => emit_tiles(
-            &s.world,
-            map,
-            multis,
-            animdata,
-            &mut art,
-            (px, py, pz),
-            max_z,
-            &mut lights,
-        ),
+        Some(map) => {
+            apply_surface_overhead(&s.world, map, multis, max_z, &mut mobiles);
+            emit_tiles(
+                &s.world,
+                map,
+                multis,
+                animdata,
+                &mut art,
+                (px, py, pz),
+                max_z,
+                &mut lights,
+            )
+        }
         None => TileEmission::default(),
     };
     mark("emit_tiles", &mut t);

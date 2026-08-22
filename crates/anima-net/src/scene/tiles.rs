@@ -84,6 +84,13 @@ pub(super) const FLAG_SURFACE: u64 = 0x200;
 
 pub(super) const FLAG_BRIDGE: u64 = 0x400;
 
+/// `TileFlag.Window` / `TileFlag.NoShoot` (ClassicUO `TileDataLoader.cs:461/465`).
+/// Together they are the line-of-sight blockers `HasSurfaceOverhead` looks for
+/// on the 4×4 around another mobile — a roof flag alone is not enough.
+pub(super) const FLAG_WINDOW: u64 = 0x1000;
+
+pub(super) const FLAG_NOSHOOT: u64 = 0x2000;
+
 pub(super) const FLAG_ROOF: u64 = 0x1000_0000;
 
 /// Foliage flag (trees/bushes): the renderer fades these when they'd hide the

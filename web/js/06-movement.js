@@ -1162,6 +1162,10 @@ function drawMobs() {
     // others use their own `mounted`/`mountAnim` fields.
     const ent = isSelf ? scene.player : mobById.get(id);
     const mounted = !!(ent && ent.mounted);
+    // ClassicUO `AllowedToDraw = !HasSurfaceOverhead`: another mobile fully
+    // enclosed under NoShoot/Window tiles is not drawn (and not clickable)
+    // while we are outside looking at the building. The player is never flagged.
+    if (!isSelf && ent && ent.so) continue;
     const mountAnim = (ent && (ent.mountAnim | 0)) || 0;
     // ClassicUO `MobileView`: after the mount is drawn, `drawY += OffsetY` so
     // the rider (body + equipment) sits on the animal. The mount itself stays

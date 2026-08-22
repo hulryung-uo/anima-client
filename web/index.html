@@ -902,6 +902,13 @@
         position: absolute; left: 45px; top: 30px; pointer-events: none;
         image-rendering: pixelated;
       }
+      /* ClassicUO ContainerData.MinimizerArea: invisible 16×16 pin. */
+      .cont-art .cont-min {
+        position: absolute; width: 16px; height: 16px; cursor: pointer; z-index: 2;
+      }
+      .container-win.cont-iconized .cont-item,
+      .container-win.cont-iconized .cont-eye,
+      .container-win.cont-iconized .cont-min { display: none; }
       .cont-item { position: relative; width: 44px; height: 44px; cursor: pointer;
         background: rgba(0, 0, 0, .3); border: 1px solid #222; border-radius: 4px; }
       .cont-item:hover { border-color: #3a4250; background: rgba(138, 180, 248, .1); }

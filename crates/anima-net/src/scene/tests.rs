@@ -396,6 +396,47 @@ fn hidden_field_present_only_when_true() {
 }
 
 #[test]
+fn overhead_covers_matches_classicuo_inequality() {
+    // GameSceneDrawingSorting.HasSurfaceOverhead: tile.Z > obj.Z, NoShoot|Window,
+    // and `_maxZ - tile.Z + 5 >= tile.Z - obj.Z`.
+    const NS: u64 = FLAG_NOSHOOT;
+    const WIN: u64 = FLAG_WINDOW;
+    // Outside (maxZ=127): a noshoot/window slab above the mobile covers it.
+    assert!(overhead_covers(0, 127, 20, NS));
+    assert!(overhead_covers(0, 127, 20, WIN));
+    assert!(
+        !overhead_covers(0, 127, 20, FLAG_ROOF),
+        "a roof flag alone is not cover"
+    );
+    assert!(
+        !overhead_covers(0, 127, 0, NS),
+        "same-Z wall is not above the mobile"
+    );
+    // Inside a house maxZ sits at the eave. A noshoot at that same Z is NOT close
+    // enough: 20-20+5 >= 20-0 → 5 >= 20, so the NPC in the room stays drawn.
+    assert!(!overhead_covers(0, 20, 20, NS));
+    // A slightly higher ceiling still covers: 40-20+5 >= 20 → 25 >= 20.
+    assert!(overhead_covers(0, 40, 20, NS));
+}
+
+#[test]
+fn surface_overhead_requires_the_whole_4x4() {
+    let mut covered = std::collections::HashSet::new();
+    for dy in -1..=2 {
+        for dx in -1..=2 {
+            covered.insert((dx, dy));
+        }
+    }
+    assert!(has_surface_overhead_neighborhood(
+        |dx, dy| covered.contains(&(dx, dy))
+    ));
+    covered.remove(&(2, 2));
+    assert!(!has_surface_overhead_neighborhood(
+        |dx, dy| covered.contains(&(dx, dy))
+    ));
+}
+
+#[test]
 fn corpse_equip_only_lists_what_is_still_on_the_corpse() {
     // 0x89 CorpseEquip is a one-shot snapshot; nothing on the wire retracts it
     // when a layer is looted. The view therefore has to ask what the corpse

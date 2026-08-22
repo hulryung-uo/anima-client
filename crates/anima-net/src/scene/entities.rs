@@ -79,6 +79,32 @@ pub(super) fn mobiles_json(world: &World, look: &Look, player: &Mobile) -> Vec<V
         .collect()
 }
 
+/// Flag mobiles ClassicUO would not draw (`AllowedToDraw = !HasSurfaceOverhead`).
+/// `"so":1` is omitted when false, like [`hidden_field`]. The player is not in
+/// this list. Needs `&mut MapData` for the statics cache, so it runs after
+/// `Look` is dropped.
+pub(super) fn apply_surface_overhead(
+    world: &World,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    max_z: i32,
+    mobiles: &mut [Value],
+) {
+    let scan = TileScan::build(world, map);
+    let mut cache = std::collections::HashMap::new();
+    for v in mobiles {
+        let (Some(x), Some(y), Some(z)) = (v.get("x"), v.get("y"), v.get("z")) else {
+            continue;
+        };
+        let x = x.as_i64().unwrap_or(0);
+        let y = y.as_i64().unwrap_or(0);
+        let z = z.as_i64().unwrap_or(0) as i32;
+        if has_surface_overhead(&scan, map, multis, x, y, z, max_z, &mut cache) {
+            v["so"] = json!(1);
+        }
+    }
+}
+
 /// Ground items in view: the sprite, its draw-sort priority, and the
 /// pathfinding bits a nearby one contributes to the browser's own Z resolution.
 pub(super) fn items_json(

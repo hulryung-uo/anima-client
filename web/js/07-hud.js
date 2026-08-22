@@ -248,7 +248,10 @@ function drawMinimap(s) {
     if (it.nd || it.fh) continue;
     isoDot(it.x, it.y, "#e2b340", 1.4);
   }
-  for (const mb of s.mobiles || []) isoDot(mb.x, mb.y, cssColor(notoColor(mb.noto)), 2);
+  for (const mb of s.mobiles || []) {
+    if (mb.so) continue;
+    isoDot(mb.x, mb.y, cssColor(notoColor(mb.noto)), 2);
+  }
   // player: white dot + facing tick (also iso-projected so it points where you face).
   ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(cx, cy, 2.6, 0, 7); ctx.fill();
   const dd = DIR_DELTA[(s.player && s.player.dir & 7) || 0];
@@ -1048,6 +1051,7 @@ function inspectMobile(serial) {
     ["HP", `${m.hits | 0}/${m.hitsMax | 0}`],
     ["Notoriety", NOTO_NAMES[m.noto | 0] || String(m.noto | 0)],
     ["IsMounted", String(!!m.mounted)], ["IsHidden", String(!!m.hidden)],
+    ["AllowedToDraw", String(!m.so)],
     ["IsPoisoned", String(!!m.poisoned)], ["IsInvulnerable", String(!!m.yellow)],
     ["AnimType", String(m.at | 0)], ["Equipment", String((m.equip || []).length)],
   ];

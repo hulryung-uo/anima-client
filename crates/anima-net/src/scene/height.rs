@@ -95,6 +95,79 @@ pub(super) fn max_draw_z_scanned(
     max_z
 }
 
+/// ClassicUO `HasSurfaceOverhead` (`GameSceneDrawingSorting.cs:511`): one
+/// Static/Multi above `obj_z` with NoShoot or Window, close enough to the
+/// current draw ceiling. The 4×4 neighborhood check is [`has_surface_overhead`].
+pub(super) fn overhead_covers(obj_z: i32, max_z: i32, tile_z: i32, flags: u64) -> bool {
+    tile_z > obj_z
+        && flags & (FLAG_NOSHOOT | FLAG_WINDOW) != 0
+        && max_z - tile_z + 5 >= tile_z - obj_z
+}
+
+/// True when every cell of ClassicUO's `x,y in -1..=2` neighborhood around
+/// `(mx, my)` has an overhead cover. One gap and the mobile stays drawn —
+/// that's why a vendor in a doorway is visible from the street and someone
+/// deep inside a shop is not.
+#[cfg(test)]
+pub(super) fn has_surface_overhead_neighborhood(mut covered: impl FnMut(i32, i32) -> bool) -> bool {
+    for dy in -1..=2 {
+        for dx in -1..=2 {
+            if !covered(dx, dy) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn tile_has_overhead_cover(
+    scan: &TileScan,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    x: i64,
+    y: i64,
+    obj_z: i32,
+    max_z: i32,
+) -> bool {
+    if x < 0 || y < 0 {
+        return false;
+    }
+    roof_scan_tiles(scan, multis, map, x, y)
+        .into_iter()
+        .any(|(tz, flags)| overhead_covers(obj_z, max_z, tz, flags))
+}
+
+/// ClassicUO `HasSurfaceOverhead` for a mobile at `(mx, my, mz)`. Never run
+/// on the player — the caller already dropped them from `scene.mobiles`.
+/// `cache` is `(tile_x, tile_y, obj_z) → covered` so overlapping 4×4s of
+/// nearby mobiles don't re-scan the same statics.
+pub(super) fn has_surface_overhead(
+    scan: &TileScan,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    mx: i64,
+    my: i64,
+    mz: i32,
+    max_z: i32,
+    cache: &mut std::collections::HashMap<(i64, i64, i32), bool>,
+) -> bool {
+    for dy in -1..=2 {
+        for dx in -1..=2 {
+            let tx = mx + dx;
+            let ty = my + dy;
+            let key = (tx, ty, mz);
+            if !cache.contains_key(&key) {
+                let hit = tile_has_overhead_cover(scan, map, multis, tx, ty, mz, max_z);
+                cache.insert(key, hit);
+            }
+            if !cache[&key] {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Flood-fill the lowest connected roof Z within ±6 of `z`, starting at (x, y).
 /// Ported from ClassicUO `Map.CalculateNearZ`. `visited` prevents revisits.
 /// `multis` (see [`roof_scan_tiles`]) lets a house's own roof components join

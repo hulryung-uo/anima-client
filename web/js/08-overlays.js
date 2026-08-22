@@ -614,6 +614,11 @@ function drawBars(now) {
   // pet defending itself), so it's tracked + highlighted separately.
   const combatant = (scene.combatant | 0) >>> 0;
   for (const m of scene.mobiles || []) {
+    if (m.so) {
+      // Hidden by HasSurfaceOverhead — no sprite, so no bar/name either.
+      // Leave `seen` alone so the prune below drops any leftover objects.
+      continue;
+    }
     const id = "m" + m.serial;
     const st = anim.get(id);
     if (!st) continue;                       // not yet interpolated / left view
