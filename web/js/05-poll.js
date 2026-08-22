@@ -50,9 +50,15 @@ function primeSeqRings(s) {
 async function poll() {
   const t0 = performance.now();
   try {
-    const r = await fetch("scene.json?" + Date.now());
-    if (!r.ok) throw new Error(r.status);
-    scene = await r.json();
+    if (WASM_MODE) {
+      const next = await wasmPollScene();
+      if (!next) return;
+      scene = next;
+    } else {
+      const r = await fetch("scene.json?" + Date.now());
+      if (!r.ok) throw new Error(r.status);
+      scene = await r.json();
+    }
     // Not in world yet (login-page mode): show the login form instead of rendering.
     if (scene && scene.auth) {
       // A completed/lost game session owns a large amount of DOM and seq-gated
@@ -252,6 +258,28 @@ function rebuildStatics() {
   staticPool.clear();
   markDirty();
 }
+
+function rebuildItems() {
+  for (const e of itemPool.values()) {
+    animatedStatics.delete(e.sp); world.removeChild(e.sp); e.sp.destroy();
+  }
+  itemPool.clear();
+  markDirty();
+}
+
+// ClassicUO ProcessAlpha: hide at/above `_maxZ`, else hide if `_noDrawRoofs && IsRoof`.
+// The server already set `hz` for the first clause and for cover-driven roofs;
+// `drawRoofs` is the Options toggle that forces every remaining roof graphic off.
+function ceilHidden(rec) {
+  return !!(rec && (rec.hz || (!settings.drawRoofs && rec.rf)));
+}
+
+// ClassicUO `_maxGroundZ` picking gate (`PushToRenderQueue`: `obj.Z <= _maxGroundZ`).
+function maxGroundZ() {
+  const z = scene && scene.map && scene.map.maxGroundZ;
+  return z == null ? 127 : (z | 0);
+}
+function aboveGroundZ(z) { return (z | 0) > maxGroundZ(); }
 
 function updateAnimStates(s) {
   const now = performance.now();
@@ -550,7 +578,7 @@ function syncWorld(s) {
       // source in place; `easeAlphas` does the rest. This is the whole reason
       // the server now sends the object instead of dropping it: there is a
       // sprite here to ease.
-      const hzNow = st.hz ? 1 : 0;
+      const hzNow = ceilHidden(st) ? 1 : 0;
       if (ex && ex._hz !== hzNow) {
         setAlphaSource(ex, "ceil", hzNow ? 0 : null);
         ex._hz = hzNow;
@@ -591,7 +619,7 @@ function syncWorld(s) {
     if (sp._baseAlpha !== 1) sp.alpha = sp._baseAlpha;
     // Born under a ceiling: start at 0 and hidden, so a roof that was already
     // over you when the sprite streamed in doesn't fade IN from nowhere.
-    sp._hz = st.hz ? 1 : 0;
+    sp._hz = ceilHidden(st) ? 1 : 0;
     if (sp._hz) { sp.alpha = 0; sp.visible = false; setAlphaSource(sp, "ceil", 0); }
     sp._texUrl = texUrl; // so the "still on screen" branch above can keep it LRU-fresh
     // Animated static (flames/fountains/water wheels): the server baked the ART
@@ -678,10 +706,15 @@ function syncWorld(s) {
       // Ceiling state is deliberately NOT in the change key above: it must flip
       // the fade source on the LIVING sprite, not rebuild it — rebuilding is
       // what popped. Same shape as the statics loop.
-      const hzNow = it.hz ? 1 : 0;
+      const hzNow = ceilHidden(it) ? 1 : 0;
       if (e.sp && e.sp._hz !== hzNow) {
         setAlphaSource(e.sp, "ceil", hzNow ? 0 : null);
         e.sp._hz = hzNow;
+      }
+      if (e.sp) {
+        const click = !hzNow && !aboveGroundZ(iz);
+        e.sp.eventMode = click ? "static" : "none";
+        e.sp.cursor = click ? "pointer" : "default";
       }
       continue; // unchanged; see the blanket LRU-touch note above
     }
@@ -723,9 +756,10 @@ function syncWorld(s) {
     // this cannot outlive the graphic it was derived from.
     sp._baseAlpha = it.tr ? A_TRANSLUCENT : 1;
     if (sp._baseAlpha !== 1) sp.alpha = sp._baseAlpha;
-    sp._hz = it.hz ? 1 : 0;
+    sp._hz = ceilHidden(it) ? 1 : 0;
     if (sp._hz) { sp.alpha = 0; sp.visible = false; setAlphaSource(sp, "ceil", 0); }
-    sp.eventMode = "static"; sp.cursor = "pointer";
+    const click = !sp._hz && !aboveGroundZ(iz);
+    sp.eventMode = click ? "static" : "none"; sp.cursor = click ? "pointer" : "default";
     // Per-pixel hit-testing (see pixelHitArea above). The closure re-reads the
     // CURRENT frame because an animated item's texture is swapped under it by
     // `tickAnimatedStatics` — testing a campfire's click against frame 0 while a

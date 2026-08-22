@@ -62,6 +62,7 @@ function actionSummary(a) {
     case "allnames": return "all names";
     case "virtue": return `virtue #${a.id}`;
     case "emote": return `emote ${a.text}`;
+    case "drawroofs": return "toggle draw roofs";
     default: return a.t;
   }
 }
@@ -92,6 +93,12 @@ function runMacroAction(a) {
       break;
     }
     case "open": { const fn = OPEN_FNS[a.win]; if (fn) fn(); break; }
+    case "drawroofs":
+      settings.drawRoofs = !settings.drawRoofs;
+      saveSettings();
+      rebuildStatics();
+      rebuildItems();
+      break;
   }
 }
 function toggleMacros() {
@@ -708,10 +715,11 @@ function submitChat() {
   }
   closeChat();
 }
-function sendInput(cmd) { fetch("/input", { method: "POST", body: cmd }).catch(() => {}); }
+function sendInput(cmd) {
+  if (WASM_MODE) wasmSendInput(cmd);
+  else fetch("/input", { method: "POST", body: cmd }).catch(() => {});
+}
 // ---- movement diagnostic trace (POSTs to /log; server prints with ANIMA_DEBUG) ----
 let TRACE = false;
 function trace(m) { if (TRACE) fetch("/log", { method: "POST", body: Math.round(performance.now()) + " " + m }).catch(() => {}); }
-
-main();
 

@@ -7,6 +7,31 @@
 use super::*;
 
 #[test]
+fn ceil_hz_cave_does_not_hide_a_roof_below_the_ceiling() {
+    // ClassicUO land-overhang branch: maxZ = pz+16, `_noDrawRoofs` stays false.
+    // A roof at z=10 under a cave ceiling of 16 must still draw — inferring
+    // `_noDrawRoofs` from `max_z < 127` is what used to hide every roof in view.
+    assert!(!ceil_hz(10, 16, false, true));
+    assert!(
+        ceil_hz(16, 16, false, true),
+        "z >= max_z still hides, even in a cave"
+    );
+    assert!(!ceil_hz(15, 16, false, false));
+}
+
+#[test]
+fn ceil_hz_high_z_clamp_still_hides_roofs() {
+    // Player z≥111 clamps max_z back to 127; `_noDrawRoofs` must survive that
+    // or the roof stays drawn (`GameSceneDrawingSorting.cs:203-206`).
+    assert!(ceil_hz(120, 127, true, true));
+    assert!(
+        !ceil_hz(120, 127, true, false),
+        "a non-roof at z<max_z stays drawn"
+    );
+    assert!(!ceil_hz(50, 127, false, true), "open sky draws roofs");
+}
+
+#[test]
 fn gump_layout_parses_common_commands() {
     let layout = "{ resizepic 0 0 5054 200 120 }{ button 20 90 247 248 1 0 7 }\
                   { text 20 20 0 0 }{ checkbox 20 50 210 211 1 3 }\
@@ -462,6 +487,7 @@ fn corpse_equip_only_lists_what_is_still_on_the_corpse() {
         map: None,
         anim: None,
         animdata: None,
+        tileart: None,
     };
     // Both entries survive the container filter or not; with no tiledata both
     // then fail the AnimID check, so the observable difference is on the World
@@ -656,6 +682,17 @@ fn hue_pickers_json_is_sorted_and_exact() {
             { "serial": 20, "graphic": 0x2006 },
         ])
     );
+}
+
+#[test]
+fn race_change_json_is_null_or_exact() {
+    let mut w = World::default();
+    assert_eq!(race_change_json(&w), json!(null));
+    w.race_change = Some(anima_core::world::RaceChangePrompt {
+        female: false,
+        race: 1,
+    });
+    assert_eq!(race_change_json(&w), json!({ "female": false, "race": 1 }));
 }
 
 #[test]
@@ -1242,6 +1279,67 @@ fn explain_tile_walkable_for_planning_names_the_door_only_when_it_alone_blocks()
     assert_eq!(
         door, None,
         "an ordinary walkable tile must not get a door serial"
+    );
+}
+
+#[test]
+fn multi_distance_bonus_matches_classicuo_and_grows_for_design_tiles() {
+    // ClassicUO `Item.LoadMulti` inits min/max at 0 and folds every component
+    // (`Item.cs:236-254`) before the visibility branch, then
+    // `MultiDistanceBonus = max(|minX|, maxX, |minY|, maxY)` (`:305-308`).
+    let comps = [
+        MultiComponent {
+            graphic: 1,
+            dx: -4,
+            dy: 0,
+            dz: 0,
+            visible: true,
+            server_keeps: true,
+            is_origin: true,
+        },
+        MultiComponent {
+            graphic: 2,
+            dx: 10,
+            dy: -3,
+            dz: 0,
+            visible: false,
+            server_keeps: false,
+            is_origin: false,
+        },
+    ];
+    assert_eq!(multi_distance_bonus(&comps, &[]), 10);
+    // A custom-house piece 40 tiles off expands the bonus past any stock
+    // `multi.mul` footprint — the `near_multis` filter used to use a fixed 32.
+    assert_eq!(multi_distance_bonus(&comps, &[(40, 0)]), 40);
+}
+
+#[test]
+fn multi_origin_in_view_uses_view_plus_bonus() {
+    // ClassicUO `HouseManager.IsHouseInRange`: `distance += MultiDistanceBonus`
+    // then independent-axis Chebyshev (`HouseManager.cs:75-77`).
+    assert!(
+        !multi_origin_in_view(50, 0, 0, 0, 18, 31),
+        "18+31=49 does not reach origin at 50"
+    );
+    assert!(
+        multi_origin_in_view(50, 0, 0, 0, 18, 32),
+        "18+32=50 includes origin at 50"
+    );
+}
+
+#[test]
+fn invisible_origin_is_drawn_when_graphic_exceeds_two() {
+    // ClassicUO `AllowedToDraw = MultiGraphic > 2` (`Item.cs:358`).
+    assert!(!multi_component_never_draw(false, true, 3));
+    assert!(multi_component_never_draw(false, true, 2));
+    assert!(multi_component_never_draw(false, true, 0));
+    assert!(
+        !multi_component_never_draw(true, true, 1),
+        "a visible origin is a Multi, drawn regardless of graphic <= 2"
+    );
+    assert!(
+        multi_component_never_draw(false, false, 0x58A5),
+        "a non-origin invisible component stays a path-only nd record"
     );
 }
 
@@ -2016,7 +2114,7 @@ fn max_draw_z_culls_a_multi_roof_component_above_the_player() {
     let (px, py, pz) = (3503i64, 2574, 0i32);
     let baseline = max_draw_z(&anima_core::World::new(), &mut map, None, px, py, pz);
     assert_eq!(
-        baseline, 127,
+        baseline.max_z, 127,
         "open field with no roof over the player: draw everything"
     );
 
@@ -2050,8 +2148,12 @@ fn max_draw_z_culls_a_multi_roof_component_above_the_player() {
 
     let culled = max_draw_z(&world, &mut map, Some(&multis), px, py, pz);
     assert!(
-        culled < 127,
-        "the multi's roof component must cull max_draw_z, got {culled}"
+        culled.max_z < 127,
+        "the multi's roof component must cull max_draw_z, got {culled:?}"
+    );
+    assert!(
+        culled.no_draw_roofs,
+        "a roof over the player must set no_draw_roofs, not just max_z"
     );
 }
 
@@ -2666,7 +2768,17 @@ fn a_season_change_moves_no_pathing_field() {
         let mut world = anima_core::World::new();
         world.season = season;
         let mut lights = Vec::new();
-        let e = emit_tiles(&world, map, None, None, &mut None, CENTER, 127, &mut lights);
+        let e = emit_tiles(
+            &world,
+            map,
+            None,
+            None,
+            &mut None,
+            CENTER,
+            127,
+            false,
+            &mut lights,
+        );
         let parse = |body: &str| -> Vec<Value> {
             serde_json::from_str(&format!("[{}]", body.trim_end_matches(','))).expect("scene json")
         };
@@ -2777,6 +2889,7 @@ fn translucent_is_emitted_for_exactly_the_translucent_statics() {
         &mut None,
         CENTER,
         127,
+        false,
         &mut lights,
     );
     let statics: Vec<Value> =
@@ -2837,7 +2950,17 @@ fn translucency_follows_the_seasonal_draw_graphic() {
         let mut world = anima_core::World::new();
         world.season = season;
         let mut lights = Vec::new();
-        let e = emit_tiles(&world, map, None, None, &mut None, CENTER, 127, &mut lights);
+        let e = emit_tiles(
+            &world,
+            map,
+            None,
+            None,
+            &mut None,
+            CENTER,
+            127,
+            false,
+            &mut lights,
+        );
         let all: Vec<Value> =
             serde_json::from_str(&format!("[{}]", e.statics.trim_end_matches(',')))
                 .expect("statics json");
@@ -2921,7 +3044,7 @@ fn draw_golden_path() -> std::path::PathBuf {
 fn drawn_projection(map: &mut MapData, multis: Option<&Multis>, c: (i64, i64, i32)) -> Vec<String> {
     let world = anima_core::World::new();
     let mut lights = Vec::new();
-    let max_z = max_draw_z(&world, map, multis, c.0, c.1, c.2);
+    let ceil = max_draw_z(&world, map, multis, c.0, c.1, c.2);
     let e = emit_tiles(
         &world,
         map,
@@ -2929,7 +3052,8 @@ fn drawn_projection(map: &mut MapData, multis: Option<&Multis>, c: (i64, i64, i3
         None,
         &mut None,
         (c.0, c.1, c.2),
-        max_z,
+        ceil.max_z,
+        ceil.no_draw_roofs,
         &mut lights,
     );
     let statics: Vec<Value> =
@@ -3012,7 +3136,7 @@ fn ceiling_pathing_projection(map: &mut MapData, c: (i64, i64, i32)) -> Vec<Stri
     // fires, nothing is ever ceiling-hidden, and both this golden and its
     // positive control pass vacuously — which is precisely the failure mode the
     // golden exists to rule out.
-    let max_z = max_draw_z(&world, map, None, c.0, c.1, c.2);
+    let ceil = max_draw_z(&world, map, None, c.0, c.1, c.2);
     let e = emit_tiles(
         &world,
         map,
@@ -3020,7 +3144,8 @@ fn ceiling_pathing_projection(map: &mut MapData, c: (i64, i64, i32)) -> Vec<Stri
         None,
         &mut None,
         (c.0, c.1, c.2),
-        max_z,
+        ceil.max_z,
+        ceil.no_draw_roofs,
         &mut lights,
     );
     let statics: Vec<Value> =
@@ -3138,7 +3263,7 @@ fn ceiling_hidden_objects_are_emitted_and_inert() {
     for (name, x, y, z) in CEILING_CENTERS {
         let world = anima_core::World::new();
         let mut lights = Vec::new();
-        let max_z = max_draw_z(&world, &mut map, None, x, y, z);
+        let ceil = max_draw_z(&world, &mut map, None, x, y, z);
         let e = emit_tiles(
             &world,
             &mut map,
@@ -3146,11 +3271,12 @@ fn ceiling_hidden_objects_are_emitted_and_inert() {
             None,
             &mut None,
             (x, y, z),
-            max_z,
+            ceil.max_z,
+            ceil.no_draw_roofs,
             &mut lights,
         );
         assert!(
-            max_z < 127,
+            ceil.max_z < 127,
             "{name}: max_z is 127 — this center is not under cover"
         );
         let statics: Vec<Value> =
@@ -3220,7 +3346,7 @@ fn never_drawn_records_carry_pathing_and_nothing_else() {
             .unwrap_or_else(|_| MapData::open(&dir).expect("open map data"));
         let world = anima_core::World::new();
         let mut lights = Vec::new();
-        let max_z = max_draw_z(&world, &mut map, multis.as_ref(), x, y, z);
+        let ceil = max_draw_z(&world, &mut map, multis.as_ref(), x, y, z);
         let e = emit_tiles(
             &world,
             &mut map,
@@ -3228,7 +3354,8 @@ fn never_drawn_records_carry_pathing_and_nothing_else() {
             None,
             &mut None,
             (x, y, z),
-            max_z,
+            ceil.max_z,
+            ceil.no_draw_roofs,
             &mut lights,
         );
         let statics: Vec<Value> =
@@ -3321,6 +3448,7 @@ fn multi_components_reach_the_browser_when_authoritative_but_invisible() {
         &mut None,
         (boat_x, boat_y, boat_z),
         127,
+        false,
         &mut lights,
     );
     let statics: Vec<Value> =
@@ -3379,6 +3507,7 @@ fn container_info_resolves_graphic_and_falls_back() {
         map: None,
         anim: None,
         animdata: None,
+        tileart: None,
     };
     let info = container_info_json(&w, &look);
     assert_eq!(
@@ -3405,4 +3534,19 @@ fn map_item_name_reads_tiledata() {
     assert_eq!(map.item_name(0x0E75), "backpack");
     assert_eq!(map.item_name(0x0E79), "pouch");
     assert_eq!(map.item_name(0x2006), "corpse");
+}
+
+#[test]
+#[ignore] // needs ~/dev/uo/uo-resource
+fn terrain_window_emits_map_around_britain_bank() {
+    let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+    let mut map = MapData::open(&dir).expect("open map data");
+    let json = build_terrain_window(&mut map, None, None, None, (1495, 1629, 10), 0);
+    let v: serde_json::Value = serde_json::from_str(&json).expect("terrain json");
+    assert_eq!(v["map"]["cx"], 1495);
+    assert_eq!(v["map"]["cy"], 1629);
+    assert!(
+        v["map"]["tiles"].as_array().map(|a| a.len()).unwrap_or(0) > 100,
+        "land window should be the LAND_RADIUS square"
+    );
 }

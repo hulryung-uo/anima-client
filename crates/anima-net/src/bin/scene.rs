@@ -73,6 +73,7 @@ fn main() {
             None,
             None,
             multis.as_ref(),
+            None,
             &journal,
         );
         write_atomic(&out, &scene);

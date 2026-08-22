@@ -232,6 +232,20 @@ pub(super) fn parse_command(body: &str) -> Option<Action> {
         "opendoor" => arg.is_empty().then_some(Action::OpenDoor),
         "lastweapon" => arg.is_empty().then_some(Action::EquipLastWeapon),
         "allnames" => arg.is_empty().then_some(Action::AllNames),
+        // racechange:<skin>:<hairStyle>:<hairHue>:<beardStyle>:<beardHue>
+        // 0xBF/0x2A confirm. Female/elf bodies send beard 0/0.
+        "racechange" => {
+            let mut p = arg.split(':');
+            Some(Action::ChangeRace {
+                skin_hue: p.next()?.parse().ok()?,
+                hair_style: p.next()?.parse().ok()?,
+                hair_hue: p.next()?.parse().ok()?,
+                beard_style: p.next()?.parse().ok()?,
+                beard_hue: p.next()?.parse().ok()?,
+            })
+        }
+        "racechangecancel" => arg.is_empty().then_some(Action::ChangeRaceCancel),
+        "uostore" => arg.is_empty().then_some(Action::OpenUOStore),
         // virtue:<id> — 1 Honor … 8 Spirituality (0x12 type 0xF4).
         "virtue" => Some(Action::InvokeVirtue {
             id: arg.parse().ok()?,
@@ -1170,6 +1184,21 @@ mod command_tests {
         assert!(parse_command("opendoor:1").is_none());
         assert_eq!(parse_command("lastweapon"), Some(Action::EquipLastWeapon));
         assert_eq!(parse_command("allnames"), Some(Action::AllNames));
+        assert_eq!(
+            parse_command("racechange:1:2:3:4:5"),
+            Some(Action::ChangeRace {
+                skin_hue: 1,
+                hair_style: 2,
+                hair_hue: 3,
+                beard_style: 4,
+                beard_hue: 5,
+            })
+        );
+        assert_eq!(
+            parse_command("racechangecancel"),
+            Some(Action::ChangeRaceCancel)
+        );
+        assert_eq!(parse_command("uostore"), Some(Action::OpenUOStore));
         assert_eq!(
             parse_command("virtue:1"),
             Some(Action::InvokeVirtue { id: 1 })

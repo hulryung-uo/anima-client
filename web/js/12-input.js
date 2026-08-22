@@ -94,11 +94,18 @@ function mouseMove() {
   return { dir, run: range >= MOUSE_RUN_RANGE };
 }
 
+function keyboardWantsRun() {
+  if (shiftHeld) return true;
+  if (!settings.alwaysRun) return false;
+  if (settings.alwaysRunUnlessHidden && scene && scene.player && scene.player.hidden) return false;
+  return true;
+}
+
 // What the player wants to do this frame (single source for prediction + send).
 function activeMove() {
   if (chatting || wmOn) return null;   // don't walk while typing or with the world map open
   if (rightDown) { const m = mouseMove(); if (m) { standUp(); return m; } }
-  if (held.size) { standUp(); return { dir: [...held].pop(), run: shiftHeld }; }
+  if (held.size) { standUp(); return { dir: [...held].pop(), run: keyboardWantsRun() }; }
   return null;
 }
 

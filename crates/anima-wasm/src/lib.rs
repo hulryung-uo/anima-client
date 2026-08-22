@@ -8,12 +8,39 @@
 //!
 //! Build: `wasm-pack build crates/anima-wasm --target web`.
 
-use anima_contract_json::{observation_to_json, SCHEMA_VERSION};
+use anima_contract_json::{action_from_json, observation_to_json, SCHEMA_VERSION};
+use anima_core::agent::{HouseDesignAction, SpeechMode};
+use anima_core::net::outgoing::{
+    build_attack, build_bandage_target, build_boat_move_request, build_book_header_change,
+    build_book_page_request, build_book_page_write, build_bulletin_post_message,
+    build_bulletin_remove_message, build_bulletin_request_message, build_bulletin_request_summary,
+    build_buy, build_cast_spell, build_cast_spell_from_book, build_change_race_cancel,
+    build_change_race_request, build_chat_create_channel, build_chat_join, build_chat_leave,
+    build_chat_message, build_chat_open, build_disarm_request, build_drop, build_emote_action,
+    build_equip, build_equip_last_weapon, build_guild_menu_request, build_gump_response,
+    build_help_request, build_house_design_add_item, build_house_design_add_roof,
+    build_house_design_add_stair, build_house_design_backup, build_house_design_clear,
+    build_house_design_close, build_house_design_commit, build_house_design_delete_item,
+    build_house_design_delete_roof, build_house_design_go_to_floor, build_house_design_restore,
+    build_house_design_revert, build_house_design_sync, build_hue_picker_response,
+    build_invoke_virtue, build_map_add_pin, build_map_change_pin, build_map_clear_pins,
+    build_map_insert_pin, build_map_remove_pin, build_map_toggle_editable, build_open_door,
+    build_open_uo_store, build_opl_request, build_party_accept, build_party_can_loot,
+    build_party_decline, build_party_invite, build_party_leave, build_party_message,
+    build_party_private_message, build_party_remove, build_pick_up, build_popup_request,
+    build_popup_select, build_profile_request, build_quest_arrow_click, build_quest_menu_request,
+    build_rename_request, build_sell, build_single_click, build_skill_lock, build_stat_lock,
+    build_status_request, build_stun_request, build_target_by_resource, build_targeted_skill,
+    build_targeted_spell, build_toggle_flying, build_trade_accept, build_trade_cancel,
+    build_trade_gold, build_use_ability, build_use_skill, BOAT_SPEED_FAST, BOAT_SPEED_SLOW,
+    BOAT_SPEED_STOP,
+};
 use anima_core::net::{
-    apply_packet, build_client_version, LoginConfig, LoginDirective, LoginMachine, StreamDecoder,
-    Walker,
+    apply_packet, build_client_version, CharacterAppearance, CharacterChoice, CharacterPrompt,
+    LoginConfig, LoginDirective, LoginMachine, StreamDecoder, Walker,
 };
 use anima_core::world::World;
+use anima_core::Action;
 use wasm_bindgen::prelude::*;
 
 /// A browser-side UO client core. JS feeds it bytes from the WebSocket and reads
@@ -35,6 +62,9 @@ pub struct WasmClient {
     game_server_port: u16,
     /// Why the login handshake failed, if it did. See [`WasmClient::login_error`].
     login_error: Option<String>,
+    /// Last [`LoginDirective::ChooseCharacter`] prompt, until the page calls
+    /// [`WasmClient::play_character`] / [`WasmClient::create_character`].
+    character_prompt: Option<CharacterPrompt>,
 }
 
 #[wasm_bindgen]
@@ -51,6 +81,9 @@ impl WasmClient {
         let cfg = LoginConfig {
             username,
             password,
+            // The page owns the character list (ClassicUO LoginScene). Auto-pick
+            // would skip [`WasmClient::character_list_json`] entirely.
+            defer_character_choice: true,
             ..Default::default()
         };
         let (machine, initial) = LoginMachine::start(cfg);
@@ -66,6 +99,7 @@ impl WasmClient {
             game_server: None,
             game_server_port: 0,
             login_error: None,
+            character_prompt: None,
         }
     }
 
@@ -131,9 +165,11 @@ impl WasmClient {
                             self.outbox.extend(then);
                             self.logged_in = true;
                         }
-                        // The JS/WASM constructor currently uses automatic slot
-                        // selection, so this directive is reserved for native UI.
-                        LoginDirective::ChooseCharacter(_) => {}
+                        // The page shows the list via `character_list_json` and
+                        // resumes with `play_character` / `create_character`.
+                        LoginDirective::ChooseCharacter(prompt) => {
+                            self.character_prompt = Some(prompt);
+                        }
                         LoginDirective::Done(r) => {
                             self.logout_handshake = r.character_list_flags
                                 & anima_core::net::CHARACTER_LIST_FLAG_LOGOUT_HANDSHAKE
@@ -200,6 +236,124 @@ impl WasmClient {
         if let Some(pkt) = self.walker.step(&mut self.world, dir, run) {
             self.outbox.extend(pkt);
         }
+    }
+
+    /// Speak. ASCII uses 0x03; anything else is unencoded 0xAD (no `speech.mul`
+    /// in the browser). `mode` is a [`SpeechMode`] name (`say`, `yell`, …).
+    pub fn say(&mut self, text: String, mode: String) {
+        let msg_type = SpeechMode::from_name(&mode)
+            .unwrap_or(SpeechMode::Say)
+            .wire();
+        self.queue_say(&text, msg_type);
+    }
+
+    /// Double-click (use) a serial.
+    pub fn use_serial(&mut self, serial: u32) {
+        self.outbox
+            .extend(anima_core::net::outgoing::build_double_click(serial));
+    }
+
+    /// Attack a serial.
+    pub fn attack(&mut self, serial: u32) {
+        self.world.last_attack = Some(serial);
+        self.outbox
+            .extend(anima_core::net::outgoing::build_attack(serial));
+    }
+
+    /// Toggle war mode.
+    pub fn war_mode(&mut self, on: bool) {
+        self.outbox
+            .extend(anima_core::net::outgoing::build_war_mode(on));
+    }
+
+    /// Apply one contract action, or a JSON array of them. Empty string = ok.
+    pub fn apply_action_json(&mut self, json: String) -> String {
+        let v: serde_json::Value = match serde_json::from_str(&json) {
+            Ok(v) => v,
+            Err(e) => return e.to_string(),
+        };
+        let items: Vec<serde_json::Value> = match v {
+            serde_json::Value::Array(a) => a,
+            other => vec![other],
+        };
+        for item in items {
+            match action_from_json(&item) {
+                Ok(action) => self.queue_action(&action),
+                Err(e) => return e,
+            }
+        }
+        String::new()
+    }
+
+    /// Server-provided character list (empty object while the handshake has not
+    /// reached 0xA9 / a delete re-prompt).
+    pub fn character_list_json(&self) -> String {
+        let Some(prompt) = &self.character_prompt else {
+            return "{}".into();
+        };
+        let slots: Vec<String> = prompt
+            .list
+            .slots
+            .iter()
+            .map(|s| format!("{{\"index\":{},\"name\":{}}}", s.index, json_str(&s.name)))
+            .collect();
+        let cities: Vec<String> = prompt
+            .list
+            .cities
+            .iter()
+            .map(|c| {
+                format!(
+                    "{{\"index\":{},\"name\":{},\"building\":{}}}",
+                    c.index,
+                    json_str(&c.name),
+                    json_str(&c.building)
+                )
+            })
+            .collect();
+        let rejected = prompt.delete_rejected.map(|r| {
+            format!(
+                ",\"deleteRejected\":{{\"reason\":{},\"text\":{}}}",
+                r.reason,
+                json_str(r.text)
+            )
+        });
+        format!(
+            "{{\"slots\":[{}],\"cities\":[{}],\"slotCount\":{}{}}}",
+            slots.join(","),
+            cities.join(","),
+            prompt.list.slot_count,
+            rejected.as_deref().unwrap_or("")
+        )
+    }
+
+    /// Play the named slot from the current character list. Returns false when
+    /// there is no prompt or the slot is empty.
+    pub fn play_character(&mut self, slot: u8) -> bool {
+        self.choose(CharacterChoice::Play(slot))
+    }
+
+    /// Create a character from the same JSON the play-server login form sends
+    /// (`name`, stats, skills, `profession`, hues). Returns an empty string on
+    /// success, otherwise the error.
+    pub fn create_character(&mut self, json: String) -> String {
+        if self.character_prompt.is_none() {
+            return "no character list".into();
+        }
+        match appearance_from_json(&json) {
+            Ok(appearance) => {
+                if self.choose(CharacterChoice::Create(appearance)) {
+                    String::new()
+                } else {
+                    "create was rejected".into()
+                }
+            }
+            Err(e) => e,
+        }
+    }
+
+    /// Delete the named slot. The next 0xA9/0x86 refreshes [`character_list_json`].
+    pub fn delete_character(&mut self, slot: u8) -> bool {
+        self.choose(CharacterChoice::Delete(slot))
     }
 
     /// Answer a legacy 0x7C item/question menu. Returns false when the menu no
@@ -398,6 +552,597 @@ impl WasmClient {
         let obs = self.world.observe(&mut self.journal_cursor);
         observation_to_json(&obs).to_string()
     }
+}
+
+impl WasmClient {
+    fn choose(&mut self, choice: CharacterChoice) -> bool {
+        let Some(machine) = self.login.as_mut() else {
+            return false;
+        };
+        match machine.choose_character(choice) {
+            Ok(dirs) => {
+                self.character_prompt = None;
+                for d in dirs {
+                    match d {
+                        LoginDirective::Send(b) => self.outbox.extend(b),
+                        LoginDirective::ChooseCharacter(prompt) => {
+                            self.character_prompt = Some(prompt);
+                        }
+                        _ => {}
+                    }
+                }
+                true
+            }
+            Err(e) => {
+                self.login_error = Some(e.to_string());
+                false
+            }
+        }
+    }
+
+    fn queue_say(&mut self, text: &str, msg_type: u8) {
+        if text.is_ascii() {
+            self.outbox.extend(anima_core::net::outgoing::build_say(
+                text, msg_type, 0x0034, 3,
+            ));
+        } else {
+            self.outbox
+                .extend(anima_core::net::outgoing::build_unicode_say(
+                    text,
+                    msg_type,
+                    0x0034,
+                    3,
+                    &[],
+                ));
+        }
+    }
+
+    fn queue_action(&mut self, action: &Action) {
+        match action {
+            Action::Walk { dir, run } => self.walk(*dir, *run),
+            Action::WalkTo { .. } => {
+                // Needs MapData pathfinding (play-server / Session::advance_route).
+                // Keyboard Walk still reaches the shard; click-to-walk is a no-op here.
+            }
+            Action::Say { text, mode } => self.queue_say(text, mode.wire()),
+            Action::PartySay { text } => self.outbox.extend(build_party_message(text)),
+            Action::Attack { serial } => self.attack(*serial),
+            Action::AutoAttack => {
+                if let Some(serial) = self.world.auto_attack_target() {
+                    self.attack(serial);
+                }
+            }
+            Action::AttackLast => {
+                if let Some(serial) = self.world.last_attack {
+                    self.outbox.extend(build_attack(serial));
+                }
+            }
+            Action::Use { serial } => self.use_serial(*serial),
+            Action::Click { serial } => self.outbox.extend(build_single_click(*serial)),
+            Action::PickUp { serial, amount } => {
+                self.outbox.extend(build_pick_up(*serial, *amount));
+            }
+            Action::Drop {
+                serial,
+                x,
+                y,
+                z,
+                container,
+            } => self
+                .outbox
+                .extend(build_drop(*serial, *x, *y, *z, *container)),
+            Action::Equip { serial, layer } => {
+                let mobile = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                self.outbox.extend(build_equip(*serial, *layer, mobile));
+            }
+            Action::WarMode { on } => self.war_mode(*on),
+            Action::CastSpell { spell } => self.outbox.extend(build_cast_spell(*spell)),
+            Action::TargetObject { serial } => self.respond_target(Some(*serial), 0, 0, 0, 0),
+            Action::TargetGround { x, y, z, graphic } => {
+                self.respond_target(None, *x, *y, *z, *graphic);
+            }
+            Action::TargetCancel => self.cancel_target(),
+            Action::BuyItems { vendor, items } => self.outbox.extend(build_buy(*vendor, items)),
+            Action::SellItems { vendor, items } => {
+                self.outbox.extend(build_sell(*vendor, items));
+                self.world.close_shop_sell();
+            }
+            Action::GumpResponse {
+                serial,
+                gump_id,
+                button,
+                switches,
+                entries,
+            } => {
+                self.outbox.extend(build_gump_response(
+                    *serial, *gump_id, *button, switches, entries,
+                ));
+                self.world.close_gump(*serial);
+            }
+            Action::PopupRequest { serial } => {
+                self.outbox.extend(build_popup_request(*serial));
+            }
+            Action::PopupSelect { serial, index } => {
+                self.outbox.extend(build_popup_select(*serial, *index));
+                self.world.popup = None;
+            }
+            Action::LegacyMenuSelect { serial, index } => {
+                let _ = self.legacy_menu_select(*serial, *index);
+            }
+            Action::HuePickerSelect { serial, hue } => {
+                if self.world.hue_picker(*serial).is_some() {
+                    self.outbox.extend(build_hue_picker_response(*serial, *hue));
+                    self.world.close_hue_picker(*serial);
+                }
+            }
+            Action::BookRequest { serial, pages } => {
+                self.outbox.extend(build_book_page_request(*serial, *pages));
+            }
+            Action::UseAbility { ability } => {
+                let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                self.outbox.extend(build_use_ability(serial, *ability));
+                self.world.arm_ability(*ability);
+            }
+            Action::DisarmRequest => self.outbox.extend(build_disarm_request()),
+            Action::StunRequest => self.outbox.extend(build_stun_request()),
+            Action::ToggleFlying => self.outbox.extend(build_toggle_flying()),
+            Action::BandageTarget { bandage, target } => {
+                let target = if *target != 0 {
+                    *target
+                } else {
+                    self.world.player_mobile().map(|p| p.serial).unwrap_or(0)
+                };
+                self.outbox.extend(build_bandage_target(*bandage, target));
+            }
+            Action::TargetedSpell { spell, target } => {
+                let target = if *target != 0 {
+                    *target
+                } else {
+                    self.world.player_mobile().map(|p| p.serial).unwrap_or(0)
+                };
+                self.outbox.extend(build_targeted_spell(*spell, target));
+            }
+            Action::TargetedSkill { skill, target } => {
+                let target = if *target != 0 {
+                    *target
+                } else {
+                    self.world.player_mobile().map(|p| p.serial).unwrap_or(0)
+                };
+                self.outbox.extend(build_targeted_skill(*skill, target));
+            }
+            Action::TargetByResource { tool, resource } => {
+                self.outbox
+                    .extend(build_target_by_resource(*tool, *resource));
+            }
+            Action::SkillLock { skill, lock } => {
+                self.outbox.extend(build_skill_lock(*skill, *lock));
+                if let Some(s) = self.world.skills.get_mut(skill) {
+                    s.lock = *lock;
+                }
+            }
+            Action::StatLock { stat, lock } => {
+                self.outbox.extend(build_stat_lock(*stat, *lock));
+                match stat {
+                    0 => self.world.player_stats.str_lock = *lock,
+                    1 => self.world.player_stats.dex_lock = *lock,
+                    2 => self.world.player_stats.int_lock = *lock,
+                    _ => {}
+                }
+            }
+            Action::UseSkill { skill } => self.outbox.extend(build_use_skill(*skill)),
+            Action::OpenDoor => self.outbox.extend(build_open_door()),
+            Action::EquipLastWeapon => {
+                let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                self.outbox.extend(build_equip_last_weapon(serial));
+            }
+            Action::InvokeVirtue { id } => self.outbox.extend(build_invoke_virtue(*id)),
+            Action::EmoteAction { action } => self.outbox.extend(build_emote_action(action)),
+            Action::CastSpellFromBook { spell, book } => {
+                self.outbox
+                    .extend(build_cast_spell_from_book(*spell, *book));
+            }
+            Action::AllNames => {
+                const CAP: usize = 60;
+                let self_serial = self.world.player_mobile().map(|p| p.serial);
+                let mut n = 0usize;
+                let mobiles: Vec<u32> = self
+                    .world
+                    .mobiles
+                    .values()
+                    .filter(|m| Some(m.serial) != self_serial)
+                    .map(|m| m.serial)
+                    .collect();
+                for serial in mobiles {
+                    if n >= CAP {
+                        break;
+                    }
+                    self.outbox.extend(build_single_click(serial));
+                    n += 1;
+                }
+                let corpses: Vec<u32> = self
+                    .world
+                    .items
+                    .values()
+                    .filter(|it| it.graphic == 0x2006)
+                    .map(|it| it.serial)
+                    .collect();
+                for serial in corpses {
+                    if n >= CAP {
+                        break;
+                    }
+                    self.outbox.extend(build_single_click(serial));
+                    n += 1;
+                }
+            }
+            Action::ChangeRace {
+                skin_hue,
+                hair_style,
+                hair_hue,
+                beard_style,
+                beard_hue,
+            } => {
+                self.outbox.extend(build_change_race_request(
+                    *skin_hue,
+                    *hair_style,
+                    *hair_hue,
+                    *beard_style,
+                    *beard_hue,
+                ));
+                self.world.race_change = None;
+            }
+            Action::ChangeRaceCancel => {
+                self.outbox.extend(build_change_race_cancel());
+                self.world.race_change = None;
+            }
+            Action::OpenUOStore => self.outbox.extend(build_open_uo_store()),
+            Action::OplRequest { serial } => self.outbox.extend(build_opl_request(&[*serial])),
+            Action::PartyInvite => self.outbox.extend(build_party_invite()),
+            Action::PartyAccept { leader } => {
+                let leader = if *leader != 0 {
+                    *leader
+                } else {
+                    self.world.party.pending_invite.unwrap_or(0)
+                };
+                self.outbox.extend(build_party_accept(leader));
+                self.world.party.pending_invite = None;
+            }
+            Action::PartyDecline { leader } => {
+                let leader = if *leader != 0 {
+                    *leader
+                } else {
+                    self.world.party.pending_invite.unwrap_or(0)
+                };
+                self.outbox.extend(build_party_decline(leader));
+                self.world.party.pending_invite = None;
+            }
+            Action::PartyLeave => {
+                let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                self.outbox.extend(build_party_leave(serial));
+            }
+            Action::PartyKick { member } => self.outbox.extend(build_party_remove(*member)),
+            Action::PartyPrivateMessage { member, text } => {
+                self.outbox
+                    .extend(build_party_private_message(*member, text));
+            }
+            Action::PartySetCanLoot { can_loot } => {
+                self.outbox.extend(build_party_can_loot(*can_loot));
+            }
+            Action::StatusRequest { serial } => {
+                let serial = if *serial != 0 {
+                    *serial
+                } else {
+                    self.world.player_mobile().map(|p| p.serial).unwrap_or(0)
+                };
+                self.outbox.extend(build_status_request(4, serial));
+            }
+            Action::BulletinRequestMessage { board, message } => {
+                self.outbox
+                    .extend(build_bulletin_request_message(*board, *message));
+            }
+            Action::BulletinRequestSummary { board, message } => {
+                self.outbox
+                    .extend(build_bulletin_request_summary(*board, *message));
+            }
+            Action::BulletinPost {
+                board,
+                reply_to,
+                subject,
+                lines,
+            } => {
+                let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+                self.outbox.extend(build_bulletin_post_message(
+                    *board, *reply_to, subject, &refs,
+                ));
+            }
+            Action::BulletinRemove { board, message } => {
+                self.outbox
+                    .extend(build_bulletin_remove_message(*board, *message));
+            }
+            Action::BoatMove { dir, run } => {
+                let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                let speed = if *run {
+                    BOAT_SPEED_FAST
+                } else {
+                    BOAT_SPEED_SLOW
+                };
+                self.outbox
+                    .extend(build_boat_move_request(serial, *dir, speed));
+            }
+            Action::BoatStop => {
+                let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                let dir = self.world.player_mobile().map(|p| p.direction).unwrap_or(0);
+                self.outbox
+                    .extend(build_boat_move_request(serial, dir, BOAT_SPEED_STOP));
+            }
+            Action::BookHeaderChange {
+                serial,
+                title,
+                author,
+            } => {
+                self.outbox
+                    .extend(build_book_header_change(*serial, title, author));
+            }
+            Action::BookPageWrite {
+                serial,
+                page,
+                lines,
+            } => {
+                self.outbox
+                    .extend(build_book_page_write(*serial, *page, lines));
+            }
+            Action::MapToggleEditable { serial } => {
+                self.outbox.extend(build_map_toggle_editable(*serial));
+            }
+            Action::MapAddPin { serial, x, y } => {
+                self.outbox.extend(build_map_add_pin(*serial, *x, *y));
+            }
+            Action::MapInsertPin {
+                serial,
+                index,
+                x,
+                y,
+            } => {
+                self.outbox
+                    .extend(build_map_insert_pin(*serial, *index, *x, *y));
+            }
+            Action::MapChangePin {
+                serial,
+                index,
+                x,
+                y,
+            } => {
+                self.outbox
+                    .extend(build_map_change_pin(*serial, *index, *x, *y));
+            }
+            Action::MapRemovePin { serial, index } => {
+                self.outbox.extend(build_map_remove_pin(*serial, *index));
+            }
+            Action::MapClearPins { serial } => {
+                self.outbox.extend(build_map_clear_pins(*serial));
+            }
+            Action::ChatOpen => {
+                let name = self
+                    .world
+                    .player_mobile()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                self.outbox.extend(build_chat_open(&name));
+            }
+            Action::ChatJoin { channel, password } => {
+                self.outbox.extend(build_chat_join(channel, password));
+            }
+            Action::ChatCreate { channel, password } => {
+                self.outbox
+                    .extend(build_chat_create_channel(channel, password));
+            }
+            Action::ChatLeave => self.outbox.extend(build_chat_leave()),
+            Action::ChatSay { text } => self.outbox.extend(build_chat_message(text)),
+            Action::Rename { serial, name } => {
+                self.outbox.extend(build_rename_request(*serial, name));
+            }
+            Action::QuestArrowClick { right_click } => {
+                self.outbox.extend(build_quest_arrow_click(*right_click));
+            }
+            Action::HelpRequest => self.outbox.extend(build_help_request()),
+            Action::GuildMenu => {
+                let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                self.outbox.extend(build_guild_menu_request(serial));
+            }
+            Action::QuestMenu => {
+                let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                self.outbox.extend(build_quest_menu_request(serial));
+            }
+            Action::Logout => {
+                let _ = self.logout();
+            }
+            Action::TradeAccept { container, accept } => {
+                if self
+                    .world
+                    .trades
+                    .iter()
+                    .any(|t| t.my_container == *container)
+                {
+                    self.outbox.extend(build_trade_accept(*container, *accept));
+                    if let Some(t) = self.world.trade_mut(*container) {
+                        t.my_accept = *accept;
+                    }
+                }
+            }
+            Action::TradeCancel { container } => {
+                if self
+                    .world
+                    .trades
+                    .iter()
+                    .any(|t| t.my_container == *container)
+                {
+                    self.outbox.extend(build_trade_cancel(*container));
+                    self.world.close_trade(*container);
+                }
+            }
+            Action::TradeGold {
+                container,
+                gold,
+                platinum,
+            } => {
+                if self
+                    .world
+                    .trades
+                    .iter()
+                    .any(|t| t.my_container == *container)
+                {
+                    self.outbox
+                        .extend(build_trade_gold(*container, *gold, *platinum));
+                    if let Some(t) = self.world.trade_mut(*container) {
+                        t.my_offer_gold = *gold;
+                        t.my_offer_platinum = *platinum;
+                    }
+                }
+            }
+            Action::ProfileRequest { serial } => {
+                self.outbox.extend(build_profile_request(*serial));
+            }
+            Action::HouseDesign(cmd) => {
+                let player = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                let bytes = match *cmd {
+                    HouseDesignAction::AddItem { graphic, x, y } => {
+                        build_house_design_add_item(player, graphic, x, y)
+                    }
+                    HouseDesignAction::DeleteItem { graphic, x, y, z } => {
+                        build_house_design_delete_item(player, graphic, x, y, z)
+                    }
+                    HouseDesignAction::AddStair { graphic, x, y } => {
+                        build_house_design_add_stair(player, graphic, x, y)
+                    }
+                    HouseDesignAction::AddRoof { graphic, x, y, z } => {
+                        build_house_design_add_roof(player, graphic, x, y, z)
+                    }
+                    HouseDesignAction::DeleteRoof { graphic, x, y, z } => {
+                        build_house_design_delete_roof(player, graphic, x, y, z)
+                    }
+                    HouseDesignAction::GoToFloor(floor) => {
+                        build_house_design_go_to_floor(player, floor)
+                    }
+                    HouseDesignAction::Commit => build_house_design_commit(player),
+                    HouseDesignAction::Close => build_house_design_close(player),
+                    HouseDesignAction::Clear => build_house_design_clear(player),
+                    HouseDesignAction::Revert => build_house_design_revert(player),
+                    HouseDesignAction::Backup => build_house_design_backup(player),
+                    HouseDesignAction::Restore => build_house_design_restore(player),
+                    HouseDesignAction::Sync => build_house_design_sync(player),
+                };
+                self.outbox.extend(bytes);
+                if matches!(
+                    *cmd,
+                    HouseDesignAction::AddItem { .. }
+                        | HouseDesignAction::DeleteItem { .. }
+                        | HouseDesignAction::AddStair { .. }
+                        | HouseDesignAction::AddRoof { .. }
+                        | HouseDesignAction::DeleteRoof { .. }
+                ) {
+                    self.outbox.extend(build_house_design_sync(player));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn respond_target(&mut self, serial: Option<u32>, x: u16, y: u16, z: i16, graphic: u16) {
+        let Some(cursor) = self.world.pending_target else {
+            return;
+        };
+        let (target_type, serial) = match serial {
+            Some(s) => (0u8, s),
+            None => (1u8, 0u32),
+        };
+        self.outbox
+            .extend(anima_core::net::outgoing::build_target_response(
+                target_type,
+                cursor.cursor_id,
+                cursor.cursor_flag,
+                serial,
+                x,
+                y,
+                z,
+                graphic,
+            ));
+        self.world.pending_target = None;
+    }
+
+    fn cancel_target(&mut self) {
+        let Some(cursor) = self.world.pending_target else {
+            return;
+        };
+        self.outbox
+            .extend(anima_core::net::outgoing::build_target_response(
+                cursor.target_type,
+                cursor.cursor_id,
+                cursor.cursor_flag,
+                0,
+                0xFFFF,
+                0xFFFF,
+                0,
+                0,
+            ));
+        self.world.pending_target = None;
+    }
+}
+
+fn json_str(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn appearance_from_json(json: &str) -> Result<CharacterAppearance, String> {
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let u8n = |k: &str, d: u8| {
+        v.get(k)
+            .and_then(|x| x.as_u64())
+            .and_then(|n| u8::try_from(n).ok())
+            .unwrap_or(d)
+    };
+    let u16n = |k: &str, d: u16| {
+        v.get(k)
+            .and_then(|x| x.as_u64())
+            .and_then(|n| u16::try_from(n).ok())
+            .unwrap_or(d)
+    };
+    let mut appearance = CharacterAppearance {
+        name: v
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        female: v.get("female").and_then(|x| x.as_bool()).unwrap_or(false),
+        skin_hue: u16n("skin_hue", 0),
+        hair_style: u16n("hair_style", 0),
+        hair_hue: u16n("hair_hue", 0),
+        facial_hair_style: u16n("facial_hair_style", 0),
+        facial_hair_hue: u16n("facial_hair_hue", 0),
+        shirt_hue: u16n("shirt_hue", 0),
+        pants_hue: u16n("pants_hue", 0),
+        strength: u8n("strength", 60),
+        dexterity: u8n("dexterity", 20),
+        intelligence: u8n("intelligence", 10),
+        city_index: u16n("city_index", 0),
+        skills: [(0, 0); 4],
+        profession: u8n("profession", 0),
+    };
+    if let Some(list) = v.get("skills").and_then(|x| x.as_array()) {
+        for (i, item) in list.iter().take(4).enumerate() {
+            appearance.skills[i] = (
+                item.get("id")
+                    .and_then(|x| x.as_u64())
+                    .and_then(|n| u8::try_from(n).ok())
+                    .unwrap_or(0),
+                item.get("value")
+                    .and_then(|x| x.as_u64())
+                    .and_then(|n| u8::try_from(n).ok())
+                    .unwrap_or(0),
+            );
+        }
+    }
+    appearance.validate().map_err(|e| e.to_string())?;
+    Ok(appearance)
 }
 
 #[cfg(test)]
@@ -650,5 +1395,44 @@ mod tests {
                 allowed: true,
             })
         );
+    }
+
+    #[test]
+    fn say_use_attack_and_action_json_queue_packets() {
+        let mut client = WasmClient::new("user".into(), "pass".into());
+        client.login = None;
+        client.outbox.clear();
+
+        client.say("hi".into(), "say".into());
+        assert_eq!(
+            client.take_outbox(),
+            anima_core::net::outgoing::build_say("hi", 0, 0x0034, 3)
+        );
+
+        client.use_serial(0x4000_0001);
+        assert_eq!(
+            client.take_outbox(),
+            anima_core::net::outgoing::build_double_click(0x4000_0001)
+        );
+
+        client.attack(0x1234);
+        assert_eq!(
+            client.take_outbox(),
+            anima_core::net::outgoing::build_attack(0x1234)
+        );
+
+        let err = client.apply_action_json(r#"[{"type":"WarMode","on":true}]"#.into());
+        assert!(err.is_empty(), "{err}");
+        assert_eq!(
+            client.take_outbox(),
+            anima_core::net::outgoing::build_war_mode(true)
+        );
+    }
+
+    #[test]
+    fn character_list_json_is_empty_until_prompted() {
+        let client = WasmClient::new("user".into(), "pass".into());
+        assert_eq!(client.character_list_json(), "{}");
+        assert!(!WasmClient::new("user".into(), "pass".into()).play_character(0));
     }
 }

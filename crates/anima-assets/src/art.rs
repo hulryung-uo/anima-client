@@ -13,6 +13,7 @@ use crate::uop::UopReader;
 const LAND_DIM: usize = 44;
 
 /// A decoded RGBA8 image.
+#[derive(Clone)]
 pub struct Image {
     pub width: u32,
     pub height: u32,

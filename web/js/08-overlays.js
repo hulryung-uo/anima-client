@@ -87,7 +87,7 @@ function addOverhead(id, text, type, hue, now) {
   // being pixel-upscaled. On T2A even single-click names arrive as overhead text.
   const el = document.createElement("div");
   el.className = "oh-label" + (MSG_CLASS[type] ? " " + MSG_CLASS[type] : "");
-  el.textContent = text;
+  paintUoFont(el, text);
   namesEl().appendChild(el);
   // Linger longer for longer lines (ClassicUO scales with length), then fade.
   const ttl = Math.min(8000, 3000 + text.length * 70);
@@ -100,7 +100,46 @@ function addOverhead(id, text, type, hue, now) {
 // late-arriving hue from the async hue table recolors it on a later frame).
 function applyOverheadColor(o) {
   const c = o.fc || msgColor(o.type, o.hue); // fc = a forced colour (e.g. notoriety name)
-  if (o._c !== c) { o.el.style.color = c; o._c = c; }
+  if (o._c !== c) {
+    if (o.el.classList.contains("uo")) o.el.style.backgroundColor = c;
+    else o.el.style.color = c;
+    o._c = c;
+  }
+}
+
+// Rasterize `text` with the shard's `unifont*.mul` (ClassicUO overhead path).
+// 1-bit glyphs are white; we CSS-mask them so `background-color` is the hue.
+// A 404 (fonts not loaded) falls back to the system font already on the label.
+function paintUoFont(el, text) {
+  const src = "font/text.png?font=1&uni=1&t=" + encodeURIComponent(text);
+  if (el._fontSrc === src) return;
+  el._fontSrc = src;
+  const img = new Image();
+  img.onload = () => {
+    if (el._fontSrc !== src) return;
+    el.classList.add("uo");
+    el.textContent = "";
+    el.style.width = img.naturalWidth + "px";
+    el.style.height = img.naturalHeight + "px";
+    el.style.webkitMaskImage = `url("${src}")`;
+    el.style.maskImage = `url("${src}")`;
+    if (el.style.color) el.style.backgroundColor = el.style.color;
+    el._w = img.naturalWidth;
+    el._h = img.naturalHeight;
+    el._measure = true;
+  };
+  img.onerror = () => {
+    if (el._fontSrc !== src) return;
+    el.classList.remove("uo");
+    el.style.webkitMaskImage = "";
+    el.style.maskImage = "";
+    el.style.width = "";
+    el.style.height = "";
+    el.textContent = text;
+    el._w = el._h = undefined;
+    el._measure = true;
+  };
+  img.src = src;
 }
 
 // Float a mobile's name above its head in its notoriety colour (single-click, like
@@ -679,8 +718,13 @@ function drawBars(now) {
       // Only a text change invalidates the cached size — mark it for the read
       // phase below instead of measuring inline (that would force a reflow per
       // label per frame, since the loop just dirtied this div's layout).
-      if (d._t !== nm) { d.textContent = nm; d._t = nm; d._measure = true; }
-      if (d._noto !== m.noto) { d.style.color = cssColor(notoColor(m.noto)); d._noto = m.noto; }
+      if (d._t !== nm) { paintUoFont(d, nm); d._t = nm; d._measure = true; }
+      if (d._noto !== m.noto) {
+        const c = cssColor(notoColor(m.noto));
+        if (d.classList.contains("uo")) d.style.backgroundColor = c;
+        else d.style.color = c;
+        d._noto = m.noto;
+      }
       const fx = window.innerWidth / app.renderer.width, fy = window.innerHeight / app.renderer.height;
       const cx = (app.stage.x + x * camZoom) * fx;
       const naturalBottom = (app.stage.y + (topY - 2) * camZoom) * fy;

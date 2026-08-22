@@ -81,6 +81,7 @@ pub fn build_scene(
     animdata: Option<&AnimData>,
     anim: Option<&Anim>,
     multis: Option<&Multis>,
+    tileart: Option<&anima_assets::TileArt>,
     journal: &[Value],
 ) -> String {
     // Decode any newly-arrived custom-house designs before anything below reads
@@ -109,10 +110,13 @@ pub fn build_scene(
     // this on items, a field/object sitting on the mountain surface above a cave
     // (or furniture on a hidden upper floor) renders floating over the black void.
     let mut map = map;
-    let max_z = match map {
+    let ceiling = match map {
         Some(ref mut m) => max_draw_z(&s.world, m, multis, px, py, pz),
-        None => 127i32,
+        None => DrawCeiling::OPEN,
     };
+    let max_z = ceiling.max_z;
+    let max_ground_z = ceiling.max_ground_z;
+    let no_draw_roofs = ceiling.no_draw_roofs;
 
     // Every asset lookup the emitters below need, as one value instead of
     // fifteen closures. It holds the SHARED `&MapData`; the tile loop further
@@ -122,6 +126,7 @@ pub fn build_scene(
         map: map.as_deref(),
         anim,
         animdata,
+        tileart,
     };
 
     // Resolved here rather than beside the player JSON below: these need only
@@ -152,7 +157,7 @@ pub fn build_scene(
         .collect();
 
     let mut mobiles = mobiles_json(&s.world, &look, &p);
-    let items = items_json(&s.world, &look, px, py, max_z, max_z < 127);
+    let items = items_json(&s.world, &look, px, py, max_z, no_draw_roofs);
     let mut lights = lights_json(&s.world, &look, px, py, pz);
     // `Equipconv.def` is keyed by the wearer's REMAPPED body.
     let (equip_body, _) = look.remap(p.body, p.hue);
@@ -253,6 +258,7 @@ pub fn build_scene(
                 &mut art,
                 (px, py, pz),
                 max_z,
+                no_draw_roofs,
                 &mut lights,
             )
         }
@@ -360,6 +366,8 @@ pub fn build_scene(
     let legacy_menus = json_array_value(&legacy_menus_json(&s.world));
     // Server dye hue pickers (0x95), potentially several callback serials.
     let hue_pickers = json_array_value(&hue_pickers_json(&s.world));
+    let race_change =
+        serde_json::to_string(&race_change_json(&s.world)).unwrap_or_else(|_| "null".into());
     // Concurrent 0xA6 Tip/Notice windows. Only kind "tip" has prev/next.
     let tips = json_array_value(&tips_json(&s.world));
     // Concurrent modal 0xAB text-entry dialogs, keyed in the browser by seq.
@@ -553,13 +561,14 @@ pub fn build_scene(
         None => String::new(),
     };
     mark("small_parts", &mut t);
+    let no_draw_roofs_u8 = u8::from(no_draw_roofs);
     format!(
         "{{\"player\":{player},\
-         \"map\":{{\"cx\":{px},\"cy\":{py},\"radius\":{LAND_RADIUS},\"viewRange\":{RADIUS},\"tiles\":[{tiles}],\"maxZ\":{max_z},\"dbg\":{dbg}}},\
+         \"map\":{{\"cx\":{px},\"cy\":{py},\"radius\":{LAND_RADIUS},\"viewRange\":{RADIUS},\"tiles\":[{tiles}],\"maxZ\":{max_z},\"maxGroundZ\":{max_ground_z},\"noDrawRoofs\":{no_draw_roofs_u8},\"dbg\":{dbg}}},\
          \"statics\":[{statics}],\"mobiles\":{mobiles},\"items\":{items},\"contItems\":{cont_items},\
          \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"tanims\":{tanims},\"damage\":{damage},\"effects\":{effects},\"dragAnims\":{drag_anims},\"music\":{music},\
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
-         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"logoutAck\":{logout_ack},\"boatMoves\":{boat_moves},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
+         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"raceChange\":{race_change},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"logoutAck\":{logout_ack},\"boatMoves\":{boat_moves},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
          \"armedAbility\":{armed_ability},\"activeSpells\":{active_spells},\"chat\":{chat},\"bboard\":{bboard},\"contGumps\":{container_gumps},\"contInfo\":{cont_info},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
@@ -567,6 +576,69 @@ pub fn build_scene(
          \"deaths\":{deaths},\"net\":{net},\
          \"stats\":{{\"confirms\":{},\"denies\":{}}}}}",
         s.confirms, s.denies
+    )
+}
+
+/// Map window for the WASM asset server (`GET /terrain.json`).
+///
+/// Same `map` + `statics` (+ static `lights`) shape [`build_scene`] emits, built
+/// from map files only — no live [`Session`]. A stub player at `center` drives
+/// [`max_draw_z`] so cave/roof culling matches the play-server path.
+pub fn build_terrain_window(
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    animdata: Option<&AnimData>,
+    art: Option<&mut Art>,
+    center: (i64, i64, i32),
+    season: u8,
+) -> String {
+    let (px, py, pz) = center;
+    let mut world = World::new();
+    world.season = season;
+    world.player = Some(anima_core::types::Serial(1));
+    world.mobiles.insert(
+        1,
+        anima_core::world::Mobile {
+            serial: 1,
+            pos: anima_core::types::Position {
+                x: px.clamp(0, u16::MAX as i64) as u16,
+                y: py.clamp(0, u16::MAX as i64) as u16,
+                z: pz.clamp(i8::MIN as i32, i8::MAX as i32) as i8,
+            },
+            ..Default::default()
+        },
+    );
+    let ceiling = max_draw_z(&world, map, multis, px, py, pz);
+    let mut lights = Vec::new();
+    let mut art = art;
+    let TileEmission {
+        mut tiles,
+        mut statics,
+        dbg,
+    } = emit_tiles(
+        &world,
+        map,
+        multis,
+        animdata,
+        &mut art,
+        center,
+        ceiling.max_z,
+        ceiling.no_draw_roofs,
+        &mut lights,
+    );
+    if tiles.ends_with(',') {
+        tiles.pop();
+    }
+    if statics.ends_with(',') {
+        statics.pop();
+    }
+    let dbg = json_array(&dbg);
+    let lights = json_array(&lights);
+    let no_draw_roofs_u8 = u8::from(ceiling.no_draw_roofs);
+    format!(
+        "{{\"map\":{{\"cx\":{px},\"cy\":{py},\"radius\":{LAND_RADIUS},\"viewRange\":{RADIUS},\"tiles\":[{tiles}],\"maxZ\":{},\"maxGroundZ\":{},\"noDrawRoofs\":{no_draw_roofs_u8},\"dbg\":{dbg}}},\
+         \"statics\":[{statics}],\"lights\":{lights}}}",
+        ceiling.max_z, ceiling.max_ground_z
     )
 }
 

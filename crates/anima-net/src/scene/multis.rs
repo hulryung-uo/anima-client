@@ -6,6 +6,7 @@
 //! and the walkability fold.
 
 use super::*;
+use anima_assets::MultiComponent;
 
 /// Cap on the deduped `(dx, dy)` footprint tiles emitted for a pending 0x99
 /// placement preview — a house's raw component list runs into the hundreds,
@@ -19,6 +20,56 @@ pub(super) const PLACEMENT_TILE_CAP: usize = 4096;
 /// full multi.mul list is the realistic worst case rather than the tile
 /// count. 2000 comfortably covers that while still bounding the payload.
 pub(super) const PLACEMENT_PART_CAP: usize = 2000;
+
+/// ClassicUO `Item.LoadMulti` (`Item.cs:305-308`):
+/// `MultiDistanceBonus = max(|minX|, maxX, |minY|, maxY)` over **every**
+/// component, visible or not — the min/max fold runs before the visibility
+/// branch. `HouseManager.IsHouseInRange` then keeps the house loaded while
+/// `Chebyshev(origin, player) <= ClientViewRange + MultiDistanceBonus`.
+///
+/// Custom-house design tiles (0xD8) can sit further from the origin than the
+/// foundation `multi.mul` shape; pass those `(dx, dy)` as `extra_dx_dy` so a
+/// keep/castle whose pieces outrun the stock footprint is still in view when
+/// the player is standing on them.
+pub(super) fn multi_distance_bonus(comps: &[MultiComponent], extra_dx_dy: &[(i32, i32)]) -> i64 {
+    let mut bonus = 0i64;
+    for c in comps {
+        bonus = bonus.max((c.dx as i64).abs()).max((c.dy as i64).abs());
+    }
+    for &(dx, dy) in extra_dx_dy {
+        bonus = bonus.max((dx as i64).abs()).max((dy as i64).abs());
+    }
+    bonus
+}
+
+/// ClassicUO `HouseManager.IsHouseInRange` (`HouseManager.cs:75-77`): independent
+/// axis checks, which is Chebyshev (`max(|dx|,|dy|) <= view + bonus`).
+pub(super) fn multi_origin_in_view(
+    ox: i64,
+    oy: i64,
+    px: i64,
+    py: i64,
+    view: i64,
+    bonus: i64,
+) -> bool {
+    (ox - px).abs() <= view + bonus && (oy - py).abs() <= view + bonus
+}
+
+/// ClassicUO `Item.LoadMulti` (`:256-284`) + `CheckGraphicChange` (`:358`):
+/// a visible component is added as a `Multi` in the world; an invisible
+/// index-0 is **not**, and the parent Item draws it via
+/// `DisplayedGraphic = MultiGraphic` iff `MultiGraphic > 2` (`AllowedToDraw`).
+/// We skip drawing the parent item (`items_json` filters `is_multi`), so this
+/// is whether the origin graphic is a sprite versus a path-only `nd` record.
+pub(super) fn multi_component_never_draw(visible: bool, is_origin: bool, graphic: u16) -> bool {
+    if visible {
+        false
+    } else if is_origin && graphic > 2 {
+        false
+    } else {
+        true
+    }
+}
 
 /// The pending 0x99 house/multi placement footprint
 /// (`World::pending_multi_placement`), as a `(dx, dy)`-deduped outline the
@@ -215,7 +266,7 @@ pub(super) fn emit_multi_component(
     map: &MapData,
     animdata: Option<&AnimData>,
     max_z: i32,
-    under_cover: bool,
+    no_draw_roofs: bool,
     x: i64,
     y: i64,
     graphic: u16,
@@ -269,7 +320,7 @@ pub(super) fn emit_multi_component(
     // terrain.rs. A placed house's own roof comes through here, so missing this
     // site would leave houses popping while map statics faded.
     let is_roof = flags & FLAG_ROOF != 0;
-    let hz = cz >= max_z || (under_cover && is_roof);
+    let hz = ceil_hz(cz, max_z, no_draw_roofs, is_roof);
     let draw_g = season::static_draw_graphic(season, graphic);
     let (dflags, dheight) = if draw_g == graphic {
         (flags, height)
@@ -293,6 +344,7 @@ pub(super) fn emit_multi_component(
     // multi that skipped this would fade inconsistently against identical statics
     // standing beside it.
     let hidden_suffix = if hz { ",\"hz\":1" } else { "" };
+    let roof_suffix = if is_roof { ",\"rf\":1" } else { "" };
     let translucent = if dflags & FLAG_TRANSLUCENT != 0 {
         ",\"tr\":1"
     } else {
@@ -323,7 +375,7 @@ pub(super) fn emit_multi_component(
     );
     let _ = write!(
         statics,
-        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{},\"ms\":{}{}{}{}{}{}{}}},",
+        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{},\"ms\":{}{}{}{}{}{}{}{}}},",
         x,
         y,
         cz,
@@ -335,7 +387,8 @@ pub(super) fn emit_multi_component(
         path,
         season_g,
         translucent,
-        hidden_suffix
+        hidden_suffix,
+        roof_suffix
     );
     // Ceiling-hidden components charge their own budget, never the drawn one —
     // the trap acf1b2e measured for real statics (Blackthorn, 4000 exactly) and

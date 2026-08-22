@@ -125,6 +125,10 @@ pub struct CharacterAppearance {
     pub city_index: u16, // 0 = New Haven
     /// Four (skill_id, value) pairs.
     pub skills: [(u8, u8); 4],
+    /// Profession byte on CreateCharacter `0xF8` (`Prof.txt` `Desc`). 0 = custom
+    /// / Advanced (ClassicUO leftover row). Named professions are 1+ (Warrior=1,
+    /// Mage=2, …).
+    pub profession: u8,
 }
 
 impl Default for CharacterAppearance {
@@ -144,6 +148,7 @@ impl Default for CharacterAppearance {
             intelligence: 10, // 60+20+10 = 90
             city_index: 0,
             skills: [(0, 50), (1, 50), (2, 0), (3, 0)],
+            profession: 0,
         }
     }
 }
@@ -314,7 +319,7 @@ pub fn build_create_character(app: &CharacterAppearance, slot: u16, client_flags
         .u32(client_flags)
         .u32(0x0000_0001) // unknown (ClassicUO sends 1)
         .u32(0x0000_0000) // login count
-        .u8(0) // profession (0 = custom)
+        .u8(app.profession)
         .zeros(15); // reserved
 
     let gender_race = HUMAN_RACE_ID * 2 + app.female as u8;

@@ -14,8 +14,8 @@ use crate::path::Terrain;
 use crate::types::Position;
 use crate::world::{
     is_ghost_body, Book, Buff, CharacterProfile, HuePicker, JournalEntry, LegacyMenu, LogoutAck,
-    MapView, OpenUrlRequest, Party, PopupMenu, PromptState, ShopBuy, ShopSell, SpellbookContent,
-    TargetCursor, TextEntryDialog, TipNotice, TradeState, Weather, World,
+    MapView, OpenUrlRequest, Party, PopupMenu, PromptState, RaceChangePrompt, ShopBuy, ShopSell,
+    SpellbookContent, TargetCursor, TextEntryDialog, TipNotice, TradeState, Weather, World,
 };
 
 /// A skill value, in human units (50.0 == GM-half). Derived from [`crate::world::Skill`].
@@ -187,6 +187,9 @@ pub struct Observation {
     /// Open server hue pickers (0x95), sorted by serial. These cannot be
     /// canceled; answer with [`Action::HuePickerSelect`] and a dyed hue.
     pub hue_pickers: Vec<HuePicker>,
+    /// Pending heritage / race-change dialog (0xBF/0x2A), if any. Answer with
+    /// [`Action::ChangeRace`] or dismiss with [`Action::ChangeRaceCancel`].
+    pub race_change: Option<RaceChangePrompt>,
     /// Recent validated 0xA5 HTTP(S) URL requests, oldest first. These are
     /// informational events only: no navigation happens in the core, and a UI
     /// must obtain explicit user approval before opening one. Dedupe on `seq`.
@@ -708,6 +711,24 @@ pub enum Action {
     /// ClassicUO `GameActions.AllNames`. Names arrive as overhead text. The
     /// driver caps the burst so it cannot flood the link.
     AllNames,
+    /// Confirm a pending heritage / race-change dialog (0xBF/0x2A). The five
+    /// fields are the same `u16`s ClassicUO `Send_ChangeRaceRequest` writes
+    /// (skin hue, hair item id, hair hue, beard item id, beard hue). Female
+    /// and elf bodies send beard 0 / hue 0. The driver clears
+    /// [`Observation::race_change`] locally.
+    ChangeRace {
+        skin_hue: u16,
+        hair_style: u16,
+        hair_hue: u16,
+        beard_style: u16,
+        beard_hue: u16,
+    },
+    /// Dismiss the heritage dialog without changing appearance (0xBF/0x2A with
+    /// no payload — ServUO `HeritageTransform` size 5 answers cliloc 1073645).
+    ChangeRaceCancel,
+    /// Open the Ultima Store (0xFA). ServUO `UltimaStore.UOStoreRequest`; a
+    /// shard without the store registered ignores it.
+    OpenUOStore,
     /// Request an entity's Object Property List / tooltip (UO 0xD6 MegaClilocRequest).
     /// The server replies with a 0xD6 MegaCliloc stored in `World::opl`. Sent on
     /// hover so the client can show the item/mobile's full properties.
@@ -1213,6 +1234,7 @@ impl World {
             popup: self.popup.clone(),
             legacy_menus,
             hue_pickers,
+            race_change: self.race_change,
             open_urls: self.recent_open_urls.clone(),
             tips: self.tips.clone(),
             text_entry_dialogs: self.text_entry_dialogs.clone(),

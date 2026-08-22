@@ -45,6 +45,20 @@ pub(super) fn starting_skills(profession: &str) -> Option<[(u8, u8); 4]> {
     })
 }
 
+/// `Prof.txt` `Desc` byte for a named preset. 0 = Advanced/custom.
+fn profession_byte(name: &str) -> u8 {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "warrior" => 1,
+        "mage" => 2,
+        "crafter" | "blacksmith" => 3,
+        "necromancer" => 4,
+        "paladin" => 5,
+        "samurai" => 6,
+        "ninja" => 7,
+        _ => 0,
+    }
+}
+
 /// Parse the browser's JSON login request. The legacy colon-separated body is
 /// retained for scripts and older embedded web assets.
 pub(super) fn parse_login_attempt(body: &str) -> Result<LoginAttempt, &'static str> {
@@ -183,6 +197,7 @@ pub(super) fn parse_character_appearance(
             .and_then(|number| u16::try_from(number).ok())
             .ok_or("invalid starting city")?,
         skills: [(0, 0); 4],
+        profession: 0,
     };
     // An explicit `skills` array (the custom picker) wins; otherwise fall back to
     // the named profession's preset. `validate()` enforces the UO rules either way
@@ -190,6 +205,11 @@ pub(super) fn parse_character_appearance(
     appearance.skills = match create.get("skills").and_then(|field| field.as_array()) {
         Some(list) => parse_skill_choices(list)?,
         None => starting_skills(text("profession")).ok_or("unknown starting profession")?,
+    };
+    appearance.profession = match create.get("profession") {
+        Some(field) if field.is_u64() => u8::try_from(field.as_u64().unwrap_or(0)).unwrap_or(0),
+        Some(field) => profession_byte(field.as_str().unwrap_or("")),
+        None => profession_byte(text("profession")),
     };
     appearance.validate()?;
     Ok(appearance)
@@ -384,6 +404,7 @@ mod login_request_tests {
             (20, 20, 50)
         );
         assert_eq!(appearance.skills, starting_skills("mage").unwrap());
+        assert_eq!(appearance.profession, 2);
         assert_eq!(appearance.city_index, 3);
     }
 

@@ -283,6 +283,14 @@ pub(super) fn hue_pickers_json(world: &World) -> Value {
     )
 }
 
+/// Pending 0xBF/0x2A heritage / race-change dialog, or `null` when closed.
+pub(super) fn race_change_json(world: &World) -> Value {
+    match world.race_change {
+        Some(prompt) => json!({ "female": prompt.female, "race": prompt.race }),
+        None => Value::Null,
+    }
+}
+
 /// Open 0xA6 Tip/Notice windows. Arrival order and `seq` are preserved because
 /// repeated packets with the same wire tip id are distinct ClassicUO gumps.
 pub(super) fn tips_json(world: &World) -> Value {

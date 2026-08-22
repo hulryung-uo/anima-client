@@ -17,7 +17,7 @@
 //! [`observation_to_json`] emits one object with these top-level keys, one per
 //! [`Observation`] field: `player`, `mobiles`, `items`, `new_journal`,
 //! `pending_target`, `skills`, `gumps`, `prompt`, `trades`, `buffs`,
-//! `shop_buy`, `shop_sell`, `popup`, `legacy_menus`, `hue_pickers`, `open_urls`, `tips`,
+//! `shop_buy`, `shop_sell`, `popup`, `legacy_menus`, `hue_pickers`, `race_change`, `open_urls`, `tips`,
 //! `text_entry_dialogs`, `character_profiles`, `logout_ack`, `book`, `party`, `quest_arrow`, `waypoints`,
 //! `weather`, `season`, `light`, `war`, `last_attack`, `combatant`, `corpse_of`,
 //! `corpse_equip`, `map_index`, `aos`, `opl`, `recent_damage`, `spellbooks`,
@@ -138,13 +138,16 @@
 //! `GameActions` verbs that had no Action — `OpenDoor` (0x12/0x58, facing-tile
 //! door, not a double-click), `EquipLastWeapon` (0xD7/0x1E), `InvokeVirtue`
 //! (0x12/0xF4, 1-based), `EmoteAction` (0x12/0xC7), `CastSpellFromBook`
-//! (0x12/0x27) and `AllNames` (a burst of single-clicks).)
+//! (0x12/0x27) and `AllNames` (a burst of single-clicks). v31: 0xBF/0x2A
+//! heritage / race-change (`race_change` plus `ChangeRace`/`ChangeRaceCancel`)
+//! and `OpenUOStore` (0xFA). Pre-OPL equipment info (0xBF/0x10) rides the
+//! existing journal — no new observation key.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 30;
+pub const SCHEMA_VERSION: u32 = 31;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
@@ -155,8 +158,8 @@ use anima_core::types::Position;
 use anima_core::world::{
     Book, Buff, CharacterProfile, HuePicker, JournalEntry, LegacyMenu, LegacyMenuEntry,
     LegacyMenuKind, LogoutAck, MapView, OpenUrlRequest, Party, PopupEntry, PopupMenu, PromptState,
-    ShopBuy, ShopSell, ShopSellItem, SpellbookContent, TargetCursor, TextEntryDialog, TipNotice,
-    TradeState, Weather,
+    RaceChangePrompt, ShopBuy, ShopSell, ShopSellItem, SpellbookContent, TargetCursor,
+    TextEntryDialog, TipNotice, TradeState, Weather,
 };
 use serde_json::{json, Value};
 
@@ -492,6 +495,10 @@ fn hue_picker_json(picker: &HuePicker) -> Value {
     json!({ "serial": picker.serial, "graphic": picker.graphic })
 }
 
+fn race_change_json(prompt: &RaceChangePrompt) -> Value {
+    json!({ "female": prompt.female, "race": prompt.race })
+}
+
 fn open_url_json(request: &OpenUrlRequest) -> Value {
     json!({ "seq": request.seq, "url": request.url })
 }
@@ -646,6 +653,7 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "popup": obs.popup.as_ref().map(popup_json),
         "legacy_menus": obs.legacy_menus.iter().map(legacy_menu_json).collect::<Vec<_>>(),
         "hue_pickers": obs.hue_pickers.iter().map(hue_picker_json).collect::<Vec<_>>(),
+        "race_change": obs.race_change.as_ref().map(race_change_json),
         "open_urls": obs.open_urls.iter().map(open_url_json).collect::<Vec<_>>(),
         "tips": obs.tips.iter().map(tip_json).collect::<Vec<_>>(),
         "text_entry_dialogs": obs.text_entry_dialogs.iter().map(text_entry_dialog_json).collect::<Vec<_>>(),
@@ -910,6 +918,15 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
             book: req_u32("book")?,
         }),
         "AllNames" => Ok(Action::AllNames),
+        "ChangeRace" => Ok(Action::ChangeRace {
+            skin_hue: req_u16("skin_hue")?,
+            hair_style: req_u16("hair_style")?,
+            hair_hue: req_u16("hair_hue")?,
+            beard_style: req_u16("beard_style")?,
+            beard_hue: req_u16("beard_hue")?,
+        }),
+        "ChangeRaceCancel" => Ok(Action::ChangeRaceCancel),
+        "OpenUOStore" => Ok(Action::OpenUOStore),
         "OplRequest" => Ok(Action::OplRequest {
             serial: req_u32("serial")?,
         }),
@@ -1349,6 +1366,22 @@ mod tests {
             ),
             (json!({"type": "AllNames"}), Action::AllNames),
             (
+                json!({"type": "ChangeRace", "skin_hue": 1, "hair_style": 2, "hair_hue": 3,
+                       "beard_style": 4, "beard_hue": 5}),
+                Action::ChangeRace {
+                    skin_hue: 1,
+                    hair_style: 2,
+                    hair_hue: 3,
+                    beard_style: 4,
+                    beard_hue: 5,
+                },
+            ),
+            (
+                json!({"type": "ChangeRaceCancel"}),
+                Action::ChangeRaceCancel,
+            ),
+            (json!({"type": "OpenUOStore"}), Action::OpenUOStore),
+            (
                 json!({"type": "OplRequest", "serial": 8}),
                 Action::OplRequest { serial: 8 },
             ),
@@ -1751,7 +1784,6 @@ mod tests {
 
     #[test]
     fn schema_v30_retains_waypoint_exact_shape() {
-        assert_eq!(SCHEMA_VERSION, 30);
         let obs = Observation {
             waypoints: vec![WaypointView {
                 serial: 0x1234_5678,
@@ -2026,6 +2058,7 @@ mod tests {
 
     #[test]
     fn observation_json_has_expected_keys() {
+        assert_eq!(SCHEMA_VERSION, 31);
         let obs = Observation::default();
         let v = observation_to_json(&obs);
         for k in [
@@ -2044,6 +2077,7 @@ mod tests {
             "popup",
             "legacy_menus",
             "hue_pickers",
+            "race_change",
             "open_urls",
             "tips",
             "text_entry_dialogs",
@@ -2089,11 +2123,27 @@ mod tests {
         assert!(v["prompt"].is_null());
         assert_eq!(v["legacy_menus"], json!([]));
         assert_eq!(v["hue_pickers"], json!([]));
+        assert!(v["race_change"].is_null());
         assert_eq!(v["open_urls"], json!([]));
         assert_eq!(v["tips"], json!([]));
         assert_eq!(v["text_entry_dialogs"], json!([]));
         assert_eq!(v["character_profiles"], json!([]));
         assert!(v["logout_ack"].is_null());
+    }
+
+    #[test]
+    fn schema_v31_race_change_json() {
+        let obs = Observation {
+            race_change: Some(RaceChangePrompt {
+                female: true,
+                race: 3,
+            }),
+            ..Observation::default()
+        };
+        assert_eq!(
+            observation_to_json(&obs)["race_change"],
+            json!({ "female": true, "race": 3 })
+        );
     }
 
     /// Schema v5: `items[].is_multi` — a placed boat/house shows up in

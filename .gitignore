@@ -6,6 +6,7 @@ node_modules/
 dist/
 web/scene.json
 web/scene.json.tmp
+web/pkg/
 
 # stray CDP/debug helper scripts (local only)
 /capchk.js

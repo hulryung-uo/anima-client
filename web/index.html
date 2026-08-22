@@ -273,6 +273,15 @@
         font: 600 14px ui-monospace, Menlo, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
         text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 3px #000;
       }
+      /* Unicode `unifont*.mul` glyphs (1-bit white) painted via CSS mask so the
+         notoriety/speech hue is the element's background (ClassicUO FontsLoader). */
+      .nm-label.uo, .oh-label.uo {
+        font-size: 0; line-height: 0; padding: 0; text-shadow: none;
+        -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+        -webkit-mask-size: 100% 100%; mask-size: 100% 100%;
+        filter: drop-shadow(1px 0 0 #000) drop-shadow(-1px 0 0 #000)
+                drop-shadow(0 1px 0 #000) drop-shadow(0 -1px 0 #000);
+      }
       /* Per-message-type styling (ClassicUO): yells loud, whispers quiet, emotes
          italic, power words distinct. Color comes from the server hue (see msgColor). */
       .oh-label.oh-yell    { font-size: 16px; font-weight: 800; letter-spacing: .02em; }
@@ -1085,6 +1094,14 @@
       .hue-picker-swatch:hover { border-color: #fff; transform: scale(1.35); z-index: 1; }
       .hue-picker-swatch.selected { outline: 2px solid #fff; outline-offset: -2px; z-index: 2; }
       .hue-picker-apply { width: 100%; text-align: center; }
+      .race-change-win { width: 280px; z-index: 45; }
+      .race-change-body { display: flex; flex-direction: column; gap: 8px; }
+      .race-change-body label { display: flex; flex-direction: column; gap: 3px; color: #b6bcc6; font-size: 11px; }
+      .race-change-body input { background: rgba(0,0,0,.4); border: 1px solid #2a3a4a; border-radius: 5px;
+        color: #e6eaf0; padding: 6px 8px; font-size: 13px; }
+      .race-change-meta { color: #f0d58b; font-size: 12px; }
+      .race-change-actions { display: flex; gap: 8px; }
+      .race-change-actions .dlg-btn { flex: 1; text-align: center; }
       /* ---- vendor shop window (buy / sell) ---- */
       #shop-win { top: 70px; left: 300px; width: 340px; }
       .shop-body { max-height: 60vh; overflow-y: auto; padding: 8px; }
@@ -1179,6 +1196,7 @@
           <label>Port <input id="lg-port" value="2594" spellcheck="false" autocomplete="off"></label>
           <label>Account <input id="lg-user" spellcheck="false" autocomplete="username"></label>
           <label>Password <input id="lg-pass" type="password" autocomplete="current-password"></label>
+          <label id="lg-relay-row" style="display:none">Relay <input id="lg-relay" value="ws://127.0.0.1:2595/relay?target=1" spellcheck="false" autocomplete="off"></label>
         </div>
         <div id="lg-account-summary" style="display:none"></div>
         <!-- Existing characters as a clickable list (click = select, double-click
@@ -1556,5 +1574,6 @@
     <script src="js/11-dragdrop.js"></script>
     <script src="js/12-input.js"></script>
     <script src="js/13-macros.js"></script>
+    <script src="js/14-wasm.js"></script>
   </body>
 </html>

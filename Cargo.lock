@@ -46,8 +46,10 @@ name = "anima-agent"
 version = "0.0.0"
 dependencies = [
  "anima-assets",
+ "anima-contract-json",
  "anima-core",
  "anima-net",
+ "serde_json",
 ]
 
 [[package]]
@@ -108,6 +110,7 @@ version = "0.0.0"
 dependencies = [
  "anima-contract-json",
  "anima-core",
+ "serde_json",
  "wasm-bindgen",
 ]
 

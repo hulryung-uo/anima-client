@@ -55,7 +55,11 @@ async function main() {
 
   poll();
   setInterval(poll, 150);
-  connectSoundStream(); // SSE: play sounds the instant they fire (no poll wait)
+  if (!WASM_MODE) connectSoundStream(); // SSE: play sounds the instant they fire (no poll wait)
+  if (WASM_MODE) {
+    wasmPrepareLoginUi();
+    showLogin("login");
+  }
   setInterval(tickBuffTimers, 1000); // count down the buff-bar timers once a second
   // Render-on-demand loop: renderFrame() advances the prediction/glide every
   // animation frame (so motion stays smooth), but app.render() — the expensive GPU
@@ -372,14 +376,16 @@ const WIZ_STEP_TITLES = ["Identity", "Stats", "Skills", "Appearance", "City & Re
 const wizAppearance = {
   skinHue: 0, hairStyle: 0, hairHue: 0, beardStyle: 0, beardHue: 0, shirtHue: 0, pantsHue: 0,
 };
-// Quick presets for the step-3 skill picker: [skillId, value] pairs, ids index
-// SKILL_NAMES. Mirrors anima-net's `starting_skills()` (play_server.rs).
+let wizProfession = 0; // 0xF8 profession byte (Prof.txt Desc); 0 = Advanced
+// Fallback presets if /professions.json is missing. Prof.txt is 30×4 = 120.
 const WIZ_SKILL_PRESETS = {
-  warrior: [[40, 50], [27, 50]], // Swordsmanship + Tactics
-  mage: [[25, 50], [16, 50]],    // Magery + Evaluating Intelligence
-  ranger: [[31, 50], [27, 50]],  // Archery + Tactics
-  crafter: [[7, 50], [45, 50]],  // Blacksmithy + Mining
+  warrior: [[40, 50], [27, 50], [1, 0], [0, 0]],
+  mage: [[25, 50], [16, 50], [1, 0], [0, 0]],
+  ranger: [[31, 50], [27, 50], [1, 0], [0, 0]],
+  crafter: [[7, 50], [45, 50], [1, 0], [0, 0]],
 };
+const WIZ_PRESET_STATS = { warrior: [45, 35, 10], mage: [25, 20, 45], ranger: [35, 40, 15], crafter: [45, 30, 15] };
+const WIZ_PRESET_PROFESSION = { warrior: 1, mage: 2, ranger: 3, crafter: 4 };
 function wizHueRange(start, end) {
   const hues = [];
   for (let hue = start; hue <= end; hue++) hues.push(hue);
@@ -582,17 +588,48 @@ function wireLogin() {
     row.select.addEventListener("change", updateSkillTotal);
     row.value.addEventListener("input", updateSkillTotal);
   }
-  for (const button of document.querySelectorAll(".wiz-preset-btn")) {
-    button.addEventListener("click", () => {
-      const preset = WIZ_SKILL_PRESETS[button.dataset.preset] || [];
-      skillRows.forEach((row, slot) => {
-        const pick = preset[slot];
-        row.select.value = pick ? String(pick[0]) : "";
-        row.value.value = pick ? String(pick[1]) : "0";
-      });
-      updateSkillTotal();
+  function applyProfession(p) {
+    wizProfession = p.profession | 0;
+    if (p.str != null) { statInputs[0].value = p.str; statInputs[1].value = p.dex; statInputs[2].value = p.int; updateStatTotal(); }
+    const skills = p.skills || [];
+    skillRows.forEach((row, slot) => {
+      const pick = skills[slot];
+      row.select.value = pick ? String(pick.id) : "";
+      row.value.value = pick ? String(pick.value) : "0";
+    });
+    updateSkillTotal();
+  }
+  function fallbackProfessions() {
+    return Object.keys(WIZ_SKILL_PRESETS).map((key) => {
+      const stats = WIZ_PRESET_STATS[key] || [60, 20, 10];
+      return {
+        name: key[0].toUpperCase() + key.slice(1),
+        profession: WIZ_PRESET_PROFESSION[key] || 0,
+        skills: (WIZ_SKILL_PRESETS[key] || []).filter((pair) => pair[1]).map(([id, value]) => ({ id, value })),
+        str: stats[0], dex: stats[1], int: stats[2],
+      };
     });
   }
+  async function loadProfessions() {
+    const host = document.querySelector(".wiz-presets");
+    if (!host) return;
+    let list = [];
+    try {
+      const response = await fetch("professions.json");
+      if (response.ok) list = await response.json();
+    } catch { /* offline — hardcoded fallback below */ }
+    if (!Array.isArray(list) || !list.length) list = fallbackProfessions();
+    host.replaceChildren();
+    for (const p of list) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "wiz-preset-btn";
+      button.textContent = p.name;
+      button.addEventListener("click", () => applyProfession(p));
+      host.appendChild(button);
+    }
+  }
+  loadProfessions();
 
   // ---- step 4: hue-swatch appearance pickers ----
   function buildHueSwatchRow(container, hues, getHue, setHue, withDefault = true) {
@@ -860,6 +897,7 @@ function wireLogin() {
     wizAppearance.skinHue = 0; wizAppearance.hairStyle = 0; wizAppearance.hairHue = 0;
     wizAppearance.beardStyle = 0; wizAppearance.beardHue = 0;
     wizAppearance.shirtHue = 0; wizAppearance.pantsHue = 0;
+    wizProfession = 0;
     wizShowStep(1);
   }
   wizBackBtn.addEventListener("click", () => {
@@ -886,6 +924,15 @@ function wireLogin() {
     msg.textContent = "Creating character…";
     go.disabled = true; backButton.disabled = true;
     wizNextBtn.disabled = true; wizBackBtn.disabled = true;
+    if (WASM_MODE) {
+      const err = wasmCreateCharacter(create);
+      if (err) {
+        msg.textContent = "Character creation failed: " + err;
+        go.disabled = false; backButton.disabled = false;
+        wizNextBtn.disabled = false; wizBackBtn.disabled = false;
+      }
+      return;
+    }
     try {
       const response = await fetch("character", {
         method: "POST",
@@ -906,6 +953,7 @@ function wireLogin() {
     const skills = readSkillRows().filter(Boolean).map(s => ({ id: s.id, value: s.value }));
     const create = {
       name, female, strength, dexterity, intelligence,
+      profession: wizProfession,
       city_index: Number(document.getElementById("lg-city").value),
       skills,
       skin_hue: wizAppearance.skinHue,
@@ -934,6 +982,11 @@ function wireLogin() {
     msg.textContent = characterStage ? "Entering world…" : "Connecting…";
     go.disabled = true;
     backButton.disabled = true;
+    if (WASM_MODE) {
+      if (characterStage) wasmPlaySlot(selectedSlot);
+      else wasmSubmitLogin();
+      return;
+    }
     try {
       const endpoint = characterStage ? "character" : "login";
       const body = characterStage
@@ -959,6 +1012,15 @@ function wireLogin() {
     go.disabled = true;
     backButton.disabled = true;
     deleteButton.disabled = true;
+    if (WASM_MODE) {
+      wasmDisconnect();
+      window.updateCharacterLoginStage(false);
+      msg.textContent = "";
+      go.disabled = false;
+      backButton.disabled = true;
+      deleteButton.disabled = true;
+      return;
+    }
     try {
       const response = await fetch("character", {
         method: "POST",
@@ -983,6 +1045,15 @@ function wireLogin() {
     go.disabled = true;
     backButton.disabled = true;
     deleteButton.disabled = true;
+    if (WASM_MODE) {
+      if (!wasmDeleteSlot(slot.index)) {
+        msg.textContent = "Delete request failed";
+        go.disabled = false;
+        backButton.disabled = false;
+        deleteButton.disabled = false;
+      }
+      return;
+    }
     try {
       const response = await fetch("character", {
         method: "POST",

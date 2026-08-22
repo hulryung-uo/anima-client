@@ -18,6 +18,7 @@ pub(super) struct Look<'a> {
     pub(super) map: Option<&'a MapData>,
     pub(super) anim: Option<&'a Anim>,
     pub(super) animdata: Option<&'a AnimData>,
+    pub(super) tileart: Option<&'a anima_assets::TileArt>,
 }
 
 impl Look<'_> {
@@ -83,6 +84,27 @@ impl Look<'_> {
             ),
             None => (base_anim, None, item_hue),
         }
+    }
+
+    /// Paperdoll gump for a worn item (ClassicUO `PaperDollInteractable.GetAnimID`).
+    /// Equipconv first, then `tileart.uop` type-0 appearance (always at
+    /// [`MALE_GUMP_OFFSET`] + appearance id, even on a female wearer).
+    pub(super) fn paperdoll_gump(
+        &self,
+        body: u16,
+        item_graphic: u16,
+        item_hue: u16,
+    ) -> (u16, Option<u16>, u16) {
+        let (a, gump, hue) = self.equip_conv(body, self.item_anim(item_graphic), item_hue);
+        if let Some(app) = self
+            .tileart
+            .and_then(|t| t.get(item_graphic as u32))
+            .and_then(|info| info.appearance_for(body as u32))
+        {
+            let gid = (MALE_GUMP_OFFSET as u32).saturating_add(app) as u16;
+            return (a, Some(gid), hue);
+        }
+        (a, gump, hue)
     }
 
     /// Does an item graphic emit light (torch/lamp/brazier)?
@@ -173,6 +195,16 @@ impl Look<'_> {
     pub(super) fn item_stackable(&self, g: u16) -> bool {
         self.map
             .is_some_and(|m| m.item_flags(g) & FLAG_STACKABLE != 0)
+    }
+
+    /// `tileart.uop` stack-amount alias (ClassicUO `TileArtLoader`), else `g`.
+    /// Corpse `amount` is a body id, not a stack count — callers must not use
+    /// this on graphic 0x2006.
+    pub(super) fn stack_graphic(&self, g: u16, amount: u16) -> u16 {
+        self.tileart
+            .and_then(|t| t.get(g as u32))
+            .map(|info| info.stack_graphic(amount as u32) as u16)
+            .unwrap_or(g)
     }
 
     /// A dyed item's art hue, PartialHue-aware (see [`item_art_hue`]). Every

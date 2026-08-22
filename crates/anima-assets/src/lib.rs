@@ -8,23 +8,30 @@
 pub mod anim;
 pub mod animdata;
 pub mod art;
+pub mod bwt;
 pub mod cliloc;
 pub mod customhouse;
 mod def;
+pub mod fonts;
 pub mod gump;
 pub mod hues;
 mod idxmul;
 pub mod lights;
 pub mod map;
+pub mod mapdif;
 pub mod mounts;
+pub mod multimap;
 pub mod multis;
+pub mod profession;
 pub mod radarcol;
 pub mod skills;
 pub mod sound;
 pub mod speech;
 pub mod texmap;
+pub mod tileart;
 pub mod tiledata;
 pub mod uop;
+pub mod verdata;
 
 pub use anim::{Anim, EquipConv};
 pub use animdata::AnimData;
@@ -34,17 +41,23 @@ pub use customhouse::{
     CustomHouseCatalog, CustomHouseCategory, CustomHouseDoor, CustomHouseFloor, CustomHouseMisc,
     CustomHouseRoof, CustomHouseStair, CustomHouseTeleport, CustomHouseWall, SupportInfo,
 };
+pub use fonts::Fonts;
 pub use gump::Gumps;
 pub use hues::{apply_hue, Hues};
 pub use lights::Lights;
 pub use map::{LandTile, MapData, StaticTile, ZReason, MAP_HEIGHT, MAP_WIDTH};
+pub use mapdif::{MapDiffs, MapPatchCounts};
+pub use multimap::MultiMap;
 pub use multis::{MultiComponent, Multis};
+pub use profession::{Profession, Professions};
 pub use radarcol::RadarCol;
 pub use skills::{SkillInfo, Skills};
 pub use sound::Sounds;
 pub use speech::Speeches;
 pub use texmap::Texmaps;
+pub use tileart::{TileArt, TileArtInfo};
 pub use tiledata::TileData;
+pub use verdata::Verdata;
 
 use anima_core::path::Terrain;
 

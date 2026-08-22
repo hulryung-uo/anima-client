@@ -34,6 +34,7 @@ pub(super) fn emit_tiles(
     art: &mut Option<&mut Art>,
     center: (i64, i64, i32),
     max_z: i32,
+    no_draw_roofs: bool,
     lights: &mut Vec<Value>,
 ) -> TileEmission {
     let (px, py, pz) = center;
@@ -43,8 +44,12 @@ pub(super) fn emit_tiles(
     let mut statics = String::with_capacity(16 * 1024);
     let mut n_statics = 0usize;
     // Ceiling-hidden statics carry their OWN budget so they can never evict a
-    // path-bearing static from `n_statics`. Sized past the densest under-cover
-    // window measured (Blackthorn castle, 2616 hidden in one 49x49 window).
+    // drawn sprite from `n_statics`. CLASSICUO_GAPS once called two Blackthorn
+    // numbers a contradiction; they were different measurements:
+    //   * 4000 exactly — `DRAWN_STATIC_CAP` filling and truncating the visible
+    //     set (the pop this split exists to prevent).
+    //   * 2616 — ceiling-hidden statics in one 49×49 window. This cap (3200)
+    //     sits past that. The Britain-house live check was 352 hidden.
     const HIDDEN_STATIC_CAP: usize = 3200;
     /// The drawn-sprite budget. Named rather than a bare literal because it is
     /// now one of three separate budgets, and only this one bounds pixels.
@@ -54,12 +59,9 @@ pub(super) fn emit_tiles(
     // budgets so a crowded screen can never spend the pathing one.
     let mut n_path = 0usize;
     let mut dbg: Vec<Value> = Vec::new();
-    // `max_z` (computed up front, see the top of this fn) hides the roof /
-    // upper floors when the player is under cover (ClassicUO UpdateMaxDrawZ):
-    // statics at/above it aren't sent, revealing the interior.
-    // Under cover? Then (like ClassicUO `_noDrawRoofs`) hide *every* roof tile
-    // in view, not only those above max_z — so the whole roof lifts off.
-    let under_cover = max_z < 127;
+    // `_noDrawRoofs` is its own bool (ClassicUO UpdateMaxDrawZ), NOT `max_z < 127`.
+    // A cave caps max_z at pz+16 without hiding every roof in view; a player at
+    // z≥111 clamps max_z back to 127 while still needing roofs lifted.
     // Authoritative sz for a WIDER neighbourhood than just the 8 immediate
     // neighbours, resolved by chaining `calculate_new_z` hop-by-hop outward
     // (BFS by Chebyshev shell) from the player's own confirmed Z, instead of
@@ -118,25 +120,36 @@ pub(super) fn emit_tiles(
             }
         }
     }
-    // Multis (boats/houses) within the window + a margin big enough for the
-    // furthest real component (26 tiles, verified against the real
-    // multi.mul — see `anima_assets::multis`'s module doc) so a multi whose
-    // ORIGIN sits just outside the window can still have components drawn
-    // over/walked over just inside it. Resolved once per scene build (not
-    // per tile) as `(x, y, z, multi_id, serial)` — the serial rides along so
-    // the per-tile loop below can look up a decoded custom-house design and
-    // swap it in for `multis.components_at`; `Multis::components_at`'s own
-    // per-multi cache then makes each tile's lookup below O(components on
-    // that ONE tile), not O(components on the whole multi).
-    const MULTI_MARGIN: i64 = 32;
-    let near_multis: Vec<(i64, i64, i32, u32, u32)> = if multis.is_some() {
+    // Multis (boats/houses) whose ClassicUO `MultiDistanceBonus` puts any
+    // component inside the view window. A fixed `MULTI_MARGIN` missed custom-
+    // house design tiles that sit further from the foundation origin than the
+    // stock `multi.mul` shape (`HouseManager.IsHouseInRange` uses
+    // `ClientViewRange + MultiDistanceBonus` per house, not a global 32).
+    // Resolved once per scene build as `(x, y, z, multi_id, serial)` — the
+    // serial rides along so the per-tile loop can look up a decoded custom-
+    // house design and swap it in for `multis.components_at`.
+    let near_multis: Vec<(i64, i64, i32, u32, u32)> = if let Some(ms) = multis {
         world
             .items
             .iter()
-            .filter(|(_, it)| {
-                it.is_multi
-                    && (it.pos.x as i64 - px).abs() <= RADIUS + MULTI_MARGIN
-                    && (it.pos.y as i64 - py).abs() <= RADIUS + MULTI_MARGIN
+            .filter(|(serial, it)| {
+                if !it.is_multi {
+                    return false;
+                }
+                let comps = ms.components(it.graphic as u32).unwrap_or(&[]);
+                let extra: Vec<(i32, i32)> = world
+                    .house_designs
+                    .get(serial)
+                    .filter(|d| d.tiles_ready)
+                    .map(|d| {
+                        d.tiles
+                            .keys()
+                            .map(|&(dx, dy)| (dx as i32, dy as i32))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let bonus = multi_distance_bonus(comps, &extra);
+                multi_origin_in_view(it.pos.x as i64, it.pos.y as i64, px, py, RADIUS, bonus)
             })
             .map(|(serial, it)| {
                 (
@@ -409,7 +422,7 @@ pub(super) fn emit_tiles(
                     // is precisely why its own `Pathfinder.CreateItemList` is
                     // untouched by the ceiling. `hz` is our `AlphaHue = 0`.
                     let is_roof = s.flags & 0x1000_0000 != 0;
-                    let hz = (s.z as i32) >= max_z || (under_cover && is_roof);
+                    let hz = ceil_hz(s.z as i32, max_z, no_draw_roofs, is_roof);
                     // A budget may stop us DRAWING an object; it must never stop us
                     // SHIPPING its pathing bits. Before this, both budgets dropped the
                     // whole record — measured to delete 294 path-bearing statics inside
@@ -494,6 +507,7 @@ pub(super) fn emit_tiles(
                     // animated static would otherwise repaint the whole scene on
                     // every frame interval, forever.
                     let hidden_suffix = if hz { ",\"hz\":1" } else { "" };
+                    let roof_suffix = if is_roof { ",\"rf\":1" } else { "" };
                     let translucent = if dflags & FLAG_TRANSLUCENT != 0 {
                         ",\"tr\":1"
                     } else {
@@ -528,7 +542,7 @@ pub(super) fn emit_tiles(
                     let hue = static_hue_suffix(s.hue, dflags);
                     let _ = write!(
                         statics,
-                        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}{}{}{}{}{}{}}},",
+                        "{{\"x\":{},\"y\":{},\"z\":{},\"g\":{},\"pz\":{}{}{}{}{}{}{}{}{}{}}},",
                         x,
                         y,
                         s.z,
@@ -541,6 +555,7 @@ pub(super) fn emit_tiles(
                         fol_hidden,
                         translucent,
                         hidden_suffix,
+                        roof_suffix,
                         hue
                     );
                     // Ceiling-hidden objects count against their OWN budget and
@@ -611,7 +626,7 @@ pub(super) fn emit_tiles(
                                             map,
                                             animdata,
                                             max_z,
-                                            under_cover,
+                                            no_draw_roofs,
                                             x,
                                             y,
                                             g,
@@ -660,11 +675,18 @@ pub(super) fn emit_tiles(
                             if !c.visible && !paths {
                                 continue;
                             }
+                            // Invisible index-0 is the parent Item's sprite in
+                            // ClassicUO (`Item.LoadMulti` else-if `i == 0` →
+                            // `MultiGraphic`, then `AllowedToDraw = MultiGraphic > 2`).
+                            // We don't draw the parent item, so emit it as a sprite
+                            // rather than an `nd` record.
+                            let never_draw =
+                                multi_component_never_draw(c.visible, c.is_origin, c.graphic);
                             emit_multi_component(
                                 map,
                                 animdata,
                                 max_z,
-                                under_cover,
+                                no_draw_roofs,
                                 x,
                                 y,
                                 c.graphic,
@@ -678,7 +700,7 @@ pub(super) fn emit_tiles(
                                 px,
                                 py,
                                 season,
-                                !c.visible,
+                                never_draw,
                                 paths,
                                 &mut n_path,
                             );

@@ -3131,6 +3131,28 @@ fn general_info_map_change_sets_facet() {
 }
 
 #[test]
+fn general_info_map_patches_stores_counts_in_classicuo_order() {
+    let mut w = World::new();
+    // 0xBF/0x18: count=2 facets, (map=3, statics=7) then (map=1, statics=0).
+    let mut p = PacketWriter::new();
+    p.u8(0xBF)
+        .u16(0)
+        .u16(0x0018)
+        .u32(2)
+        .u32(3)
+        .u32(7)
+        .u32(1)
+        .u32(0);
+    let mut frame = p.into_vec();
+    let len = frame.len() as u16;
+    frame[1] = (len >> 8) as u8;
+    frame[2] = (len & 0xFF) as u8;
+    assert!(apply_packet(&mut w, &frame));
+    assert_eq!(w.map_patch_counts, vec![(3, 7), (1, 0)]);
+    assert_eq!(w.map_patches_gen, 1);
+}
+
+#[test]
 fn map_change_purges_old_facet_but_keeps_player_and_holdings() {
     let mut w = World::new();
     let player = 0x1000_0001;
@@ -3356,6 +3378,70 @@ fn general_info_close_gump_by_type_drops_matching_kind() {
     assert!(apply_packet(&mut w, &frame));
     assert_eq!(w.gumps.len(), 1);
     assert_eq!(w.gumps[0].serial, 3);
+}
+
+#[test]
+fn general_info_display_equipment_info_journals_name_crafter_and_attrs() {
+    // ServUO DisplayEquipmentInfo: name cliloc, crafted-by, unidentified,
+    // one flag attr (charges -1) and one charged attr, then terminator -1.
+    let mut w = World::new();
+    w.item_mut(0x4000_0001).name = "katana".into();
+    let mut p = PacketWriter::new();
+    p.u8(0xBF).u16(0).u16(0x0010).u32(0x4000_0001).u32(1026638);
+    p.u32(0xFFFF_FFFD).u16(3).bytes(b"Bob");
+    p.u32(0xFFFF_FFFC);
+    p.u32(1_061_170).u16((-1i16) as u16); // exceptional (flag)
+    p.u32(1_061_179).u16(50); // uses remaining
+    p.u32(0xFFFF_FFFF);
+    assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+    assert_eq!(w.journal.len(), 4);
+    assert_eq!(w.journal[0].cliloc, 1026638);
+    assert_eq!(w.journal[0].hue, 0x3B2);
+    assert_eq!(w.journal[0].serial, 0x4000_0001);
+    assert_eq!(w.journal[1].text, "Crafted by Bob[Unidentified]");
+    assert_eq!(w.journal[2].cliloc, 1_061_170);
+    assert!(w.journal[2].affix.is_empty());
+    assert_eq!(w.journal[3].cliloc, 1_061_179);
+    assert_eq!(w.journal[3].affix, " : 50");
+}
+
+#[test]
+fn general_info_display_equipment_info_drops_unknown_item() {
+    let mut w = World::new();
+    let mut p = PacketWriter::new();
+    p.u8(0xBF).u16(0).u16(0x0010).u32(0x4000_0099).u32(1026638);
+    p.u32(0xFFFF_FFFF);
+    assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+    assert!(w.journal.is_empty());
+}
+
+#[test]
+fn general_info_heritage_opens_and_close_sentinel_clears() {
+    let mut w = World::new();
+    let mut open = PacketWriter::new();
+    open.u8(0xBF).u16(0).u16(0x002A).u8(1).u8(2); // female elf
+    assert!(apply_packet(&mut w, &patch_len(open.into_vec())));
+    let prompt = w.race_change.expect("dialog open");
+    assert!(prompt.female);
+    assert_eq!(prompt.race, 2);
+
+    let mut close = PacketWriter::new();
+    close.u8(0xBF).u16(0).u16(0x002A).u8(0).u8(0xFF);
+    assert!(apply_packet(&mut w, &patch_len(close.into_vec())));
+    assert!(w.race_change.is_none());
+}
+
+#[test]
+fn general_info_forced_anim_matches_low_16_bits() {
+    let mut w = World::new();
+    w.mobile_mut(0x1000_00AB);
+    let mut p = PacketWriter::new();
+    p.u8(0xBF).u16(0).u16(0x002B).u16(0x00AB).u8(4).u8(3);
+    assert!(apply_packet(&mut w, &patch_len(p.into_vec())));
+    assert_eq!(
+        w.recent_anims.last(),
+        Some(&(1, 0x1000_00AB, 4, 3, true, 0))
+    );
 }
 
 #[test]

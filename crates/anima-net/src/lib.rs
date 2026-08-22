@@ -28,8 +28,9 @@ use anima_core::net::outgoing::{
     build_book_header_change, build_book_page_request, build_book_page_write,
     build_bulletin_post_message, build_bulletin_remove_message, build_bulletin_request_message,
     build_bulletin_request_summary, build_buy, build_cast_spell, build_cast_spell_from_book,
-    build_chat_create_channel, build_chat_join, build_chat_leave, build_chat_message,
-    build_chat_open, build_client_view_range, build_disarm_request, build_double_click, build_drop,
+    build_change_race_cancel, build_change_race_request, build_chat_create_channel,
+    build_chat_join, build_chat_leave, build_chat_message, build_chat_open,
+    build_client_view_range, build_disarm_request, build_double_click, build_drop,
     build_emote_action, build_equip, build_equip_last_weapon, build_guild_menu_request,
     build_gump_response, build_help_request, build_house_design_add_item,
     build_house_design_add_roof, build_house_design_add_stair, build_house_design_backup,
@@ -39,17 +40,17 @@ use anima_core::net::outgoing::{
     build_house_design_sync, build_hue_picker_response, build_invoke_virtue,
     build_legacy_menu_response, build_logout_request, build_map_add_pin, build_map_change_pin,
     build_map_clear_pins, build_map_insert_pin, build_map_remove_pin, build_map_toggle_editable,
-    build_open_door, build_opl_request, build_party_accept, build_party_can_loot,
-    build_party_decline, build_party_invite, build_party_leave, build_party_message,
-    build_party_private_message, build_party_remove, build_pick_up, build_ping,
-    build_popup_request, build_popup_select, build_profile_request, build_profile_update,
-    build_prompt_response, build_quest_arrow_click, build_quest_menu_request, build_rename_request,
-    build_say, build_sell, build_single_click, build_skill_lock, build_stat_lock,
-    build_status_request, build_stun_request, build_target_by_resource, build_target_response,
-    build_targeted_skill, build_targeted_spell, build_text_entry_dialog_response,
-    build_tip_request, build_toggle_flying, build_trade_accept, build_trade_cancel,
-    build_trade_gold, build_unicode_say, build_use_ability, build_use_skill, build_war_mode,
-    BOAT_SPEED_FAST, BOAT_SPEED_SLOW, BOAT_SPEED_STOP, OPL_REQUEST_BATCH,
+    build_open_door, build_open_uo_store, build_opl_request, build_party_accept,
+    build_party_can_loot, build_party_decline, build_party_invite, build_party_leave,
+    build_party_message, build_party_private_message, build_party_remove, build_pick_up,
+    build_ping, build_popup_request, build_popup_select, build_profile_request,
+    build_profile_update, build_prompt_response, build_quest_arrow_click, build_quest_menu_request,
+    build_rename_request, build_say, build_sell, build_single_click, build_skill_lock,
+    build_stat_lock, build_status_request, build_stun_request, build_target_by_resource,
+    build_target_response, build_targeted_skill, build_targeted_spell,
+    build_text_entry_dialog_response, build_tip_request, build_toggle_flying, build_trade_accept,
+    build_trade_cancel, build_trade_gold, build_unicode_say, build_use_ability, build_use_skill,
+    build_war_mode, BOAT_SPEED_FAST, BOAT_SPEED_SLOW, BOAT_SPEED_STOP, OPL_REQUEST_BATCH,
 };
 use anima_core::net::{
     apply_packet, build_client_version, walk_pacing, CharacterChoice, CharacterPrompt,
@@ -959,6 +960,27 @@ impl Session {
                     n += 1;
                 }
             }
+            Action::ChangeRace {
+                skin_hue,
+                hair_style,
+                hair_hue,
+                beard_style,
+                beard_hue,
+            } => {
+                self.send(&build_change_race_request(
+                    *skin_hue,
+                    *hair_style,
+                    *hair_hue,
+                    *beard_style,
+                    *beard_hue,
+                ))?;
+                self.world.race_change = None;
+            }
+            Action::ChangeRaceCancel => {
+                self.send(&build_change_race_cancel())?;
+                self.world.race_change = None;
+            }
+            Action::OpenUOStore => self.send(&build_open_uo_store())?,
             Action::OplRequest { serial } => self.send(&build_opl_request(&[*serial]))?,
             Action::PartyInvite => self.send(&build_party_invite())?,
             Action::PartyAccept { leader } => {

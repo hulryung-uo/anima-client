@@ -7,6 +7,16 @@
 // frame at their interpolated positions with walk/idle animation frames.
 
 const HALF = 22, ZSTEP = 4;
+// `/?wasm=1` (and `/wasm.html` → that URL): protocol in anima-wasm, map from /terrain.json.
+const WASM_MODE = (function () {
+  try {
+    const u = new URL(location.href);
+    if (u.searchParams.get("wasm") === "1") return true;
+    return /(?:^|\/)wasm\.html$/i.test(u.pathname);
+  } catch (e) {
+    return false;
+  }
+})();
 // Resting alpha for a `TileFlag.Translucent` static/item (scene field `tr`).
 // ClassicUO eases such an object's AlphaHue to 178 and the shader consumes it as
 // `AlphaHue / 255f` (GameSceneDrawingSorting.cs:371, StaticView.cs:63,
@@ -263,6 +273,11 @@ const SETTINGS_DEFAULTS = {
   shadowsStatics: true,           // …and on trees/foliage/rocks (ClassicUO's ShadowsStatics)
   treeStumps: false,              // draw trees as stumps and drop their canopy (ClassicUO TreeToStumps)
   hideVegetation: false,          // don't draw vegetation at all (ClassicUO HideVegetation)
+  // ClassicUO DrawRoofs (Profile.cs, default true). Off → every roof graphic
+  // hides even outdoors (`_noDrawRoofs = !DrawRoofs` at UpdateMaxDrawZ start).
+  drawRoofs: true,
+  alwaysRun: false,            // ClassicUO AlwaysRun — keyboard walks run without Shift
+  alwaysRunUnlessHidden: true, // ClassicUO AlwaysRunUnlessHidden — walk while hidden
 };
 let settings = Object.assign({}, SETTINGS_DEFAULTS);
 try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}")); } catch (e) {}
@@ -303,6 +318,8 @@ const OPTIONS = [
   { key: "shadowsStatics", kind: "checkbox", cat: "video", label: "Tree & rock shadows", onChange: () => rebuildStatics() },
   { key: "treeStumps", kind: "checkbox", cat: "video", label: "Trees as stumps", onChange: () => rebuildStatics() },
   { key: "hideVegetation", kind: "checkbox", cat: "video", label: "Hide vegetation", onChange: () => rebuildStatics() },
+  { key: "drawRoofs", kind: "checkbox", cat: "video", label: "Draw roofs",
+    onChange: () => { rebuildStatics(); rebuildItems(); } },
   // The light is baked into each tile's vertices when the sprite is built, so
   // changing it has to throw the tile pool away (not the static pool).
   { key: "terrainShadows", kind: "intRange", cat: "video", label: "Terrain shading", min: 5, max: 25, onChange: () => rebuildTiles() },
@@ -317,6 +334,8 @@ const OPTIONS = [
 
   { key: "abilities", kind: "checkbox", cat: "gameplay", label: "Weapon abilities", onChange: () => refreshAbilities(true) },
   { key: "autoOpenDoors", kind: "checkbox", cat: "gameplay", label: "Auto-open doors" },
+  { key: "alwaysRun", kind: "checkbox", cat: "gameplay", label: "Always run" },
+  { key: "alwaysRunUnlessHidden", kind: "checkbox", cat: "gameplay", label: "Walk while hidden" },
   { key: "gridLoot", kind: "checkbox", cat: "gameplay", label: "Click-to-loot corpses", onChange: () => refreshOpenContainers() },
   { key: "gridContainers", kind: "checkbox", cat: "gameplay", label: "Grid container view", onChange: () => refreshOpenContainers() },
   { key: "containerScale", kind: "intRange", cat: "gameplay", label: "Container scale %", min: 50, max: 200, onChange: () => refreshOpenContainers() },

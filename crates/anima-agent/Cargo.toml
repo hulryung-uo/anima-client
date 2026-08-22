@@ -8,6 +8,10 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 anima-core = { path = "../anima-core" }
 anima-net = { path = "../anima-net" }
+# Observation JSON ↔ Action for `LlmBrain`. The brain still never parses
+# packets; this is the same contract the NDJSON bridge uses.
+anima-contract-json = { path = "../anima-contract-json" }
+serde_json = "1"
 # Only for `MapData` (WalkTo pathfinding terrain) — the brain itself never
 # touches assets, just the runner in `main.rs`.
 anima-assets = { path = "../anima-assets" }

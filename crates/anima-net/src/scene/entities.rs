@@ -113,7 +113,7 @@ pub(super) fn items_json(
     px: i64,
     py: i64,
     max_z: i32,
-    under_cover: bool,
+    no_draw_roofs: bool,
 ) -> Vec<Value> {
     world
         .items
@@ -137,7 +137,8 @@ pub(super) fn items_json(
         })
         .map(|it| {
             let mut v = json!({
-                "x": it.pos.x, "y": it.pos.y, "z": it.pos.z, "g": it.graphic,
+                "x": it.pos.x, "y": it.pos.y, "z": it.pos.z,
+                "g": if it.graphic == 0x2006 { it.graphic } else { look.stack_graphic(it.graphic, it.amount) },
                 "serial": it.serial, "pz": look.item_pz(it.graphic, it.pos.z as i32)
             });
             // Mark foliage so the renderer can fade it (only when true, small payload).
@@ -153,9 +154,17 @@ pub(super) fn items_json(
             if nd_item {
                 v["nd"] = json!(1);
             }
-            let hz_item = (it.pos.z as i32) >= max_z || (under_cover && look.item_roof(it.graphic));
+            let hz_item = ceil_hz(
+                it.pos.z as i32,
+                max_z,
+                no_draw_roofs,
+                look.item_roof(it.graphic),
+            );
             if hz_item {
                 v["hz"] = json!(1);
+            }
+            if look.item_roof(it.graphic) {
+                v["rf"] = json!(1);
             }
             // Translucent (blood, spiderweb, curtain): ClassicUO runs dynamic
             // items through the same alpha chain as statics (`case Item item:`
@@ -283,7 +292,7 @@ pub(super) fn equip_json(
         .values()
         .filter(|it| it.container == Some(player.serial) && it.layer != 0)
         .map(|it| {
-            let (a, gump, hue) = look.equip_conv(equip_body, look.item_anim(it.graphic), it.hue);
+            let (a, gump, hue) = look.paperdoll_gump(equip_body, it.graphic, it.hue);
             // Same PartialHue encoding as the mobile-equip arm above; this one also
             // feeds the paperdoll's icon list and doll gump layers, which ClassicUO
             // hues partially as well (`PaperDollInteractable.cs:269`).
@@ -355,7 +364,8 @@ pub(super) fn container_items_json(world: &World, look: &Look) -> Vec<Value> {
         .map(|it| {
             let mut v = json!({
                 "serial": it.serial, "cont": it.container,
-                "g": it.graphic, "amount": it.amount,
+                "g": if it.graphic == 0x2006 { it.graphic } else { look.stack_graphic(it.graphic, it.amount) },
+                "amount": it.amount,
                 "x": it.pos.x, "y": it.pos.y,
                 // Is this nested item itself a container? Only then should a
                 // double-click open a container window (bandages/potions/etc. must not).

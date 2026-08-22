@@ -227,7 +227,13 @@ pub struct UopReader {
 
 impl UopReader {
     pub fn open(path: &Path) -> std::io::Result<UopReader> {
-        let data = std::fs::read(path)?;
+        Self::from_bytes(std::fs::read(path)?)
+    }
+
+    /// Parse an already-loaded UOP container. The WASM asset path hands the
+    /// browser's File System Access bytes to the same decoder the native
+    /// reader uses, so a browser client does not need `std::fs`.
+    pub fn from_bytes(data: Vec<u8>) -> std::io::Result<UopReader> {
         let mut cursor = std::io::Cursor::new(&data);
         let (entries, order) = parse_uop_table(&mut cursor)?;
         Ok(UopReader {
@@ -265,6 +271,12 @@ impl UopReader {
     /// Decompressed bytes for an entry identified by its path hash.
     pub fn by_hash(&self, hash: u64) -> Option<Vec<u8>> {
         self.decode(self.entries.get(&hash)?)
+    }
+
+    /// Decompressed bytes for an arbitrary virtual path (hashed with
+    /// [`uop_hash`]). Used by [`crate::tileart`] (`build/tileart/{:08}.bin`).
+    pub fn by_path(&self, path: &str) -> Option<Vec<u8>> {
+        self.by_hash(uop_hash(path))
     }
 
     /// Decompressed bytes of every entry, in FILE/TABLE PARSE ORDER — for

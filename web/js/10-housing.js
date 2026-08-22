@@ -1104,6 +1104,58 @@ registerDialog({
   dismiss: "content",
   build: buildHuePickerWindow,
 });
+
+const RACE_CHANGE_NAMES = { 1: "Human", 2: "Elf", 3: "Gargoyle" };
+function raceChangeSignature(p) {
+  return (p.female ? "f" : "m") + ":" + (p.race | 0);
+}
+function buildRaceChangeWindow(p) {
+  const race = p.race | 0;
+  const female = !!p.female;
+  const raceName = RACE_CHANGE_NAMES[race] || ("Race " + race);
+  const hasBeard = !female && race !== 2;
+  const confirm = () => {
+    dismissDialog("raceChange", 1);
+    sendInput("racechange:" + num(".rc-skin") + ":" + num(".rc-hair") + ":" + num(".rc-hairhue")
+      + ":" + (hasBeard ? num(".rc-beard") : 0) + ":" + (hasBeard ? num(".rc-beardhue") : 0));
+  };
+  const cancel = () => {
+    dismissDialog("raceChange", 1);
+    sendInput("racechangecancel");
+  };
+  const { el, body } = makeWindowFrame({
+    cls: "race-change-win", title: "Change race", bodyCls: "race-change-body",
+    onClose: cancel,
+  });
+  body.innerHTML = '<div class="race-change-meta">' + (female ? "Female " : "Male ") + raceName + "</div>"
+    + '<label>Skin hue <input class="rc-skin" type="number" min="0" max="65535" value="33770"></label>'
+    + '<label>Hair style <input class="rc-hair" type="number" min="0" max="65535" value="8251"></label>'
+    + '<label>Hair hue <input class="rc-hairhue" type="number" min="0" max="65535" value="1102"></label>'
+    + (hasBeard
+      ? '<label>Beard style <input class="rc-beard" type="number" min="0" max="65535" value="0"></label>'
+        + '<label>Beard hue <input class="rc-beardhue" type="number" min="0" max="65535" value="0"></label>'
+      : "")
+    + '<div class="race-change-actions">'
+    + '<button type="button" class="dlg-btn rc-ok">Confirm</button>'
+    + '<button type="button" class="dlg-btn rc-cancel">Cancel</button></div>';
+  const num = (sel) => (body.querySelector(sel) ? (body.querySelector(sel).value | 0) : 0);
+  body.querySelector(".rc-ok").addEventListener("click", confirm);
+  body.querySelector(".rc-cancel").addEventListener("click", cancel);
+  el.addEventListener("keydown", (event) => {
+    if (event.code === "Escape") { event.preventDefault(); cancel(); }
+    else if (event.code === "Enter" || event.code === "NumpadEnter") { event.preventDefault(); confirm(); }
+  });
+  return { el };
+}
+
+registerDialog({
+  id: "raceChange",
+  source: (scene) => (scene && scene.raceChange) ? [scene.raceChange] : [],
+  key: () => 1,
+  sig: raceChangeSignature,
+  dismiss: "session",
+  build: buildRaceChangeWindow,
+});
 // ── Right-click context (popup) menu (0xBF/0x14) ───────────────────────────
 // scene.popup = { serial, entries:[{ index, text }] } | null. We show a small
 // menu div at the last cursor position; a row click sends popupsel and hides it;

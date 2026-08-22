@@ -927,3 +927,102 @@ pub(super) fn static_filters_json(tiledata: Option<&TileData>) -> String {
     }
     serde_json::json!({ "cave": cave, "vegetation": vegetation, "trees": trees }).to_string()
 }
+
+/// `/font/ascii/{font}/{ch}.png` or `/font/uni/{font}/{ch}.png`.
+pub(super) fn parse_font_glyph_url(url: &str) -> Option<(bool, usize, u32)> {
+    let rest = url.strip_prefix("/font/")?;
+    let (kind, rest) = rest.split_once('/')?;
+    let uni = match kind {
+        "ascii" => false,
+        "uni" => true,
+        _ => return None,
+    };
+    let (font, rest) = rest.split_once('/')?;
+    let ch = rest.strip_suffix(".png")?;
+    let font = font.parse().ok()?;
+    let ch = if let Some(hex) = ch.strip_prefix("0x").or_else(|| ch.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).ok()?
+    } else {
+        ch.parse().ok()?
+    };
+    Some((uni, font, ch))
+}
+
+pub(super) fn serve_font_glyph(
+    fonts: &Option<Arc<Fonts>>,
+    uni: bool,
+    font: usize,
+    ch: u32,
+    req: tiny_http::Request,
+) {
+    let Some(fonts) = fonts else {
+        let _ = req.respond(Response::from_string("no fonts").with_status_code(404));
+        return;
+    };
+    let img = if uni {
+        fonts.unicode_glyph(font, ch)
+    } else {
+        fonts.ascii_glyph(font, ch as u8).cloned()
+    };
+    match img {
+        Some(img) => respond_png(req, img.to_png()),
+        None => {
+            let _ = req.respond(Response::from_string("no glyph").with_status_code(404));
+        }
+    }
+}
+
+pub(super) fn serve_font_text(fonts: &Option<Arc<Fonts>>, raw_url: &str, req: tiny_http::Request) {
+    let Some(fonts) = fonts else {
+        let _ = req.respond(Response::from_string("no fonts").with_status_code(404));
+        return;
+    };
+    let q = raw_url.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let mut font = 0usize;
+    let mut uni = true;
+    let mut text = String::new();
+    for pair in q.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        match k {
+            "font" => font = v.parse().unwrap_or(0),
+            "uni" => uni = v != "0",
+            "t" => {
+                text = urlencoding_decode(v);
+            }
+            _ => {}
+        }
+    }
+    match fonts.render_text(font, uni, &text) {
+        Some(img) => respond_png(req, img.to_png()),
+        None => {
+            let _ = req.respond(Response::from_string("empty").with_status_code(404));
+        }
+    }
+}
+
+fn urlencoding_decode(s: &str) -> String {
+    let mut out = Vec::new();
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) =
+                u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or(""), 16)
+            {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(if b[i] == b'+' { b' ' } else { b[i] });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `/tileart/stack/{graphic}/{amount}`
+pub(super) fn parse_tileart_stack_url(url: &str) -> Option<(u16, u32)> {
+    let rest = url.strip_prefix("/tileart/stack/")?;
+    let (g, amount) = rest.split_once('/')?;
+    Some((g.parse().ok()?, amount.parse().ok()?))
+}

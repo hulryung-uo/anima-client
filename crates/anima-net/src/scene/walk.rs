@@ -143,9 +143,11 @@ impl<'a> TileScan<'a> {
 /// (`Server/MultiData.cs` `MultiComponentList`, every constructor:
 /// `if (i == 0 || allTiles[i].m_Flags != 0)`).
 ///
-/// This is the WALKABILITY rule only — rendering (the tile loop in
-/// [`build_scene`]) still folds on `visible`, since ClassicUO only ever *draws*
-/// visible components.
+/// This is the WALKABILITY rule only. Rendering (the tile loop in
+/// [`emit_tiles`]) draws visible components as sprites; an invisible index-0
+/// is drawn as the parent Item's sprite when `graphic > 2` (ClassicUO
+/// `Item.MultiGraphic` / `AllowedToDraw`); other invisible-but-authoritative
+/// components are never-drawn pathing records.
 ///
 /// (Both fold through [`TileScan`] rather than rescanning the item table.)
 pub(super) fn multi_components_at_scanned(

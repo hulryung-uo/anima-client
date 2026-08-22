@@ -737,6 +737,14 @@ The receive side is generally complete; there is no way to *act*.
 | ~~Party: loot flag, private message, leader kick~~ — **CLOSED, live-verified** | `build_party_can_loot` (0xBF/0x06/0x06), `build_party_private_message` (0x06/0x03) and `build_party_remove` (0x06/0x02) + `Action::PartySetCanLoot`/`PartyPrivateMessage`/`PartyKick` + `partyloot:<0\|1>`/`partytell:<member>:<text>`/`partykick:<member>`. **Kick and leave are one packet**, distinguished only by whose serial it names; ServUO's `PartyCommands.OnRemove` gates it on `p.Leader == from \|\| from == target` and ignores a non-leader silently — verified both ways live (a member's kick of the leader changed nothing; the leader's kick of the member disbanded the party on both clients). Loot flag answers cliloc 1005447/1005448 and is **never sent back**, so a UI must remember what it asked for. Private messages are clamped to 128 chars because ServUO *drops* longer ones rather than truncating | S |
 | ~~Request another entity's status (0x34 non-self) → party mana/stam bars~~ — **CLOSED, live-verified — and the row's premise was wrong twice** | `Action::StatusRequest { serial }` (0 = self) → 0x34 type 4; `party[].mana/manaMax/stam/stamMax` now leave `build_scene`. Two corrections worth keeping: **(a) it is a resync, not the only source.** ServUO pushes a member's mana/stam changes unprompted (`Party.OnManaChanged`/`OnStamChanged` → 0xA2/0xA3) — but only while they are in update range and visible, so a member you lost sight of freezes at the last value with nothing scheduled to fix it. That is the real gap this fills. **(b) The values are percentages, not points.** Every party-facing vitals packet goes through `AttributeNormalizer` (max written as a fixed 25, current as `cur * 25 / max`). Measured live: a member at a real 7/10 mana reached the leader as 17/25. Never compare another member's mana against a spell cost — our own vitals are un-normalized, theirs are not | S |
 | ~~Open door / last weapon / virtue / animate / cast-from-book / all-names~~ — **CLOSED** | ClassicUO `GameActions` verbs that had no Action. `OpenDoor` (0x12/0x58) opens the door on the facing tile — auto-walk and keyboard bump now send this instead of double-clicking a serial, matching `PlayerMobile.TryOpenDoors`. `EquipLastWeapon` (0xD7/0x1E), `InvokeVirtue` (0x12/0xF4, 1-based Honor…Spirituality), `EmoteAction` (0x12/0xC7 bow/salute; command `animate:` so it does not collide with speech `emote:`), `CastSpellFromBook` (0x12/0x27; the spellbook UI uses it when the book's serial is known), `AllNames` (single-click every other mobile and every corpse, cap 60). Contract schema v29 → v30. Macros gained the same verbs; Options gained ContainerScale (50–200%) and authentic corpse gumps blink the 0x45/0x46 eye. Container minimize/iconize is closed on the container-windows row below | S |
+| ~~**Pre-OPL equipment info** (0xBF/0x10)~~ — **CLOSED** | ServUO still sends `DisplayEquipmentInfo` on equipment `OnSingleClick` (crafted-by, unidentified, charges, exceptional). ClassicUO paints it as overhead text (`0x3B2`) then requests MegaCliloc. anima-core journals the name cliloc plus crafter/unidentified ASCII and per-attr clilocs (charges as affix), so the play-server resolver and `ingestSpeech` float the same lines. Unknown serials are dropped, matching ClassicUO `Items.Get == null` | S |
+| ~~**Heritage / race-change** (0xBF/0x2A)~~ — **CLOSED** | Incoming `HeritagePacket` (`female`, `race` 1/2/3) fills `World::race_change` / `Observation::race_change` / `scene.raceChange`; race 0 or > 3 (ServUO close sentinel `0xFF`) clears it. Confirm is `Action::ChangeRace` (five `u16`s, ClassicUO `Send_ChangeRaceRequest`, ServUO size-15 `HeritageTransform`); cancel is the 5-byte subcommand-only packet (cliloc 1073645). Play commands `racechange:` / `racechangecancel`; the renderer opens a small confirm dialog. Schema v30 → v31 | S |
+| ~~**Forced mobile animation** (0xBF/0x2B)~~ — **CLOSED** | ClassicUO matches `(mobile.serial & 0xFFFF)` and `SetAnimation`/`AnimIndex` with `ExecuteAnimation = false`. We resolve the same low-16 serial and queue a 0x6E-style `recent_anims` event so the renderer plays the group; freeze-on-frame is approximated by playing once | S |
+| ~~**Open UO Store** (0xFA)~~ — **CLOSED** | ClassicUO `Send_OpenUOStore` is a 1-byte packet. `Action::OpenUOStore` + `uostore`. ServUO registers it in `UltimaStore.UOStoreRequest` | S |
+
+Closed 2026-08-23 (AlwaysRun): ClassicUO `AlwaysRun` / `AlwaysRunUnlessHidden` are now Options (default off / on). Keyboard walk runs without Shift when Always run is set, unless the player is hidden and Walk while hidden is on. Mouse-steer still uses distance-to-run.
+
+Remaining ClassicUO Options / visual QoL (not protocol holes): AutoOpenCorpses, SmoothDoors, NameOverHeadHandler Ctrl+Shift filters, aura under feet, drag-select health bars, anchored gump groups, MacroButtonGump on the hotbar. Circle of Transparency is a deliberate occupancy-fade instead (`06-movement.js`). Screenshot / Credits / LocationGo are client chrome.
 
 ---
 
@@ -1286,20 +1294,14 @@ previous row's alpha refactor was built for. It turned out to be a row about
   `visible`, written *unconditionally*: a ceiling-hidden sprite is created at
   alpha 0 and stays there, so folding that write into the "alpha changed" branch
   would have meant it never ran and hundreds of alpha-0 sprites stayed in the batch.
-- **Deliberately NOT done, each recorded rather than silently skipped.** The
-  tall-wall `(z-maxZ)<height` exception is part of the dead-against-`150` code —
-  porting it would ADD a divergence. `_noDrawRoofs` stays inferred from
-  `max_z < 127` rather than carried as its own bool (a real fidelity gap: we lift a
-  town's roofs from inside a cave, and fail to lift them above z=111) because
-  changing *which* objects are hidden is a separate, separately-verifiable change —
-  the `hz`/`path_withheld` split exists precisely so it can land safely later. Land
-  still pops (its sprite is destroyed outright). `HasSurfaceOverhead` and the
-  `_maxGroundZ` gate are unported. And the **pathing half is deferred as its own
-  new row**: ceiling-hidden objects still ship without `h`/`pf`, so the browser's
-  predicted Z stays blind to indoor staircases. **The bound stated here was wrong
-  and was retired the same day — see the next entry.** It read "always
-  one-directional (browser more permissive, never a shifted Z) and never on a tile
-  the server marks walkable"; all three clauses are false.
+- **Deliberately NOT done at the time, each recorded rather than silently skipped.
+  Later closed where noted.** The tall-wall `(z-maxZ)<height` exception is part of
+  the dead-against-`150` code — porting it would ADD a divergence (**won't-port**).
+  `_noDrawRoofs` is now a real bool on `DrawCeiling` / `map.noDrawRoofs` (no longer
+  inferred from `max_z < 127`). `HasSurfaceOverhead` ships as `"so":1`. `_maxGroundZ`
+  is a picking gate (`map.maxGroundZ`). Land still pops (its sprite is destroyed
+  outright) — **won't-port**. The **pathing half** closed the same day — see the
+  next entry.
 
 Verified live against the running ServUO at a Britain house (1618,1556,30 → walk
 south). The discriminating measurement is the transition, since a fade and a pop
@@ -1427,13 +1429,33 @@ behavioural impact are the multi origin (18 Z) and the ladder rung, not the
 nodraw statics. This row restores the data; it does not claim a visible fix at
 that site.
 
-After it, "no draw predicate deletes a pathing byte" is true of the emitters. What
-remains is bounded and none of it is a draw decision: `PATH_ONLY_CAP` and
-`PATH_RADIUS` (transport budgets), and `near_multis`' distance filter. Left open
-as their own rows: `HIDDEN_STATIC_CAP`'s value (the file contradicts itself on the
-measurement); ClassicUO drawing the invisible index-0 component as the parent
-Item's sprite (cosmetic, and it would move the drawn set this row's golden pins);
-and `near_multis` bounds for custom-house designs.
+After it, "no draw predicate deletes a pathing byte" is true of the emitters.
+`PATH_ONLY_CAP` and `PATH_RADIUS` are transport budgets this architecture needs
+because `scene.statics` is a windowed poll, not ClassicUO's full object chain —
+they are not draw predicates and are **won't-port** (ClassicUO has no emit cap).
+
+Closed 2026-08-22 (the three leftovers of the draw-predicate row):
+
+- ~~`HIDDEN_STATIC_CAP`'s value~~ — **CLOSED.** The two Blackthorn numbers were
+  different measurements, not a contradiction: **4000 exactly** is
+  `DRAWN_STATIC_CAP` filling (the pop the split prevents); **2616** is
+  ceiling-hidden statics in one 49×49 window, which `HIDDEN_STATIC_CAP = 3200`
+  sits past. The Britain-house live check was 352 hidden. Comment at
+  `terrain.rs` pins both.
+- ~~Invisible index-0 drawn as the parent Item's sprite~~ — **CLOSED.**
+  ClassicUO `Item.LoadMulti` (`:256-284`): a visible component is a `Multi`; an
+  invisible index-0 is not, and the parent Item draws it via
+  `DisplayedGraphic = MultiGraphic` iff `MultiGraphic > 2`
+  (`CheckGraphicChange` `:358`). We skip drawing the parent (`items_json`
+  filters `is_multi`), so `multi_component_never_draw` emits that origin
+  graphic as a sprite rather than an `nd` record. Tests:
+  `invisible_origin_is_drawn_when_graphic_exceeds_two`.
+- ~~`near_multis` bounds for custom-house designs~~ — **CLOSED.** Per-house
+  `MultiDistanceBonus` (`Item.cs:305-308`) plus 0xD8 design-tile extents;
+  include when Chebyshev(origin, player) ≤ `RADIUS + bonus`
+  (`HouseManager.IsHouseInRange` `:75-77`). Replaces the global `MULTI_MARGIN
+  = 32`. Tests: `multi_distance_bonus_matches_classicuo_and_grows_for_design_tiles`,
+  `multi_origin_in_view_uses_view_plus_bonus`.
 
 ---
 
@@ -1488,17 +1510,49 @@ This is the one that cuts against the project's own thesis.
 
 ## Tier 5 — assets (`crates/anima-assets`)
 
-Beyond T0.1 and T0.7 above: `verdata.mul` patching; `mapdif`/`stadif` map-diff files
-and 0xBF/0x18; ~~`speech.mul` keyword encoding~~ (**CLOSED** — see above);
-`Multimap.rle`/`facet0N.mul` (the world map already rasters from map+radarcol;
-this is the classic client’s own facet bitmap, unused while that path works);
-`fonts.mul` + `unifont*.mul`; ~~`art.def`/`TexTerr.def` alias tables~~ (**CLOSED**);
-~~`gump.def` alias table~~ (**CLOSED**); ~~`skills.mul`~~ (**CLOSED**);
-`Prof.txt`/`Professn.enu` professions (0xF8's profession byte is hardcoded 0);
-`tileart.uop`; ~~`Anim1.def`/`Anim2.def` + `% AnimationCount`~~ (**CLOSED**);
-~~`light.mul`~~ (**CLOSED**, Tier 3); cliloc language selection and BWT-compressed
-clilocs; `Client.Version`-driven format selection; ~~MUL fallback when a UOP is
-absent~~ (**CLOSED**); ~~`hues.mul` ramp-index (red channel)~~ (**CLOSED**).
+Beyond T0.1 and T0.7 above. Closed 2026-08-22:
+
+- ~~`verdata.mul` patching~~ — **CLOSED.** `Verdata::open` + `TileData::apply_verdata`
+  (file id 30: land groups 836/964 bytes, static 1188/1316, `block_id - 0x200` for
+  statics). Missing file → empty table, matching ClassicUO's skip.
+  `TileDataLoader` / `VerdataLoader`.
+- ~~`mapdif`/`stadif` and 0xBF/0x18~~ — **CLOSED.** `MapDiffs` per facet;
+  `MapData::apply_patches(land, sta)` applies the first N `mapdifl`/`stadifl`
+  entries (ClassicUO `MapLoader.ApplyPatches`). GeneralInfo 0x18 stores
+  `(mapPatches, staticPatches)` per facet in ClassicUO order (cap 6). The play
+  loop reapplies on `map_patches_gen`. Test:
+  `general_info_map_patches_stores_counts_in_classicuo_order`.
+- ~~`speech.mul` keyword encoding~~ (**CLOSED** — see above);
+- ~~`Multimap.rle`/`facet0N.mul`~~ — **CLOSED.** `MultiMap` RLE → greyscale `Image`;
+  `GET /multimap.png`. The isometric world map still rasters from map+radarcol
+  (`/worldmap.png`); this is the classic client's own facet bitmap
+  (`MultiMapLoader`).
+- ~~`fonts.mul` + `unifont*.mul`~~ — **CLOSED.** `Fonts` decoder (`FontsLoader`);
+  `GET /font/text.png?font=&uni=&t=` and `/font/ascii|uni/{font}/{ch}.png`. Overhead
+  names use the unicode font via CSS mask (ClassicUO's 1-bit glyphs, hued by
+  notoriety/speech).
+- ~~`art.def`/`TexTerr.def` alias tables~~ (**CLOSED**);
+- ~~`gump.def` alias table~~ (**CLOSED**);
+- ~~`skills.mul`~~ (**CLOSED**);
+- ~~`Prof.txt`/`Professn.enu` professions~~ — **CLOSED.** `ProfessionLoader` parse;
+  0xF8 profession byte from `Desc` (Warrior=1 … Ninja=7, Advanced leftover = 0).
+  Wizard fetches `/professions.json` (skills 30×4 = 120, stats sum 90).
+- ~~`tileart.uop`~~ — **CLOSED.** Stack-amount aliases rewrite scene `g`;
+  `TryGetAppearance` (type 0, only when more than one appearance type) feeds
+  paperdoll gump ids as `MALE_GUMP_OFFSET + appearanceId`
+  (`PaperDollInteractable.GetAnimID` `:427-436`, `TileArt.TryGetAppearance`).
+- ~~`Anim1.def`/`Anim2.def` + `% AnimationCount`~~ (**CLOSED**);
+- ~~`light.mul`~~ (**CLOSED**, Tier 3);
+- ~~cliloc language selection and BWT-compressed clilocs~~ — **CLOSED.**
+  `Cliloc::open_lang` loads ENU then overlays `ANIMA_LANG` (default `enu`).
+  Fourth byte `0x8E` → BWT (`ClilocLoader.cs:77`).
+- ~~`Client.Version`-driven format selection~~ — **CLOSED** as file-length
+  detection: ClassicUO `TileDataLoader.cs:35` uses `Version < CV_7090`; we have
+  no client-version string in `anima-assets`, and a HS `tiledata.mul` is always
+  ≥ 493_568 bytes (the HS land section), which is the same fork. Multis already
+  pick 12- vs 16-byte stride the same way.
+- ~~MUL fallback when a UOP is absent~~ (**CLOSED**);
+- ~~`hues.mul` ramp-index (red channel)~~ (**CLOSED**).
 
 ---
 

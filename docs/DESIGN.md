@@ -6,7 +6,7 @@
 > architecture, the current state, the roadmap, and the concrete protocol/asset
 > knowledge needed to implement Phase 1.
 
-Last updated: 2026-08-17 · Status: **Phases 1–3 COMPLETE, including the Phase 3
+Last updated: 2026-08-22 · Status: **Phases 1–3 COMPLETE, including the Phase 3
 "human-playable polish" tail** (iso sprite blitting, walk/attack/typed animations
 incl. UOP + monster body remap, gumps, audio, secure trading, AI contract). 8 crates
 (anima-core / anima-assets / anima-contract-json / anima-net / anima-wasm /
@@ -80,9 +80,9 @@ treasure maps, and **custom housing** (0xD8 viewing: plane parse/zlib → deferr
 mode-0/1/2 decode against multi.mul bounds → design tiles replace the foundation's
 components in both scene emission and the walkability fold; auto 0xBF/0x1E refresh
 on 0xBF/0x1D revision notices; live-verified against ServUO placement → DesignInsert
-→ delete). What actually remains (see §6 Phase 3 for detail): richer/RL/LLM brains and
-browser-side asset delivery for a genuine WASM client (`anima-relay` exists; the
-page still renders from the play server's `scene.json`).
+→ delete). Richer brains (`HunterBrain` / `LlmBrain`) and the browser WASM isometric
+page (`/?wasm=1` + `anima-relay` + `anima-net --bin assets` `/terrain.json`) are
+done too — see §6.
 delete-character (0x83) is done too: `build_delete_character` (30 zeroed bytes —
 NOT the password, ClassicUO parity) + a `LoginConfig::delete_existing` flow that
 deletes-once then re-runs select/create against the refreshed 0x86 list, with 0x85
@@ -394,7 +394,10 @@ The driver is the only code that knows about sockets — write it once for nativ
    bandage siblings `TargetedSpell`/`TargetedSkill`/`TargetByResource`
    (0xBF/0x2D, 0x2E, 0x30). Schema v30 added ClassicUO `GameActions` verbs that
    had no Action: `OpenDoor` (0x12/0x58), `EquipLastWeapon` (0xD7/0x1E),
-   `InvokeVirtue`, `EmoteAction`, `CastSpellFromBook`, `AllNames`.
+   `InvokeVirtue`, `EmoteAction`, `CastSpellFromBook`, `AllNames`. Schema v31
+   added the heritage / race-change dialog (`race_change` + `ChangeRace` /
+   `ChangeRaceCancel`, 0xBF/0x2A) and `OpenUOStore` (0xFA). Pre-OPL equipment
+   info (0xBF/0x10) rides the existing journal.
    **`Observation.terrain`** (schema v17) is the one field that does not come from
    a packet: local walkability (walkable / standing Z / the serial of a closed door
    in the way), so a brain can tell a wall from open ground rather than delegating
@@ -417,19 +420,22 @@ server-initiated bank/container windows and filtering vendor/spellbook overloads
 - ✅ PixiJS renderer (`web/`) draws a live minimap (walkability/Z) + mobiles/items +
   HUD from `Observation`, fed by `anima-net`'s `scene` bridge. Screenshot-verified.
 
-**Remaining tail:** the relay now exists (`crates/anima-relay`, verified
-carrying a real login handshake to ServUO), and the Tauri shell is done. What
-is left for a genuine browser client is the *page*: today `web/` renders from
-`scene.json`, which the play server builds **with the UO asset files** — art,
-animation, gump art, hues, cliloc. A browser running `anima-wasm` would own
-the protocol but still not own those, and browsers cannot read a local UO
-install except through the Chromium-only File System Access API (§4). So the
-honest shape of the remaining work is asset delivery, not transport.
+**Remaining tail:** none of the planned work. The relay exists (`crates/anima-relay`,
+verified carrying a real login handshake to ServUO), the Tauri shell is done, and
+the browser page is `/?wasm=1` ( `/wasm.html` redirects there): `WasmClient` owns
+the protocol (character list, walk/say/use/attack, `apply_action_json`),
+`anima-relay` is the WebSocket↔TCP pump, and `cargo run -p anima-net --bin assets`
+serves `/art`, `/gump`, `/font`, and `GET /terrain.json` (the same land/statics
+window `build_scene` emits) from the local UO install without a game session.
+`web/js/14-wasm.js` merges `observation_json()` with that terrain into the existing
+Pixi `poll()`/`syncWorld` path. Build the module with
+`wasm-pack build crates/anima-wasm --target web --out-dir web/pkg`. Keyboard walk
+reaches the shard; `Action::WalkTo` is still a no-op in WASM (no in-process `MapData`).
 
 ### Phase 3 — AI brains + real art + human-playable polish. ✅ COMPLETE (incl. the tail).
-- ✅ `anima-agent`: `Brain` trait (`decide(&Observation)->Vec<Action>`) + `WanderBrain`
-  (explore/greet/flee/grab) — runs live: `cargo run -p anima-agent -- 127.0.0.1 2594
-  <u> <p> [ticks]`. The full perception→decision→action loop on the real server.
+- ✅ `anima-agent`: `Brain` trait (`decide(&Observation)->Vec<Action>`) +
+  `WanderBrain` / `HunterBrain` / `LlmBrain` — `--brain wander|hunter|llm`.
+  The full perception→decision→action loop on the real server.
 - ✅ `anima-assets::art`: decodes `artLegacyMUL.uop` (land diamond + static RLE,
   ARGB1555→RGBA); the `play`/`scene` servers PNG-encode and cache it per graphic.
   (Note: art UOP paths use a `.tga` extension, unlike the map's `.dat`.)
@@ -460,14 +466,15 @@ honest shape of the remaining work is asset delivery, not transport.
   Python brain; `Session::advance_route` gives any driver a non-blocking
   `Action::WalkTo`.
 
-**Remaining tail:** richer brains (RL/LLM over the contract); browser *page*
-wiring for `anima-wasm` + the existing `anima-relay` (the relay itself is done —
-what is left is asset delivery into the browser, §4). ClassicUO Tier 3 is closed
-(including seated-character deformation). Remaining asset rows are the large
-optional formats (`verdata`, `mapdif`, `fonts.mul`, `tileart.uop`, BWT cliloc)
-— see CLASSICUO_GAPS.md Tier 5. (Previously listed here and since completed:
-delete-character, `multi.mul`, sitting, treasure maps, Tauri, custom housing,
-the relay, `speech.mul` keywords, skills.mul / *.def aliases / MUL fallback.)
+**Remaining tail:** none of the planned work. Richer brains (`HunterBrain`,
+`LlmBrain` over `ANIMA_LLM_URL`), the browser WASM isometric page (`/?wasm=1` +
+`anima-relay` + `anima-net --bin assets` `/terrain.json`), and ClassicUO Tier 5
+asset rows
+(`verdata`, `mapdif`/0xBF/0x18, `fonts.mul`, `tileart.uop`, BWT cliloc, Prof.txt,
+Multimap.rle) are implemented — see CLASSICUO_GAPS.md. (Previously listed here
+and since completed: delete-character, `multi.mul`, sitting, treasure maps, Tauri,
+custom housing, the relay, `speech.mul` keywords, skills.mul / *.def aliases /
+MUL fallback.)
 
 ---
 

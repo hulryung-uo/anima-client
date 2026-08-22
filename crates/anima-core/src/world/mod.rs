@@ -562,6 +562,16 @@ pub struct HuePicker {
     pub graphic: u16,
 }
 
+/// Pending heritage / race-change appearance dialog (0xBF/0x2A HeritagePacket).
+/// `race` is 1 human / 2 elf / 3 gargoyle; `female` is the body the server
+/// asked the player to pick hair/skin for. Closed by a later packet with
+/// race 0 or > 3 (ServUO's close sentinel is `0xFF`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RaceChangePrompt {
+    pub female: bool,
+    pub race: u8,
+}
+
 /// A book opened by the player (from 0x93 OpenBook / 0xD4 OpenBookNew). The header
 /// packet sets `serial`/`title`/`author`/`writable`/`page_count` and sizes `pages`
 /// to `page_count` empty pages; the page content arrives separately in 0x66
@@ -1226,6 +1236,9 @@ pub struct World {
     pub legacy_menus: Vec<LegacyMenu>,
     /// Open server hue pickers (0x95), keyed by serial. See [`HuePicker`].
     pub hue_pickers: Vec<HuePicker>,
+    /// Pending heritage / race-change dialog (0xBF/0x2A), if the server has
+    /// opened one. See [`RaceChangePrompt`].
+    pub race_change: Option<RaceChangePrompt>,
     /// The currently open book (0x93/0xD4 header + 0x66 page content), or `None`.
     /// See [`Book`].
     pub book: Option<Book>,
@@ -1451,6 +1464,13 @@ pub struct World {
     /// via [`World::on_map_change`] (never assign directly — that's what purges the
     /// old facet's entities).
     pub map_index: u8,
+    /// Map-diff patch counts from GeneralInfo `0xBF/0x18`, `(land, statics)` per
+    /// facet index. Empty until the shard enables diffs. The play server applies
+    /// the matching counts to `MapData` (ClassicUO `MapLoader.ApplyPatches`).
+    pub map_patch_counts: Vec<(u32, u32)>,
+    /// Bumped on every 0xBF/0x18 so a driver can re-apply without comparing
+    /// the count vector.
+    pub map_patches_gen: u64,
     /// Active player-to-player secure trade sessions (0x6F) — normally 0 or 1,
     /// but see [`TradeState`]'s doc for why concurrent sessions with
     /// different opponents are possible. Use [`World::open_trade`]/

@@ -1166,6 +1166,7 @@ function drawMobs() {
     // enclosed under NoShoot/Window tiles is not drawn (and not clickable)
     // while we are outside looking at the building. The player is never flagged.
     if (!isSelf && ent && ent.so) continue;
+    const pick = isSelf || !(ent && aboveGroundZ(ent.z ?? st.z));
     const mountAnim = (ent && (ent.mountAnim | 0)) || 0;
     // ClassicUO `MobileView`: after the mount is drawn, `drawY += OffsetY` so
     // the rider (body + equipment) sits on the animal. The mount itself stays
@@ -1319,7 +1320,7 @@ function drawMobs() {
       part("mount", `anim/${mountAnim}/${mg}/${d}/${mFrame}.png`, -1, false, mountAnim, mg, mFrame);
     }
     // BODY (hued by skin).
-    part("body", bodyAnim ? `anim/${bodyAnim}/${group}/${d}/${frame}.png${skinHue ? `?hue=${skinHue}` : ""}` : null, 0, true, bodyAnim, group, frame);
+    part("body", bodyAnim ? `anim/${bodyAnim}/${group}/${d}/${frame}.png${skinHue ? `?hue=${skinHue}` : ""}` : null, 0, pick, bodyAnim, group, frame);
     // SHADOW, behind everything. ClassicUO draws exactly one per mobile — an
     // extra pass over the BODY frame only (`MobileView.Draw`'s `hasShadow`
     // branch, `entity = null`), never per worn layer, so overlapping clothes
@@ -1400,36 +1401,33 @@ function drawMobs() {
           if (!sp) {
             sp = new PIXI.Sprite(e.tex);
             sp.anchor.set(0.5, 1.0);
-            // Only the body is the click target; mount/clothing/hair never eat clicks.
-            // Clicking YOURSELF is a real interaction too (single-click = your name in
-            // your notoriety colour, double-click = your paperdoll), so the "self" body
-            // is a click target like any other mobile — its serial comes from scene.player.
-            if (clickSerial != null) {
-              sp.eventMode = "static";
-              sp.cursor = "pointer";
-              // Per-pixel hit-testing (see pixelHitArea above): a big transparent
-              // mount/robe frame must not steal clicks from whatever's actually
-              // drawn behind it. Unlike world items this sprite is persistent and
-              // its texture swaps every animation frame, so the URL is looked up
-              // live from st.partTex (kept current by part() above) rather than
-              // captured once here. Each depth strip tests its own band of the mask.
-              const partKey = e.key;
-              sp.hitArea = pixelHitArea(sp, () => { const p = st.partTex.get(partKey); return p ? p.url : null; });
-              sp.on("pointerdown", (ev) => onEntityPointerDown(clickSerial, ev));
-              // OPL tooltip on hover (same flow as world items) + target highlight.
-              sp.on("pointerover", () => {
-                hoverEntity(clickSerial);
-                for (const s of mobPartSprites(id, "body")) targetHighlightOn(s);
-              });
-              sp.on("pointerout", () => {
-                hoverOut(clickSerial);
-                for (const s of mobPartSprites(id, "body")) targetHighlightOff(s);
-              });
-            } else {
-              sp.eventMode = "none";
-            }
             world.addChild(sp);
             mobSprites.set(key, sp);
+          }
+          // ClassicUO `_maxGroundZ` is a picking gate, not a draw gate: the
+          // mobile stays on screen, it just stops eating clicks (a cave's
+          // surface-above-you NPCs). Bind once; flip eventMode as the bound
+          // moves.
+          if (clickSerial != null && !sp._pickBound) {
+            sp._pickBound = true;
+            const partKey = e.key;
+            sp.hitArea = pixelHitArea(sp, () => { const p = st.partTex.get(partKey); return p ? p.url : null; });
+            sp.on("pointerdown", (ev) => onEntityPointerDown(clickSerial, ev));
+            sp.on("pointerover", () => {
+              hoverEntity(clickSerial);
+              for (const s of mobPartSprites(id, "body")) targetHighlightOn(s);
+            });
+            sp.on("pointerout", () => {
+              hoverOut(clickSerial);
+              for (const s of mobPartSprites(id, "body")) targetHighlightOff(s);
+            });
+          }
+          if (clickSerial != null) {
+            sp.eventMode = "static";
+            sp.cursor = "pointer";
+          } else {
+            sp.eventMode = "none";
+            sp.cursor = "default";
           }
           applySliceTexture(sp, e.tex, sl.sy, sl.sh);
           // Position by the frame's draw-center (ClassicUO: top-left at screenX - cx,

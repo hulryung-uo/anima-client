@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::mapdif::MapDiffs;
 use crate::tiledata::{flags, TileData};
 use crate::uop::UopReader;
 
@@ -185,6 +186,13 @@ pub struct MapData {
     width: u32,
     height: u32,
     blocks_y: u32,
+    /// Optional `mapdif`/`stadif` tables for this facet. Applied when the
+    /// shard sends 0xBF/0x18 (ClassicUO `MapLoader.ApplyPatches`).
+    diffs: MapDiffs,
+    /// `block_num → index into diffs.map_list` for currently applied land patches.
+    patch_land: HashMap<u32, usize>,
+    /// `block_num → index into diffs.sta_list` for currently applied static patches.
+    patch_sta: HashMap<u32, usize>,
 }
 
 /// One 7-byte `statics.mul` record: graphic, in-block x/y, z, hue.
@@ -258,6 +266,9 @@ impl MapData {
             width,
             height,
             blocks_y: height / BLOCK_SIZE,
+            diffs: MapDiffs::load(&dir, facet),
+            patch_land: HashMap::new(),
+            patch_sta: HashMap::new(),
         })
     }
 
@@ -267,28 +278,100 @@ impl MapData {
         self.facet
     }
 
+    /// Apply the first `land_count` / `sta_count` entries of this facet's
+    /// `mapdifl`/`stadifl` lists (ClassicUO `MapLoader.ApplyPatches`). Counts of
+    /// 0 restore the base map. Always clears the block caches so the next
+    /// `land`/`statics` read sees the new tables.
+    pub fn apply_patches(&mut self, land_count: u32, sta_count: u32) {
+        self.patch_land.clear();
+        self.patch_sta.clear();
+        let n = (land_count as usize).min(self.diffs.map_list.len());
+        for i in 0..n {
+            self.patch_land.insert(self.diffs.map_list[i], i);
+        }
+        let n = (sta_count as usize).min(self.diffs.sta_list.len());
+        for i in 0..n {
+            self.patch_sta.insert(self.diffs.sta_list[i], i);
+        }
+        self.land_cache.clear();
+        self.statics_cache.clear();
+    }
+
+    fn parse_land_cells(block: &[u8]) -> Vec<(u16, i8)> {
+        let mut cells = vec![(0u16, 0i8); 64];
+        // 4-byte MapBlock header, then 64 × (graphic u16, z i8).
+        for (i, cell) in cells.iter_mut().enumerate() {
+            let pos = 4 + i * 3;
+            if pos + 3 <= block.len() {
+                let tile = u16::from_le_bytes([block[pos], block[pos + 1]]) & 0x3FFF;
+                let z = block[pos + 2] as i8;
+                *cell = (tile, z);
+            }
+        }
+        cells
+    }
+
+    fn fill_statics_from(
+        &self,
+        data: &[u8],
+        data_off: usize,
+        data_len: usize,
+    ) -> Vec<Vec<StaticTile>> {
+        let mut out: Vec<Vec<StaticTile>> = vec![Vec::new(); (BLOCK_SIZE * BLOCK_SIZE) as usize];
+        if data_off == 0xFFFF_FFFF || data_len == 0 {
+            return out;
+        }
+        let mut pos = data_off;
+        let end = (data_off + data_len).min(data.len());
+        while pos + 7 <= end {
+            let Some((graphic, cx, cy, z, hue)) = parse_static_record(&data[pos..pos + 7]) else {
+                break;
+            };
+            pos += 7;
+            let tile = StaticTile {
+                graphic,
+                z,
+                height: self.tiledata.item_height(graphic),
+                flags: self.tiledata.item_flags(graphic),
+                hue,
+            };
+            if cx < BLOCK_SIZE && cy < BLOCK_SIZE {
+                out[(cy * BLOCK_SIZE + cx) as usize].push(tile);
+            }
+        }
+        out
+    }
+
     // Returns a *reference* into the block cache (no clone): callers copy out the
     // one cell / filter the few statics they need. Cloning the whole 8×8 block on
     // every land()/statics() call dominated scene-build time in dense areas.
     fn load_land_block(&mut self, bx: u32, by: u32) -> &Vec<(u16, i8)> {
         let key = (bx << 16) | by;
         if !self.land_cache.contains_key(&key) {
-            let block_num = (bx * self.blocks_y + by) as usize;
-            let chunk_idx = block_num / BLOCKS_PER_UOP_CHUNK;
-            let block_in_chunk = block_num % BLOCKS_PER_UOP_CHUNK;
-
-            let mut cells = vec![(0u16, 0i8); 64];
-            if let Some(chunk) = self.uop.by_map_chunk(self.facet, chunk_idx) {
-                let base = block_in_chunk * MAP_BLOCK_BYTES + 4; // skip 4-byte header
-                for (i, cell) in cells.iter_mut().enumerate() {
-                    let pos = base + i * 3;
-                    if pos + 3 <= chunk.len() {
-                        let tile = u16::from_le_bytes([chunk[pos], chunk[pos + 1]]) & 0x3FFF;
-                        let z = chunk[pos + 2] as i8;
-                        *cell = (tile, z);
+            let block_num = (bx * self.blocks_y + by) as u32;
+            let cells = if let Some(&i) = self.patch_land.get(&block_num) {
+                self.diffs
+                    .map_block(i)
+                    .map(Self::parse_land_cells)
+                    .unwrap_or_else(|| vec![(0u16, 0i8); 64])
+            } else {
+                let block_num = block_num as usize;
+                let chunk_idx = block_num / BLOCKS_PER_UOP_CHUNK;
+                let block_in_chunk = block_num % BLOCKS_PER_UOP_CHUNK;
+                let mut cells = vec![(0u16, 0i8); 64];
+                if let Some(chunk) = self.uop.by_map_chunk(self.facet, chunk_idx) {
+                    let base = block_in_chunk * MAP_BLOCK_BYTES + 4;
+                    for (i, cell) in cells.iter_mut().enumerate() {
+                        let pos = base + i * 3;
+                        if pos + 3 <= chunk.len() {
+                            let tile = u16::from_le_bytes([chunk[pos], chunk[pos + 1]]) & 0x3FFF;
+                            let z = chunk[pos + 2] as i8;
+                            *cell = (tile, z);
+                        }
                     }
                 }
-            }
+                cells
+            };
             self.land_cache.insert(key, cells);
         }
         &self.land_cache[&key]
@@ -299,46 +382,35 @@ impl MapData {
         if self.statics_cache.contains_key(&key) {
             return &self.statics_cache[&key];
         }
-        let block_num = (bx * self.blocks_y + by) as usize;
-        let idx_off = block_num * 12;
-        // One bucket per cell (cy*BLOCK_SIZE + cx), so statics(x,y) is a direct index.
-        let mut out: Vec<Vec<StaticTile>> = vec![Vec::new(); (BLOCK_SIZE * BLOCK_SIZE) as usize];
-        if idx_off + 12 <= self.staidx.len() {
-            let data_off = u32::from_le_bytes([
-                self.staidx[idx_off],
-                self.staidx[idx_off + 1],
-                self.staidx[idx_off + 2],
-                self.staidx[idx_off + 3],
-            ]) as usize;
-            let data_len = u32::from_le_bytes([
-                self.staidx[idx_off + 4],
-                self.staidx[idx_off + 5],
-                self.staidx[idx_off + 6],
-                self.staidx[idx_off + 7],
-            ]) as usize;
-            if data_off != 0xFFFF_FFFF && data_len != 0 {
-                let mut pos = data_off;
-                let end = (data_off + data_len).min(self.statics.len());
-                while pos + 7 <= end {
-                    let Some((graphic, cx, cy, z, hue)) =
-                        parse_static_record(&self.statics[pos..pos + 7])
-                    else {
-                        break;
-                    };
-                    pos += 7;
-                    let tile = StaticTile {
-                        graphic,
-                        z,
-                        height: self.tiledata.item_height(graphic),
-                        flags: self.tiledata.item_flags(graphic),
-                        hue,
-                    };
-                    if cx < BLOCK_SIZE && cy < BLOCK_SIZE {
-                        out[(cy * BLOCK_SIZE + cx) as usize].push(tile);
-                    }
+        let block_num = (bx * self.blocks_y + by) as u32;
+        let out = if let Some(&i) = self.patch_sta.get(&block_num) {
+            match self.diffs.sta_index(i) {
+                Some((pos, len)) if pos != 0xFFFF_FFFF && len != 0 => {
+                    self.fill_statics_from(&self.diffs.sta_data, pos as usize, len as usize)
                 }
+                _ => vec![Vec::new(); (BLOCK_SIZE * BLOCK_SIZE) as usize],
             }
-        }
+        } else {
+            let block_num = block_num as usize;
+            let idx_off = block_num * 12;
+            if idx_off + 12 <= self.staidx.len() {
+                let data_off = u32::from_le_bytes([
+                    self.staidx[idx_off],
+                    self.staidx[idx_off + 1],
+                    self.staidx[idx_off + 2],
+                    self.staidx[idx_off + 3],
+                ]) as usize;
+                let data_len = u32::from_le_bytes([
+                    self.staidx[idx_off + 4],
+                    self.staidx[idx_off + 5],
+                    self.staidx[idx_off + 6],
+                    self.staidx[idx_off + 7],
+                ]) as usize;
+                self.fill_statics_from(&self.statics, data_off, data_len)
+            } else {
+                vec![Vec::new(); (BLOCK_SIZE * BLOCK_SIZE) as usize]
+            }
+        };
         self.statics_cache.insert(key, out);
         &self.statics_cache[&key]
     }

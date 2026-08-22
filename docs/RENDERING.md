@@ -84,8 +84,12 @@ ClassicUO never removes the object from the tile's chain — which is exactly wh
 | **Mobile** | Same `ProcessAlpha`, called with an **empty** `StaticTiles` (`:840-850`) — so only the `obj.Z >= _maxZ` branch can fire for a mobile, never the roof or translucent ones. (`z + DEFAULT_CHARACTER_HEIGHT(16) > maxZ` is the dead branch.) Separately, **`HasSurfaceOverhead`** (`:511`) sets `AllowedToDraw = false` for any *other* mobile whose entire 4×4 (`dx,dy ∈ -1..=2`) has a Static/Multi above it with `NoShoot`/`Window` close enough to the current ceiling (`_maxZ - tile.Z + 5 >= tile.Z - obj.Z`). That is "you cannot see people through a house from outside"; walking inside lowers `_maxZ` to the eave and the inequality fails, so the NPC is drawn. The player is exempt. We emit `"so":1` and the renderer skips the sprite (and its name/bar/click target). |
 
 `CalculateAlpha` steps ±25 per 20 ms tick, symmetric both ways — 255→0 in 11 steps,
-a ~220 ms floor. Two user toggles we do not model: `UseObjectsFading` (default true;
-off makes it snap) and `DrawRoofs`/"Hide roof tiles" (default true).
+a ~220 ms floor. `UseObjectsFading` (default true; off makes it snap) is not a
+separate option here — the ease is always on. **`DrawRoofs`** is Options → "Draw
+roofs" (`settings.drawRoofs`, default true): ClassicUO starts
+`_noDrawRoofs = !DrawRoofs` at `UpdateMaxDrawZ`, so unchecking it hides every
+roof-flagged static even outdoors. We emit `"rf":1` on roofs and the renderer
+hides `!drawRoofs && rec.rf` in addition to `"hz":1`.
 
 ## 4. Why this yields correct multi-floor
 
@@ -111,12 +115,17 @@ The map/tiledata live server-side, so we compute the cull in `anima-net::scene` 
 send the visible statics to the browser; the renderer just draws what it receives and
 depth-sorts by `(x+y)` + Z.
 
-- **`scene::max_draw_z(map, px, py, pz)`** → `maxZ`. Ports Scans A & B + CalculateNearZ +
-  the `pz16` clamp. (`MapData` already exposes `land(x,y)` and `statics(x,y)` with
-  tiledata flags incl. `Roof 0x10000000`, `Surface 0x200`.)
+- **`scene::max_draw_z`** returns a `DrawCeiling` `{ max_z, max_ground_z, no_draw_roofs }`.
+  `_noDrawRoofs` is its **own bool** (ClassicUO `UpdateMaxDrawZ`), not inferred from
+  `max_z < 127` — that inference lifted a town's roofs from inside a cave and failed
+  to lift them when player z≥111 clamped `max_z` back to 127. `scene.json`
+  `map.maxZ` / `map.maxGroundZ` / `map.noDrawRoofs` plus `"rf":1` on roof statics.
+  `_maxGroundZ` is a **picking** bound (ClassicUO `PushToRenderQueue`:
+  `obj.Z <= _maxGroundZ`), not a draw bound; the renderer skips targeting anything
+  with `z > map.maxGroundZ`.
 - **scene ceiling flag** (was a cull): a static with `z >= maxZ` **or**
-  `(under_cover && IsRoof)` is still EMITTED, carrying `"hz":1` and **no** `h`/`pf`
-  animation frames and no light — but WITH its normal `h`/`pf` pathing suffix, since
+  `(no_draw_roofs && IsRoof)` is still EMITTED, carrying `"hz":1` (and `"rf":1` on
+  roofs) — WITH its normal `h`/`pf` pathing suffix, since
   an invisible object still blocks and still feeds the browser's `calculate_new_z`
   (withholding it shifted the browser's predicted Z by up to 20 units on
   server-walkable tiles; ClassicUO's own `Pathfinder` likewise never consults the
@@ -145,8 +154,10 @@ depth-sorts by `(x+y)` + Z.
 - ~~Translucent (alpha 178)~~ — **done**; only the foliage circle-of-transparency
   half of this bullet remains (and our occlusion pass is its own rule, not
   ClassicUO's CoT, which ships disabled by default).
-- The static "tall wall pokes through the ceiling" height exception (`(z-maxZ)<height`).
-  We currently hard-cull at `z >= maxZ`; revisit if wall tops clip oddly at a ceiling.
+- The static "tall wall pokes through the ceiling" height exception (`(z-maxZ)<height`)
+  is part of ClassicUO's dead-against-`150` code — **won't-port** (porting it would
+  add a divergence). Land sprites still pop rather than fade (destroyed when they
+  leave the draw set) — also **won't-port**; statics/items ease via `ProcessAlpha`.
 
 ## 6. Verification
 - Stand under a roof → whole roof gone, room visible. Verified at Britain house

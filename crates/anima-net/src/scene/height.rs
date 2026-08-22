@@ -38,6 +38,37 @@ pub(super) fn roof_scan_tiles(
     out
 }
 
+/// ClassicUO `UpdateMaxDrawZ` output (`GameSceneDrawingSorting.cs:69-206`).
+///
+/// Inferring `_noDrawRoofs` from `max_z < 127` is the documented fidelity gap:
+/// a cave (`max_z = pz+16`) is not "under a roof", and a player at z≥111 clamps
+/// `max_z` back to 127 while still needing roofs lifted.
+///
+/// `_maxGroundZ` is a **picking** bound, not a draw bound. ClassicUO's last
+/// assignment (`:206`) writes the *local* `maxGroundZ`, which is 127 except on
+/// the land-overhang/cave branch (`:96-102`). `PushToRenderQueue` then refuses
+/// mouse selection of anything with `Z > _maxGroundZ`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct DrawCeiling {
+    pub max_z: i32,
+    pub max_ground_z: i32,
+    pub no_draw_roofs: bool,
+}
+
+impl DrawCeiling {
+    pub const OPEN: Self = Self {
+        max_z: 127,
+        max_ground_z: 127,
+        no_draw_roofs: false,
+    };
+}
+
+/// ClassicUO `ProcessAlpha` roof/Z rule for one object (`:337` / `:355`):
+/// hide at/above `_maxZ`, else hide if `_noDrawRoofs && IsRoof`.
+pub(super) fn ceil_hz(z: i32, max_z: i32, no_draw_roofs: bool, is_roof: bool) -> bool {
+    z >= max_z || (no_draw_roofs && is_roof)
+}
+
 /// ClassicUO `UpdateMaxDrawZ`: the Z at/above which statics are hidden so a roof
 /// or upper floor over the player vanishes and the interior shows. 127 = draw all.
 /// `multis` widens both scans below to in-view multi components (a house roof
@@ -49,17 +80,24 @@ pub(super) fn max_draw_z_scanned(
     px: i64,
     py: i64,
     pz: i32,
-) -> i32 {
+) -> DrawCeiling {
     if px < 0 || py < 0 {
-        return 127;
+        return DrawCeiling::OPEN;
     }
     let mut max_z = 127i32;
+    let mut no_draw_roofs = false;
     let pz14 = pz + 14;
     let pz16 = pz + 16;
 
     // Ground above the player (terrain overhang/cave) → cap at pz+16.
+    // ClassicUO does NOT set `_noDrawRoofs` on this branch (`:96-102`); it
+    // DOES set the local `maxGroundZ` that later becomes the picking bound.
     if pz16 <= map.land(px as u32, py as u32).z as i32 {
-        return pz16;
+        return DrawCeiling {
+            max_z: pz16,
+            max_ground_z: pz16,
+            no_draw_roofs: false,
+        };
     }
     // Statics (+ multi components) over the player's own tile: an upper floor
     // / non-roof blocker.
@@ -69,6 +107,7 @@ pub(super) fn max_draw_z_scanned(
             let is_surface = flags & FLAG_SURFACE != 0;
             if (flags & 0x2_0004) == 0 && (!is_roof || is_surface) {
                 max_z = tz;
+                no_draw_roofs = true;
             }
         }
     }
@@ -83,16 +122,25 @@ pub(super) fn max_draw_z_scanned(
                 let mut visited = HashSet::new();
                 max_z = calculate_near_z(scan, multis, map, px + 1, py + 1, tz, tz, &mut visited);
                 roof_found = true;
+                no_draw_roofs = true;
             }
         }
     }
 
     // ClassicUO clamps the ceiling to at least pz+16 (you always see ~16 above
     // your head). Only when something was actually found over the player.
+    // The clamp can push `max_z` back to 127 (player z≥111); `_noDrawRoofs`
+    // must survive that, or the roof stays drawn.
     if max_z != 127 || roof_found {
         max_z = max_z.max(pz16);
     }
-    max_z
+    DrawCeiling {
+        max_z,
+        // ClassicUO `:206`: `_maxGroundZ = maxGroundZ` where the local is 127
+        // unless the land-overhang branch fired (early-returned above).
+        max_ground_z: 127,
+        no_draw_roofs,
+    }
 }
 
 /// ClassicUO `HasSurfaceOverhead` (`GameSceneDrawingSorting.cs:511`): one
@@ -556,7 +604,7 @@ pub(super) fn max_draw_z(
     px: i64,
     py: i64,
     pz: i32,
-) -> i32 {
+) -> DrawCeiling {
     let scan = TileScan::build(world, map);
     max_draw_z_scanned(&scan, map, multis, px, py, pz)
 }

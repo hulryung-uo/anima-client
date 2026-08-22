@@ -37,6 +37,11 @@ pub(super) struct SpawnHttp {
     pub(super) watch: Arc<AtomicU64>,
     /// Prebuilt `skills.mul` JSON for `GET /skillinfo.json`.
     pub(super) skillinfo: Arc<String>,
+    pub(super) professions: Arc<String>,
+    pub(super) fonts: Option<Arc<Fonts>>,
+    pub(super) tileart: Option<Arc<TileArt>>,
+    pub(super) multimap: Option<Arc<Vec<u8>>>,
+    pub(super) terrain: Option<Arc<Mutex<super::TerrainState>>>,
 }
 
 /// Spawn the worker-thread pool serving `server` (already bound by [`bind`]).
@@ -66,6 +71,11 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         read_only,
         watch,
         skillinfo,
+        professions,
+        fonts,
+        tileart,
+        multimap,
+        terrain,
     } = args;
     let tile_cache: TileCache = Arc::new(Mutex::new(ByteCache::new(TILE_CACHE_BYTES)));
     let anim_cache: AnimCache = Arc::new(Mutex::new(ByteCache::new(ANIM_CACHE_BYTES)));
@@ -102,6 +112,11 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         let watch = watch.clone();
         let facet = facet.clone();
         let skillinfo = skillinfo.clone();
+        let professions = professions.clone();
+        let fonts = fonts.clone();
+        let tileart = tileart.clone();
+        let multimap = multimap.clone();
+        let terrain = terrain.clone();
         thread::spawn(move || {
             while let Ok(req) = server.recv() {
                 handle_request(Ctx {
@@ -134,6 +149,11 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
                     read_only,
                     watch: &watch,
                     skillinfo: &skillinfo,
+                    professions: &professions,
+                    fonts: &fonts,
+                    tileart: &tileart,
+                    multimap: &multimap,
+                    terrain: &terrain,
                 });
             }
         });
@@ -171,6 +191,11 @@ pub(super) struct Ctx<'a> {
     pub(super) read_only: bool,
     pub(super) watch: &'a Arc<AtomicU64>,
     pub(super) skillinfo: &'a Arc<String>,
+    pub(super) professions: &'a Arc<String>,
+    pub(super) fonts: &'a Option<Arc<Fonts>>,
+    pub(super) tileart: &'a Option<Arc<TileArt>>,
+    pub(super) multimap: &'a Option<Arc<Vec<u8>>>,
+    pub(super) terrain: &'a Option<Arc<Mutex<super::TerrainState>>>,
 }
 
 pub(super) fn handle_request(ctx: Ctx) {
@@ -205,6 +230,11 @@ pub(super) fn handle_request(ctx: Ctx) {
         house_catalog,
         facet,
         skillinfo,
+        professions,
+        fonts,
+        tileart,
+        multimap,
+        terrain,
     } = ctx;
     let raw_url = req.url().to_string();
     // Parse the optional `?hue=<n>` query before stripping it. 0 = no hue.
@@ -364,6 +394,8 @@ pub(super) fn handle_request(ctx: Ctx) {
         let mut r = Response::from_string(body);
         r.add_header(ctype("application/json"));
         let _ = req.respond(r);
+    } else if url == "/terrain.json" {
+        serve_terrain_json(terrain, art, &raw_url, req);
     } else if url == "/sounds" {
         // SSE stream. tiny_http's Response buffers the socket writer and only flushes
         // when the body completes — useless for a never-ending stream (headers never
@@ -405,6 +437,32 @@ pub(super) fn handle_request(ctx: Ctx) {
         let mut r = Response::from_string(skillinfo.as_str());
         r.add_header(ctype("application/json"));
         r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=3600"[..]).unwrap());
+        let _ = req.respond(r);
+    } else if url == "/professions.json" {
+        let mut r = Response::from_string(professions.as_str());
+        r.add_header(ctype("application/json"));
+        r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=3600"[..]).unwrap());
+        let _ = req.respond(r);
+    } else if url == "/multimap.png" {
+        match multimap.as_ref() {
+            Some(b) => respond_png(req, b.to_vec()),
+            None => {
+                let _ = req.respond(Response::from_string("no Multimap.rle").with_status_code(404));
+            }
+        }
+    } else if let Some((uni, font, ch)) = parse_font_glyph_url(&url) {
+        serve_font_glyph(fonts, uni, font, ch, req);
+    } else if url == "/font/text.png" {
+        serve_font_text(fonts, &raw_url, req);
+    } else if let Some((g, amount)) = parse_tileart_stack_url(&url) {
+        let resolved = tileart
+            .as_ref()
+            .and_then(|t| t.get(g as u32))
+            .map(|info| info.stack_graphic(amount) as u16)
+            .unwrap_or(g);
+        let mut r = Response::from_string(format!("{{\"g\":{resolved}}}"));
+        r.add_header(ctype("application/json"));
+        r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"max-age=86400"[..]).unwrap());
         let _ = req.respond(r);
     } else if url == "/pois.json" {
         // World-map points of interest (towns/banks/shops/dungeons/…). Static — built
@@ -612,6 +670,84 @@ pub(super) fn serve_static(web_dir: &Option<PathBuf>, url: &str, req: tiny_http:
     }
 }
 
+/// Query for `GET /terrain.json?x=&y=&z=&map=&season=`. Missing keys default to 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TerrainQuery {
+    pub x: i64,
+    pub y: i64,
+    pub z: i32,
+    pub map: u8,
+    pub season: u8,
+}
+
+pub(super) fn parse_terrain_query(raw_url: &str) -> TerrainQuery {
+    let mut q = TerrainQuery {
+        x: 0,
+        y: 0,
+        z: 0,
+        map: 0,
+        season: 0,
+    };
+    let Some(qs) = raw_url.split('?').nth(1) else {
+        return q;
+    };
+    for kv in qs.split('&') {
+        let Some((k, v)) = kv.split_once('=') else {
+            continue;
+        };
+        match k {
+            "x" => q.x = v.parse().unwrap_or(0),
+            "y" => q.y = v.parse().unwrap_or(0),
+            "z" => q.z = v.parse().unwrap_or(0),
+            "map" => q.map = v.parse().unwrap_or(0),
+            "season" => q.season = v.parse().unwrap_or(0),
+            _ => {}
+        }
+    }
+    q
+}
+
+fn serve_terrain_json(
+    terrain: &Option<Arc<Mutex<super::TerrainState>>>,
+    art: &Option<Arc<Mutex<Art>>>,
+    raw_url: &str,
+    req: tiny_http::Request,
+) {
+    let Some(terrain) = terrain else {
+        let _ = req.respond(Response::from_string("404").with_status_code(404));
+        return;
+    };
+    let q = parse_terrain_query(raw_url);
+    let body = {
+        let Ok(mut state) = terrain.lock() else {
+            let _ = req.respond(Response::from_string("lock").with_status_code(500));
+            return;
+        };
+        let mut art_guard = art.as_ref().and_then(|a| a.lock().ok());
+        state.with_facet(q.map, |map, multis, animdata| {
+            crate::scene::build_terrain_window(
+                map,
+                multis,
+                animdata,
+                art_guard.as_deref_mut(),
+                (q.x, q.y, q.z),
+                q.season,
+            )
+        })
+    };
+    match body {
+        Some(s) => {
+            let mut r = Response::from_string(s);
+            r.add_header(ctype("application/json"));
+            r.add_header(Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]).unwrap());
+            let _ = req.respond(r);
+        }
+        None => {
+            let _ = req.respond(Response::from_string("no map").with_status_code(404));
+        }
+    }
+}
+
 pub(super) fn ctype(v: &str) -> Header {
     Header::from_bytes(&b"Content-Type"[..], v.as_bytes()).unwrap()
 }
@@ -636,7 +772,7 @@ pub(super) fn content_type(path: &str) -> &'static str {
 
 #[cfg(test)]
 mod csrf_tests {
-    use super::origin_allowed;
+    use super::{origin_allowed, parse_terrain_query};
 
     #[test]
     fn no_origin_header_is_allowed() {
@@ -673,5 +809,39 @@ mod csrf_tests {
         // Malformed request with no Host at all — nothing to compare against;
         // not this guard's job to reject it.
         assert!(origin_allowed(Some("http://evil.example"), None));
+    }
+
+    #[test]
+    fn terrain_query_defaults_and_parses_center() {
+        assert_eq!(
+            parse_terrain_query("/terrain.json"),
+            super::TerrainQuery {
+                x: 0,
+                y: 0,
+                z: 0,
+                map: 0,
+                season: 0,
+            }
+        );
+        assert_eq!(
+            parse_terrain_query("/terrain.json?x=1495&y=1629&z=10&map=1&season=3"),
+            super::TerrainQuery {
+                x: 1495,
+                y: 1629,
+                z: 10,
+                map: 1,
+                season: 3,
+            }
+        );
+        assert_eq!(
+            parse_terrain_query("/terrain.json?x=bad&y=2"),
+            super::TerrainQuery {
+                x: 0,
+                y: 2,
+                z: 0,
+                map: 0,
+                season: 0,
+            }
+        );
     }
 }

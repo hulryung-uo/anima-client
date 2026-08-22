@@ -1,31 +1,54 @@
-//! `Cliloc.enu` reader: the UO localized-string table.
+//! `Cliloc.*` reader: the UO localized-string table.
 //!
 //! UO refers to most server-side text (item names, context-menu entries, system
-//! messages, gump labels) by a numeric "cliloc" id rather than literal text. The
-//! table that maps id → English text lives in `Cliloc.enu` in the data dir.
+//! messages, gump labels) by a numeric "cliloc" id rather than literal text.
+//! English lives in `Cliloc.enu`; other languages are `Cliloc.<lang>` (kor, jpn,
+//! deu, …). ClassicUO loads the requested language on top of English so missing
+//! ids still resolve (`ClilocLoader.Load`).
 //!
-//! Format (see ClassicUO `ClilocLoader`): a 6-byte header (`[u32][u16]`), then a
+//! Format (ClassicUO `ClilocLoader`): a 6-byte header (`[u32][u16]`), then a
 //! flat stream of records until EOF, each:
 //! `[number u32 LE][flag u8][length u16 LE][text: `length` bytes UTF-8]`.
 //!
-//! (Newer 7.0.10.4+ clients can ship a BWT-compressed cliloc whose 4th byte is
-//! `0x8E`; we don't ship that decompressor — the `Cliloc.enu` in this project's
-//! data dir is the plain form.)
+//! Newer files can be BWT-compressed (4th byte `0x8E`); we decompress those
+//! with [`crate::bwt`] before parsing.
 
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 
-/// The localized-string table (English), `id → text`.
+use crate::bwt;
+
+/// The localized-string table, `id → text`.
 pub struct Cliloc {
     entries: HashMap<u32, String>,
 }
 
 impl Cliloc {
-    /// Open `Cliloc.enu` from `data_dir` and parse every record into the map.
+    /// Open `Cliloc.enu` from `data_dir`.
     pub fn open(data_dir: impl AsRef<Path>) -> io::Result<Cliloc> {
-        let data = std::fs::read(data_dir.as_ref().join("Cliloc.enu"))?;
-        Ok(Self::parse(&data))
+        Self::open_lang(data_dir, "enu")
+    }
+
+    /// Open `Cliloc.<lang>`, falling back to English for missing ids and for a
+    /// missing language file (ClassicUO `ClilocLoader.Load`).
+    pub fn open_lang(data_dir: impl AsRef<Path>, lang: &str) -> io::Result<Cliloc> {
+        let dir = data_dir.as_ref();
+        let lang = if lang.is_empty() { "enu" } else { lang };
+        let wanted = format!("Cliloc.{lang}");
+        let enu = dir.join("Cliloc.enu");
+        let path = dir.join(&wanted);
+        let mut table = if path != enu && enu.is_file() {
+            Self::parse(&read_maybe_bwt(&enu)?)
+        } else {
+            Cliloc {
+                entries: HashMap::new(),
+            }
+        };
+        let file = if path.is_file() { path } else { enu };
+        let overlay = Self::parse(&read_maybe_bwt(&file)?);
+        table.entries.extend(overlay.entries);
+        Ok(table)
     }
 
     /// Parse a raw (uncompressed) cliloc buffer.
@@ -47,8 +70,6 @@ impl Cliloc {
         }
         Cliloc { entries }
     }
-
-    /// The text for a cliloc id, if present.
     pub fn get(&self, id: u32) -> Option<&str> {
         self.entries.get(&id).map(String::as_str)
     }
@@ -91,6 +112,17 @@ impl Cliloc {
     /// Whether the table is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+/// Read a cliloc file, BWT-decompressing when the 4th byte is `0x8E`
+/// (ClassicUO `ClilocLoader`: `buf[3] == 0x8E`).
+fn read_maybe_bwt(path: &Path) -> io::Result<Vec<u8>> {
+    let buf = std::fs::read(path)?;
+    if buf.get(3) == Some(&0x8E) {
+        Ok(bwt::decompress(&buf))
+    } else {
+        Ok(buf)
     }
 }
 

@@ -29,8 +29,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anima_assets::{
-    Anim, AnimData, Art, Cliloc, CustomHouseCatalog, Gumps, Hues, Lights, MapData, Multis,
-    RadarCol, Skills, Sounds, Speeches, Texmaps, TileData,
+    Anim, AnimData, Art, Cliloc, CustomHouseCatalog, Fonts, Gumps, Hues, Lights, MapData, MultiMap,
+    Multis, Professions, RadarCol, Skills, Sounds, Speeches, Texmaps, TileArt, TileData,
 };
 use anima_core::agent::{HouseDesignAction, SpeechMode};
 use anima_core::net::{
@@ -122,6 +122,38 @@ pub struct PlayConfig {
     pub read_only: bool,
 }
 
+/// Map files shared with the HTTP thread in asset-only mode so
+/// `GET /terrain.json` can emit the same window [`crate::scene::build_scene`] would.
+pub(super) struct TerrainState {
+    data_dir: PathBuf,
+    maps: HashMap<u8, MapData>,
+    pub(super) multis: Option<Multis>,
+    pub(super) animdata: Option<AnimData>,
+}
+
+impl TerrainState {
+    /// Load `facet` on first use, then hand `&mut MapData` plus the shared
+    /// multi/animdata readers to `f`. Split-borrows the struct fields so the
+    /// callback can hold all three at once (a `&mut self` helper cannot).
+    pub(super) fn with_facet<R>(
+        &mut self,
+        facet: u8,
+        f: impl FnOnce(&mut MapData, Option<&Multis>, Option<&AnimData>) -> R,
+    ) -> Option<R> {
+        let TerrainState {
+            data_dir,
+            maps,
+            multis,
+            animdata,
+        } = self;
+        if !maps.contains_key(&facet) {
+            maps.insert(facet, MapData::open_facet(data_dir, facet).ok()?);
+        }
+        let map = maps.get_mut(&facet)?;
+        Some(f(map, multis.as_ref(), animdata.as_ref()))
+    }
+}
+
 /// A bound-but-not-yet-running play server: the HTTP side (and its worker
 /// threads) are already listening; [`run`](PlayServer::run) does the
 /// (blocking) game-server login + loop.
@@ -151,6 +183,7 @@ pub struct PlayServer {
     watch: Arc<AtomicU64>,
     /// `speech.mul` — attached to each new [`Session`] so Say encodes keywords.
     speech: Option<Speeches>,
+    tileart: Option<Arc<TileArt>>,
 }
 
 /// Load assets, bind the HTTP server (workers included), and return a
@@ -166,7 +199,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     // Multi (house/boat) component reader — `multi.idx`/`multi.mul`. Same
     // dataset regardless of facet, so loaded once here (unlike `map`, which
     // reloads per facet in the game loop).
-    let multis: Option<Multis> = Multis::open(&data_dir).ok();
+    let mut multis: Option<Multis> = Multis::open(&data_dir).ok();
     eprintln!(
         "play: multis {}",
         if multis.is_some() {
@@ -189,7 +222,8 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     let texmaps: Option<Arc<Texmaps>> = Texmaps::open(&data_dir).ok().map(Arc::new);
     // Cliloc table (Cliloc.enu): localized text for context-menu labels (and reusable
     // for gump/system-message clilocs). Resolved into the scene when present.
-    let cliloc: Option<Arc<Cliloc>> = Cliloc::open(&data_dir).ok().map(Arc::new);
+    let lang = std::env::var("ANIMA_LANG").unwrap_or_else(|_| "enu".into());
+    let cliloc: Option<Arc<Cliloc>> = Cliloc::open_lang(&data_dir, &lang).ok().map(Arc::new);
     let speech: Option<Speeches> = Speeches::open(&data_dir).ok();
     eprintln!(
         "play: speech {}",
@@ -206,6 +240,28 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
             })
             .unwrap_or_else(|_| "[]".into()),
     );
+    let professions: Arc<String> = Arc::new({
+        let skills = Skills::open(&data_dir).ok();
+        match Professions::open(&data_dir, skills.as_ref()) {
+            Ok(p) => {
+                eprintln!("play: Prof.txt loaded ({} professions)", p.entries.len());
+                p.to_json()
+            }
+            Err(_) => "[]".into(),
+        }
+    });
+    let fonts: Option<Arc<Fonts>> = Fonts::open(&data_dir).ok().map(Arc::new);
+    eprintln!(
+        "play: fonts {}",
+        if fonts.is_some() {
+            "loaded"
+        } else {
+            "not loaded"
+        }
+    );
+    let tileart: Option<Arc<TileArt>> = Some(Arc::new(TileArt::open(&data_dir)));
+    let multimap: Option<Arc<Vec<u8>>> =
+        MultiMap::open(&data_dir).map(|m| Arc::new(m.to_image().to_png()));
     // light.mul/lightidx.mul — the per-light glow shapes. Optional like every
     // other art file: without it the renderer keeps its plain radial falloff.
     let lights: Option<Arc<Lights>> = Lights::open(&data_dir).ok().map(Arc::new);
@@ -219,7 +275,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     // animdata.mul: resolves a graphical effect's ART tile-id animation sequence +
     // frame interval (used by build_scene to bake `effects[].frames`/`interval`).
     // Read in the game-loop thread only, so a plain Option (no Arc) is enough.
-    let animdata: Option<AnimData> = AnimData::open(&data_dir).ok();
+    let mut animdata: Option<AnimData> = AnimData::open(&data_dir).ok();
     eprintln!(
         "play: animdata {}",
         if animdata.is_some() {
@@ -321,6 +377,25 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     let (login_tx, login_rx) = mpsc::channel::<LoginAttempt>();
     let (character_tx, character_rx) = mpsc::channel::<CharacterDecision>();
 
+    // Asset-only mode (`read_only` + no game loop): HTTP serves `/terrain.json`
+    // from these files so `/?wasm=1` can draw the isometric world without a
+    // play-server Session. Taken out of `PlayServer` because `serve_assets`
+    // never runs `build_scene`.
+    let terrain = if cfg.read_only {
+        let mut maps = HashMap::new();
+        if let Some(m) = map.take() {
+            maps.insert(0u8, m);
+        }
+        Some(Arc::new(Mutex::new(TerrainState {
+            data_dir: data_dir.clone(),
+            maps,
+            multis: multis.take(),
+            animdata: animdata.take(),
+        })))
+    } else {
+        None
+    };
+
     // The HTTP server comes up FIRST so the login page is reachable before we've
     // connected to any game server. Bound to loopback by default — this process
     // must never accept a connection from off the machine unless the caller
@@ -366,6 +441,11 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
             read_only: cfg.read_only,
             watch: watch.clone(),
             skillinfo,
+            professions: professions.clone(),
+            fonts: fonts.clone(),
+            tileart: tileart.clone(),
+            multimap: multimap.clone(),
+            terrain: terrain.clone(),
         },
     );
 
@@ -387,6 +467,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
         facet,
         watch,
         speech,
+        tileart,
     })
 }
 
@@ -420,6 +501,7 @@ pub struct Monitor {
     cliloc: Option<Arc<Cliloc>>,
     animdata: Option<AnimData>,
     facet: Arc<AtomicU8>,
+    tileart: Option<Arc<TileArt>>,
     /// Our OWN cursor into `World::journal`. Deliberately not `Session::observation()`,
     /// which advances the session's single shared journal cursor — reading frames for a
     /// spectator must never consume journal lines the session's real owner has not seen.
@@ -479,6 +561,7 @@ impl Monitor {
             self.animdata.as_ref(),
             self.anim.as_deref(),
             self.multis.as_ref(),
+            self.tileart.as_deref(),
             &self.journal,
         );
         drop(art_guard);
@@ -556,6 +639,7 @@ impl PlayServer {
             cliloc: self.cliloc,
             animdata: self.animdata,
             facet: self.facet,
+            tileart: self.tileart,
             journal_cursor: 0,
             journal: Vec::new(),
             journal_seq: 0,
@@ -569,6 +653,23 @@ impl PlayServer {
     /// The HTTP port actually bound (resolves `PlayConfig.http_port == 0`).
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Keep serving HTTP art/gumps/fonts without connecting to a shard.
+    /// `/scene.json` stays empty. `GET /terrain.json` builds the map window.
+    /// Open `/?wasm=1` (`/wasm.html` redirects there) after `wasm-pack build`.
+    pub fn serve_assets(self) -> io::Result<()> {
+        eprintln!(
+            "assets: serving UO files at http://{}:{}/  (no game session)",
+            self.cfg.bind_addr, self.port
+        );
+        eprintln!(
+            "assets: open http://{}:{}/?wasm=1 after `wasm-pack build crates/anima-wasm --target web --out-dir web/pkg`",
+            self.cfg.bind_addr, self.port
+        );
+        loop {
+            std::thread::park();
+        }
     }
 
     /// Log in (auto or via the served login page) and run the game loop.
@@ -592,6 +693,7 @@ impl PlayServer {
             facet,
             watch: _watch,
             speech,
+            tileart,
         } = self;
 
         // Starting city for a newly-created character (ServUO honors the selection):
@@ -826,6 +928,7 @@ impl PlayServer {
             let mut auto_max_steps = AUTO_WALK_MAX_STEPS;
             // Last core 0x38 event mirrored into this loop's own auto-walk state.
             let mut server_pathfind_seq = 0u64;
+            let mut last_patches_gen = u64::MAX;
             // Movement (ClassicUO model): the *browser* is the pacer. Its prediction commits
             // one step per UO cadence (ClassicUO `Walker.LastStepRequestTime`) and sends one
             // `walk` per committed step; we just execute each step once. There is no
@@ -957,10 +1060,25 @@ impl PlayServer {
                 let want_facet = session.world.map_index;
                 if map.as_ref().map(MapData::facet) != Some(want_facet) {
                     match MapData::open_facet(&cfg.data_dir, want_facet) {
-                        Ok(m) => map = Some(m),
+                        Ok(m) => {
+                            map = Some(m);
+                            last_patches_gen = u64::MAX;
+                        }
                         Err(e) => eprintln!(
                             "play: facet {want_facet} map load failed: {e} (keeping current map)"
                         ),
+                    }
+                }
+                if let Some(m) = map.as_mut() {
+                    if session.world.map_patches_gen != last_patches_gen {
+                        let (land, sta) = session
+                            .world
+                            .map_patch_counts
+                            .get(m.facet() as usize)
+                            .copied()
+                            .unwrap_or((0, 0));
+                        m.apply_patches(land, sta);
+                        last_patches_gen = session.world.map_patches_gen;
                     }
                 }
 
@@ -1323,6 +1441,7 @@ impl PlayServer {
                         animdata.as_ref(),
                         anim.as_deref(),
                         multis.as_ref(),
+                        tileart.as_deref(),
                         &journal,
                     );
                     drop(art_guard);

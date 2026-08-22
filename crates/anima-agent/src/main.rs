@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use anima_agent::WanderBrain;
+use anima_agent::{HunterBrain, LlmBrain, WanderBrain};
 use anima_assets::{Cliloc, MapData, Speeches};
 use anima_core::net::LoginConfig;
 use anima_core::{Action, Brain};
@@ -19,7 +19,15 @@ use anima_net::{Endpoint, Session};
 const TERRAIN_RADIUS: u8 = 12;
 
 fn main() {
-    let mut a = std::env::args().skip(1);
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `--brain wander|hunter|llm` (or `ANIMA_BRAIN`) picks the contract
+    // consumer; remaining args stay host/port/user/pass/ticks/data_dir.
+    let mut brain_kind = std::env::var("ANIMA_BRAIN").unwrap_or_else(|_| "wander".into());
+    if args.first().map(|s| s.as_str()) == Some("--brain") && args.len() >= 2 {
+        args.remove(0);
+        brain_kind = args.remove(0);
+    }
+    let mut a = args.into_iter();
     let host = a.next().unwrap_or_else(|| "127.0.0.1".into());
     let port: u16 = a.next().and_then(|s| s.parse().ok()).unwrap_or(2594);
     let user = a.next().unwrap_or_else(|| "animaagent".into());
@@ -69,7 +77,17 @@ fn main() {
         p0.name, p0.pos.x, p0.pos.y
     );
 
-    let mut brain = WanderBrain::new();
+    println!("agent: brain {brain_kind}");
+    let mut brain: Box<dyn Brain> = match brain_kind.as_str() {
+        "hunter" => Box::new(HunterBrain::new()),
+        "llm" => {
+            let url = std::env::var("ANIMA_LLM_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:8088/decide".into());
+            println!("agent: LLM POST {url}");
+            Box::new(LlmBrain::new(url))
+        }
+        _ => Box::new(WanderBrain::new()),
+    };
     // Settle: pump a moment so the initial perception (status, nearby) lands.
     let _ = s.observe(Duration::from_millis(800));
 
@@ -166,6 +184,9 @@ fn main() {
                     format!("castbook({spell}@0x{book:08X})")
                 }
                 Action::AllNames => "allnames".into(),
+                Action::ChangeRace { .. } => "racechange".into(),
+                Action::ChangeRaceCancel => "racechangecancel".into(),
+                Action::OpenUOStore => "uostore".into(),
                 Action::OplRequest { serial } => format!("oplreq(0x{serial:08X})"),
                 Action::PartyInvite => "partyinvite".into(),
                 Action::PartyAccept { leader } => format!("partyaccept(0x{leader:08X})"),

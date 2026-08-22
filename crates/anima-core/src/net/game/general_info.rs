@@ -9,12 +9,14 @@ use super::*;
 /// 0xBF GeneralInfo — multiplexed subcommands. We handle the fast-walk key
 /// stack (sub 0x01 sets six keys, sub 0x02 pushes one; each walk consumes one),
 /// close-gump-by-type (sub 0x04), party (sub 0x06), the facet switch (sub
-/// 0x08), the popup menu (sub 0x14), extended stats (sub 0x19: bonded-pet
-/// death / stat-training locks), spellbook content (sub 0x1B), the custom
-/// house notification (sub 0x1D), house-designer enter/leave (sub 0x20), the
-/// armed weapon special move being cleared (sub 0x21), New Damage (sub 0x22),
-/// a special move / toggled spell going active or inactive (sub 0x25), and
-/// speed mode (sub 0x26).
+/// 0x08), the popup menu (sub 0x14), map-diff enable (sub 0x18), extended
+/// stats (sub 0x19: bonded-pet death / stat-training locks), spellbook content
+/// (sub 0x1B), the custom house notification (sub 0x1D), house-designer
+/// enter/leave (sub 0x20), the armed weapon special move being cleared (sub
+/// 0x21), New Damage (sub 0x22), a special move / toggled spell going active
+/// or inactive (sub 0x25), speed mode (sub 0x26), pre-OPL equipment info
+/// (sub 0x10), the heritage / race-change dialog (sub 0x2A), and a forced
+/// mobile animation (sub 0x2B).
 ///
 /// Deliberately NOT wired: sub 0x16 CloseUserInterfaceWindows. ClassicUO does
 /// handle it client-side (`ExtendedCommand` case 0x16: paperdoll/statusbar/
@@ -62,6 +64,24 @@ pub(super) fn general_info(world: &mut World, frame: &[u8]) -> PResult<()> {
         // reload of `MapData` would additionally require.
         0x08 => world.on_map_change(r.u8()?),
         0x14 => parse_popup(world, &mut r)?,
+        // 0x18 EnableMapDiffs — `[count:u32]{ [mapPatches:u32][staticPatches:u32] }×count`
+        // (ClassicUO `ApplyPatches`, big-endian). The counts say how many of
+        // each facet's `mapdiflN`/`stadiflN` list entries to apply, in file
+        // order; missing diff files mean that facet simply has none. ServUO's
+        // `MapPatches` packet writes four facets. ClassicUO reads (map, statics)
+        // per facet — we match that read order even if a given shard swapped
+        // the two words (the play server applies them as (land, statics)).
+        0x18 => {
+            let n = (r.u32()? as usize).min(6);
+            let mut facets = Vec::with_capacity(n);
+            for _ in 0..n {
+                let map = r.u32()?;
+                let sta = r.u32()?;
+                facets.push((map, sta));
+            }
+            world.map_patch_counts = facets;
+            world.map_patches_gen = world.map_patches_gen.saturating_add(1);
+        }
         0x19 => parse_extended_stats(world, &mut r)?,
         0x1B => parse_spellbook_content(world, &mut r)?,
         // 0x1D CustomHouseNotification — `[serial:u32][revision:u32]`. ServUO
@@ -159,7 +179,153 @@ pub(super) fn general_info(world: &mut World, frame: &[u8]) -> PResult<()> {
             let val = r.u8()?;
             world.player_stats.speed_mode = if val > 3 { 0 } else { val };
         }
+        0x10 => parse_display_equipment_info(world, &mut r)?,
+        0x2A => parse_heritage(world, &mut r)?,
+        0x2B => parse_forced_anim(world, &mut r)?,
         _ => {}
+    }
+    Ok(())
+}
+
+/// Overhead hue ClassicUO uses for 0xBF/0x10 equipment info
+/// (`PacketHandlers` case 0x10: `0x3B2`, `MessageType.Regular`, `TextType.OBJECT`).
+const EQUIP_INFO_HUE: u16 = 0x3B2;
+
+/// 0xBF/0x10 DisplayEquipmentInfo — ServUO still sends this on equipment
+/// `OnSingleClick` (crafted-by, unidentified, charges, exceptional, …) even
+/// on shards that also have OPL. ClassicUO paints it as overhead text on the
+/// item and then requests MegaCliloc; we journal the same lines (hue `0x3B2`)
+/// so the renderer floats them and a brain sees them in `new_journal`.
+///
+/// Layout (ServUO `DisplayEquipmentInfo`): `[serial:u32][nameCliloc:u32]` then
+/// optional tagged words `0xFFFFFFFD` (crafter ASCII) / `0xFFFFFFFC`
+/// (unidentified), then `cliloc:u32` + `charges:i16` pairs, terminated by
+/// `0xFFFFFFFF`. ClassicUO stops the attr loop at `Position < Length - 4`
+/// so the terminator is never read as a cliloc. Unknown serials are dropped
+/// the same way ClassicUO returns when `world.Items.Get` is null.
+fn parse_display_equipment_info(world: &mut World, r: &mut PacketReader) -> PResult<()> {
+    let serial = r.u32()?;
+    let name_cliloc = r.u32()?;
+    if !world.items.contains_key(&serial) {
+        return Ok(());
+    }
+    let speaker = world
+        .items
+        .get(&serial)
+        .map(|it| it.name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| " ".to_string());
+
+    if name_cliloc > 0 {
+        push_journal_cliloc(
+            world,
+            serial,
+            speaker.clone(),
+            String::new(),
+            0,
+            EQUIP_INFO_HUE,
+            name_cliloc,
+            String::new(),
+            false,
+        );
+    }
+
+    let mut next = r.u32()?;
+    let mut crafter_name_len: u16 = 0;
+    let mut ascii = String::new();
+    if next == 0xFFFF_FFFD {
+        crafter_name_len = r.u16()?;
+        if crafter_name_len > 0 {
+            let raw = r.bytes(crafter_name_len as usize)?;
+            ascii.push_str("Crafted by ");
+            ascii.push_str(&ascii_string(raw));
+        }
+    }
+    if crafter_name_len != 0 {
+        next = r.u32()?;
+    }
+    let unidentified = next == 0xFFFF_FFFC;
+    if unidentified {
+        ascii.push_str("[Unidentified]");
+    }
+
+    let mut count: u8 = 0;
+    let mut attrs: Vec<(u32, i16)> = Vec::new();
+    while r.remaining() > 4 {
+        if count != 0 || next == 0xFFFF_FFFD || next == 0xFFFF_FFFC {
+            next = r.u32()?;
+        }
+        let charges = r.i16()?;
+        attrs.push((next, charges));
+        count = count.saturating_add(1);
+    }
+
+    if !ascii.is_empty() {
+        push_journal(world, serial, speaker.clone(), ascii, 0, EQUIP_INFO_HUE);
+    }
+    for (cliloc, charges) in attrs {
+        if cliloc == 0 || cliloc >= 0xFFFF_FFFC {
+            continue;
+        }
+        let affix = if charges == -1 {
+            String::new()
+        } else {
+            format!(" : {charges}")
+        };
+        push_journal_cliloc(
+            world,
+            serial,
+            speaker.clone(),
+            String::new(),
+            0,
+            EQUIP_INFO_HUE,
+            cliloc,
+            affix,
+            false,
+        );
+    }
+    Ok(())
+}
+
+/// 0xBF/0x2A HeritagePacket — `[female:u8][race:u8]` (ServUO
+/// `HeritagePacket`, ClassicUO `ExtendedCommand` case 0x2A). Race `1` human /
+/// `2` elf / `3` gargoyle opens the appearance dialog; `0` or `> 3` (including
+/// ServUO's close sentinel `0xFF`) dismisses it. The client's confirm reply
+/// is the same subcommand with five `u16`s — see
+/// [`crate::net::outgoing::build_change_race_request`].
+fn parse_heritage(world: &mut World, r: &mut PacketReader) -> PResult<()> {
+    let female = r.u8()? != 0;
+    let race = r.u8()?;
+    world.race_change = if (1..=3).contains(&race) {
+        Some(crate::world::RaceChangePrompt { female, race })
+    } else {
+        None
+    };
+    Ok(())
+}
+
+/// 0xBF/0x2B — force a mobile onto animation group `anim_id` at frame
+/// `frame_count` (ClassicUO `SetAnimation` + `AnimIndex = frameCount`,
+/// `ExecuteAnimation = false`). Serial on the wire is the low 16 bits of the
+/// mobile serial. We queue it through the same 0x6E anim ring the renderer
+/// already plays; freeze-on-frame is approximated by playing the group once.
+fn parse_forced_anim(world: &mut World, r: &mut PacketReader) -> PResult<()> {
+    let lo = r.u16()? as u32;
+    let anim_id = r.u8()?;
+    let frame_count = r.u8()?;
+    if let Some(serial) = world
+        .mobiles
+        .values()
+        .find(|m| (m.serial & 0xFFFF) == lo)
+        .map(|m| m.serial)
+    {
+        world.push_anim(
+            serial,
+            u16::from(anim_id),
+            u16::from(frame_count.max(1)),
+            true,
+            0,
+        );
     }
     Ok(())
 }

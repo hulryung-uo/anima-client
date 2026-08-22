@@ -688,6 +688,44 @@ pub fn build_toggle_flying() -> Vec<u8> {
     finish_variable(w.into_vec())
 }
 
+/// Confirm a heritage / race-change dialog (0xBF/0x2A). ClassicUO
+/// `Send_ChangeRaceRequest`: `[0xBF][len:u16=15][0x002A][skinHue:u16]
+/// [hairStyle:u16][hairHue:u16][beardStyle:u16][beardHue:u16]`. ServUO
+/// `HeritageTransform` accepts this 15-byte shape and applies the hues/ids
+/// when a heritage quester or race-change token is pending. Female and elf
+/// bodies send beard style/hue 0.
+pub fn build_change_race_request(
+    skin_hue: u16,
+    hair_style: u16,
+    hair_hue: u16,
+    beard_style: u16,
+    beard_hue: u16,
+) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x002A);
+    w.u16(skin_hue)
+        .u16(hair_style)
+        .u16(hair_hue)
+        .u16(beard_style)
+        .u16(beard_hue);
+    finish_variable(w.into_vec())
+}
+
+/// Cancel a heritage / race-change dialog (0xBF/0x2A with no payload).
+/// ServUO `HeritageTransform` treats a 5-byte packet as cancel and answers
+/// cliloc 1073645 ("You may try this again later…").
+pub fn build_change_race_cancel() -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x002A);
+    finish_variable(w.into_vec())
+}
+
+/// Open the Ultima Store (0xFA). Fixed 1-byte packet — ClassicUO
+/// `Send_OpenUOStore` / ServUO `UltimaStore.UOStoreRequest`.
+pub fn build_open_uo_store() -> Vec<u8> {
+    vec![0xFA]
+}
+
 /// StunRequest — GeneralInfo `0xBF`, subcommand `0x000A`, no payload. The Stun
 /// half of the pre-AOS pair; see [`build_disarm_request`] for why the
 /// subcommand is `0x0A` and not ClassicUO's `0x09`. ServUO gates it on
@@ -2784,5 +2822,23 @@ mod tests {
         assert_eq!(&p[9..13], &[0x00, b'H', 0x00, b'i']);
         assert_eq!(u16::from_be_bytes([p[13], p[14]]), 0x0000); // NUL terminator
         assert_eq!(p.len(), 15);
+    }
+
+    #[test]
+    fn change_race_request_is_fifteen_bytes() {
+        // ServUO HeritageTransform Size==15 is the confirm path.
+        let p = build_change_race_request(0x83EA, 0x203B, 0x044E, 0x2040, 0x044E);
+        assert_eq!(
+            p,
+            vec![
+                0xBF, 0x00, 0x0F, 0x00, 0x2A, 0x83, 0xEA, 0x20, 0x3B, 0x04, 0x4E, 0x20, 0x40, 0x04,
+                0x4E,
+            ]
+        );
+        assert_eq!(
+            build_change_race_cancel(),
+            vec![0xBF, 0x00, 0x05, 0x00, 0x2A]
+        );
+        assert_eq!(build_open_uo_store(), vec![0xFA]);
     }
 }
