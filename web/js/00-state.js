@@ -251,6 +251,7 @@ const LIFT_REJECT_MSG = [
 const SETTINGS_KEY = "anima.settings";
 const SETTINGS_DEFAULTS = {
   sfx: true, sfxVol: 0.4,        // sound effects on/off + volume
+  footsteps: true,               // ClassicUO EnableFootstepsSound (default true there too)
   music: true, musicVol: 0.3,    // background music on/off + volume
   tooltips: true,                // OPL hover tooltips
   bars: true,                    // overhead HP bars
@@ -311,6 +312,7 @@ let optCat = "audio";
 const OPTIONS = [
   { key: "sfx", kind: "checkbox", cat: "audio", label: "Sound effects", onChange: () => applyAudioSettings() },
   { key: "sfxVol", kind: "range", cat: "audio", label: "SFX volume", onChange: () => applyAudioSettings() },
+  { key: "footsteps", kind: "checkbox", cat: "audio", label: "Footstep sounds" },
   { key: "music", kind: "checkbox", cat: "audio", label: "Music", onChange: () => applyAudioSettings() },
   { key: "musicVol", kind: "range", cat: "audio", label: "Music volume", onChange: () => applyAudioSettings() },
 

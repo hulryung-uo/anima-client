@@ -440,6 +440,50 @@ function enqueueSteps(now) {
 // the step's target at its own decoupled catch-up rate (see below); a completed
 // step commits to the base and the next begins (carrying the time remainder for
 // continuous motion). Turns are consumed instantly (facing only).
+// ---- footstep sounds ---------------------------------------------------------
+// These are CLIENT-generated: ServUO never sends one (grepping it for 0x12B /
+// 0x129 finds only a Huffman table entry), so without this the world is silent
+// as you walk, and the main audio confirmation that a movement input was even
+// accepted is missing.
+//
+// Ported from ClassicUO `Mobile.ProcessFootstepsSound`
+// (Game/GameObjects/Mobile.cs:520-561), which runs every frame from
+// ProcessAnimation for any mobile that is human, not hidden, not dead, not
+// flying, and has a step pending — i.e. it is time-throttled, not once-per-tile.
+// On foot: 0x012B alternating with 0x012C, every 400 ms. Mounted and running:
+// 0x0129/0x012A every 150 ms. Mounted and walking: 0x012B, no alternation, every
+// 350 ms. Every delay is then scaled by 13/10 there, giving 520/195/455.
+const FOOTSTEP_ON_FOOT = 0x012B, FOOTSTEP_MOUNT_RUN = 0x0129;
+
+// ClassicUO `Mobile.IsHuman` (:146-159) — an explicit graphic list, not an
+// anim-type test, so a horse or a dragon is silent while a gargoyle is not.
+function bodyIsHuman(b) {
+  return (b >= 0x0190 && b <= 0x0193) || (b >= 0x00B7 && b <= 0x00BA)
+      || (b >= 0x025D && b <= 0x0260)
+      || b === 0x029A || b === 0x029B || b === 0x02B6 || b === 0x02B7
+      || b === 0x03DB || b === 0x03DF || b === 0x03E2
+      || b === 0x02E8 || b === 0x02E9 || b === 0x04E5;
+}
+
+// `st` carries the per-mobile throttle + alternation ClassicUO keeps as
+// LastStepSoundTime / StepSoundOffset. Flying is not checked: the 0x04 status
+// flag is not decoded yet, so no mobile can be known to be flying.
+function footstep(st, now, x, y, run, mounted, body, hidden, dead) {
+  if (!settings.sfx || !settings.footsteps || audioMuted) return;
+  if (!bodyIsHuman(body | 0) || hidden || dead) return;
+  if (now < (st.stepSfxAt || 0)) return;
+  let inc = st.stepSfxOfs | 0;
+  let id = FOOTSTEP_ON_FOOT;
+  let delay = 400;
+  if (mounted) {
+    if (run) { id = FOOTSTEP_MOUNT_RUN; delay = 150; }
+    else { inc = 0; delay = 350; }
+  }
+  st.stepSfxOfs = (inc + 1) % 2;
+  st.stepSfxAt = now + delay * 13 / 10;
+  playSfx(id + inc, x | 0, y | 0);
+}
+
 function processSteps(now, dt) {
   if (!pred) return;
   let guard = 0;
@@ -522,6 +566,15 @@ function processSteps(now, dt) {
       // server does exactly the steps we did. A tap commits one step → one walk →
       // one server tile (no overshoot); release stops committing → server stops.
       sendInput(`walk:${s.dir}:${s.run ? 1 : 0}`);
+      // A turn in place covers no ground, so it makes no sound.
+      if (!s.turn) {
+        const me = anim.get("self");
+        const pl = scene && scene.player;
+        if (me && pl) {
+          footstep(me, now, s.x, s.y, !!s.run, !!pl.mounted, pl.body,
+                   !!pl.hidden, !!pl.dead);
+        }
+      }
       lastWalkSentAt = now;
       trace(`CMT ${s.turn ? "turn" : "move"} dir=${s.dir} -> walk`);
       pred.steps.shift();
@@ -665,6 +718,17 @@ function renderFrame(dt) {
     // Leg cadence tied to ground covered. We don't get other mobiles' run flag, so
     // infer it from their measured step cadence (a fast ~≤280ms step = running).
     const stepDur = st.stepDur || 300;
+    if (mv && st.mobRec) {
+      // Bodies 402/403 are the human ghost pair, and they sit inside IsHuman's
+      // 0x0190..0x0193 range — so without this a ghost would walk audibly, which
+      // is exactly what ClassicUO's separate !IsDead test prevents. The scene has
+      // no per-mobile `dead`, but it does not need one: for a *human* body the
+      // ghost pair is the whole of it. The run flag is the same cadence guess
+      // the walk animation makes, and it inherits that guess's inaccuracy.
+      const b = st.mobRec.body | 0;
+      footstep(st, now, st.tx, st.ty, stepDur <= 280, !!st.mobRec.mounted, b,
+               !!st.mobRec.hidden, b === 402 || b === 403);
+    }
     st.animPhase = mv ? ((st.animPhase || 0) + cyclesPerTile(stepDur <= 280) * dt / stepDur) % 1 : 0;
     if (dist < 1e-3) continue;
     if (dist > 3) { st.rx = st.tx; st.ry = st.ty; st.rz = tz; continue; }
