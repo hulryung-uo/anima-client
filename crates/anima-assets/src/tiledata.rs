@@ -2,9 +2,17 @@
 //!
 //! Layout (HS): a land section of 512 groups, then an item/static section.
 //! - Land group:  `[header u32][32 × (flags u64, texID u16, name[20])]`  (30 B/entry)
-//! - Item group:  `[header u32][32 × (flags u64, weight u8, quality u8, unk u16,
-//!   unk1 u8, quantity u8, animID u16, unk2 u8, hue u8, unk3 u16, height u8,
-//!   name[20])]`  (41 B/entry)
+//! - Item group:  `[header u32][32 × (flags u64, weight u8, layer u8, count i32,
+//!   animID u16, hue u16, lightIndex u16, height u8, name[20])]`  (41 B/entry)
+//!
+//! Field names and order are ClassicUO's `TileDataLoader`
+//! (`src/ClassicUO.Assets/TileDataLoader.cs`, the `staticTiles.Add` loop), which
+//! is the only thing that pins them — the file itself carries no schema. Only the
+//! FLAGS field changes width between the two layouts (4 vs 8 bytes); everything
+//! after it keeps the same relative offsets, which is why the constants below are
+//! measured from the END of flags rather than from the start of the entry. Getting
+//! that base wrong is not a theoretical risk: it is the bug this comment replaces
+//! (see `ITEM_HEIGHT_AFTER_FLAGS`).
 //!
 //! We only need each tile's flags (and item height) for walkability.
 
@@ -56,6 +64,25 @@ const LAND_GROUP_HS: usize = 4 + 32 * LAND_ENTRY_HS; // 964
 const LAND_GROUP_OLD: usize = 4 + 32 * LAND_ENTRY_OLD; // 836
 const LAND_GROUPS: usize = 512;
 const LAND_SECTION_HS: usize = LAND_GROUPS * LAND_GROUP_HS; // 493_568
+
+/// Byte offset of an item entry's `height`, measured from the END of the flags
+/// field: `weight u8` + `layer u8` + `count i32` + `animID u16` + `hue u16` +
+/// `lightIndex u16` = 12.
+///
+/// Measured from the end of flags, not the start of the entry, because that is
+/// the only part whose width differs between the two layouts. Both readers used
+/// to add 16/17 to `flags_size()` instead — the correct *absolute* HS offsets
+/// (20/21) applied to the wrong base, so every name came back four characters
+/// short ("cedar tree" → "r tree", "nodraw" → "aw") and every height came back as
+/// the fourth byte of the NAME ("cave floor" → 101, i.e. `'e'`). That made
+/// `item_is_nodraw` match nothing at all, and fed ASCII codes to every
+/// walkability calculation downstream. Named constants now, so the two call
+/// sites cannot drift apart again.
+const ITEM_HEIGHT_AFTER_FLAGS: usize = 12;
+/// Byte offset of an item entry's 20-byte NUL-padded name, from the end of the
+/// flags field — the `height` byte and then the name. See
+/// [`ITEM_HEIGHT_AFTER_FLAGS`].
+const ITEM_NAME_AFTER_FLAGS: usize = ITEM_HEIGHT_AFTER_FLAGS + 1;
 
 const ITEM_ENTRY_HS: usize = 41;
 const ITEM_ENTRY_OLD: usize = 37;
@@ -296,10 +323,11 @@ impl TileData {
     /// the void/placeholder tiles (`GameObject.cs`:
     /// `data.Name.StartsWith("nodraw", OrdinalIgnoreCase)`) — e.g. static graphic
     /// 8600, whose art is the literal "NO DRAW" bitmap. The 20-byte name field sits
-    /// at item-entry offset +21 (after flags..height); we compare the leading 6
-    /// bytes case-insensitively, matching ClassicUO's `StartsWith`.
+    /// at [`ITEM_NAME_AFTER_FLAGS`] past the flags (item-entry offset +21 in the HS
+    /// layout); we compare the leading 6 bytes case-insensitively, matching
+    /// ClassicUO's `StartsWith`.
     pub fn item_is_nodraw(&self, graphic: u16) -> bool {
-        let name_off = self.flags_size() + 17;
+        let name_off = self.flags_size() + ITEM_NAME_AFTER_FLAGS;
         self.item_entry_off(graphic).is_some_and(|off| {
             self.data[off + name_off..off + name_off + 6].eq_ignore_ascii_case(b"nodraw")
         })
@@ -314,7 +342,7 @@ impl TileData {
     /// Not a substitute for an OPL name: this one is per-GRAPHIC and knows
     /// nothing about a particular item's magical prefix, dye or crafter.
     pub fn item_name(&self, graphic: u16) -> String {
-        let name_off = self.flags_size() + 17;
+        let name_off = self.flags_size() + ITEM_NAME_AFTER_FLAGS;
         self.item_entry_off(graphic)
             .map(|off| {
                 let raw = &self.data[off + name_off..off + name_off + 20];
@@ -326,7 +354,7 @@ impl TileData {
 
     /// Height of a static/item graphic (used for Z stacking/walkability).
     pub fn item_height(&self, graphic: u16) -> u8 {
-        let h_off = self.flags_size() + 16;
+        let h_off = self.flags_size() + ITEM_HEIGHT_AFTER_FLAGS;
         self.item_entry_off(graphic)
             .map(|off| self.data[off + h_off])
             .unwrap_or(0)
@@ -355,6 +383,98 @@ mod tests {
         let td = TileData::from_bytes(data);
         assert!(td.is_high_seas());
         assert_eq!(td.land_flags(0), 0x200);
+    }
+
+    /// Build a one-group HS item section whose single entry carries a known
+    /// height and name, so the two field offsets are pinned without a data file.
+    ///
+    /// This is the shape of test that was missing: the reader had `item_flags`,
+    /// `item_layer` and `item_anim` right and only `height`/`name` wrong, and
+    /// nothing exercised those two — so a four-byte slip in both survived every
+    /// gate, and the whole world's static heights were ASCII characters.
+    fn hs_item_entry(height: u8, name: &[u8]) -> TileData {
+        let mut data = vec![0u8; LAND_SECTION_HS + ITEM_GROUP_HS];
+        let off = LAND_SECTION_HS + 4; // past the group header
+        data[off..off + 8].copy_from_slice(&0x200u64.to_le_bytes()); // flags: SURFACE
+        data[off + 8] = 7; // weight
+        data[off + 9] = 21; // layer
+        data[off + 14..off + 16].copy_from_slice(&0x1234u16.to_le_bytes()); // animID
+
+        // Absolute offsets, deliberately NOT `ITEM_*_AFTER_FLAGS`: a fixture
+        // written through the same constants it is meant to pin moves with them,
+        // so it passes for any value of them. (Verified — with the old +16/+17
+        // this test still went green; only the real-file test and the last-entry
+        // bounds test caught the bug.) 20/21 are ClassicUO's layout: flags 8 +
+        // weight 1 + layer 1 + count 4 + animID 2 + hue 2 + lightIndex 2.
+        data[off + 20] = height;
+        data[off + 21..off + 21 + name.len()].copy_from_slice(name);
+        TileData::from_bytes(data)
+    }
+
+    #[test]
+    fn hs_item_height_and_name_read_their_own_fields() {
+        let td = hs_item_entry(20, b"cedar tree");
+        assert!(td.is_high_seas());
+        // The neighbouring fields must stay where they were — the bug was in the
+        // BASE these two are measured from, so a test that only checked height
+        // and name could be satisfied by moving everything.
+        assert_eq!(td.item_flags(0), 0x200);
+        assert_eq!(td.item_layer(0), 21);
+        assert_eq!(td.item_anim(0), 0x1234);
+        assert_eq!(td.item_height(0), 20);
+        assert_eq!(td.item_name(0), "cedar tree");
+        // Height 0 is a real value (every floor tile has it), not "absent": the
+        // old reader could never return it, because it was reading a name byte.
+        assert_eq!(hs_item_entry(0, b"cave floor").item_height(0), 0);
+        assert_eq!(hs_item_entry(0, b"cave floor").item_name(0), "cave floor");
+        // The nodraw sniff reads the same field, and used to match nothing at all.
+        assert!(hs_item_entry(0, b"nodraw").item_is_nodraw(0));
+        assert!(!hs_item_entry(0, b"cedar tree").item_is_nodraw(0));
+    }
+
+    #[test]
+    fn item_name_stays_inside_the_last_entry() {
+        // The name is the entry's final 20 bytes, so reading it four bytes late
+        // ran off the end of the buffer on the very last graphic — a panic that
+        // `/abilities.json?g=65535` reached from the network.
+        let td = hs_item_entry(3, b"x");
+        // Entry 31 is the last one the buffer holds; 32 is the first past it, so
+        // this covers both the in-range boundary and the out-of-range guard.
+        let past_end = ((ITEM_GROUP_HS - 4) / ITEM_ENTRY_HS) as u16;
+        assert_eq!(past_end, 32);
+        for g in 0..=past_end {
+            let _ = td.item_name(g);
+            let _ = td.item_height(g);
+            let _ = td.item_is_nodraw(g);
+        }
+    }
+
+    /// The five names and two heights this install actually holds — the exact
+    /// values the buggy reader got wrong, pinned against the real file so a
+    /// future offset slip is caught with a diff a reader can recognise.
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource (real tiledata.mul)
+    fn real_tiledata_names_and_heights() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let td = TileData::open(std::path::Path::new(&dir).join("tiledata.mul").as_path())
+            .expect("open tiledata.mul");
+        for (graphic, name) in [
+            (1339u16, "cave floor"), // was "floor"
+            (3288, "cedar tree"),    // was "r tree"
+            (2960, "table"),         // was "e"
+            (8600, "nodraw"),        // was "aw" — so nothing was ever culled
+            (1873, "stone stairs"),  // was "e stairs"
+        ] {
+            assert_eq!(td.item_name(graphic), name, "name of {graphic}");
+        }
+        // Heights, not just names: the height field is a DIFFERENT offset, and
+        // names alone would not have caught it reading the name's fourth byte.
+        assert_eq!(td.item_height(1339), 0, "cave floor is flat (was 101, 'e')");
+        assert_eq!(td.item_height(3288), 20, "cedar tree (was 97, 'a')");
+        assert!(td.item_is_nodraw(8600));
+        assert!(!td.item_is_nodraw(3288));
+        // Reachable from the network via /tilename and /abilities.json?g=.
+        let _ = td.item_name(u16::MAX);
     }
 
     #[test]

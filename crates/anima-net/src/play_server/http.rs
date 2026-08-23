@@ -542,6 +542,22 @@ pub(super) fn handle_request(ctx: Ctx) {
         let mut r = Response::from_string(format!("{{\"frames\":{frames},\"c\":[{c}]}}"));
         r.add_header(ctype("application/json"));
         let _ = req.respond(r);
+    } else if let Some(graphic) = parse_tilename_url(&url) {
+        // Names one map static for the renderer's single-click label. A static
+        // has no serial and so no OPL, and the scene's per-static record is far
+        // too hot to carry a string, so the browser asks per graphic and
+        // memoizes. Static per data files, but deliberately no Cache-Control:
+        // same reasoning as /abilities.json just above — the renderer already
+        // caches each graphic for the life of the page, so browser caching would
+        // buy nothing and only hide a data-file or server change behind a stale
+        // copy.
+        let mut r = Response::from_string(tile_name_json(
+            cliloc.as_deref(),
+            tiledata.as_deref(),
+            graphic,
+        ));
+        r.add_header(ctype("application/json"));
+        let _ = req.respond(r);
     } else if let Some(graphic) = parse_iteminfo_url(&url) {
         let anim_id = tiledata.as_ref().map(|t| t.item_anim(graphic)).unwrap_or(0);
         let mut r = Response::from_string(format!("{{\"anim\":{anim_id}}}"));

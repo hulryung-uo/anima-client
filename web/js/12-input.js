@@ -192,6 +192,170 @@ function onEntityPointerDown(serial, e, isItem) {
   }
 }
 
+// Is this click on the avatar itself? Our own mobile is deliberately NOT a click
+// target (so it never eats RMB steering), so a click on the band it occupies at
+// the canvas centre is resolved to self instead. dxp/dyp and the 28/68/14
+// constants are CSS-client px tuned at zoom 1, so the per-window CSS stretch
+// cancels out and only camZoom needs folding in — the sprite is a child of
+// app.stage, which camZoom scales — else a self-heal misses the (larger) body
+// when zoomed in, or grabs nearby ground when zoomed out.
+function clickIsSelfBand(clientX, clientY) {
+  if (!(scene && scene.player) || !app || !app.canvas) return false;
+  const r = app.canvas.getBoundingClientRect();
+  const dxp = (clientX - r.left) - r.width / 2, dyp = (clientY - r.top) - r.height / 2;
+  return Math.abs(dxp) < 28 * camZoom && dyp > -68 * camZoom && dyp < 14 * camZoom;
+}
+
+// The `z` a 0x6C reply must carry for a MAP STATIC, which is not simply the
+// static's own z. ClassicUO (`TargetManager.Target`) adds the tiledata height
+// back on for a SURFACE tile on client 7.0.9.0+:
+//
+//     if (Version >= CV_7090 && itemData.IsSurface) z += itemData.Height;
+//
+// and that is not cosmetic — it is one half of a round trip. ServUO undoes it
+// (`PacketHandlers.TargetResponse`: `if (state.HighSeas) { if (id.Surface) z -=
+// id.Height; }`) before validating the reply against `map.Tiles.GetStaticTiles`,
+// and it sets `HighSeas` from the client version we ourselves advertise —
+// 7.0.102.3 (`anima-core net/login.rs`) lands in `ProtocolChanges.Version70610`,
+// which includes `HighSeas`. So we DO need it: without the addition the shard
+// subtracts a height nobody added and every surface static fails validation,
+// which cancels the whole target. Measured against this install's tiledata a
+// table is Surface/height 6 and stone stairs Surface/height 5, so those two are
+// off by 6 and 5 — the harvest targets happen not to be (a tree is Impassable,
+// not Surface; `cave floor`, the static half of Mining's tile list, is Surface
+// with height 0), which is exactly why this has to be reasoned from the version
+// rather than from whether chopping works.
+//
+// `pf` bit 1 is `TileFlag.Surface` and `h` the tiledata height, both baked into
+// the static record by the server (`scene/tiles.rs` `path_bits`). They are
+// PATH_RADIUS-gated (10 tiles), so a static further out reports neither and gets
+// no adjustment — correct for every non-surface object at any range, and beyond
+// the reach of every harvest/spell target anyway; a surface static past 10 tiles
+// is the one case this cannot get right, and only the server can fix that.
+function staticTargetZ(st) {
+  const z = st.z | 0;
+  return ((st.pf | 0) & 2) !== 0 ? z + (st.h | 0) : z;
+}
+
+// A left-click landed on a map static (tree, wall, mountain face, house wall).
+// Statics have no serial, so this is deliberately NOT `onEntityPointerDown`:
+// it answers a target cursor with `targetxy` carrying the static's own graphic
+// and z, and single-click floats its name. Everything else a static cannot do
+// (double-click use, drag, context menu, attack) is simply absent.
+function onStaticPointerDown(sp, e) {
+  if (e.button !== 0) return;   // right button still steers (a static has no context menu)
+  const st = sp && sp._st;
+  if (!st) return;
+  // Multi placement and custom-house design own the click while they are up,
+  // and both want the GROUND point: the footprint/ghost previews are computed
+  // from `groundTileAt`, and answering a house placement with a static would
+  // make ServUO validate the tile and cancel the entire target on any mismatch
+  // (a `MultiTarget` is still an ordinary 0x6C, so it goes through the same
+  // `GetStaticTiles` check). ClassicUO carries `SendMultiTarget`, which forces
+  // graphic 0, for exactly this. So fall through to the canvas handler, which
+  // already sends graphic 0 — see `setupInput`'s mousedown.
+  if (scene && (scene.placement || scene.houseDesign)) return;
+  entityClickedAt = performance.now();
+  if (inspectPick) { inspectPicked({ x: st.x | 0, y: st.y | 0 }); return; }
+  if (scene && scene.target && scene.target.active === 1 && !targetUIHidden) {
+    // A static drawn over the avatar — standing under a tree, inside a doorway —
+    // must not steal the self-target the canvas handler resolves from that band:
+    // the avatar is not a click target, so nothing else would win it back, and
+    // every self-cast bandage/heal in a forest would land on the tree. Leave the
+    // click alone (no `targetConsumedAt`) so that handler still sees it.
+    if (clickIsSelfBand(e.clientX, e.clientY)) return;
+    targetConsumedAt = performance.now();
+    // The RAW map graphic (`st.g`), never the drawn one (`st.dg`): the seasonal
+    // remap and the StaticFilters toggles are client-side art substitutions,
+    // while ServUO validates against `map.Tiles.GetStaticTiles(x, y)` — the
+    // unremapped ids. (ClassicUO sends `Static.Graphic`, which its own
+    // `SetGraphicBySeason` has already overwritten, so a winter tree fails
+    // there; `OriginalGraphic` is what it should send and what `st.g` is.)
+    sendInput(`targetxy:${st.x | 0}:${st.y | 0}:${staticTargetZ(st)}:${st.g | 0}`);
+    endTargetUI();
+    return;
+  }
+  showStaticName(sp, st);
+}
+
+// ---- single-click name on a map static --------------------------------------
+// ClassicUO's `case Static st:` arm of the no-target left-click
+// (`GameSceneInputHandler`): float the tile's name over it and put the same line
+// in the journal. Its name is `Static.Name`, which IS the tiledata `ItemData.Name`,
+// and only when that is empty does it fall back to cliloc `1020000 + graphic`
+// (`Clilocs.GetString(1020000 + st.Graphic, st.ItemData.Name)` — note the tiledata
+// name is that call's own default too, so the two can only ever disagree when
+// tiledata has nothing).
+//
+// This is the one named thing in the world that cannot come off the scene: a
+// static has no serial, so it has no OPL and no `scene.opl` entry, and the
+// per-static payload is far too hot to carry a string (a 49x49 window emits
+// thousands of them). It is a per-GRAPHIC asset lookup instead, memoized here —
+// a forest is a few dozen graphics repeated a thousand times.
+const staticNameCache = new Map();   // graphic -> name | null (null = server had none)
+function staticTileName(g, cb) {
+  const id = g | 0;
+  if (staticNameCache.has(id)) { cb(staticNameCache.get(id)); return; }
+  fetch("tilename/" + id)
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => {
+      const name = (j && typeof j.name === "string" && j.name) ? j.name : null;
+      staticNameCache.set(id, name);
+      cb(name);
+    })
+    .catch(() => { staticNameCache.set(id, null); cb(null); });
+}
+
+// Floating static labels currently on screen: { el, x, y, z, top, born, ttl }.
+// A list of its own rather than an entry in `overheads` (08-overlays.js) because
+// that one anchors every line to an `anim` state — i.e. to a MOBILE — and drops
+// any line whose anchor it cannot find. A static is a fixed world point with no
+// such entry, so it gets the same container, class and fade with its own pump.
+let staticLabels = [];
+const STATIC_LABEL_TTL = 3000;   // same linger as a single-clicked mobile name
+function showStaticName(sp, st) {
+  // Above the ART, not above the tile: statics are foot-anchored at
+  // `isoY(x, y, z) + HALF` (see the static pool in syncWorld), so the top of a
+  // 20-tall tree is that minus its texture height. Measured HERE, before the
+  // name lookup's round trip, because the sprite can be reaped and destroyed
+  // while that is in flight — and read once rather than per frame, so the label
+  // does not bob along with an animated static's differing frame heights.
+  const top = (sp ? sp.height : 0) + 4;
+  staticTileName(st.g, (name) => {
+    if (!name) return;           // no tiledata/cliloc text — say nothing, don't invent one
+    // Journal it too: ClassicUO routes this through `MessageManager.HandleMessage`
+    // as a CLIENT Label, so it lands in the journal exactly like a mobile's name.
+    addSysMessage(name);
+    const el = document.createElement("div");
+    el.className = "oh-label oh-name";
+    el.textContent = name;
+    el.style.color = msgColor(6, 0x03b2);   // ClassicUO's hue for this line
+    namesEl().appendChild(el);
+    staticLabels.push({ el, x: st.x | 0, y: st.y | 0, z: st.z | 0, top,
+                        born: performance.now(), ttl: STATIC_LABEL_TTL });
+    while (staticLabels.length > 8) { const o = staticLabels.shift(); o.el.remove(); }
+    if (staticLabels.length === 1) requestAnimationFrame(pumpStaticLabels);
+  });
+}
+// Keep each label pinned over its world point while the camera pans, fade it out
+// at the end of its life, then reap it. Same screen math as `drawOverheads`: the
+// canvas is CSS-stretched from a capped renderer buffer, so renderer px must be
+// scaled back into client px (fx/fy) after the camera + zoom transform.
+function pumpStaticLabels() {
+  if (!staticLabels.length) return;
+  const now = performance.now();
+  const fx = window.innerWidth / app.renderer.width, fy = window.innerHeight / app.renderer.height;
+  for (let i = staticLabels.length - 1; i >= 0; i--) {
+    const o = staticLabels[i];
+    const age = now - o.born;
+    if (age >= o.ttl) { o.el.remove(); staticLabels.splice(i, 1); continue; }
+    o.el.style.left = ((app.stage.x + isoX(o.x, o.y) * camZoom) * fx) + "px";
+    o.el.style.top = ((app.stage.y + (isoY(o.x, o.y, o.z) + HALF - o.top) * camZoom) * fy) + "px";
+    o.el.style.opacity = age > o.ttl - 600 ? String((o.ttl - age) / 600) : "1";
+  }
+  if (staticLabels.length) requestAnimationFrame(pumpStaticLabels);
+}
+
 // Invert the iso projection at the player's z to get the world tile under a click
 // (renderer-space global coords minus the camera offset). Matches the forward
 // projection isoX/isoY with HALF/ZSTEP; z is assumed to be the player's z.

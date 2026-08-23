@@ -1713,3 +1713,70 @@ in a browser. ServUO has only three `explodes: true` call sites
 (`SnowPile`, `PileOfGlacialSnow`, pet-training `SpecialAbility`), and all three
 need a target that is itself carrying snow, which did not survive headless
 driving. Worth a look the next time a real client session is up.
+
+---
+
+Closed 2026-08-24 (statics are objects, and the four bytes that hid it): you
+could not chop a tree. The axe targeted the ground, ServUO built a `LandTarget`,
+and `Lumberjacking` — which lists tree tiles as *static* ids — could never match
+it. Two independent causes, and the second was hiding underneath the first.
+
+**Statics were never made interactive.** ClassicUO treats every drawn
+`GameObject` as a click target and answers a target cursor with that object's own
+graphic (`GameSceneInputHandler.cs:575` → `TargetManager.cs:433-457`). Our static
+pool set `zIndex`, alpha, shadows and animation frames but never `eventMode` and
+never bound `pointerdown`, and the one ground-target path hardcoded
+`targetxy:<x>:<y>:<z>:0` with the *player's* z. Statics are click targets now,
+answer with their own graphic and their own z, and a click with no cursor up
+floats the tile's name through a new `/tilename/<graphic>` route — tiledata name
+first (with UO's plural marker resolved), cliloc `1020000 + graphic` as the
+fallback, which is ClassicUO's order and not the one usually quoted. The
+land/graphic-0 path is untouched, and is now what multi placement and house
+design defer to.
+
+`itemData.Height` is required for us, which took measuring rather than reading:
+we advertise 7.0.102.3, so ServUO's `NetState` sets `Version70610`, and
+`PacketHandlers.cs:1302` does `z -= id.Height` for a Surface — ClassicUO's
+`z += Height` is the matching half. Measured on this install: table Surface/h6,
+stone stairs Surface/h5, cave floor Surface/h0, tree Impassable and not a
+surface.
+
+**And `tiledata.rs` had been reading the wrong four bytes since forever.**
+ClassicUO's `TileDataLoader` (`src/ClassicUO.Assets/`) reads an item entry as
+flags, `weight u8`, `layer u8`, `count i32`, `animID u16`, `hue u16`,
+`lightIndex u16`, `height u8`, `name[20]` — so from the end of flags, height is
+at +12 and name at +13. Ours used +16 and +17. `item_flags`, `item_layer` and
+`item_anim` were right and nothing exercised the other two, so the slip survived
+every gate.
+
+Three consequences, all live-confirmed before the fix:
+
+- **Every static name was four characters short**: `cave floor` → `floor`,
+  `cedar tree` → `r tree`, `stone stairs` → `e stairs`, `table` → `e`.
+- **Every static height was a letter.** `item_height` at +16 is `name[3]`, so
+  cave floor reported 101 (`'e'`) and cedar tree 97 (`'a'`), and those ASCII
+  codes fed every walkability calculation. This is what made the first bug
+  invisible: mining a cave-floor static at z −24 computed z 77, and ServUO
+  cancels a bad target *silently*. With the true height 0 it sends −24 and
+  answers "You dig some iron ore and put it in your backpack."
+- **`item_is_nodraw` matched nothing, ever**, because it sniffed `"nodraw"` four
+  bytes in and read `"aw"`. Culling those placeholders has now run for the first
+  time: 791 sprites of graphic 8611 gone at 5540,835, with 264 kept as records
+  that still block movement.
+
+Standing Z moved on only 2 of 7203 tiles sampled, so the walkability damage was
+narrow in practice — but it also fixes a **panic reachable from the network**:
+the name is an entry's last 20 bytes, so reading it four bytes late ran off the
+end of the buffer on the highest graphic, which `/abilities.json?g=65535` hits.
+
+The regression tests pin height *and* name together, because names alone would
+not have caught the height bug. One of them had to be rewritten mid-flight: a
+fixture built through the same constants it is meant to pin moves with them and
+passes for any value — it went green against the old +16/+17 too.
+
+**Corrections to the brief this work was given:** "you cannot mine a mountain
+face" was wrong. Mountains are land tiles and always worked; only statics — cave
+floors, ore-bearing rock — were broken. Left unverified: the PIXI hit-test leg
+itself (no browser slot was free, so the client logic is covered by a Node
+harness over the real source, all six branches) and the documented
+`PATH_RADIUS > 10` gap for surface statics.

@@ -228,6 +228,76 @@ pub(super) fn parse_iteminfo_url(url: &str) -> Option<u16> {
     url.strip_prefix("/iteminfo/")?.parse().ok()
 }
 
+/// Match `/tilename/<graphic>` → graphic. Names a MAP STATIC for the renderer's
+/// single-click label (see [`tile_name_json`]).
+pub(super) fn parse_tilename_url(url: &str) -> Option<u16> {
+    url.strip_prefix("/tilename/")?.parse().ok()
+}
+
+/// ClassicUO `StringHelper.GetPluralAdjustedString`. A tiledata name can carry
+/// its own plural marker — `"slab%s% of bacon"`, `"loa%ves/f%"` — where the
+/// `%`-delimited middle is either the plural suffix alone or `plural/singular`.
+///
+/// 216 of this install's item names use it, and none of those entries has a
+/// tiledata quantity above 1, so `plural` is false for every static a click can
+/// land on today. It is still a parameter rather than a baked-in `false`: the
+/// marker's whole point is that it has two readings, and hiding one of them
+/// inside the function would make it lie about what it implements.
+pub(super) fn plural_adjusted(name: &str, plural: bool) -> String {
+    if !name.contains('%') {
+        return name.to_string();
+    }
+    // C# `Split('%', RemoveEmptyEntries)`.
+    let parts: Vec<&str> = name.split('%').filter(|p| !p.is_empty()).collect();
+    if parts.len() < 2 {
+        return name.to_string(); // a lone marker: not a plural form, leave it alone
+    }
+    let mut out = String::from(parts[0]);
+    if let Some((p, sng)) = parts[1].split_once('/') {
+        out.push_str(if plural { p } else { sng });
+    } else if plural {
+        out.push_str(parts[1]);
+    }
+    if parts.len() == 3 {
+        out.push_str(parts[2]);
+    }
+    out
+}
+
+/// The display name of a map static, for the renderer's single-click label.
+///
+/// Statics have no serial, hence no OPL, so this is the only way the browser can
+/// name one — and it is a pure per-graphic lookup, which is why it is a route and
+/// not a scene field (a 49×49 window emits thousands of statics; a string on each
+/// would dwarf the record).
+///
+/// Precedence is ClassicUO's, from the `case Static st:` arm of its no-target
+/// left-click (`GameSceneInputHandler.cs:649-666`): the plural-adjusted tiledata
+/// name FIRST, and cliloc `1020000 + graphic` only when that is empty — with the
+/// tiledata name as that call's own default, so the two can never disagree except
+/// where tiledata has nothing to say. Not the other way round, even though both
+/// tables are loaded here: reversing them would silently prefer cliloc's copy,
+/// which for an unnamed graphic reads `"unused"`/`"nodraw"` rather than nothing.
+///
+/// `null` when neither table has a name (or neither file is loaded) — the
+/// renderer floats nothing rather than a fabricated label.
+pub(super) fn tile_name_json(
+    cliloc: Option<&Cliloc>,
+    tiledata: Option<&TileData>,
+    graphic: u16,
+) -> String {
+    let from_tiledata = tiledata
+        .map(|t| plural_adjusted(&t.item_name(graphic), false))
+        .filter(|n| !n.is_empty());
+    let name = from_tiledata.or_else(|| {
+        cliloc
+            .and_then(|c| c.format(1_020_000 + graphic as u32, ""))
+            .filter(|n| !n.is_empty())
+    });
+    serde_json::json!({ "name": name }).to_string()
+}
+
+/// Extract `c=<n>` from a raw URL query string — a light's colour index. 0 (no
 /// Extract `c=<n>` from a raw URL query string — a light's colour index. 0 (no
 /// colour, plain white) if absent.
 pub(super) fn parse_color_query(raw_url: &str) -> u16 {
@@ -694,6 +764,47 @@ mod hue_palette_tests {
         assert_eq!(cave.len(), 0x0553 - 0x053B); // 25 ids minus the hole
         assert!(!cave.contains(&0x0550));
         assert!(cave.contains(&0x053B) && cave.contains(&0x0553));
+    }
+
+    #[test]
+    fn plural_marker_is_resolved_the_way_classicuo_resolves_it() {
+        // Every shape the real tiledata actually contains, by graphic:
+        // three-part (0x0976 "slab%s% of bacon"), `plural/singular` (0x0F13
+        // "rub%ies/y%") and a lone unmatched marker (0x0F83).
+        assert_eq!(plural_adjusted("slab%s% of bacon", false), "slab of bacon");
+        assert_eq!(plural_adjusted("slab%s% of bacon", true), "slabs of bacon");
+        assert_eq!(plural_adjusted("rub%ies/y%", false), "ruby");
+        assert_eq!(plural_adjusted("rub%ies/y%", true), "rubies");
+        // No marker at all — the overwhelming majority, including every static a
+        // harvest click lands on ("tree", "cave floor").
+        assert_eq!(plural_adjusted("tree", false), "tree");
+        // A marker with nothing to pair it with is left EXACTLY as it is, `%`
+        // and all: ClassicUO returns the string untouched when the split yields
+        // fewer than two parts, and inventing a trim here would be a silent
+        // divergence rather than a fix.
+        assert_eq!(
+            plural_adjusted("Executioner's Cap%", false),
+            "Executioner's Cap%"
+        );
+        assert_eq!(plural_adjusted("", false), "");
+    }
+
+    #[test]
+    fn tile_name_is_null_rather_than_empty_without_data_files() {
+        // With neither table loaded there is no name to give, and the renderer
+        // must float NOTHING rather than an empty label — so this has to be a
+        // JSON null, not `""`.
+        let v: serde_json::Value = serde_json::from_str(&tile_name_json(None, None, 3274)).unwrap();
+        assert!(v["name"].is_null());
+    }
+
+    #[test]
+    fn tilename_url_takes_only_a_graphic() {
+        assert_eq!(parse_tilename_url("/tilename/3274"), Some(3274));
+        assert_eq!(parse_tilename_url("/tilename/"), None);
+        assert_eq!(parse_tilename_url("/tilename/-1"), None);
+        assert_eq!(parse_tilename_url("/tilename/70000"), None); // past u16
+        assert_eq!(parse_tilename_url("/iteminfo/3274"), None);
     }
 
     #[test]

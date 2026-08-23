@@ -281,6 +281,29 @@ function maxGroundZ() {
 }
 function aboveGroundZ(z) { return (z | 0) > maxGroundZ(); }
 
+// Can this static sprite be clicked (targeted / named)? Same three gates the
+// dynamic-item loop applies, plus the gray beyond-view ring:
+//   * ceiling-hidden — it is drawn at alpha 0, and ClassicUO's
+//     `PushToRenderQueue` never even enqueues an object at AlphaHue 0, so it
+//     is not in the pick list either;
+//   * above `_maxGroundZ` — ClassicUO's picking gate (`obj.Z <= _maxGroundZ`);
+//   * beyond the view range — the server sends those only so the ring can be
+//     drawn grayed out; ClassicUO has no objects out there at all, and every
+//     server-side target is range-checked anyway.
+// Re-applied every poll (not just at creation) because all three flip while the
+// sprite's pool identity stays the same — walking under a roof, or past `VR`.
+// Only writes when the answer actually flips, unlike the item loop's inline
+// version: this runs for EVERY static every poll (a crowded window is thousands
+// of them, against a few dozen items), and `eventMode` is a setter that pokes
+// PIXI's interaction bookkeeping.
+function setStaticClickable(sp, st, beyondView) {
+  const click = !sp._hz && !beyondView && !aboveGroundZ(st.z);
+  if (sp._click === click) return;
+  sp._click = click;
+  sp.eventMode = click ? "static" : "none";
+  sp.cursor = click ? "pointer" : "default";
+}
+
 function updateAnimStates(s) {
   const now = performance.now();
   const seen = new Set();
@@ -583,6 +606,13 @@ function syncWorld(s) {
         setAlphaSource(ex, "ceil", hzNow ? 0 : null);
         ex._hz = hzNow;
       }
+      // Re-stamp the record the click handlers read (see the creation branch).
+      // Not an optimization to skip: the pool key is (x,y,drawG,z,hue), which
+      // cannot see `h`/`pf` appearing — those are PATH_RADIUS-gated server-side,
+      // so a static that streamed in from 15 tiles away carries NEITHER until
+      // the player walks within 10, and the sprite is never rebuilt in between.
+      // Targeting a surface static needs both (see `staticTargetZ`).
+      if (ex) { ex._st = st; setStaticClickable(ex, st, beyondView); }
       continue; // unchanged; see the blanket LRU-touch note above
     }
     const texUrl = `art/static/${drawG}.png${hueQ}`;
@@ -639,6 +669,25 @@ function syncWorld(s) {
     // was waiting on this classification. A child of the static so it inherits
     // position and depth; same transform and colour as a mobile's.
     if (staticCastsShadow(sg, st.f)) attachStaticShadow(sp, tex);
+    // Clickable, exactly like the dynamic-item loop below — until this, map
+    // statics were drawn and nothing else, so a target cursor always fell
+    // through to the canvas handler and answered with the LAND tile (graphic 0).
+    // That is why an axe could not be aimed at a tree: ServUO branches on the
+    // reply's graphic (`PacketHandlers.TargetResponse`) and only a non-zero one
+    // becomes the `StaticTarget` the harvest system reads its tile id from.
+    // The whole record rides on the sprite so the handlers can answer with the
+    // static's OWN graphic and z instead of the player's.
+    sp._st = st;
+    // Per-pixel hit-testing, same closure shape (and same reason) as the item
+    // loop's: an animated static's texture is swapped under it by
+    // `tickAnimatedStatics`, so the mask must follow the CURRENT frame or a
+    // click on a tall flame falls through to whatever is behind it.
+    sp.hitArea = pixelHitArea(sp, () =>
+      (sp._frameUrls && sp._fidx >= 0 ? sp._frameUrls[sp._fidx] : sp._texUrl));
+    setStaticClickable(sp, st, beyondView);
+    sp.on("pointerdown", (ev) => onStaticPointerDown(sp, ev));
+    sp.on("pointerover", () => targetHighlightOn(sp));
+    sp.on("pointerout", () => targetHighlightOff(sp));
     world.addChild(sp);
     staticPool.set(key, sp);
   }

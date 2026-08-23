@@ -372,17 +372,11 @@ function setupInput() {
     }
     if (!(scene && scene.target && scene.target.active === 1) || targetUIHidden) return;
     if (performance.now() - targetConsumedAt < 200) return; // a mob/item already answered
-    // Our own avatar is always at the canvas centre but isn't a click target (so it
-    // never eats steering). During a target cursor, a click on that centre band IS
-    // self — answer with target:<self> so bandages / beneficial spells work on us.
-    // The band must track the avatar's on-screen size, which scales with camZoom
-    // (the sprite is a child of app.stage, scaled by camZoom). dxp/dyp and the
-    // 28/68/14 constants are already CSS-client px tuned at zoom 1, so the per-window
-    // stretch cancels and only camZoom needs folding in — else a self-heal misses
-    // the (larger) body when zoomed in, or grabs nearby ground tiles when zoomed out.
-    const r = canvas.getBoundingClientRect();
-    const dxp = (e.clientX - r.left) - r.width / 2, dyp = (e.clientY - r.top) - r.height / 2;
-    if (scene.player && Math.abs(dxp) < 28 * camZoom && dyp > -68 * camZoom && dyp < 14 * camZoom) {
+    // During a target cursor, a click on the avatar's centre band IS self —
+    // answer with target:<self> so bandages / beneficial spells work on us. The
+    // band test lives in 12-input.js because the static click path defers to it
+    // too (a tree drawn over the avatar must not steal the self-target).
+    if (clickIsSelfBand(e.clientX, e.clientY)) {
       sendInput("target:" + (scene.player.serial >>> 0));
       endTargetUI();
       return;
