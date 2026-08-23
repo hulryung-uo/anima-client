@@ -152,8 +152,95 @@ async function main() {
 // or markDirty(), so the expensive PIXI world stays render-on-demand even while
 // rain/snow animate continuously. Reads only the latest polled `scene`.
 let fxCanvas = null, fxCtx = null, fxParticles = [], fxTint = 0, fxKind = -1, fxLastT = 0;
-const FX_MAX_PARTICLES = 60; // hard cap regardless of weatherN
+const FX_MAX_PARTICLES = 70; // ClassicUO MAX_WEATHER_EFFECT (Weather.cs:16)
 const FX_MAX_NIGHT = 0.6;    // cap on the night tint (see the target calc below)
+
+// ---- weather (0x65) ----------------------------------------------------------
+// ClassicUO's four types (`Game/Weather.cs:13-22`). Only 0 and 2 were handled
+// here before, so a fierce storm and a brewing one rendered as clear sky.
+const WT_RAIN = 0, WT_STORM_APPROACH = 1, WT_SNOW = 2, WT_STORM_BREWING = 3;
+const FX_WEATHER_MSG = {
+  [WT_RAIN]: "It begins to rain.",
+  [WT_STORM_APPROACH]: "A fierce storm approaches.",
+  [WT_SNOW]: "It begins to snow.",
+  [WT_STORM_BREWING]: "A storm is brewing.",
+};
+const FX_WEATHER_MS = 6 * 60 * 1000; // ClassicUO WEATHER_TIMER (Constants.cs:97)
+const FX_THUNDER = [0x028, 0x206];   // Weather.PlayThunder
+const FX_WIND_SFX = [0x014, 0x015, 0x016]; // Weather.PlayWind
+const FX_WIND_SWIRL = 20;            // the `range` of ClassicUO's SinOscillate call
+let fxWind = 0, fxWindNextT = 0, fxWeatherStartT = 0;
+
+// ClassicUO positions both weather sounds at a random 10-18 tile offset from the
+// player on each axis (`Weather.PlaySound`, :207-223) so they never sit exactly
+// on top of you.
+function fxWeatherSfx(ids) {
+  if (typeof playSfx !== "function" || audioMuted || !settings.sfx) return;
+  if (!scene || !scene.player) return;
+  const off = () => (10 + Math.floor(Math.random() * 9)) * (Math.random() < 0.5 ? -1 : 1);
+  playSfx(ids[Math.floor(Math.random() * ids.length)],
+          (scene.player.x | 0) + off(), (scene.player.y | 0) + off());
+}
+
+// A new weather type: journal line (ClassicUO uses hue 1154 for all four) plus
+// the type's opening sound. Rain alone is silent.
+function fxWeatherStart(kind, now) {
+  fxWeatherStartT = FX_WEATHER_MSG[kind] !== undefined ? now : 0;
+  fxWindNextT = 0; // forces a re-roll, which ClassicUO also counts as a change
+  const msg = FX_WEATHER_MSG[kind];
+  if (msg === undefined) return;
+  addSysMessage(msg);
+  fxWindSound(kind);
+}
+
+function fxWindSound(kind) {
+  if (kind === WT_SNOW) fxWeatherSfx(FX_WIND_SFX);
+  else if (kind === WT_STORM_APPROACH || kind === WT_STORM_BREWING) fxWeatherSfx(FX_THUNDER);
+}
+
+// Wind re-rolls every 13-19 s to a signed 0..4 and cannot reverse in one step —
+// ClassicUO forces a sign crossing through 0 first (`Weather.cs:262-295`).
+// Returns whether this tick changed it, which is what gates the sound.
+function fxTickWind(kind, now) {
+  if (fxWeatherStartT === 0 || now < fxWindNextT) return false;
+  const first = fxWindNextT === 0;
+  fxWindNextT = now + (13 + Math.random() * 6) * 1000;
+  const last = fxWind;
+  let w = Math.floor(Math.random() * 5);
+  if (Math.floor(Math.random() * 3) !== 0) w = -w;
+  if (w < 0 && last > 0) w = 0;
+  else if (w > 0 && last < 0) w = 0;
+  fxWind = w;
+  return first || w !== last;
+}
+
+// Horizontal speed for a wind-driven particle. ClassicUO turns (Wind, baseVy)
+// into an angle + magnitude, adds a per-particle swirl to the angle and converts
+// back (`Weather.cs:375-400`). We take the ANGLE from that model but keep our own
+// vertical speed, which is tuned for a CSS-pixel canvas rather than a 640x480
+// game window — so the lean matches while the fall rate stays right here.
+//
+// One deliberate divergence: ClassicUO's `SinOscillate` (`:49-54`) computes
+// `Math.Sign(ToRadians(angle)) * range`, and radians of a 0..359 value are never
+// negative — so it returns a constant +20 and the swirl does not actually swirl.
+// The name, the `freq` argument and the unused range all say `Math.Sin` was
+// meant; we oscillate for real.
+function fxGust(p, baseVy, now) {
+  const swirl = FX_WIND_SWIRL * Math.sin((now * 0.4 / 2.7777 + p.phase) * Math.PI / 180);
+  const angle = Math.atan2(fxWind, baseVy) + swirl * Math.PI / 180;
+  return Math.hypot(fxWind, baseVy) * (p.vy / baseVy) * Math.sin(angle);
+}
+
+// Wrap horizontally; recycle at the top. Past WEATHER_TIMER a particle that
+// leaves is retired instead, so the weather drains out of view rather than
+// snapping off mid-screen (ClassicUO `:320-334`). Returns true if it is gone.
+function fxRetire(p, i, W, H, expired, topY) {
+  if (p.x < 0) p.x += W; else if (p.x > W) p.x -= W;
+  if (p.y <= H) return false;
+  if (expired) { fxParticles.splice(i, 1); return true; }
+  p.y = topY; p.x = Math.random() * W;
+  return false;
+}
 
 function initFx() {
   fxCanvas = document.getElementById("fx");
@@ -169,11 +256,13 @@ function fxSpawn(W, H, snow) {
   if (snow) {
     return { x: Math.random() * W, y: Math.random() * H,
              vx: (Math.random() - 0.5) * 0.6, vy: 0.6 + Math.random() * 1.3,
-             r: 1 + Math.random() * 1.8, phase: Math.random() * 100 };
+             r: 1 + Math.random() * 1.8, phase: Math.random() * 360 };
   }
-  // rain: fast, near-vertical light-blue streaks (slight lean)
+  // rain: fast, near-vertical light-blue streaks (slight lean). `phase` is the
+  // per-particle offset of the wind swirl, which only storm-approach uses.
   return { x: Math.random() * W, y: Math.random() * H,
-           vx: -1.0 - Math.random(), vy: 9 + Math.random() * 6, r: 0, phase: 0 };
+           vx: -1.0 - Math.random(), vy: 9 + Math.random() * 6, r: 0,
+           phase: Math.random() * 360 };
 }
 
 function fxFrame(now) {
@@ -269,35 +358,55 @@ function fxFrame(now) {
   // Felucca registers as season 4 and so every living player was permanently
   // greyed. ---
 
-  // --- weather: only rain(0) and snow(2) are animated; anything else clears ---
+  // --- weather (0x65). ClassicUO has FOUR types, not two: WT_RAIN 0,
+  // WT_STORM_APPROACH 1, WT_SNOW 2, WT_STORM_BREWING 3 (`Game/Weather.cs:13-22`).
+  // Rain and storm-approach share the streak branch (`:407-410`); storm-brewing
+  // has no draw case at all and is sound only. We used to clear the particle set
+  // for 1 and 3, so a fierce storm rendered as perfectly clear sky. ---
   const kind = scene ? scene.weather : 0xFF;
-  const snow = kind === 2, rain = kind === 0;
-  const wantN = (rain || snow) ? Math.min(FX_MAX_PARTICLES, scene.weatherN || 0) : 0;
-  if (kind !== fxKind) { fxParticles.length = 0; fxKind = kind; } // re-seed on type change
+  const snow = kind === WT_SNOW;
+  const streaks = kind === WT_RAIN || kind === WT_STORM_APPROACH;
+  if (kind !== fxKind) { fxParticles.length = 0; fxKind = kind; fxWeatherStart(kind, now); }
+  const windChanged = fxTickWind(kind, now);
+  if (windChanged) fxWindSound(kind);
+  // Count is scaled to the window against ClassicUO's 640x480 reference
+  // (`CalculateScaledCount`, :186-195) and capped at its MAX_WEATHER_EFFECT.
+  // Past WEATHER_TIMER the particles are not snapped off: they retire one at a
+  // time as they leave the viewport, which is why the drain lives in the update
+  // loops below rather than here.
+  const raw = scene ? (scene.weatherN | 0) : 0;
+  const expired = fxWeatherStartT > 0 && now - fxWeatherStartT > FX_WEATHER_MS;
+  const wantN = ((streaks || snow) && raw > 0 && !expired)
+    ? Math.min(FX_MAX_PARTICLES, Math.max(1, Math.round(raw * (W * H) / (640 * 480))))
+    : 0;
   while (fxParticles.length < wantN) fxParticles.push(fxSpawn(W, H, snow));
-  if (fxParticles.length > wantN) fxParticles.length = wantN;
+  if (fxParticles.length > wantN && !expired) fxParticles.length = wantN;
 
-  if (wantN > 0) {
+  if (fxParticles.length > 0 && (streaks || snow)) {
     const f = dt / 16; // normalize step to ~60fps
-    if (rain) {
+    if (streaks) {
       ctx.strokeStyle = "rgba(170, 200, 235, 0.5)";
       ctx.lineWidth = 1;
       ctx.beginPath();
-      for (const p of fxParticles) {
-        p.x += p.vx * f; p.y += p.vy * f;
-        if (p.y > H) { p.y = -10; p.x = Math.random() * W; }
-        if (p.x < 0) p.x += W; else if (p.x > W) p.x -= W;
+      // Plain rain keeps its own fixed lean — ClassicUO gives WT_RAIN a constant
+      // `SpeedX = -4.5 - scaleRatio` and never applies Wind to it (:343-346).
+      // Storm-approach is the wind-driven one (`SpeedX = Wind`, `SpeedY = 6`).
+      for (let i = fxParticles.length - 1; i >= 0; i--) {
+        const p = fxParticles[i];
+        const vx = kind === WT_STORM_APPROACH ? fxGust(p, 6.0, now) : p.vx;
+        p.x += vx * f; p.y += p.vy * f;
+        if (fxRetire(p, i, W, H, expired, -10)) continue;
         ctx.moveTo(p.x, p.y);
-        ctx.lineTo(p.x - p.vx * 1.6, p.y - p.vy * 1.6);
+        ctx.lineTo(p.x - vx * 1.6, p.y - p.vy * 1.6);
       }
       ctx.stroke();
     } else {
       ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
-      for (const p of fxParticles) {
-        p.x += (p.vx + Math.sin((p.y + p.phase) * 0.02) * 0.5) * f;
+      for (let i = fxParticles.length - 1; i >= 0; i--) {
+        const p = fxParticles[i];
+        p.x += fxGust(p, 1.0, now) * f;
         p.y += p.vy * f;
-        if (p.y > H) { p.y = -6; p.x = Math.random() * W; }
-        if (p.x < 0) p.x += W; else if (p.x > W) p.x -= W;
+        if (fxRetire(p, i, W, H, expired, -6)) continue;
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.r, 0, 6.283);
         ctx.fill();
