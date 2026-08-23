@@ -765,7 +765,7 @@ Remaining ClassicUO Options / visual QoL (not protocol holes): AutoOpenCorpses, 
 | ~~Network stats~~ — **CLOSED, live-verified** | Ping, in/out rate, totals and packet counts for the link to the game server, plus this page's own HTTP poll — two hops, because this client has two and a lag reading that blamed the wrong one would be worse than none. The ping is a real 0x73 round trip (ServUO's `PingAck` echoes the sequence byte), averaged over five as ClassicUO does, measured in the driver that owns the socket since the core has no clock by design. Kept in **microseconds** — see the note below | S–M |
 | ~~Inspector~~ — **CLOSED, live-verified** | Arm it, click a mobile, an item or the ground, and read back everything this client believes about it: ClassicUO's key/value dump with its field names, sorted by key, click-a-value-to-copy. Plus the **raw scene record** underneath — ClassicUO's list only prints what someone hardcoded, and the question worth asking in this repo is what the server actually sent. A ground click resolves to a tile, so that view also lists the statics standing on it | S–M |
 | ~~Container gumps ignore real container art and each item's stored (x,y)~~ — **CLOSED, live-verified** | Both halves were already on the wire and discarded: 0x3C carries a position per item, and 0x24 names the container's gump. The gump id is now **retained** (`World::container_gumps`) rather than read from the open-event ring, which ages out while the window stays open, and reaches the renderer as `scene.contGumps`. The window draws that art and places each item at its raw (x, y), read **signed** as ClassicUO does (`(short)item.X`). ClassicUO additionally clamps into a per-gump bounds table (78 entries); we clip with `overflow: hidden` instead, which needs no table and cannot disagree with the server about where an item actually is. Verified live on a real backpack (gump 60, 230×204) with a dozen items at their stored positions | M |
-| ~~Container windows: sized wrong, no type, one-mode~~ — **CLOSED, live-verified** | Follow-up to the row above, all three verified live. (1) The window was a fixed 252px, clipping a wide gump (a 282px game board) and guttering a narrow one; it now sizes to the gump texture (learned from the loaded `<img>`, cached per gump id), like ClassicUO's `ContainerGump`. (2) A late 0x24 (gump id arriving after the item set was stable) never re-rendered because `containerSignature` hashed only items; it now includes the gump id, the container graphic/name, and the view toggles. (3) A new **grid mode** (`settings.gridContainers`, default off = authentic) shows the container's own icon + tiledata name in the title bar so a pouch reads differently from a backpack — which the authentic mode *cannot* distinguish because ServUO gives both gump 0x3C. The name/graphic are resolved server-side into a new `scene.contInfo` (serial→{g,name,hue}) from `world.items` + tiledata, since the browser has neither. **Deliberate divergences:** we keep a slim title bar in both modes (ClassicUO's authentic gump is chromeless, but our DOM window needs a drag/close surface); the general grid mode is our own (ClassicUO has only the corpse `GridLootGump`); still no per-gump bounds clamp. `ContainerScale` (Options 50–200%, chess/backgammon gumps `0x091A`/`0x092E` stay 1×) and the authentic corpse blink-eye (gump `0x45`/`0x46`, 750ms) landed with the GameActions batch. Minimize/iconize landed later — see the closed note after this table. A server-only 0x24 with no local `openContainer` (a banker's box) still opens no window — pre-existing, out of scope | M |
+| ~~Container windows: sized wrong, no type, one-mode~~ — **CLOSED, live-verified** | Follow-up to the row above, all three verified live. (1) The window was a fixed 252px, clipping a wide gump (a 282px game board) and guttering a narrow one; it now sizes to the gump texture (learned from the loaded `<img>`, cached per gump id), like ClassicUO's `ContainerGump`. (2) A late 0x24 (gump id arriving after the item set was stable) never re-rendered because `containerSignature` hashed only items; it now includes the gump id, the container graphic/name, and the view toggles. (3) A new **grid mode** (`settings.gridContainers`, default off = authentic) shows the container's own icon + tiledata name in the title bar so a pouch reads differently from a backpack — which the authentic mode *cannot* distinguish because ServUO gives both gump 0x3C. The name/graphic are resolved server-side into a new `scene.contInfo` (serial→{g,name,hue}) from `world.items` + tiledata, since the browser has neither. **Deliberate divergences:** we keep a slim title bar in both modes (ClassicUO's authentic gump is chromeless, but our DOM window needs a drag/close surface); the general grid mode is our own (ClassicUO has only the corpse `GridLootGump`); still no per-gump bounds clamp. `ContainerScale` (Options 50–200%, chess/backgammon gumps `0x091A`/`0x092E` stay 1×) and the authentic corpse blink-eye (gump `0x45`/`0x46`, 750ms) landed with the GameActions batch. Minimize/iconize landed later — see the closed note after this table. The line this row used to carry — "a server-only 0x24 with no local `openContainer` (a banker's box) still opens no window" — was **wrong**; see the note below | M |
 | ~~Window management~~ — **CLOSED, live-verified** | Every draggable panel — the dynamic windows from `makeWindowFrame` *and* the static ones (paperdoll, spellbook, skills, options, macros) — now **remembers where it was left** and comes back inside the viewport, because the persistence lives in `makeDraggable`, the one function they all already went through. Keyed by element id or class, never by serial: a serial is per-corpse/per-bag and never returns, so "the next container opens where I put the last one" is the only memory worth having (ClassicUO's per-type defaults do the same). Windows are clamped on restore and on browser resize, and a position saved on a bigger screen is **written back clamped**, so it heals instead of being re-clamped forever. `resize: both` is opt-in per window (bulletin board, server gumps, plus the journal from the row above) — deliberately not on the map or an authentic container, whose layout is in the server's own pixel space | M |
 
 Closed 2026-08-20 (container minimize/iconize): the leftover on the container-windows
@@ -781,6 +781,48 @@ backgammon have no icon. A press that moved ≥5 px is a window drag, not a
 minimize, matching `MIN_PICKUP_DRAG_DISTANCE_PIXELS`; a held cursor item blocks
 it (`ItemHold.Enabled`). Minimized state lives on the window object, not in
 `containerSignature`, so the poll cannot fight the player.
+
+Closed 2026-08-24 (server-opened containers): the "a banker's box still opens no
+window" line on the row above was a **misdiagnosis**, and this is the correction
+rather than a fix for what it claimed. The 0x24 path has been whole since the
+vendor/container packet pack (2026-07-11): `draw_container` records the open,
+`container_opens_json` filters the two overloads out of it, and the browser's
+`ingestContainerOpens` (`web/js/08-overlays.js`) calls the same `openContainer`
+a double-click does. Driving the real `web/js/*.js` through a fake DOM with a
+scene carrying only a server 0x24 — no local open anywhere — builds the window,
+titles it, draws gump `0x4A` and fills it, and it survives the next two polls.
+What was actually broken in August was one layer earlier: ServUO's banker keys
+entirely off `e.Keywords` (`Scripts/Mobiles/NPCs/Banker.cs:323`, a `foreach` over
+the keyword array — it never string-matches "bank"), and this client only started
+encoding `speech.mul` keywords onto 0xAD three days after that row was written
+(9f4773d, 2026-08-17). Until then no keyword reached the banker, `BankBox.Open`
+never ran, and **no 0x24 was ever sent** — so the absent window was blamed on the
+window layer. Pinned offline now at both testable seams:
+`draw_container_retains_the_art_a_server_opened_window_draws_from` (anima-core)
+and `a_server_only_container_open_carries_both_halves_the_window_needs`
+(anima-net), the second because it takes *two* fields to make that window
+visible — `containerOpens` to open it and `contGumps` to give it art — and losing
+either reads to a player as "nothing happened".
+
+One real hole did come out of the investigation and is fixed: `refreshContainer`
+read a missing `contGumps` entry and an entry of **0** as the same thing, and
+parked both in the chromeless "0x24 hasn't landed yet" placeholder — which is
+transparent, so invisible. For a server-initiated open there is by definition
+nothing left to wait for, so a shard that answers `Container.GumpID` 0 hung an
+invisible window forever. Presence now decides the wait (and `containerSignature`
+distinguishes the two states, or the window could never re-render out of it); a
+named gump of 0 falls through to the grid, the same fallback a missing gump
+texture already took. Still open, deliberately: the WASM page (`/?wasm=1`) opens
+no server-initiated container at all — `Observation` **excludes**
+`recent_container_opens` on purpose ("a window-opening UI signal",
+`anima-contract-json/src/lib.rs`), so `14-wasm.js` hardcodes `containerOpens: []`
+and `contGumps: {}`. Reversing that is a contract schema decision, not a renderer
+one. ClassicUO's own chain, for the record: `PacketHandlers.cs:206`
+`Handler.Add(0x24, OpenContainer)` → `OpenContainer` (:1305) → `0xFFFF`
+`SpellbookGump` / `0x0030` `ShopGump` / else `new ContainerGump(world, item,
+graphic, playsound)` (:1516) — and note ClassicUO is **stricter** than we are
+there, dropping the packet outright when `world.Items.Get(serial) == null`
+("[OpenContainer]: item not found", :1540).
 
 ---
 
@@ -1595,3 +1637,79 @@ while layers 0x03/0x05/0x0B/0x15 and the shop containers 0x1A/0x1B survived,
 and the Buy window still opened with all four prices resolved to concrete
 serials through `cont: 0x400177C3` — the very layer-0x1A container the sweep
 had to leave alone.
+
+---
+
+Closed 2026-08-24 (night, and the projectile that never burst): two defects
+found by re-reading ClassicUO against shipped code rather than against the
+backlog, which was empty. Neither is a missing feature; both are wire fields we
+already had and used wrongly.
+
+**1. The two light levels are on opposite scales, and we compared them.**
+`World::effective_light` combined 0x4F and 0x4E as `min(overall, personal)` on
+the reasoning that "lower = brighter, so `min` picks the brighter". That is true
+of 0x4F alone and false of the pair. ClassicUO's `IsometricLight::Recalculate`
+is explicit, comment included: `int reverted = 32 - Overall; // if overall is 0,
+we have MAXIMUM light`, then `current = Personal > reverted ? Personal :
+reverted` and `IsometricLevel = current * 0.03125f`. So **0x4F is a darkness and
+0x4E is a brightness floor** — the thing Night Sight raises — and the client
+combines them as a *brightness*, `max(personal, 32 - overall) / 32`. We now
+compute `32 - max(personal, 32 - overall)` and keep one "higher = darker" scale
+end to end, so nothing downstream had to change.
+
+What that cost: ServUO's `PlayerMobile::CheckLightLevels` sends 0x4E paired with
+**every** 0x4F, and `ComputeBaseLightLevels` sets `personal = m_LightLevel`,
+which is 0 for any character without Night Sight. Once one such packet was
+accepted, `min(overall, 0)` pinned the scene to 0 forever: no dusk, no night, no
+dungeon, and the whole `light.mul` shape-and-colour pass — which only runs
+behind `if (fxTint > 0.05)` — never executed again. And where it did fire it was
+backwards: Night Sight *lowered* the result. Note this does not retract the
+`light.mul` row above; that measurement was real. It means the darkness it
+depends on had been dying as soon as the server resent a personal light.
+
+Live A/B on the shard, at night (`overall` 12). ServUO's `[light N` sets
+`e.Mobile.LightLevel` (`Handlers.cs:506`) — the **personal** level, not the
+global, which is what makes it the right probe here:
+
+| probe | `scene.light` now | under `min(...)` |
+|---|---|---|
+| no personal light (plain night) | **12** — dark | 0 — full daylight |
+| `[light 25` (Night Sight) | **7** — brighter | 12 — no change, or darker |
+| `[light 0` (dispelled) | **12** — dark again | 0 |
+
+`32 - max(25, 32 - 12) = 7` and `32 - max(0, 20) = 12`, matching ClassicUO
+exactly. The browser's tint was on the wrong denominator too (`light / 0x1F`
+against a 32-step scale) and its coefficient was never exercised; it is now
+`min(FX_MAX_NIGHT, light / 32)`, because a near-black overlay at alpha `a`
+approximates ClassicUO's multiply-by-`1 - a`. `FX_MAX_NIGHT` survives as a
+**cap**, not a scale: we draw far fewer light sources than ClassicUO, so an
+authentic 0.97 at the darkest dungeon level would be unreadable.
+
+**2. `doesExplode` was skipped, so nothing burst on impact.** 0x70/0xC0/0xC7
+carry an explode byte that `effects.rs` dropped with `r.skip(1)`, so explosion
+potions, explosive bolts and snowballs flew to the target and simply stopped —
+losing the visual confirmation that the thing landed. ClassicUO keeps it as
+`CanCreateExplosionEffect` and spawns the burst **client-side** in
+`MovingEffect::RemoveMe` → `FixedEffect(0x36CB, Hue, 400, 0)` at the target,
+inheriting the blend. So the core only carries the flag (`Effect::explodes`) and
+the browser owns the spawn, which is the D3 line. One wrinkle: the browser has
+no `animdata.mul` to animate `0x36CB` from, so the burst's frame list rides
+along on the effect that causes it (`exFrames`/`exInterval`, emitted only when
+`explodes` is set rather than on every effect in the feed).
+
+The neighbouring `fixedDir` byte stays skipped **on purpose**: ClassicUO reads it
+into `MovingEffect.FixedDir` and then never uses it anywhere in the client, so
+our unconditional rotation already matches its real behaviour. The parser test
+therefore sets `fixedDir` non-zero while varying explode, so a future off-by-one
+between the two is caught.
+
+**Verification, honestly.** The light fix is live-verified on the shard (table
+above). The explode fix is **not**: it is pinned offline at both seams — the
+parser (`graphic_effect_explode_byte_is_retained`, three byte values plus the
+neighbouring fields) and the scene emitter
+(`an_exploding_effect_carries_the_burst_the_browser_has_to_draw`, which also
+asserts an ordinary effect ships neither key) — but the burst was not seen drawn
+in a browser. ServUO has only three `explodes: true` call sites
+(`SnowPile`, `PileOfGlacialSnow`, pet-training `SpecialAbility`), and all three
+need a target that is itself carrying snow, which did not survive headless
+driving. Worth a look the next time a real client session is up.

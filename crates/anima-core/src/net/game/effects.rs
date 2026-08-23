@@ -14,7 +14,8 @@ use super::*;
 /// [explode:u8]`. 0xC0 (36 B) then adds `[hue:u32][renderMode:u32]`; 0xC7 (49 B)
 /// adds 13 further particle bytes the 2D client ignores (rendered like 0xC0).
 /// `hued` = false for 0x70 (hue forced to 0), true for 0xC0/0xC7 (low 16 bits of
-/// the hue u32). Ported from ClassicUO `PacketHandlers.GraphicEffect`.
+/// the hue u32). `explode` is retained — a moving effect carrying it bursts on
+/// impact (see [`Effect::explodes`]). Ported from ClassicUO `PacketHandlers.GraphicEffect`.
 pub(super) fn graphic_effect(world: &mut World, frame: &[u8], hued: bool) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     let kind = r.u8()?;
@@ -30,11 +31,14 @@ pub(super) fn graphic_effect(world: &mut World, frame: &[u8], hued: bool) -> PRe
     let speed = r.u8()?;
     let duration = r.u8()?;
     r.skip(2)?; // unknown
+    // `fixedDir` stays skipped on purpose: ClassicUO reads it into
+    // `MovingEffect::FixedDir` and then never uses it anywhere in the client, so
+    // our unconditional rotation already matches its real behaviour.
     r.skip(1)?; // fixed direction
-    r.skip(1)?; // explode flag
-                // 0xC0/0xC7 carry a 32-bit hue (only the low 16 bits matter) and a
-                // renderMode u32 ClassicUO takes as `GraphicEffectBlendMode` via `% 7`.
-                // 0xC7's further particle extras are Enhanced-Client-only.
+    let explodes = r.u8()? != 0;
+    // 0xC0/0xC7 carry a 32-bit hue (only the low 16 bits matter) and a
+    // renderMode u32 ClassicUO takes as `GraphicEffectBlendMode` via `% 7`.
+    // 0xC7's further particle extras are Enhanced-Client-only.
     let hue = if hued { r.u32()? as u16 } else { 0 };
     let blend = if hued { (r.u32()? % 7) as u8 } else { 0 };
     world.push_effect(Effect {
@@ -53,6 +57,7 @@ pub(super) fn graphic_effect(world: &mut World, frame: &[u8], hued: bool) -> PRe
         duration,
         hue,
         blend,
+        explodes,
     });
     Ok(())
 }
@@ -144,8 +149,10 @@ pub(super) fn overall_light(world: &mut World, frame: &[u8]) -> PResult<()> {
 }
 
 /// 0x4E PersonalLightLevel — `[id][serial:u32][level:u8]` (6 bytes). Stored only
-/// for our own character; combined with the overall level in
-/// [`World::effective_light`].
+/// for our own character. Unlike 0x4F this is a *brightness* floor (0 = none,
+/// raised by Night Sight), so it cannot be compared with the overall level
+/// directly — see [`World::effective_light`]. ServUO sends it on every light
+/// change, with level 0 for a character that has no personal light.
 pub(super) fn personal_light(world: &mut World, frame: &[u8]) -> PResult<()> {
     let mut r = PacketReader::new(&frame[1..]);
     let serial = r.u32()?;

@@ -290,6 +290,12 @@ pub struct Effect {
     /// 0xC0/0xC7 `renderMode % 7` (ClassicUO `GraphicEffectBlendMode`).
     /// 0x70 has no field and stays 0 = Normal.
     pub blend: u8,
+    /// The packet's `explode` byte: a moving effect that should burst when it
+    /// lands. ClassicUO keeps this as `CanCreateExplosionEffect` and, in
+    /// `MovingEffect::RemoveMe`, spawns a second `FixedEffect(0x36CB)` at the
+    /// target — so the burst is a *client-side* follow-up to one packet, not a
+    /// second packet. Renderers own that spawn; the core only carries the flag.
+    pub explodes: bool,
 }
 
 /// One server acknowledgement that ends an item-drag operation. ClassicUO
@@ -1186,7 +1192,8 @@ pub struct World {
     /// Overall light level (0x4F): 0 = brightest day, ~0x1F darkest night.
     pub light_level: u8,
     /// The player's personal light level (0x4E), if the server has sent one.
-    /// Combined with `light_level` via [`World::effective_light`].
+    /// This is a *brightness floor* (Night Sight raises it), the opposite
+    /// scale from `light_level`. Combined via [`World::effective_light`].
     pub personal_light: Option<u8>,
     /// Current weather (0x65). See [`Weather`].
     pub weather: Weather,
@@ -2199,14 +2206,29 @@ impl World {
         self.waypoints.insert(waypoint.serial, waypoint);
     }
 
-    /// The light level the renderer should use: the brighter (lower) of the
-    /// overall level and the player's personal light, when a personal light is
-    /// active. Lower = brighter, so `min` picks the brighter of the two.
+    /// The darkness the renderer should apply: 0 = brightest day, 0x1F+ = darkest.
+    ///
+    /// The two levels are on *opposite* scales, which is the whole subtlety
+    /// here. 0x4F `light_level` is a darkness (0 = noon); 0x4E `personal_light`
+    /// is a brightness floor that Night Sight raises. ClassicUO
+    /// (`IsometricLight::Recalculate`) combines them as a brightness
+    /// `max(personal, 32 - overall) / 32`; we invert that back to a darkness so
+    /// the renderer keeps one "higher = darker" scale end to end.
+    ///
+    /// The previous `min(overall, personal)` was wrong in both directions.
+    /// ServUO's `PlayerMobile::CheckLightLevels` always sends 0x4E paired with
+    /// 0x4F, and `personal` is 0 for anyone without Night Sight — so the `min`
+    /// pinned the result to 0 and night, dusk and dungeons never darkened at
+    /// all. When Night Sight *was* up it took the `min` the other way and
+    /// darkened the scene instead of brightening it.
     pub fn effective_light(&self) -> u8 {
-        match self.personal_light {
-            Some(p) => self.light_level.min(p),
-            None => self.light_level,
-        }
+        // Mirrors ClassicUO's constant: light runs over 32 steps, not 31.
+        const STEPS: u8 = 32;
+        let personal = self.personal_light.unwrap_or(0);
+        let brightness = personal
+            .max(STEPS.saturating_sub(self.light_level))
+            .min(STEPS);
+        STEPS - brightness
     }
 
     /// Add or refresh a buff icon (0xDF action=add). Upserts by `icon`.

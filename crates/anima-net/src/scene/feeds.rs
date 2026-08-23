@@ -148,6 +148,16 @@ pub(super) fn damage_json(world: &World) -> Vec<Value> {
 /// Graphical effects (0x70/0xC0/0xC7): spell bolts, hit sparkles, explosions,
 /// fields. The ART tile-id animation sequence + per-frame interval are resolved
 /// here from `animdata.mul` so the client just cycles `frames`.
+///
+/// An effect whose `explode` byte was set bursts when it lands, which ClassicUO
+/// does client-side by spawning a second `FixedEffect(0x36CB)` at the target
+/// (`MovingEffect::RemoveMe`). The browser owns that spawn but has no
+/// `animdata.mul`, so the burst's own frame list rides along on the effect that
+/// causes it — `exFrames`/`exInterval`, present only when `explodes` is true.
+/// The burst ClassicUO spawns at a moving effect's impact point
+/// (`GameEffect::CreateExplosionEffect`), for 400 ms at speed 0.
+const EXPLOSION_GRAPHIC: u16 = 0x36CB;
+
 pub(super) fn effects_json(world: &World, animdata: Option<&AnimData>) -> Vec<Value> {
     world
         .recent_effects
@@ -157,13 +167,26 @@ pub(super) fn effects_json(world: &World, animdata: Option<&AnimData>) -> Vec<Va
                 Some(ad) => (ad.frame_sequence(e.graphic), ad.frames(e.graphic).1),
                 None => (vec![e.graphic], 0u8),
             };
-            json!({
+            let mut v = json!({
                 "seq": e.seq, "kind": e.kind, "src": e.src_serial, "tgt": e.tgt_serial,
                 "sx": e.sx, "sy": e.sy, "sz": e.sz, "tx": e.tx, "ty": e.ty, "tz": e.tz,
                 "g": e.graphic, "hue": e.hue, "blend": e.blend,
                 "speed": e.speed, "dur": e.duration,
                 "frames": frames, "interval": interval
-            })
+            });
+            if e.explodes {
+                let (ex_frames, ex_interval) = match animdata {
+                    Some(ad) => (
+                        ad.frame_sequence(EXPLOSION_GRAPHIC),
+                        ad.frames(EXPLOSION_GRAPHIC).1,
+                    ),
+                    None => (vec![EXPLOSION_GRAPHIC], 0u8),
+                };
+                v["explodes"] = json!(true);
+                v["exFrames"] = json!(ex_frames);
+                v["exInterval"] = json!(ex_interval);
+            }
+            v
         })
         .collect()
 }

@@ -1621,6 +1621,39 @@ fn graphic_effect_0x70_parsed() {
     assert_eq!((e.sx, e.sy, e.sz), (100, 200, 5));
     assert_eq!((e.tx, e.ty, e.tz), (110, 210, 5));
     assert_eq!((e.speed, e.duration, e.hue, e.blend), (7, 30, 0, 0));
+    assert!(!e.explodes); // the byte was 0 above
+}
+
+/// The `explode` byte decides whether a projectile bursts where it lands
+/// (ClassicUO `MovingEffect::RemoveMe` → `FixedEffect(0x36CB)`). It sits right
+/// after `fixedDir`, so reading it also pins that neighbour's offset.
+#[test]
+fn graphic_effect_explode_byte_is_retained() {
+    for (byte, want) in [(0u8, false), (1, true), (0xFF, true)] {
+        let mut w = World::new();
+        let mut p = PacketWriter::new();
+        p.u8(0x70)
+            .u8(0) // type = Moving
+            .u32(0xAAAA)
+            .u32(0xBBBB)
+            .u16(0x36D4)
+            .u16(100)
+            .u16(200)
+            .u8(5i8 as u8)
+            .u16(110)
+            .u16(210)
+            .u8(5i8 as u8)
+            .u8(7) // speed
+            .u8(30) // duration
+            .u16(0) // unknown
+            .u8(3) // fixed direction — deliberately non-zero, must not be read
+            .u8(byte); // explode
+        assert!(apply_packet(&mut w, &p.into_vec()));
+        let e = w.recent_effects.last().expect("effect queued");
+        assert_eq!(e.explodes, want, "explode byte {byte:#04X}");
+        // The neighbouring bytes must be unaffected by the shifted read.
+        assert_eq!((e.speed, e.duration), (7, 30));
+    }
 }
 
 #[test]
@@ -1711,19 +1744,44 @@ fn overall_light_level_stored() {
 fn personal_light_combines_with_overall() {
     let mut w = World::new();
     w.player = Some(crate::types::Serial(0x42));
-    w.light_level = 0x18;
-    // Personal light for us is brighter (lower) → wins via min().
+    w.light_level = 0x18; // dusk
+                          // Night Sight: a personal light bright enough to beat `32 - overall`
+                          // lifts the scene. 32 - max(25, 32 - 24) = 7.
     let mut p = PacketWriter::new();
-    p.u8(0x4E).u32(0x42).u8(0x08);
+    p.u8(0x4E).u32(0x42).u8(25);
     assert!(apply_packet(&mut w, &p.into_vec()));
-    assert_eq!(w.personal_light, Some(0x08));
-    assert_eq!(w.effective_light(), 0x08);
+    assert_eq!(w.personal_light, Some(25));
+    assert_eq!(w.effective_light(), 7);
 
     // A personal light for someone else is ignored.
     let mut q = PacketWriter::new();
     q.u8(0x4E).u32(0x99).u8(0x00);
     assert!(apply_packet(&mut w, &q.into_vec()));
-    assert_eq!(w.personal_light, Some(0x08));
+    assert_eq!(w.personal_light, Some(25));
+}
+
+/// Regression: ServUO pairs 0x4E with every 0x4F and sends personal = 0 for a
+/// character with no Night Sight. Combining the two with `min` pinned the
+/// result to 0, so night never darkened; combining them as ClassicUO does
+/// leaves the overall level untouched.
+#[test]
+fn zero_personal_light_does_not_cancel_the_night() {
+    let mut w = World::new();
+    w.player = Some(crate::types::Serial(0x42));
+    for overall in [0x00u8, 0x0C, 0x18, 0x1A] {
+        let mut p = PacketWriter::new();
+        p.u8(0x4F).u8(overall);
+        assert!(apply_packet(&mut w, &p.into_vec()));
+        let mut q = PacketWriter::new();
+        q.u8(0x4E).u32(0x42).u8(0x00);
+        assert!(apply_packet(&mut w, &q.into_vec()));
+        assert_eq!(w.effective_light(), overall, "overall {overall:#04X}");
+    }
+
+    // A personal light weaker than the ambient brightness changes nothing.
+    w.light_level = 0x0C;
+    w.personal_light = Some(4);
+    assert_eq!(w.effective_light(), 0x0C);
 }
 
 #[test]
@@ -3304,6 +3362,44 @@ fn draw_container_records_vendor_buy_and_spellbook_gump_ids_too() {
     assert_eq!(
         w.recent_container_opens.last(),
         Some(&(2, 0x4000_0066, 0xFFFF))
+    );
+}
+
+#[test]
+fn draw_container_retains_the_art_a_server_opened_window_draws_from() {
+    // A container the server opens on its own (a banker's box: `BankBox.Open`
+    // → `Container.DisplayTo`, ServUO `Server/Items/Containers.cs`) is the case
+    // the capped event ring alone cannot serve. Nothing local asked for that
+    // window, so it is built from the 0x24 itself — and it has to keep drawing
+    // for as long as it stays open, long after the event has aged out. That is
+    // what `container_gumps` is for; assert the SAME packet fills both.
+    let mut w = World::new();
+    const BANK: u32 = 0x4000_0123;
+    // ServUO gives a bank box (item 0xE7C) gump 0x4A — `Data/containers.cfg`.
+    let mut p = PacketWriter::new();
+    p.u8(0x24).u32(BANK).u16(0x004A).u16(0x007D);
+    assert!(apply_packet(&mut w, &p.into_vec()));
+    assert_eq!(w.recent_container_opens.last(), Some(&(1, BANK, 0x004A)));
+    assert_eq!(w.container_gumps.get(&BANK), Some(&0x004A));
+
+    // Push the open out of the ring — a busy bag-of-bags session does this in
+    // seconds — and the window must still know what to draw. 32 is comfortably
+    // past `MAX_RECENT_CONTAINER_OPENS`, which is private to `world`.
+    for i in 0..32u32 {
+        let mut q = PacketWriter::new();
+        q.u8(0x24).u32(0x4000_1000 + i).u16(0x003C).u16(0x007D);
+        assert!(apply_packet(&mut w, &q.into_vec()));
+    }
+    assert!(
+        !w.recent_container_opens
+            .iter()
+            .any(|&(_, serial, _)| serial == BANK),
+        "the event ring is expected to age out — that is why the id is retained"
+    );
+    assert_eq!(
+        w.container_gumps.get(&BANK),
+        Some(&0x004A),
+        "the still-open window would go blank without this"
     );
 }
 

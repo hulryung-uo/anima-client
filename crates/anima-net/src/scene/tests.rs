@@ -279,6 +279,64 @@ fn container_opens_json_skips_vendor_buy_and_spellbook_gump_ids() {
 }
 
 #[test]
+fn a_server_only_container_open_carries_both_halves_the_window_needs() {
+    // The banker's-box case: no local `openContainer` ever ran (the box is on
+    // the player's Bank layer, not something in view to double-click), so the
+    // ONLY thing that puts a window on screen is 0x24 → `containerOpens` →
+    // `ingestContainerOpens` → `openContainer` (web/js/08-overlays.js). Two
+    // scene fields have to agree for that window to be *visible*, and losing
+    // either one reads to a player as "nothing opened":
+    //
+    //   * `containerOpens` names the serial, or nothing is opened at all;
+    //   * `contGumps` names the SAME serial, or `refreshContainer` parks the
+    //     window in its "0x24 hasn't landed yet" placeholder — chromeless and
+    //     transparent, i.e. invisible (web/js/10-housing.js).
+    //
+    // ClassicUO does both in one step, which is why it cannot drift apart
+    // there: `PacketHandlers.cs:1305` `OpenContainer` passes the packet's
+    // `graphic` straight into `new ContainerGump(world, item, graphic,
+    // playsound)`. We split it because the gump id is retained state and the
+    // open is an event (see [`anima_core::world::World::container_gumps`]), so
+    // it is worth pinning that the split stays consistent.
+    let mut w = World::default();
+    // ServUO gives a bank box (item 0xE7C) gump 0x4A — `Data/containers.cfg`.
+    const BANK: u32 = 0x4000_0123;
+    w.push_container_open(BANK, 0x004A);
+
+    assert_eq!(
+        container_opens_json(&w),
+        json!([{ "seq": 1, "serial": BANK }]),
+        "a server-initiated open must reach the renderer as an open event"
+    );
+    assert_eq!(
+        w.container_gumps.get(&BANK),
+        Some(&0x004A),
+        "…and the same 0x24 must leave behind the art the window draws from"
+    );
+    // `contInfo` covers the serial too, even though a bank box is not an item
+    // this client necessarily holds — see `container_info_resolves_graphic_and_
+    // falls_back` for the g=0/no-name degradation that keeps the entry present.
+    let look = Look {
+        map: None,
+        anim: None,
+        animdata: None,
+        tileart: None,
+    };
+    assert!(container_info_json(&w, &look).contains_key(&BANK.to_string()));
+
+    // The two overloads stay excluded (see `container_opens_json_skips_vendor_
+    // buy_and_spellbook_gump_ids`) — but note they still land in the retained
+    // map, because that filter is the *open-a-window* policy, not a claim about
+    // what 0x24 said.
+    w.push_container_open(0x1000_0055, GUMP_ID_VENDOR_BUY);
+    assert_eq!(
+        container_opens_json(&w),
+        json!([{ "seq": 1, "serial": BANK }]),
+        "a vendor buy list must not add a second container window"
+    );
+}
+
+#[test]
 fn drag_completions_json_preserves_packet_and_optional_token() {
     let mut w = World::default();
     assert_eq!(drag_completions_json(&w), json!([]));
@@ -3549,4 +3607,51 @@ fn terrain_window_emits_map_around_britain_bank() {
         v["map"]["tiles"].as_array().map(|a| a.len()).unwrap_or(0) > 100,
         "land window should be the LAND_RADIUS square"
     );
+}
+
+/// The `explode` byte has to survive all the way into the scene, and it has to
+/// bring the burst's own frame list with it: the browser spawns ClassicUO's
+/// follow-up `FixedEffect(0x36CB)` itself (`MovingEffect::RemoveMe`) but has no
+/// `animdata.mul` to animate it from. Losing either half reads to a player as a
+/// projectile that lands and does nothing.
+#[test]
+fn an_exploding_effect_carries_the_burst_the_browser_has_to_draw() {
+    let mut w = World::default();
+    let base = anima_core::world::Effect {
+        seq: 0,
+        kind: 0, // Moving
+        src_serial: 0xAAAA,
+        tgt_serial: 0xBBBB,
+        graphic: 0x36E4,
+        sx: 100,
+        sy: 200,
+        sz: 5,
+        tx: 110,
+        ty: 210,
+        tz: 5,
+        speed: 7,
+        duration: 0,
+        hue: 0x480,
+        blend: 0,
+        explodes: true,
+    };
+    w.push_effect(base);
+    w.push_effect(anima_core::world::Effect {
+        explodes: false,
+        ..base
+    });
+
+    let v = effects_json(&w, None);
+    let arr = v.as_slice();
+    assert_eq!(arr.len(), 2);
+
+    // The exploding one carries the flag and a usable frame list.
+    assert_eq!(arr[0]["explodes"], true);
+    assert_eq!(arr[0]["exFrames"], json!([0x36CB]), "no animdata → the bare id");
+    assert!(arr[0]["exInterval"].is_number());
+
+    // The ordinary one stays silent rather than shipping a false + dead frames
+    // to every effect in the feed.
+    assert!(arr[1].get("explodes").is_none());
+    assert!(arr[1].get("exFrames").is_none());
 }

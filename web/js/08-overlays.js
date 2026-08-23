@@ -529,7 +529,10 @@ function spawnEffect(ev, now) {
   }
   overLayer.addChild(sprite);
   fxEffects.push({ kind: ev.kind | 0, src: ev.src >>> 0, tgt: ev.tgt >>> 0,
-    frames, fm, hue, born: now, totalMs, sprite, srcPos, tgtPos, pserial });
+    frames, fm, hue, born: now, totalMs, sprite, srcPos, tgtPos, pserial,
+    // Kept for the impact burst below; `exFrames` only arrives when it is due.
+    explodes: !!ev.explodes, blend: ev.blend | 0,
+    exFrames: ev.exFrames, exInterval: ev.exInterval | 0 });
   // Bound the pool so a burst of effects can't leak sprites.
   while (fxEffects.length > 48) { const o = fxEffects.shift(); overLayer.removeChild(o.sprite); o.sprite.destroy(); }
   markDirty();
@@ -554,12 +557,40 @@ function spawnDragAnim(ev, now) {
   markDirty();
 }
 
+// The impact burst for an `explode` moving effect. Fixed at the target for
+// ClassicUO's 400 ms, drawn as a kind-2 (FixedXYZ) entry so `drawEffects` keeps
+// it pinned to `srcPos` — which for the burst *is* the impact point.
+const FX_EXPLODE_MS = 400;
+function spawnImpactBurst(o, now) {
+  const frames = (o.exFrames && o.exFrames.length) ? o.exFrames : [0x36CB];
+  const fm = (o.exInterval | 0) > 0 ? Math.min(150, Math.max(50, (o.exInterval | 0) * 50)) : 80;
+  const sprite = new PIXI.Sprite();
+  sprite.anchor.set(0.5, 1.0);
+  sprite.blendMode = effectBlendMode(o.blend | 0, 2);
+  overLayer.addChild(sprite);
+  fxEffects.push({
+    kind: 2, src: o.src, tgt: o.tgt, frames, fm, hue: o.hue, born: now,
+    totalMs: Math.max(FX_EXPLODE_MS, frames.length * fm), sprite,
+    srcPos: o.tgtPos, tgtPos: o.tgtPos, pserial: o.pserial
+  });
+  while (fxEffects.length > 48) { const x = fxEffects.shift(); overLayer.removeChild(x.sprite); x.sprite.destroy(); }
+  markDirty();
+}
+
 // Animate + position each active effect; expire (and free) when its life ends.
 function drawEffects(now) {
   for (let i = fxEffects.length - 1; i >= 0; i--) {
     const o = fxEffects[i];
     const age = now - o.born;
-    if (age >= o.totalMs) { overLayer.removeChild(o.sprite); o.sprite.destroy(); fxEffects.splice(i, 1); continue; }
+    if (age >= o.totalMs) {
+      overLayer.removeChild(o.sprite); o.sprite.destroy(); fxEffects.splice(i, 1);
+      // A moving effect that carried the packet's `explode` byte bursts where it
+      // landed. ClassicUO does exactly this in `MovingEffect.RemoveMe` → a second
+      // `FixedEffect(0x36CB, Hue, 400, 0)` at the target, inheriting the blend —
+      // so the burst is our own follow-up to one packet, not a second packet.
+      if (o.kind === 0 && o.explodes && !o.drag) spawnImpactBurst(o, now);
+      continue;
+    }
 
     let px, py, pz;
     if (o.kind === 0) {

@@ -153,7 +153,7 @@ async function main() {
 // rain/snow animate continuously. Reads only the latest polled `scene`.
 let fxCanvas = null, fxCtx = null, fxParticles = [], fxTint = 0, fxKind = -1, fxLastT = 0;
 const FX_MAX_PARTICLES = 60; // hard cap regardless of weatherN
-const FX_MAX_NIGHT = 0.6;    // tint opacity at the darkest light level
+const FX_MAX_NIGHT = 0.6;    // cap on the night tint (see the target calc below)
 
 function initFx() {
   fxCanvas = document.getElementById("fx");
@@ -186,7 +186,11 @@ function fxFrame(now) {
 
   // --- night tint: light 0 = full day (no tint) → ~0x1F darkest ---
   const light = scene ? (scene.light || 0) : 0;
-  const target = Math.min(FX_MAX_NIGHT, (light / 0x1F) * FX_MAX_NIGHT);
+  // ClassicUO multiplies the world by a brightness of `1 - light/32`; a near-black
+  // overlay at alpha `a` approximates a multiply by `1 - a`, so `light/32` is the
+  // authentic opacity. FX_MAX_NIGHT then caps it: we draw far fewer light sources
+  // than ClassicUO does, so the darkest dungeon levels would be unreadable.
+  const target = Math.min(FX_MAX_NIGHT, light / 32);
   fxTint += (target - fxTint) * Math.min(1, dt / 400); // smooth dawn/dusk glide
   if (fxTint > 0.003) {
     ctx.fillStyle = "rgba(8, 14, 40, " + fxTint.toFixed(3) + ")";

@@ -630,7 +630,12 @@ function containerSignature(scene, serial) {
   // be in the signature or `syncDialogFamily` skips the redraw. Bug found live:
   // a late 0x24 arriving after the items were stable left the window stuck as a
   // grid because the item-only signature never changed.
-  const gid = (scene && scene.contGumps && scene.contGumps[String(serial)]) | 0;
+  // "?" when 0x24 has not named this container yet, which is a DIFFERENT state
+  // from a named gump id of 0 (see `refreshContainer`'s `gumpKnown`). Folding
+  // both to 0 would leave the signature unchanged when the id finally lands, so
+  // the wait branch would never re-render out of its invisible placeholder.
+  const g = scene && scene.contGumps && scene.contGumps[String(serial)];
+  const gid = g === undefined ? "?" : g | 0;
   const info = (scene && scene.contInfo && scene.contInfo[String(serial)]) || {};
   const head = `${gid}:${info.g | 0}:${info.name || ""}:${settings.gridContainers ? 1 : 0}:${settings.gridLoot ? 1 : 0}:${settings.containerScale | 0}`;
   return head + "|" + ((scene && scene.contItems) || [])
@@ -667,6 +672,15 @@ function refreshContainer(serial) {
   // 78-entry table to be ported and cannot disagree with the server about
   // where the item actually is.
   const gump = (scene && scene.contGumps && scene.contGumps[String(serial)]) | 0;
+  // Did 0x24 actually NAME a gump for this container, or have we simply not
+  // heard it yet? `contGumps` is keyed by serial (`World::container_gumps`), so
+  // presence is the answer — not the id being nonzero. Only the second state is
+  // worth waiting on: a server-initiated open (`ingestContainerOpens`) exists
+  // BECAUSE 0x24 arrived, so nothing more is coming even when the id it carried
+  // is 0 (ServUO writes `Container.GumpID`, which a shard can `[set GumpID 0`),
+  // and reading that as "not heard yet" would leave the window chromeless and
+  // transparent — i.e. invisible — for good.
+  const gumpKnown = !!(scene && scene.contGumps && String(serial) in scene.contGumps);
   // ClassicUO plays the OpenSound when the container gump is created — which for
   // us is the moment the 0x24 gump id first arrives (a locally-opened window
   // waits in the pending state below until then). Play it once per open, for
@@ -695,13 +709,13 @@ function refreshContainer(serial) {
     win.minimized = false;
     win.el.classList.remove("cont-iconized");
   }
-  // Until the server's 0x24 gives us the gump id, an authentic container has
-  // nothing to draw. Show an empty chromeless window (transparent → invisible)
-  // rather than flashing the grid and then swapping to the art one poll later —
-  // the signature includes the gump id, so this refresh re-runs the instant it
-  // arrives. Grid mode and corpse-loot have their final look immediately, so
-  // they never hit this wait.
-  if (gump === 0 && !loot && !settings.gridContainers) {
+  // Until the server's 0x24 has NAMED this container at all, an authentic
+  // container has nothing to draw. Show an empty chromeless window
+  // (transparent → invisible) rather than flashing the grid and then swapping
+  // to the art one poll later — the signature carries whether the gump id has
+  // arrived, so this refresh re-runs the instant it does. Grid mode and
+  // corpse-loot have their final look immediately, so they never hit this wait.
+  if (gump === 0 && !gumpKnown && !loot && !settings.gridContainers) {
     win.el.classList.add("cont-authentic");
     body.className = "gump-body cont-art";
     win.el.style.width = ""; body.style.width = "";

@@ -227,8 +227,8 @@ pub struct Observation {
     pub weather: Weather,
     /// Current season (0xBC): 0=Spring, 1=Summer, 2=Fall, 3=Winter, 4=Desolation.
     pub season: u8,
-    /// Effective light level a renderer would use (brighter of the overall and
-    /// personal light — see [`World::effective_light`]); 0 = brightest day,
+    /// Effective darkness a renderer would use (the overall level, lifted by
+    /// any personal light — see [`World::effective_light`]); 0 = brightest day,
     /// ~0x1F darkest night.
     pub light: u8,
     /// Whether the player is in war mode (combat stance). Toggle with
