@@ -3647,7 +3647,11 @@ fn an_exploding_effect_carries_the_burst_the_browser_has_to_draw() {
 
     // The exploding one carries the flag and a usable frame list.
     assert_eq!(arr[0]["explodes"], true);
-    assert_eq!(arr[0]["exFrames"], json!([0x36CB]), "no animdata → the bare id");
+    assert_eq!(
+        arr[0]["exFrames"],
+        json!([0x36CB]),
+        "no animdata → the bare id"
+    );
     assert!(arr[0]["exInterval"].is_number());
 
     // The ordinary one stays silent rather than shipping a false + dead frames

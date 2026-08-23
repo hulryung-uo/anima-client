@@ -692,8 +692,11 @@ function renderFrame(dt) {
   // …then compose every sprite's alpha from its resting value + active sources.
   easeAlphas(dt);
   // Request a redraw only when something is actually animating: self moving (camera
-  // scrolls), a gliding mobile, or floating speech. Idle ⇒ no redraw ⇒ ~0 GPU.
-  if (overLayer.children.length) markDirty();
+  // scrolls), a gliding mobile, or a live effect. Idle ⇒ no redraw ⇒ ~0 GPU.
+  // This used to read `overLayer.children.length`, which worked only because
+  // effects were the sole thing in that layer; they are depth-sorted into
+  // `world` now, so ask the effect pool directly.
+  if (fxEffects.length) markDirty();
   else for (const st of anim.values()) if (st.animMoving || st.act) { markDirty(); break; }
   drawMobs();
   drawOverheads(now);

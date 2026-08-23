@@ -481,6 +481,26 @@ function ingestPaperdoll(s) {
   refreshPaperdoll();
 }
 
+// Effects live in `world`, not on top of it. ClassicUO gives them their own
+// render list but draws every list through the SAME depth buffer, with
+// `GameEffectView.Draw` overriding depth to `Source.CalculateDepthZ() + 1f` — so
+// an effect occludes, and is occluded by, exactly what a mobile on its tile
+// would. Ours used to sit in `overLayer` with no zIndex at all, which painted
+// bolts over walls, roofs and trees; worse, a bolt aimed at someone behind a
+// wall drew over the wall and so revealed a target the roof rule deliberately
+// hides. `mobDepthZ` is the mobile key, so an effect on a mobile clears the
+// statics sharing its tile the same way the mobile itself does; the +1 is
+// ClassicUO's own tie-break, putting the effect just above its source.
+const fxDepthZ = (x, y, z) => mobDepthZ(x, y, z) + 1;
+function fxAdd(sprite) {
+  sprite.eventMode = "none"; // never a click target — `world` children can be
+  world.addChild(sprite);
+}
+function fxRemove(sprite) {
+  world.removeChild(sprite);
+  sprite.destroy();
+}
+
 function spawnEffect(ev, now) {
   let frames = (ev.frames && ev.frames.length) ? ev.frames : [ev.g | 0];
   const hue = ev.hue | 0;
@@ -527,14 +547,15 @@ function spawnEffect(ev, now) {
     const dy = isoY(tgtPos.x, tgtPos.y, tgtPos.z | 0) - isoY(srcPos.x, srcPos.y, srcPos.z | 0);
     sprite.rotation = Math.atan2(-dy, -dx);
   }
-  overLayer.addChild(sprite);
+  fxAdd(sprite);
+  sprite.zIndex = fxDepthZ(srcPos.x, srcPos.y, srcPos.z | 0); // until drawEffects runs
   fxEffects.push({ kind: ev.kind | 0, src: ev.src >>> 0, tgt: ev.tgt >>> 0,
     frames, fm, hue, born: now, totalMs, sprite, srcPos, tgtPos, pserial,
     // Kept for the impact burst below; `exFrames` only arrives when it is due.
     explodes: !!ev.explodes, blend: ev.blend | 0,
     exFrames: ev.exFrames, exInterval: ev.exInterval | 0 });
   // Bound the pool so a burst of effects can't leak sprites.
-  while (fxEffects.length > 48) { const o = fxEffects.shift(); overLayer.removeChild(o.sprite); o.sprite.destroy(); }
+  while (fxEffects.length > 48) { const o = fxEffects.shift(); fxRemove(o.sprite); }
   markDirty();
 }
 
@@ -547,13 +568,14 @@ function spawnDragAnim(ev, now) {
   const totalMs = Math.min(2000, Math.max(200, dist * 80));
   const sprite = new PIXI.Sprite();
   sprite.anchor.set(0.5, 1.0);
-  overLayer.addChild(sprite);
+  fxAdd(sprite);
+  sprite.zIndex = fxDepthZ(srcPos.x, srcPos.y, srcPos.z | 0);
   fxEffects.push({
     kind: 0, src: ev.src >>> 0, tgt: ev.tgt >>> 0,
     frames: [ev.g | 0], fm: 80, hue, born: now, totalMs, sprite,
     srcPos, tgtPos, pserial, drag: true
   });
-  while (fxEffects.length > 48) { const o = fxEffects.shift(); overLayer.removeChild(o.sprite); o.sprite.destroy(); }
+  while (fxEffects.length > 48) { const o = fxEffects.shift(); fxRemove(o.sprite); }
   markDirty();
 }
 
@@ -567,13 +589,14 @@ function spawnImpactBurst(o, now) {
   const sprite = new PIXI.Sprite();
   sprite.anchor.set(0.5, 1.0);
   sprite.blendMode = effectBlendMode(o.blend | 0, 2);
-  overLayer.addChild(sprite);
+  fxAdd(sprite);
+  sprite.zIndex = fxDepthZ(o.tgtPos.x, o.tgtPos.y, o.tgtPos.z | 0);
   fxEffects.push({
     kind: 2, src: o.src, tgt: o.tgt, frames, fm, hue: o.hue, born: now,
     totalMs: Math.max(FX_EXPLODE_MS, frames.length * fm), sprite,
     srcPos: o.tgtPos, tgtPos: o.tgtPos, pserial: o.pserial
   });
-  while (fxEffects.length > 48) { const x = fxEffects.shift(); overLayer.removeChild(x.sprite); x.sprite.destroy(); }
+  while (fxEffects.length > 48) { const x = fxEffects.shift(); fxRemove(x.sprite); }
   markDirty();
 }
 
@@ -583,7 +606,7 @@ function drawEffects(now) {
     const o = fxEffects[i];
     const age = now - o.born;
     if (age >= o.totalMs) {
-      overLayer.removeChild(o.sprite); o.sprite.destroy(); fxEffects.splice(i, 1);
+      fxRemove(o.sprite); fxEffects.splice(i, 1);
       // A moving effect that carried the packet's `explode` byte bursts where it
       // landed. ClassicUO does exactly this in `MovingEffect.RemoveMe` → a second
       // `FixedEffect(0x36CB, Hue, 400, 0)` at the target, inheriting the blend —
@@ -619,6 +642,7 @@ function drawEffects(now) {
 
     o.sprite.x = isoX(px, py);
     o.sprite.y = isoY(px, py, pz) + HALF;
+    o.sprite.zIndex = fxDepthZ(px, py, pz | 0);
     const t = age / o.totalMs;
     o.sprite.alpha = t > 0.66 ? Math.max(0, 1 - (t - 0.66) * 3) : 1; // fade out the tail
   }

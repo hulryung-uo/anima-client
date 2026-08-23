@@ -31,6 +31,7 @@ pub(super) fn graphic_effect(world: &mut World, frame: &[u8], hued: bool) -> PRe
     let speed = r.u8()?;
     let duration = r.u8()?;
     r.skip(2)?; // unknown
+
     // `fixedDir` stays skipped on purpose: ClassicUO reads it into
     // `MovingEffect::FixedDir` and then never uses it anywhere in the client, so
     // our unconditional rotation already matches its real behaviour.

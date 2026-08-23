@@ -187,7 +187,7 @@ const DAMAGE_TTL = 1000;       // ms a number lives (rises + fades over this)
 const DAMAGE_RISE = 20;        // px it rises over its life
 
 // ---- graphical effects (0x70/0xC0/0xC7): spell bolts, hit sparkles, explosions,
-// fields. Each scene effect spawns a short-lived animated sprite on overLayer
+// fields. Each scene effect spawns a short-lived animated sprite in `world`
 // (above the world; no world re-sort). Frames + interval are baked server-side
 // from animdata.mul; we just cycle them, tint by hue, and position per kind. ----
 const fxEffects = [];          // { seq, kind, frames[], fm, born, totalMs, sprite, hue, anchors… }
