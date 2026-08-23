@@ -57,13 +57,13 @@ fn internal_decompress(input: &[u8]) -> Vec<u8> {
     let mut symbol_table = [0u8; 256];
     let mut frequency = [0u8; 256];
     let mut partial = [0i32; 256 * 3];
-    for i in 0..256 {
-        symbol_table[i] = i as u8;
+    for (i, slot) in symbol_table.iter_mut().enumerate() {
+        *slot = i as u8;
     }
     // First 1024 bytes are 256 little-endian i32 frequency counts.
-    for i in 0..256 {
+    for (i, slot) in partial.iter_mut().enumerate().take(256) {
         let o = i * 4;
-        partial[i] = i32::from_le_bytes([input[o], input[o + 1], input[o + 2], input[o + 3]]);
+        *slot = i32::from_le_bytes([input[o], input[o + 1], input[o + 2], input[o + 3]]);
     }
     let sum: i32 = partial[..256].iter().sum();
     if sum <= 0 {
@@ -73,8 +73,8 @@ fn internal_decompress(input: &[u8]) -> Vec<u8> {
     let mut output = vec![0u8; len];
 
     let mut non_zero = 0i32;
-    for i in 0..256 {
-        if partial[i] != 0 {
+    for &count in partial.iter().take(256) {
+        if count != 0 {
             non_zero += 1;
         }
     }

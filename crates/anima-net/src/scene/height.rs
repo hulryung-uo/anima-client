@@ -189,6 +189,7 @@ fn tile_has_overhead_cover(
 /// on the player — the caller already dropped them from `scene.mobiles`.
 /// `cache` is `(tile_x, tile_y, obj_z) → covered` so overlapping 4×4s of
 /// nearby mobiles don't re-scan the same statics.
+#[allow(clippy::too_many_arguments)] // each is a distinct input the scan needs
 pub(super) fn has_surface_overhead(
     scan: &TileScan,
     map: &mut MapData,
@@ -204,11 +205,10 @@ pub(super) fn has_surface_overhead(
             let tx = mx + dx;
             let ty = my + dy;
             let key = (tx, ty, mz);
-            if !cache.contains_key(&key) {
-                let hit = tile_has_overhead_cover(scan, map, multis, tx, ty, mz, max_z);
-                cache.insert(key, hit);
-            }
-            if !cache[&key] {
+            let covered = *cache
+                .entry(key)
+                .or_insert_with(|| tile_has_overhead_cover(scan, map, multis, tx, ty, mz, max_z));
+            if !covered {
                 return false;
             }
         }

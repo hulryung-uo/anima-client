@@ -101,7 +101,7 @@ impl Look<'_> {
             .and_then(|t| t.get(item_graphic as u32))
             .and_then(|info| info.appearance_for(body as u32))
         {
-            let gid = (MALE_GUMP_OFFSET as u32).saturating_add(app) as u16;
+            let gid = MALE_GUMP_OFFSET.saturating_add(app) as u16;
             return (a, Some(gid), hue);
         }
         (a, gump, hue)

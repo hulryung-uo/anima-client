@@ -287,7 +287,7 @@ fn split_skill(rest: &str) -> (&str, u8) {
 /// ClassicUO `SkillEntry.HardCodedName` aliases used when Prof.txt's skill
 /// token disagrees with `skills.mul`'s display name.
 fn hardcoded_alias(name: &str) -> Option<u8> {
-    let n = name.replace(' ', "").replace('/', "").to_ascii_lowercase();
+    let n = name.replace([' ', '/'], "").to_ascii_lowercase();
     Some(match n.as_str() {
         "alchemy" => 0,
         "anatomy" => 1,

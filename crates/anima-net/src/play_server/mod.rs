@@ -146,8 +146,10 @@ impl TerrainState {
             multis,
             animdata,
         } = self;
-        if !maps.contains_key(&facet) {
-            maps.insert(facet, MapData::open_facet(data_dir, facet).ok()?);
+        // `Entry::Vacant` rather than `or_insert_with`: the fallible open
+        // carries a `?`, which cannot cross a closure boundary.
+        if let std::collections::hash_map::Entry::Vacant(e) = maps.entry(facet) {
+            e.insert(MapData::open_facet(data_dir, facet).ok()?);
         }
         let map = maps.get_mut(&facet)?;
         Some(f(map, multis.as_ref(), animdata.as_ref()))

@@ -239,9 +239,10 @@ pub fn build_scene(
     // `placement` right above.
     let house_design = house_design_json(&s.world, multis);
 
-    // `Look` holds a shared borrow of the map; HasSurfaceOverhead needs `&mut`
-    // for the statics cache. Drop it before the tile loop, which wants the same.
-    drop(look);
+    // NOTE: `Look` holds a shared borrow of the map and must not outlive this
+    // point — the tile loop below needs the `&mut` one (HasSurfaceOverhead
+    // writes the statics cache). No explicit `drop` is needed: `look`'s last use
+    // is above, and NLL ends the borrow there.
 
     let TileEmission {
         mut tiles,

@@ -348,7 +348,7 @@ impl MapData {
     fn load_land_block(&mut self, bx: u32, by: u32) -> &Vec<(u16, i8)> {
         let key = (bx << 16) | by;
         if !self.land_cache.contains_key(&key) {
-            let block_num = (bx * self.blocks_y + by) as u32;
+            let block_num = bx * self.blocks_y + by;
             let cells = if let Some(&i) = self.patch_land.get(&block_num) {
                 self.diffs
                     .map_block(i)
@@ -382,7 +382,7 @@ impl MapData {
         if self.statics_cache.contains_key(&key) {
             return &self.statics_cache[&key];
         }
-        let block_num = (bx * self.blocks_y + by) as u32;
+        let block_num = bx * self.blocks_y + by;
         let out = if let Some(&i) = self.patch_sta.get(&block_num) {
             match self.diffs.sta_index(i) {
                 Some((pos, len)) if pos != 0xFFFF_FFFF && len != 0 => {

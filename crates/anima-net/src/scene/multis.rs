@@ -62,13 +62,9 @@ pub(super) fn multi_origin_in_view(
 /// We skip drawing the parent item (`items_json` filters `is_multi`), so this
 /// is whether the origin graphic is a sprite versus a path-only `nd` record.
 pub(super) fn multi_component_never_draw(visible: bool, is_origin: bool, graphic: u16) -> bool {
-    if visible {
-        false
-    } else if is_origin && graphic > 2 {
-        false
-    } else {
-        true
-    }
+    // Never drawn unless it is visible, or it is the invisible index-0 origin
+    // whose graphic the parent Item draws in its place.
+    !visible && (!is_origin || graphic <= 2)
 }
 
 /// The pending 0x99 house/multi placement footprint
