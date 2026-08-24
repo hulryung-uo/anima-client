@@ -53,6 +53,32 @@ pub(super) fn hidden_field(hidden: bool) -> Value {
     }
 }
 
+/// World-map positions for party and guild members who are OUT OF VIEW
+/// (0xF0 sub 0x01/0x02). Emitted as `{party:[…], guild:[…]}`, each record
+/// `{serial, x, y, map}` plus `hits` for guild records, which carry a health
+/// percentage party records do not have.
+///
+/// These are deliberately disjoint from `scene.mobiles`: ServUO omits anyone you
+/// can already see (`ProtocolExtensions.cs`), so a renderer plots these *in
+/// addition to* the mobiles it already draws, never instead of them.
+pub(super) fn tracked_json(world: &World) -> Value {
+    let one = |t: &anima_core::world::TrackedMember| {
+        let mut v = json!({ "serial": t.serial, "x": t.x, "y": t.y, "map": t.map });
+        if let Some(h) = t.hits_pct {
+            v["hits"] = json!(h);
+        }
+        v
+    };
+    json!({
+        // Whether this shard speaks 0xF0 at all. A UI that offers "show my party
+        // on the map" needs to know the difference between "nobody is out of
+        // view" and "this server cannot tell us" — both are an empty list.
+        "on": world.map_tracking,
+        "party": world.party_positions.iter().map(one).collect::<Vec<_>>(),
+        "guild": world.guild_positions.iter().map(one).collect::<Vec<_>>(),
+    })
+}
+
 /// `run` scene field: the mobile's last update carried `Direction.Running`.
 /// Only emitted when true, like [`hidden_field`] — the renderer's default is
 /// walking. It replaces a *guess* (the browser used to read running off how fast

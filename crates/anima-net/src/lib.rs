@@ -44,7 +44,8 @@ use anima_core::net::outgoing::{
     build_party_can_loot, build_party_decline, build_party_invite, build_party_leave,
     build_party_message, build_party_private_message, build_party_remove, build_pick_up,
     build_ping, build_popup_request, build_popup_select, build_profile_request,
-    build_profile_update, build_prompt_response, build_quest_arrow_click, build_quest_menu_request,
+    build_profile_update, build_prompt_response, build_query_guild_positions,
+    build_query_party_positions, build_quest_arrow_click, build_quest_menu_request,
     build_rename_request, build_say, build_sell, build_single_click, build_skill_lock,
     build_stat_lock, build_status_request, build_stun_request, build_target_by_resource,
     build_target_response, build_targeted_skill, build_targeted_spell,
@@ -198,6 +199,18 @@ const PUMP_READ_TIMEOUT: Duration = Duration::from_millis(20);
 /// keepalive kept the connection alive but measured latency once every half
 /// minute. Two bytes a second each way.
 const PING_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How often we ask the shard where our out-of-view party/guild members are
+/// (0xF0). ClassicUO's `WorldMapEntityManager` polls every 250 ms; that cadence
+/// is sized for a map gump the player is staring at, and ours feeds a minimap
+/// refreshed on a 150 ms scene poll, so a second is enough and costs four bytes
+/// each way instead of sixteen. Only sent while there is something to ask about
+/// — see the call site.
+const TRACK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How many unanswered 0xF0 queries to send before concluding the shard does not
+/// implement the extension. Three seconds of probing, then silence.
+const TRACK_MAX_PROBES: u8 = 3;
 /// Draw range (tiles) we advertise to the server on world entry (0xC8). 18 is
 /// the classic-client default; the server uses it to decide what falls in view.
 const DEFAULT_VIEW_RANGE: u8 = 18;
@@ -538,6 +551,12 @@ pub struct Session {
     logout_immediate: bool,
     /// Last time we sent a 0x73 keepalive ping.
     last_ping: Instant,
+    /// Last time we asked for 0xF0 party/guild world-map positions.
+    last_track: Instant,
+    /// Consecutive 0xF0 queries sent without the shard ever having answered.
+    /// Reset to 0 by any reply; once it reaches `TRACK_MAX_PROBES` we stop
+    /// asking a shard that evidently does not speak the extension.
+    track_probes: u8,
     /// Rolling sequence byte for the keepalive ping.
     ping_seq: u8,
     /// Traffic + latency counters for the UO socket (see [`NetStats`]).
@@ -663,6 +682,8 @@ impl Session {
                 != 0,
             logout_immediate: false,
             last_ping: Instant::now(),
+            last_track: Instant::now(),
+            track_probes: 0,
             ping_seq: 0,
             stats: NetStats::default(),
             speech: None,
@@ -1549,6 +1570,30 @@ impl Session {
             self.stats.ping_sent = Some((self.ping_seq, Instant::now()));
             self.ping_seq = self.ping_seq.wrapping_add(1);
             self.last_ping = Instant::now();
+        }
+        // World-map tracking (0xF0): where the party/guild members we CANNOT see
+        // are. Nine bytes a second, against ClassicUO's four-times-a-second poll.
+        //
+        // The gate is a probe budget rather than ClassicUO's ACK, because the
+        // ACK (reply 0x00) is one ServUO never sends — see `World::map_tracking`.
+        // So: ask a few times, and keep asking only if the shard ever answers.
+        // A shard with no 0xF0 handler at all then costs three packets total,
+        // not one per second forever.
+        if self.last_track.elapsed() >= TRACK_INTERVAL {
+            if self.world.map_tracking {
+                self.track_probes = 0;
+            }
+            if self.world.map_tracking || self.track_probes < TRACK_MAX_PROBES {
+                self.track_probes = self.track_probes.saturating_add(1);
+                // The party query is worth sending only while we are in one; the
+                // guild query doubles as the probe, since we cannot know whether
+                // we are in a guild without asking.
+                if !self.world.party.members.is_empty() {
+                    self.send(&build_query_party_positions())?;
+                }
+                self.send(&build_query_guild_positions())?;
+            }
+            self.last_track = Instant::now();
         }
         let mut buf = [0u8; 8192];
         match self.stream.read(&mut buf) {

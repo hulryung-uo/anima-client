@@ -1827,3 +1827,62 @@ adding a bit meant touching seven places and nothing failed if you touched six.
 Also corrected in passing: `poisoned_field`'s doc claimed poison was "the
 mobile-update status-flags 0x04 bit", which is exactly the bit that turned out to
 be Flying.
+
+---
+
+Closed 2026-08-25 (0xF0 — where your party is when you cannot see them): the
+network survey's highest-impact row, and absent in both directions. ServUO has
+always implemented it (`Scripts/Misc/ProtocolExtensions.cs`); we had no builder,
+no handler, and `0xF0` had no arm in `dispatch`, so a reply was framed correctly
+by `lengths.rs` and then dropped on the floor.
+
+What makes it matter: the reply lists **only the members you cannot already
+see** — `if (InUpdateRange(from, mob) && from.CanSee(mob)) continue;`. That is
+exactly the case a party needs. A teammate vanishes the instant they leave your
+~18-tile view and there was no way to find them again.
+
+**The numbering is asymmetric, which is the easy thing to get wrong.** The same
+sub-command values mean different things in each direction:
+
+| sub  | client → server        | server → client    |
+|------|------------------------|--------------------|
+| 0x00 | query party positions  | tracking accepted  |
+| 0x01 | query guild positions  | party positions    |
+| 0x02 | —                      | guild positions    |
+
+So a party *request* of 0x00 is answered by a *reply* of 0x01. The record
+layouts differ too: guild records are preceded by a flag saying whether
+positions are included at all and each carries a health percentage; party
+records are always positions and never carry health, so ours is `Option<u8>`
+rather than a fabricated 100.
+
+**ClassicUO's polling gate is wrong for ServUO, and this was the real trap.**
+ClassicUO enables tracking only on reply type 0x00 (`SetACKReceived` →
+`SetEnable(true)`). ServUO **never sends 0x00** — its only 0xF0 senders are
+`AckPartyLocations` (0x01) and `AckGuildsLocations` (0x02). Copying that gate
+faithfully would have switched tracking off forever against the one server that
+implements the extension. `World::map_tracking` therefore means "this shard
+answered 0xF0 at all" and is set by any understood reply; the driver polls on a
+three-probe budget rather than waiting for an ACK, so a shard with no 0xF0
+handler costs three packets in total instead of one per second forever.
+
+**Live-verified**, and it is the handshake that proves the round trip: connecting
+to the shard now yields `scene.tracked.on == true` within a second, which means
+our query reached ServUO's `DecodeBundledPacket`, routed to
+`QueryGuildsLocations`, and came back as an `AckGuildsLocations` our parser read
+without error. Under the ClassicUO gate that flag would read `false` forever.
+
+**Not verified: populated records.** ServUO only reports *online* guild members
+(`mob.NetState == null` is skipped) and a party needs a second player, so
+producing a non-empty list needs two accounts logged in at once, which this
+setup does not have. The record walk is pinned by tests written against ServUO's
+exact writer — party without health, guild with it, and the `locations == 0`
+case where the body is bare serials that still have to be walked to reach the
+terminator.
+
+Cadence is one second (nine bytes each way) against ClassicUO's 250 ms, because
+ours feeds a minimap on a 150 ms scene poll rather than a map gump being stared
+at. Members are plotted on the world map under the player dot, guild first so
+party wins an overlap, skipped when their facet is not ours — the reply reports
+members on other facets, and plotting those would put a teammate in the middle
+of the wrong continent.

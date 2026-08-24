@@ -688,6 +688,34 @@ pub fn build_toggle_flying() -> Vec<u8> {
     finish_variable(w.into_vec())
 }
 
+/// Ask the shard where our out-of-view party members are (0xF0 sub 0x00).
+///
+/// ClassicUO `Send_QueryPartyPosition`: `[0xF0][len:u16=4][0x00]` — the whole
+/// packet. ServUO answers with 0xF0 sub **0x01**, not 0x00: the request and the
+/// reply use different sub-command numbers, which is the single easiest thing to
+/// get wrong here (see `net::game::tracking`).
+///
+/// The reply deliberately lists only members you *cannot* see
+/// (`ProtocolExtensions.cs`), so this is the only way to find a teammate who has
+/// walked out of view.
+pub fn build_query_party_positions() -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xF0).u16(0).u8(0x00);
+    finish_variable(w.into_vec())
+}
+
+/// Ask the shard where our guild members are (0xF0 sub 0x01).
+///
+/// ClassicUO `Send_QueryGuildPosition`: `[0xF0][len:u16=5][0x01][1]`. The
+/// trailing bool asks for positions rather than a bare membership list; ServUO
+/// reads it (`QueryGuildsLocations`) and echoes the choice back as the first
+/// byte of its reply, which is sub **0x02**.
+pub fn build_query_guild_positions() -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xF0).u16(0).u8(0x01).u8(1);
+    finish_variable(w.into_vec())
+}
+
 /// Confirm a heritage / race-change dialog (0xBF/0x2A). ClassicUO
 /// `Send_ChangeRaceRequest`: `[0xBF][len:u16=15][0x002A][skinHue:u16]
 /// [hairStyle:u16][hairHue:u16][beardStyle:u16][beardHue:u16]`. ServUO
@@ -2128,6 +2156,18 @@ mod tests {
         // the wrong special — no error, just the other move.
         assert_eq!(build_disarm_request(), vec![0xBF, 0x00, 0x05, 0x00, 0x09]);
         assert_eq!(build_stun_request(), vec![0xBF, 0x00, 0x05, 0x00, 0x0A]);
+    }
+
+    /// The request numbering is NOT the reply numbering: a party query is sub
+    /// 0x00 and is answered by sub 0x01, while a guild query is sub 0x01 and is
+    /// answered by sub 0x02. Pinning the request bytes here keeps that straight.
+    #[test]
+    fn query_position_packets_match_classicuo_byte_for_byte() {
+        assert_eq!(build_query_party_positions(), vec![0xF0, 0x00, 0x04, 0x00]);
+        assert_eq!(
+            build_query_guild_positions(),
+            vec![0xF0, 0x00, 0x05, 0x01, 0x01]
+        );
     }
 
     #[test]

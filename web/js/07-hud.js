@@ -423,6 +423,20 @@ function wmWorldToScreen(wx, wy, w, h) {
   const a = (wx - px) / WORLDMAP_STEP, b = (wy - py) / WORLDMAP_STEP, s = wmScale;
   return [w / 2 + wmPan.x + s * (a - b), h / 2 + wmPan.y + s * (a + b)];
 }
+// A tracked member's name, if the party list happens to know it. `scene.tracked`
+// carries serials only — the server has no reason to resend a name we were told
+// when the member was in view — so this is best-effort and an unknown serial
+// simply goes unlabelled rather than being given a placeholder.
+function partyMemberName(serial) {
+  const ms = (scene && scene.party && scene.party.members) || [];
+  for (const m of ms) {
+    if ((m.serial >>> 0) === (serial >>> 0)) {
+      return m.name && m.name !== "Member" ? m.name : "";
+    }
+  }
+  return "";
+}
+
 function drawWorldmap() {
   if (!wmOn) return;
   const cv = document.getElementById("wmcanvas");
@@ -500,6 +514,43 @@ function drawWorldmap() {
       ctx.lineWidth = 2.5; ctx.strokeStyle = "rgba(0,0,0,.85)";
       ctx.strokeText(mk.name, sx + 6, sy); ctx.fillStyle = "#bfeeff"; ctx.fillText(mk.name, sx + 6, sy);
     }
+  }
+  // Party and guild members who are OUT OF VIEW (0xF0 → `scene.tracked`). This
+  // is the only place they can be drawn from: ServUO reports exactly the members
+  // you cannot see and omits the rest, so anyone still in view is already a
+  // mobile on the game canvas and never appears here. Drawn under the player dot
+  // and over the POI/user markers.
+  const tracked = scene && scene.tracked;
+  if (tracked) {
+    const myMap = (scene.facet | 0) || 0;
+    ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    ctx.font = "10px ui-monospace, monospace"; ctx.lineWidth = 1.5;
+    const plot = (list, fill, ring) => {
+      for (const t of (list || [])) {
+        // A member on another facet is still reported. Plotting them on this
+        // map would put a teammate in the middle of the wrong continent.
+        if ((t.map | 0) !== myMap) continue;
+        const [sx, sy] = wmWorldToScreen(t.x | 0, t.y | 0, w, h);
+        if (sx < -8 || sy < -8 || sx > w + 8 || sy > h + 8) continue;
+        ctx.fillStyle = fill; ctx.strokeStyle = ring;
+        ctx.beginPath(); ctx.arc(sx, sy, 3.5, 0, 7); ctx.fill(); ctx.stroke();
+        // Guild records carry a health percentage; party records have no such
+        // field, so `hits` is absent rather than 0 and no bar is drawn.
+        if (typeof t.hits === "number") {
+          const frac = Math.max(0, Math.min(1, t.hits / 100));
+          ctx.fillStyle = "rgba(8,11,16,.75)"; ctx.fillRect(sx - 6, sy + 5, 12, 3);
+          ctx.fillStyle = frac > 0.5 ? "#5fd35f" : frac > 0.2 ? "#e0c25f" : "#e05f5f";
+          ctx.fillRect(sx - 6, sy + 5, 12 * frac, 3);
+        }
+        const nm = partyMemberName(t.serial);
+        if (nm) {
+          ctx.strokeStyle = "rgba(0,0,0,.85)";
+          ctx.strokeText(nm, sx + 6, sy); ctx.fillStyle = "#dfe6ee"; ctx.fillText(nm, sx + 6, sy);
+        }
+      }
+    };
+    plot(tracked.guild, "#c08cff", "#1a0a2a");  // guild first: party wins on overlap
+    plot(tracked.party, "#5fd0ff", "#04121a");
   }
   // player marker sits where the origin lands (canvas center + pan).
   const mx = w / 2 + wmPan.x, my = h / 2 + wmPan.y;

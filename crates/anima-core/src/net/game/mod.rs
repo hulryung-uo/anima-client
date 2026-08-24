@@ -13,7 +13,8 @@ use crate::world::{
     BoatMovedEntity, BoatMovement, BulletinBoard, BulletinMessage, BulletinSummary, ChatChannel,
     ChatStatus, DragAnimation, Effect, GameTime, Gump, HouseDesign, HousePlane, HuePicker,
     JournalEntry, LegacyMenu, LegacyMenuEntry, LegacyMenuKind, MultiPlacement, PopupEntry,
-    PopupMenu, PromptKind, PromptState, Skill, TargetCursor, TipKind, TradeState, Waypoint, World,
+    PopupMenu, PromptKind, PromptState, Skill, TargetCursor, TipKind, TrackedMember, TradeState,
+    Waypoint, World,
 };
 
 // The handlers themselves, grouped by what they are about rather than by
@@ -33,6 +34,7 @@ mod general_info;
 mod items;
 mod mobiles;
 mod session;
+mod tracking;
 mod ui;
 use chat::*;
 use combat::*;
@@ -41,6 +43,7 @@ use general_info::*;
 use items::*;
 use mobiles::*;
 use session::*;
+use tracking::*;
 use ui::*;
 
 /// Decode one framed game packet (id byte included) into `world`.
@@ -63,6 +66,7 @@ fn dispatch(world: &mut World, id: u8, frame: &[u8]) -> PResult<bool> {
         0x1A => world_item(world, frame)?,
         0xF3 => world_item_hs(world, frame)?,
         0xF7 => packet_list(world, frame)?,
+        0xF0 => protocol_extension(world, frame)?,
         0x1D => delete(world, frame)?,
         0x11 => char_status(world, frame)?,
         0x98 => update_name(world, frame)?,

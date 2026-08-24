@@ -903,6 +903,28 @@ pub struct Party {
     pub pending_invite: Option<u32>,
 }
 
+/// One party- or guild-mate's last reported world position (0xF0 sub 0x01/0x02).
+///
+/// The server sends **only the members you cannot already see** (ServUO
+/// `AckPartyLocations`: `if (InUpdateRange(from, mob) && from.CanSee(mob))
+/// continue;`), which is precisely the case the world map exists for — a
+/// teammate disappears the moment they leave your ~18-tile view. So this is not
+/// a duplicate of [`Mobile`]: the two sets are disjoint by construction, and a
+/// serial appearing here means "known to be there, but not in view".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrackedMember {
+    pub serial: u32,
+    pub x: u16,
+    pub y: u16,
+    /// Facet id. A member on another facet is still reported, so a renderer has
+    /// to compare this against the player's own map before plotting.
+    pub map: u8,
+    /// Health as a percentage, 0..=100 (0 when dead). Guild records carry it;
+    /// party records have no such field at all, so it is `None` there rather
+    /// than a fabricated 100.
+    pub hits_pct: Option<u8>,
+}
+
 /// An active secure trade session (player-to-player trade window, 0x6F).
 /// Trading is peer-initiated with no consent required (dropping an item on a
 /// player opens a trade with them, ServUO `Mobile.OpenTrade`/`OnDragDrop`,
@@ -1305,6 +1327,23 @@ pub struct World {
     pub pending_opl_requests: Vec<u32>,
     /// The player's party state (0xBF/0x06). See [`Party`].
     pub party: Party,
+    /// Whether the shard has answered 0xF0 at all — set by ANY reply type we
+    /// understand, not only the 0x00 "accepted".
+    ///
+    /// ClassicUO gates its polling on 0x00 alone, which would be wrong here:
+    /// ServUO never sends it. Its only 0xF0 senders are `AckPartyLocations`
+    /// (0x01) and `AckGuildsLocations` (0x02), so a 0x00-only gate switches
+    /// tracking off forever against the server that actually implements it.
+    /// What the driver needs to know is "does this shard speak the extension",
+    /// and a reply of any kind answers that.
+    pub map_tracking: bool,
+    /// Out-of-view party members' positions (0xF0 reply 0x01). Replaced wholesale
+    /// on each reply — the packet is a full snapshot, so there is no staleness to
+    /// track. See [`TrackedMember`].
+    pub party_positions: Vec<TrackedMember>,
+    /// Out-of-view guild members' positions (0xF0 reply 0x02). Same contract as
+    /// `party_positions`; these records also carry health.
+    pub guild_positions: Vec<TrackedMember>,
     /// Whether the player is in war mode (combat stance). Authoritatively set by
     /// the server's 0x72 SetWarMode echo (see [`crate::net::game`]); the renderer
     /// reflects it and the war-mode toggle reads it.

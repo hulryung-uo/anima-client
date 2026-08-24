@@ -4893,3 +4893,107 @@ fn buff_carries_its_title_and_description_clilocs() {
         "words are the driver's job, not the core's"
     );
 }
+
+/// 0xF0 world-map tracking. The sub-command numbering is asymmetric — a party
+/// *request* is 0x00 and its *reply* is 0x01 — so these assert the reply side
+/// against the numbers ServUO actually writes (`ProtocolExtensions.cs`), not the
+/// request's.
+#[test]
+fn f0_party_positions_are_read_without_health() {
+    let mut w = World::new();
+    let mut p = PacketWriter::new();
+    p.u8(0xF0)
+        .u16(0) // length, patched below
+        .u8(0x01) // reply: party positions
+        .u32(0xAAAA)
+        .u16(1400)
+        .u16(1500)
+        .u8(0) // Felucca
+        .u32(0xBBBB)
+        .u16(300)
+        .u16(900)
+        .u8(1) // Trammel
+        .u32(0); // terminator
+    let mut frame = p.into_vec();
+    let n = frame.len() as u16;
+    frame[1..3].copy_from_slice(&n.to_be_bytes());
+    assert!(apply_packet(&mut w, &frame));
+
+    assert_eq!(w.party_positions.len(), 2);
+    assert_eq!(w.party_positions[0].serial, 0xAAAA);
+    assert_eq!(
+        (w.party_positions[0].x, w.party_positions[0].y),
+        (1400, 1500)
+    );
+    assert_eq!(w.party_positions[0].map, 0);
+    // Party records carry no health field at all — `None`, not a made-up 100.
+    assert_eq!(w.party_positions[0].hits_pct, None);
+    assert_eq!(w.party_positions[1].serial, 0xBBBB);
+    assert_eq!(w.party_positions[1].map, 1);
+}
+
+#[test]
+fn f0_guild_positions_carry_health_and_honour_the_locations_flag() {
+    let mut w = World::new();
+    let frame = |body: &[u8]| {
+        let mut v = vec![0xF0u8, 0, 0];
+        v.extend_from_slice(body);
+        let n = v.len() as u16;
+        v[1..3].copy_from_slice(&n.to_be_bytes());
+        v
+    };
+
+    // locations = 1 → each serial is followed by x, y, map and a health percent.
+    let mut p = PacketWriter::new();
+    p.u8(0x02)
+        .u8(1)
+        .u32(0xC0DE)
+        .u16(50)
+        .u16(60)
+        .u8(0)
+        .u8(73)
+        .u32(0);
+    assert!(apply_packet(&mut w, &frame(&p.into_vec())));
+    assert_eq!(w.guild_positions.len(), 1);
+    assert_eq!(w.guild_positions[0].hits_pct, Some(73));
+
+    // locations = 0 → the body is bare serials. They still have to be walked to
+    // reach the terminator, but there is nothing to plot, and the previous pins
+    // must not survive as stale ones.
+    let mut q = PacketWriter::new();
+    q.u8(0x02).u8(0).u32(0xC0DE).u32(0xF00D).u32(0);
+    assert!(apply_packet(&mut w, &frame(&q.into_vec())));
+    assert!(w.guild_positions.is_empty());
+}
+
+/// `map_tracking` means "this shard speaks 0xF0", and ANY understood reply
+/// proves that — not just the 0x00 accept. ServUO never sends 0x00 at all (its
+/// only 0xF0 senders are the two Ack packets), so a 0x00-only gate would switch
+/// polling off against the one server that implements the extension.
+#[test]
+fn f0_any_understood_reply_marks_the_shard_as_speaking_tracking() {
+    // The 0x00 accept does it, as in ClassicUO.
+    let mut w = World::new();
+    assert!(!w.map_tracking);
+    assert!(apply_packet(&mut w, &[0xF0, 0, 4, 0x00]));
+    assert!(w.map_tracking);
+
+    // ...and so does an empty party reply, which is what ServUO actually sends.
+    let mut w2 = World::new();
+    assert!(!w2.map_tracking);
+    assert!(apply_packet(&mut w2, &[0xF0, 0, 8, 0x01, 0, 0, 0, 0]));
+    assert!(w2.map_tracking, "ServUO's reply must count as proof");
+    assert!(w2.party_positions.is_empty());
+
+    // A type we do not understand must NOT: 0x03 runebook / 0x04 guardline /
+    // 0xFE Razor are accepted and ignored, exactly as ClassicUO does, but they
+    // say nothing about position tracking.
+    let mut w3 = World::new();
+    for kind in [0x03u8, 0x04, 0xFE] {
+        assert!(
+            apply_packet(&mut w3, &[0xF0, 0, 4, kind]),
+            "type {kind:#04X}"
+        );
+    }
+    assert!(!w3.map_tracking);
+}

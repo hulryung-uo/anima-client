@@ -411,6 +411,9 @@ pub fn build_scene(
     };
     // The player's party (0xBF/0x06): leader, members (name/hits from view), invite.
     let party = serde_json::to_string(&party_json(&s.world)).unwrap_or_else(|_| "{}".into());
+    // Where out-of-view party/guild members are (0xF0) — the world map's only
+    // source for anyone past our ~18-tile view.
+    let tracked = serde_json::to_string(&tracked_json(&s.world)).unwrap_or_else(|_| "{}".into());
     // Combat state: war mode (0x72) and the current "last target" serial (0 = none)
     // so the client can show a war indicator and highlight the attacked mobile.
     let war = s.world.war;
@@ -570,7 +573,7 @@ pub fn build_scene(
          \"statics\":[{statics}],\"mobiles\":{mobiles},\"items\":{items},\"contItems\":{cont_items},\
          \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"tanims\":{tanims},\"damage\":{damage},\"effects\":{effects},\"dragAnims\":{drag_anims},\"music\":{music},\
          \"light\":{light},\"weather\":{weather},\"weatherN\":{weather_n},\"season\":{season},\"lights\":{lights},\"buffs\":{buffs},\"skills\":{skills},\"gumps\":{gumps},\
-         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"raceChange\":{race_change},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"logoutAck\":{logout_ack},\"boatMoves\":{boat_moves},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\
+         \"popup\":{popup},\"legacyMenus\":{legacy_menus},\"huePickers\":{hue_pickers},\"raceChange\":{race_change},\"tips\":{tips},\"textEntryDialogs\":{text_entry_dialogs},\"profiles\":{profiles},\"logoutAck\":{logout_ack},\"boatMoves\":{boat_moves},\"book\":{book},\"spellbooks\":{spellbooks},\"opl\":{opl},\"questArrow\":{quest_arrow},\"party\":{party},\"tracked\":{tracked},\
          \"war\":{war},\"lastAttack\":{last_attack},\"combatant\":{combatant},\"aos\":{aos},\
          \"armedAbility\":{armed_ability},\"activeSpells\":{active_spells},\"chat\":{chat},\"bboard\":{bboard},\"contGumps\":{container_gumps},\"contInfo\":{cont_info},\
          \"prompt\":{prompt},\"liftRejects\":{lift_rejects},\"dragCompletions\":{drag_completions},\"deathScreen\":{death_screen},\"containerOpens\":{container_opens},\"swings\":{swings},\
