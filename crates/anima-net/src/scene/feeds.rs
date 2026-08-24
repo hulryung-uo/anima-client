@@ -53,8 +53,33 @@ pub(super) fn hidden_field(hidden: bool) -> Value {
     }
 }
 
-/// `poisoned` scene field for a mobile or the player (mobile-update status-flags
-/// 0x04 bit — see [`anima_core::world::Mobile::poisoned`]'s doc). Only emitted
+/// `run` scene field: the mobile's last update carried `Direction.Running`.
+/// Only emitted when true, like [`hidden_field`] — the renderer's default is
+/// walking. It replaces a *guess* (the browser used to read running off how fast
+/// updates arrived), so absence here now means "the server said walk", not
+/// "unknown".
+pub(super) fn running_field(running: bool) -> Value {
+    if running {
+        json!({ "run": true })
+    } else {
+        json!({})
+    }
+}
+
+/// `fly` scene field: gargoyle flight (status-flags 0x04 on a 7.0+ client).
+/// Only emitted when true.
+pub(super) fn flying_field(flying: bool) -> Value {
+    if flying {
+        json!({ "fly": true })
+    } else {
+        json!({})
+    }
+}
+
+/// `poisoned` scene field for a mobile or the player (0x16/0x17 health-bar
+/// status, type 1 — see [`anima_core::world::Mobile::poisoned`]'s doc; NOT the
+/// mobile-update 0x04 bit, which this comment used to claim and which is
+/// Flying on the client version we report). Only emitted
 /// when true, same convention as [`hidden_field`], so the renderer's default
 /// (health bar colored by HP fraction alone) needs no key at all. Pure, so
 /// it's unit-testable directly.

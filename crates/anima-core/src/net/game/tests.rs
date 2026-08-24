@@ -949,6 +949,70 @@ fn mobile_moving_hidden_flag_sets_and_clears() {
     assert!(!w.mobiles[&0xBEEF].hidden);
 }
 
+/// The 0x80 bit of the direction byte is `Direction.Running`, not part of the
+/// facing. All five parse sites used to mask it away, so the renderer inferred
+/// running from update timing instead. ServUO sends it (`Direction.Running`,
+/// `Mobile.cs:392`, written whole into the movement packets).
+#[test]
+fn direction_byte_carries_the_running_bit_separately() {
+    // Built here rather than by patching a byte offset into the shared helper:
+    // the direction byte's position is exactly what this test is about.
+    let frame = |dir: u8| {
+        let mut p = PacketWriter::new();
+        p.u8(0x77)
+            .u32(0xBEEF)
+            .u16(0x0190)
+            .u16(100)
+            .u16(200)
+            .u8(5i8 as u8)
+            .u8(dir)
+            .u16(0)
+            .u8(0)
+            .u8(1);
+        p.into_vec()
+    };
+    let mut w = World::new();
+
+    assert!(apply_packet(&mut w, &frame(0x03)));
+    assert_eq!(w.mobiles[&0xBEEF].direction, 3);
+    assert!(!w.mobiles[&0xBEEF].running);
+
+    // Same facing, now running: the facing must NOT pick up the 0x80.
+    assert!(apply_packet(&mut w, &frame(0x03 | 0x80)));
+    assert_eq!(w.mobiles[&0xBEEF].direction, 3);
+    assert!(w.mobiles[&0xBEEF].running);
+
+    // And it clears again rather than latching.
+    assert!(apply_packet(&mut w, &frame(0x03)));
+    assert!(!w.mobiles[&0xBEEF].running);
+}
+
+/// Status-flags 0x04 is Flying on the client version we report, not poison —
+/// ClassicUO reuses the slot and picks by version (`Mobile.cs:137`), and poison
+/// reaches us on 0x17 instead.
+#[test]
+fn status_flag_0x04_is_flying_and_leaves_poison_alone() {
+    let mut w = World::new();
+    assert!(apply_packet(
+        &mut w,
+        &mobile_moving_frame(0xF001, FLAG_FLYING)
+    ));
+    assert!(w.mobiles[&0xF001].flying);
+    assert!(
+        !w.mobiles[&0xF001].poisoned,
+        "0x04 must not be read as poison"
+    );
+
+    // Cleared by an update without it, and it does not disturb its neighbours.
+    assert!(apply_packet(
+        &mut w,
+        &mobile_moving_frame(0xF001, FLAG_HIDDEN | FLAG_WARMODE)
+    ));
+    assert!(!w.mobiles[&0xF001].flying);
+    assert!(w.mobiles[&0xF001].hidden);
+    assert!(w.mobiles[&0xF001].war_mode);
+}
+
 #[test]
 fn mobile_moving_no_hidden_flag_stays_false() {
     let mut w = World::new();

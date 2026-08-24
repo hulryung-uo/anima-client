@@ -43,6 +43,17 @@ pub struct Mobile {
     /// flags byte on every 0x20/0x77/0x78 (not sticky): a later update that
     /// omits the bit clears it back to `false`.
     pub hidden: bool,
+    /// Whether the mobile's last movement update carried `Direction.Running`
+    /// (0x80). ClassicUO keeps this as `Mobile.IsRunning` and uses it to pick
+    /// the run animation group and the step duration. Before this existed the
+    /// renderer inferred it from how fast updates arrived, which misreads under
+    /// poll jitter or when something stops mid-run.
+    pub running: bool,
+    /// Flying (status-flags 0x04 on a 7.0+ client). Gargoyle flight: it selects
+    /// the flight animation groups, shifts the overhead name/health line, and
+    /// paces movement as if mounted. See `net::game::mobiles::FLAG_FLYING` for
+    /// why this bit is not poison for us.
+    pub flying: bool,
     /// Poisoned status from 0x16/0x17 MobileHealthbarStatus type 1. In UO the
     /// health bar turns green while this is set, independent of the actual HP
     /// fraction. ServUO sends this after MobileIncoming and whenever poison

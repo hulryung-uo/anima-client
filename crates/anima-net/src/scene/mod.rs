@@ -326,6 +326,7 @@ pub fn build_scene(
         "equip": equip,
     });
     merge_obj(&mut player, hidden_field(p.hidden));
+    merge_obj(&mut player, flying_field(p.flying));
     merge_obj(&mut player, poisoned_field(p.poisoned));
     let sounds = json_array(&sounds_json(&s.world));
     let anims = json_array(&anims_json(&s.world));

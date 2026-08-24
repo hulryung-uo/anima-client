@@ -466,11 +466,12 @@ function bodyIsHuman(b) {
 }
 
 // `st` carries the per-mobile throttle + alternation ClassicUO keeps as
-// LastStepSoundTime / StepSoundOffset. Flying is not checked: the 0x04 status
-// flag is not decoded yet, so no mobile can be known to be flying.
-function footstep(st, now, x, y, run, mounted, body, hidden, dead) {
+// LastStepSoundTime / StepSoundOffset. `flying` silences the mobile outright —
+// that is ClassicUO's `!IsFlying` guard, and it is NOT the same rule as the
+// `IsMounted || IsFlying` one that paces a flying gargoyle like a rider.
+function footstep(st, now, x, y, run, mounted, body, hidden, dead, flying) {
   if (!settings.sfx || !settings.footsteps || audioMuted) return;
-  if (!bodyIsHuman(body | 0) || hidden || dead) return;
+  if (!bodyIsHuman(body | 0) || hidden || dead || flying) return;
   if (now < (st.stepSfxAt || 0)) return;
   let inc = st.stepSfxOfs | 0;
   let id = FOOTSTEP_ON_FOOT;
@@ -572,7 +573,7 @@ function processSteps(now, dt) {
         const pl = scene && scene.player;
         if (me && pl) {
           footstep(me, now, s.x, s.y, !!s.run, !!pl.mounted, pl.body,
-                   !!pl.hidden, !!pl.dead);
+                   !!pl.hidden, !!pl.dead, !!pl.fly);
         }
       }
       lastWalkSentAt = now;
@@ -715,21 +716,24 @@ function renderFrame(dt) {
     const dist = Math.hypot(dx, dy);
     const mv = dist > 0.06 || now < (st.moveUntil || 0);
     st.animMoving = mv;
-    // Leg cadence tied to ground covered. We don't get other mobiles' run flag, so
-    // infer it from their measured step cadence (a fast ~≤280ms step = running).
+    // Leg cadence tied to ground covered. The run flag is the SERVER's now
+    // (`scene.mobiles[].run`, the 0x80 bit of the direction byte) — this used to
+    // infer it from the measured step cadence, which misread whenever the poll
+    // jittered, latency spiked, or something stopped mid-run. The cadence
+    // fallback survives only for a mobile we have no record for yet.
     const stepDur = st.stepDur || 300;
+    const run = st.mobRec ? !!st.mobRec.run : stepDur <= 280;
     if (mv && st.mobRec) {
       // Bodies 402/403 are the human ghost pair, and they sit inside IsHuman's
       // 0x0190..0x0193 range — so without this a ghost would walk audibly, which
       // is exactly what ClassicUO's separate !IsDead test prevents. The scene has
       // no per-mobile `dead`, but it does not need one: for a *human* body the
-      // ghost pair is the whole of it. The run flag is the same cadence guess
-      // the walk animation makes, and it inherits that guess's inaccuracy.
+      // ghost pair is the whole of it.
       const b = st.mobRec.body | 0;
-      footstep(st, now, st.tx, st.ty, stepDur <= 280, !!st.mobRec.mounted, b,
-               !!st.mobRec.hidden, b === 402 || b === 403);
+      footstep(st, now, st.tx, st.ty, run, !!st.mobRec.mounted, b,
+               !!st.mobRec.hidden, b === 402 || b === 403, !!st.mobRec.fly);
     }
-    st.animPhase = mv ? ((st.animPhase || 0) + cyclesPerTile(stepDur <= 280) * dt / stepDur) % 1 : 0;
+    st.animPhase = mv ? ((st.animPhase || 0) + cyclesPerTile(run) * dt / stepDur) % 1 : 0;
     if (dist < 1e-3) continue;
     if (dist > 3) { st.rx = st.tx; st.ry = st.ty; st.rz = tz; continue; }
     const dur = (st.stepDur || 300) * 1.12;

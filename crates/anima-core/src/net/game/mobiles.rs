@@ -22,6 +22,38 @@ pub(super) const FLAG_WARMODE: u8 = 0x40;
 
 pub(super) const FLAG_PARALYZED: u8 = 0x01;
 
+/// 0x04. ClassicUO reuses one enum slot for two meanings and picks by version
+/// (`Mobile.cs:137`): `IsFlying => Version >= CV_7000 && (Flags & Poisoned)`.
+/// We report Stygian Abyss, so for us this bit is Flying and never poison —
+/// poison arrives on 0x17 (see [`health_bar_status`]). ServUO agrees:
+/// `Mobile.cs:8782-8785`, `if (m_Flying) flags |= 0x04;` in the 7.0 branch.
+pub(super) const FLAG_FLYING: u8 = 0x04;
+
+/// The status-flags byte, applied in one place because it has SEVEN call sites
+/// across the mobile-update family. A bit wired into six of them is a bug that
+/// only shows on the seventh packet, which is exactly how `flying` stayed
+/// undecoded while its own constant was already documented above.
+fn apply_status_flags(m: &mut crate::world::Mobile, flags: u8) {
+    m.hidden = flags & FLAG_HIDDEN != 0;
+    m.war_mode = flags & FLAG_WARMODE != 0;
+    m.paralyzed = flags & FLAG_PARALYZED != 0;
+    m.flying = flags & FLAG_FLYING != 0;
+}
+
+/// Split a mobile-update direction byte into facing and the running bit.
+///
+/// The 0x80 bit is `Direction.Running`, which ClassicUO peels off as `isrun`
+/// (`PacketHandlers.cs:6313-6334`) and feeds to the walk-vs-run animation group
+/// and the step duration. We masked it away at all five parse sites, which left
+/// the renderer inferring "is it running?" from how fast updates happened to
+/// arrive — a guess that misreads under poll jitter, a latency spike, or a
+/// mobile stopping mid-run. ServUO sends the bit: its `Direction` enum has
+/// `Running = 0x80` (`Mobile.cs:392`) and the movement packets write
+/// `(byte)m.Direction` whole.
+fn split_direction(b: u8) -> (u8, bool) {
+    (b & 0x07, b & 0x80 != 0)
+}
+
 /// Wear layer of the backpack (ClassicUO `Layer.Backpack`). Excluded from the
 /// stale-equipment sweep in [`apply_worn_items`] — see that function.
 const LAYER_BACKPACK: u8 = 0x15;
@@ -124,7 +156,7 @@ pub(super) fn mobile_update(world: &mut World, frame: &[u8]) -> PResult<()> {
     let x = r.u16()?;
     let y = r.u16()?;
     r.skip(2)?; // server_id
-    let direction = r.u8()? & 0x07;
+    let (direction, running) = split_direction(r.u8()?);
     let z = r.i8()?;
 
     let is_self = world.is_player(serial);
@@ -137,9 +169,8 @@ pub(super) fn mobile_update(world: &mut World, frame: &[u8]) -> PResult<()> {
         m.pos.y = y;
         m.pos.z = z;
         m.direction = direction;
-        m.hidden = flags & FLAG_HIDDEN != 0;
-        m.war_mode = flags & FLAG_WARMODE != 0;
-        m.paralyzed = flags & FLAG_PARALYZED != 0;
+        m.running = running;
+        apply_status_flags(m, flags);
     }
     if is_self {
         world.on_player_body_changed(old_body, body);
@@ -226,7 +257,7 @@ pub(super) fn mobile_moving(world: &mut World, frame: &[u8]) -> PResult<()> {
     let x = r.u16()?;
     let y = r.u16()?;
     let z = r.i8()?;
-    let direction = r.u8()? & 0x07;
+    let (direction, running) = split_direction(r.u8()?);
     let hue = r.u16()?;
     let flags = r.u8()?;
     let notoriety = r.u8()?;
@@ -240,9 +271,7 @@ pub(super) fn mobile_moving(world: &mut World, frame: &[u8]) -> PResult<()> {
     if world.is_player(serial) {
         let m = world.mobile_mut(serial);
         m.notoriety = notoriety;
-        m.hidden = flags & FLAG_HIDDEN != 0;
-        m.war_mode = flags & FLAG_WARMODE != 0;
-        m.paralyzed = flags & FLAG_PARALYZED != 0;
+        apply_status_flags(m, flags);
         return Ok(());
     }
 
@@ -252,11 +281,10 @@ pub(super) fn mobile_moving(world: &mut World, frame: &[u8]) -> PResult<()> {
     m.pos.y = y;
     m.pos.z = z;
     m.direction = direction;
+    m.running = running;
     m.hue = hue;
     m.notoriety = notoriety;
-    m.hidden = flags & FLAG_HIDDEN != 0;
-    m.war_mode = flags & FLAG_WARMODE != 0;
-    m.paralyzed = flags & FLAG_PARALYZED != 0;
+    apply_status_flags(m, flags);
     Ok(())
 }
 
@@ -275,7 +303,7 @@ pub(super) fn update_character(world: &mut World, frame: &[u8]) -> PResult<()> {
     let x = r.u16()?;
     let y = r.u16()?;
     let z = r.i8()?;
-    let direction = r.u8()? & 0x07;
+    let (direction, running) = split_direction(r.u8()?);
     let hue = r.u16()?;
     let flags = r.u8()?;
     let notoriety = r.u8()?;
@@ -291,9 +319,7 @@ pub(super) fn update_character(world: &mut World, frame: &[u8]) -> PResult<()> {
         m.body = graphic;
         m.hue = hue;
         m.notoriety = notoriety;
-        m.hidden = flags & FLAG_HIDDEN != 0;
-        m.war_mode = flags & FLAG_WARMODE != 0;
-        m.paralyzed = flags & FLAG_PARALYZED != 0;
+        apply_status_flags(m, flags);
         return Ok(());
     }
 
@@ -302,11 +328,10 @@ pub(super) fn update_character(world: &mut World, frame: &[u8]) -> PResult<()> {
     m.pos.y = y;
     m.pos.z = z;
     m.direction = direction;
+    m.running = running;
     m.hue = hue;
     m.notoriety = notoriety;
-    m.hidden = flags & FLAG_HIDDEN != 0;
-    m.war_mode = flags & FLAG_WARMODE != 0;
-    m.paralyzed = flags & FLAG_PARALYZED != 0;
+    apply_status_flags(m, flags);
     Ok(())
 }
 
@@ -339,7 +364,7 @@ pub(super) fn mobile_incoming(world: &mut World, frame: &[u8]) -> PResult<()> {
     let x = r.u16()?;
     let y = r.u16()?;
     let z = r.i8()?;
-    let direction = r.u8()? & 0x07;
+    let (direction, running) = split_direction(r.u8()?);
     let hue = r.u16()?;
     let flags = r.u8()?;
     let notoriety = r.u8()?;
@@ -356,11 +381,9 @@ pub(super) fn mobile_incoming(world: &mut World, frame: &[u8]) -> PResult<()> {
         // for self too (the self-hidden feedback path also flows through 0x78,
         // e.g. re-entering view after a facet change while hidden). Poisoned is
         // the same story: re-derive it for self too.
-        m.hidden = flags & FLAG_HIDDEN != 0;
-        // War-mode/paralyzed are visual/status attrs like hidden — refresh for
-        // self too.
-        m.war_mode = flags & FLAG_WARMODE != 0;
-        m.paralyzed = flags & FLAG_PARALYZED != 0;
+        // War-mode/paralyzed/flying are visual/status attrs like hidden —
+        // refresh for self too.
+        apply_status_flags(m, flags);
         // Notoriety is a visual attribute (like body/hue/hidden), not movement state,
         // so capture it for self too — ServUO sends the player their own noto here (and
         // on crime deltas), which is what colours your own single-click name. pos/dir
@@ -371,6 +394,7 @@ pub(super) fn mobile_incoming(world: &mut World, frame: &[u8]) -> PResult<()> {
             m.pos.y = y;
             m.pos.z = z;
             m.direction = direction;
+            m.running = running;
         }
     }
     if is_self {
@@ -393,7 +417,7 @@ pub(super) fn update_object(world: &mut World, frame: &[u8]) -> PResult<()> {
     let x = r.u16()?;
     let y = r.u16()?;
     let z = r.i8()?;
-    let direction = r.u8()? & 0x07;
+    let (direction, running) = split_direction(r.u8()?);
     let hue = r.u16()?;
     let flags = r.u8()?;
     let notoriety = r.u8()?;
@@ -409,15 +433,14 @@ pub(super) fn update_object(world: &mut World, frame: &[u8]) -> PResult<()> {
         m.hue = hue;
         // Hidden/war-mode/paralyzed/notoriety are visual attributes, not movement
         // state — refresh them for self too (same reasoning as mobile_incoming).
-        m.hidden = flags & FLAG_HIDDEN != 0;
-        m.war_mode = flags & FLAG_WARMODE != 0;
-        m.paralyzed = flags & FLAG_PARALYZED != 0;
+        apply_status_flags(m, flags);
         m.notoriety = notoriety;
         if !is_self {
             m.pos.x = x;
             m.pos.y = y;
             m.pos.z = z;
             m.direction = direction;
+            m.running = running;
         }
     }
     if is_self {

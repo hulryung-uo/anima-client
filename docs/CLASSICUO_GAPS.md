@@ -1780,3 +1780,50 @@ floors, ore-bearing rock — were broken. Left unverified: the PIXI hit-test leg
 itself (no browser slot was free, so the client logic is covered by a Node
 harness over the real source, all six branches) and the documented
 `PATH_RADIUS > 10` gap for surface statics.
+
+---
+
+Closed 2026-08-24 (the two bits every mobile update threw away): both were on the
+wire, already sent by ServUO, and simply not read.
+
+**`Direction.Running` (0x80).** All five parse sites did `r.u8()? & 0x07`, so the
+running bit was masked off for every mobile but ourselves. ClassicUO splits it as
+`isrun` (`PacketHandlers.cs:6313-6334`) and feeds it to the walk-vs-run animation
+group and the step duration; we inferred it instead from how fast updates
+happened to arrive (`cyclesPerTile(stepDur <= 280)`), a guess that misreads under
+poll jitter, a latency spike, or anything that stops mid-run. ServUO sends it —
+its own `Direction` enum has `Running = 0x80` (`Mobile.cs:392`) and the movement
+packets write `(byte)m.Direction` whole. It reaches the renderer as
+`scene.mobiles[].run`, and the cadence guess now survives only for a mobile we
+have no record for yet.
+
+**Verified live.** A walking orc reports no `run` key; the same orc with
+`ActiveSpeed`/`CurrentSpeed` dropped to 0.05 — which is what pushes ServUO's
+`BaseAI` past `delay < Mobile.WalkFoot` and makes it set the bit
+(`BaseAI.cs:2337-2343`) — reports `run: true` with `dir` still a clean 2. So both
+states are right, and the facing never picks up the 0x80.
+
+**Status-flags `0x04` (Flying).** ClassicUO reuses one enum slot for two meanings
+and picks by client version (`Mobile.cs:137`:
+`IsFlying => Version >= CV_7000 && (Flags & Poisoned) != 0`). We report Stygian
+Abyss, so for us the bit is Flying and never poison — poison arrives on 0x17,
+which we already handle. The constant was *documented* in our own source and
+never decoded. It now reaches the renderer as `fly`, and it silences footsteps,
+which is ClassicUO's `!IsFlying` guard — not to be confused with the separate
+`IsMounted || IsFlying` rule that paces a flying gargoyle like a rider.
+
+**Not live-verified**, and not for want of trying: ServUO's `Mobile.Flying`
+property carries no `[CommandProperty]` attribute (`Warmode` immediately below it
+does), so `[set Flying true` cannot reach it, and a real gargoyle toggling flight
+is the only way to raise the bit on this shard. The decode is pinned by a test
+that also asserts the bit does not leak into `poisoned`.
+
+Both fixes collapsed their call sites into one helper each — `apply_status_flags`
+for the seven flag sites and `split_direction` for the five direction sites.
+That is the point rather than tidiness: `flying` stayed undecoded for months
+*while its own constant sat documented three lines above the code*, because
+adding a bit meant touching seven places and nothing failed if you touched six.
+
+Also corrected in passing: `poisoned_field`'s doc claimed poison was "the
+mobile-update status-flags 0x04 bit", which is exactly the bit that turned out to
+be Flying.
