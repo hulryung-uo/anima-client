@@ -1886,3 +1886,52 @@ at. Members are plotted on the world map under the player dot, guild first so
 party wins an overlap, skipped when their facet is not ours — the reply reports
 members on other facets, and plotting those would put a teammate in the middle
 of the wrong continent.
+
+---
+
+Closed 2026-08-25 (wire closed, UI never wired): two rows where the protocol work
+had been finished months ago and nothing in the browser ever reached for it.
+Both are client-only; not one byte of Rust changed.
+
+**The party panel exposed two of its six verbs.** `partytell`, `partykick`,
+`partyloot` and `statusreq` have been in `commands.rs` since 2026-08-07 and no JS
+file sent any of them; `dialogs.rs` had been emitting `mana`/`manaMax`/`stam`/
+`stamMax` per member and the panel's change-signature hashed only
+`hits/hitsMax/name`, so even when it did read them they could never repaint. Now:
+
+- **Tell** (✉) per member, which opens the chat bar addressed to that member
+  rather than a separate prompt — a private message is then typed exactly where
+  every other line is typed. A targeted line wins over the `/w`-style prefixes,
+  since the target was chosen by clicking and a leading slash is part of the
+  message.
+- **Kick** (✕), drawn **only when we are the leader**. ClassicUO puts it on every
+  row and lets the server ignore a non-leader's press; a button that silently
+  does nothing is worse than an absent one.
+- **"Party can loot my corpse"**, persisted locally. The server never reports the
+  current value — ClassicUO tracks it client-side too — so this is our copy of
+  what we last sent.
+- **Mana and stamina bars**, thinner and dimmer than the HP bar so a healer is
+  not made to hunt for the one that matters. Like hits they are normalized to 25
+  for everyone but us, so they are only ever drawn as a ratio, never printed as
+  numbers beside our own real ones.
+
+The frozen-bar case `statusreq` was built for is now fixed without asking the
+player to know about it: ServUO pushes 0xA1-3 only while a member is in update
+range, so a member missing from `scene.mobiles` has bars stuck at whatever we
+last heard. Those rows are dimmed rather than shown as confident readings, and a
+`statusreq` goes out for them at most once every five seconds.
+
+**Stat locks had a control two panels over and none of their own.**
+`scene.player.strLock`/`dexLock`/`intLock` were emitted, `statlock:<stat>:<lock>`
+was accepted, and the status sheet drew STR/DEX/INT as bare numbers. The lockers
+are a straight port of the skills window's own control — same icons, same
+up → down → locked cycle as ClassicUO's `StatusGump`.
+
+**Live-verified:** `statlock:0:2` moves `strLock` 0 → 2 with `dexLock`/`intLock`
+untouched, and back to 0 — the full round trip through 0xBF/0x1A and back out on
+0x11. `partyloot` and `statusreq` were exercised against the shard too; with no
+party they are no-ops, and the point of sending them was to confirm ServUO does
+not drop the connection over either.
+
+**Not verified:** anything that needs a second player — a real kick, a private
+party message arriving, another member's bars moving. One account, one shard.

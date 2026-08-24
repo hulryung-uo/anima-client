@@ -808,6 +808,29 @@
       .pt-bar { height: 5px; margin-top: 3px; border-radius: 3px;
         background: rgba(255, 255, 255, .08); overflow: hidden; }
       .pt-bar > i { display: block; height: 100%; background: #57c75e; border-radius: 3px; }
+      /* Per-member verbs. Small and quiet: they sit on every row, so they must
+         not compete with the name for attention. */
+      .pt-verb { cursor: pointer; width: 20px; height: 18px; padding: 0; line-height: 1;
+        background: transparent; color: #7d8792; border: 1px solid #2a3a4a; border-radius: 3px;
+        font-size: 11px; }
+      .pt-verb:hover { background: rgba(138, 180, 248, .18); color: #fff; }
+      .pt-verb.kick:hover { background: rgba(224, 95, 95, .22); color: #ffd6d6; border-color: #6a3030; }
+      /* Mana and stamina read as thinner, dimmer siblings of the HP bar — three
+         equal bars would make a healer hunt for the one that matters. */
+      .pt-bar.mana { height: 3px; margin-top: 2px; }
+      .pt-bar.mana > i { background: #5b8dd6; }
+      .pt-bar.stam { height: 3px; margin-top: 2px; }
+      .pt-bar.stam > i { background: #c9a227; }
+      .pt-stale { opacity: .45; }
+      /* Stat lockers, the same control the skills window already has. */
+      .st-lock { cursor: pointer; width: 14px; text-align: center; color: #7d8792;
+        font-size: 11px; user-select: none; }
+      .st-lock:hover { color: #fff; }
+      .st-lock.locked { color: #e0a35f; }
+      #pt-loot-row { border-top: 1px solid #2a2f37; padding: 7px 2px 3px; font-size: 12px; }
+      #pt-loot-row label { display: flex; align-items: center; gap: 7px; cursor: pointer;
+        color: #b8c0c9; user-select: none; }
+      #pt-loot-row input { width: 14px; height: 14px; cursor: pointer; }
       #pt-actions { display: flex; gap: 6px; border-top: 1px solid #2a2f37; padding-top: 8px; }
       .pt-btn { flex: 1; cursor: pointer; height: 24px;
         background: #1b2530; color: #8ab4f8; border: 1px solid #2a3a4a; border-radius: 4px;
@@ -1469,9 +1492,9 @@
         <div class="bar mana"><span id="st-mana"></span></div>
         <div class="row"><span class="k">Stam</span><span id="st-stam-n">—</span></div>
         <div class="bar stam"><span id="st-stam"></span></div>
-        <div class="row"><span class="k">STR</span><span id="st-str">—</span></div>
-        <div class="row"><span class="k">DEX</span><span id="st-dex">—</span></div>
-        <div class="row"><span class="k">INT</span><span id="st-int">—</span></div>
+        <div class="row"><span class="k">STR</span><span class="st-lock" data-stat="0">↑</span><span id="st-str">—</span></div>
+        <div class="row"><span class="k">DEX</span><span class="st-lock" data-stat="1">↑</span><span id="st-dex">—</span></div>
+        <div class="row"><span class="k">INT</span><span class="st-lock" data-stat="2">↑</span><span id="st-int">—</span></div>
         <div class="row"><span class="k">Gold</span><span id="st-gold">—</span></div>
         <!-- The rest of 0x11's status sheet. The server has always parsed
              these; until now it never sent them, so the panel stopped at gold. -->
@@ -1505,6 +1528,9 @@
       <div class="gump-body">
         <div id="pt-invite-prompt"></div>
         <div id="pt-list"></div>
+        <div id="pt-loot-row">
+          <label><input type="checkbox" id="pt-loot"> Party can loot my corpse</label>
+        </div>
         <div id="pt-actions">
           <button id="pt-invite" class="pt-btn">Invite</button>
           <button id="pt-leave" class="pt-btn">Leave</button>

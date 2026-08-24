@@ -573,6 +573,7 @@ function setupInput() {
   document.getElementById("pt-close").addEventListener("click", closeParty);
   makeDraggable(document.getElementById("party"), document.getElementById("pt-title"));
   wireParty();
+  wireStatLocks();
   // HUD panel: draggable by its title (also carries #status, which lives inside it).
   const hudEl = document.getElementById("hud");
   const hudTitle = hudEl.querySelector("h1");
@@ -680,6 +681,18 @@ const CHAT_BARE_PREFIXES = [
   { keys: ["chatopen"], cmd: "chatopen" },
   { keys: ["cleave", "chatleave"], cmd: "chatleave" },
 ];
+// A pending `partytell` target: the chat bar's next line goes to this member
+// privately instead of being spoken. ClassicUO opens a dedicated one-line prompt
+// for this; we reuse the chat bar so a private message is typed exactly where
+// every other line is typed, with the target shown in the placeholder.
+let chatTellTarget = 0;
+function startPartyTell(serial, name) {
+  chatTellTarget = serial | 0;
+  openChat();
+  const bar = document.getElementById("chatbar");
+  bar.placeholder = "to " + (name || "member") + "…";
+}
+
 function openChat() {
   if (chatting) return;
   chatting = true;
@@ -690,12 +703,21 @@ function openChat() {
 }
 function closeChat() {
   chatting = false;
+  chatTellTarget = 0;
   const bar = document.getElementById("chatbar");
+  bar.placeholder = "";
   bar.classList.remove("on"); bar.blur();
 }
 function submitChat() {
   const bar = document.getElementById("chatbar");
   const text = bar.value.trim();
+  // A targeted party message wins over every prefix: the target was chosen by
+  // clicking a member, so a leading "/w" in the text is part of the message.
+  if (text && chatTellTarget) {
+    sendInput("partytell:" + chatTellTarget + ":" + text);
+    closeChat();
+    return;
+  }
   if (text) {
     const bare = /^\/([a-z]+)$/i.exec(text);
     const bareRoute = bare && CHAT_BARE_PREFIXES.find((p) => p.keys.includes(bare[1].toLowerCase()));

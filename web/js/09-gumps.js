@@ -899,6 +899,17 @@ function refreshStatus(s) {
   set("st-mana-n", `${p.mana | 0} / ${p.manaMax | 0}`); bar("st-mana", p.mana, p.manaMax);
   set("st-stam-n", `${p.stam | 0} / ${p.stamMax | 0}`); bar("st-stam", p.stam, p.stamMax);
   set("st-str", p.str | 0); set("st-dex", p.dex | 0); set("st-int", p.int | 0);
+  // Stat lockers (0x11's lock bytes → `strLock`/`dexLock`/`intLock`). These have
+  // been on the wire and in the scene the whole time with nothing to show them;
+  // this is the same control the skills window already has, two panels over.
+  const locks = [p.strLock | 0, p.dexLock | 0, p.intLock | 0];
+  for (const el of document.querySelectorAll("#statusbar .st-lock")) {
+    const lock = locks[el.dataset.stat | 0] % 3;
+    el.dataset.lock = lock;
+    el.textContent = LOCK_ICONS[lock];
+    el.title = LOCK_TITLES[lock];
+    el.classList.toggle("locked", lock === 2);
+  }
   set("st-gold", p.gold | 0);
   // The rest of the sheet. `statsCap`/`tithing` are AOS-era fields a pre-AOS
   // shard simply leaves at 0 — shown as-is rather than hidden, so "0" reads as
@@ -1213,6 +1224,41 @@ function closeParty() {
   document.getElementById("party").classList.remove("on");
 }
 // Rebuild only when the party data changes (members, hits, leader, or invite).
+// "Party can loot my corpse" (0xBF/0x06/0x06). The server never tells us the
+// current value — ClassicUO tracks it client-side too — so this is our own copy
+// of what we last sent, persisted so it survives a reload the way the toggle in
+// ClassicUO's PartyGump does.
+let partyLootMe = localStorage.getItem("anima.partyLoot") === "1";
+
+// Is this member close enough that the server is still pushing their vitals?
+// ServUO sends 0xA1-3 only while a mobile is in update range and visible, so a
+// member missing from `scene.mobiles` has frozen bars, not zeroed ones.
+function partyMemberInView(serial) {
+  const ms = (scene && scene.mobiles) || [];
+  const want = serial >>> 0;
+  if (((scene.player && scene.player.serial) >>> 0) === want) return true;
+  for (const m of ms) if ((m.serial >>> 0) === want) return true;
+  return false;
+}
+
+// Ask the server for an out-of-view member's real attributes (0x34 type 4). This
+// is the whole point of `statusreq`: without it a member who walks away leaves
+// their bars stuck at the last value we heard, forever. Throttled per member —
+// the panel refreshes on every scene poll, and one request per member per five
+// seconds is enough to keep a healer honest without spamming the wire.
+const partyStatusAsked = new Map();
+const PARTY_STATUS_MS = 5000;
+function refreshStalePartyStatus(members) {
+  const now = Date.now();
+  for (const m of members) {
+    const serial = m.serial | 0;
+    if (!serial || partyMemberInView(serial)) { partyStatusAsked.delete(serial); continue; }
+    if (now - (partyStatusAsked.get(serial) || 0) < PARTY_STATUS_MS) continue;
+    partyStatusAsked.set(serial, now);
+    sendInput("statusreq:" + serial);
+  }
+}
+
 function refreshParty() {
   const party = (scene && scene.party) || { leader: 0, members: [], invite: 0 };
   const invite = party.invite | 0;
@@ -1223,8 +1269,13 @@ function refreshParty() {
   }
   if (!partyOn) return;
   const win = document.getElementById("party");
-  const sig = `${party.leader}|${invite}|` +
-    (party.members || []).map((m) => `${m.serial}:${m.hits}:${m.hitsMax}:${m.name}`).join(",");
+  // Mana and stamina belong in the signature: they were already on the wire
+  // (`dialogs.rs` emits them per member) and hashing only hits/name meant a
+  // member whose mana changed never repainted.
+  const sig = `${party.leader}|${invite}|${partyLootMe ? 1 : 0}|` +
+    (party.members || [])
+      .map((m) => `${m.serial}:${m.hits}:${m.hitsMax}:${m.mana}:${m.manaMax}:${m.stam}:${m.stamMax}:${m.name}`)
+      .join(",");
   if (win._sig === sig) return;
   win._sig = sig;
 
@@ -1245,6 +1296,11 @@ function refreshParty() {
   // Member list with health bars.
   const list = document.getElementById("pt-list");
   const members = party.members || [];
+  const iAmLeader = (party.leader | 0) !== 0
+    && (party.leader | 0) === ((scene.player && scene.player.serial) | 0);
+  document.getElementById("pt-loot").checked = partyLootMe;
+  document.getElementById("pt-loot-row").style.display = members.length ? "" : "none";
+  refreshStalePartyStatus(members);
   if (!members.length) {
     list.innerHTML = '<div class="pt-empty">Not in a party.</div>';
   } else {
@@ -1261,13 +1317,29 @@ function refreshParty() {
       const isSelf = (m.serial | 0) === ((scene.player && scene.player.serial) | 0);
       const hp = max <= 0 ? "—" : isSelf ? `${m.hits | 0}/${max}` : `${pct}%`;
       const name = (m.name || "Member").replace(/[<>&]/g, "");
-      html += `<div class="pt-row${isLeader ? " leader" : ""}">`
+      // Mana/stam are normalized to 25 for everyone but us, exactly like hits, so
+      // they are only ever drawn as a ratio — never printed as numbers beside our
+      // own real ones.
+      const mpct = (m.manaMax | 0) > 0 ? Math.max(0, Math.min(100, Math.round((m.mana | 0) * 100 / (m.manaMax | 0)))) : 0;
+      const spct = (m.stamMax | 0) > 0 ? Math.max(0, Math.min(100, Math.round((m.stam | 0) * 100 / (m.stamMax | 0)))) : 0;
+      // A member out of update range stops receiving 0xA1-3 pushes, so their bars
+      // freeze at whatever we last heard. Dim the row rather than showing a
+      // confident stale reading; `statusreq` below is what un-freezes it.
+      const stale = !partyMemberInView(m.serial);
+      html += `<div class="pt-row${isLeader ? " leader" : ""}${stale ? " pt-stale" : ""}">`
         + `<div class="pt-head">`
         + (isLeader ? '<span class="pt-crown" title="leader">♛</span>' : "")
         + `<span class="pt-name">${name}</span>`
         + `<span class="pt-hp">${hp}</span>`
+        + (isSelf ? "" : `<button class="pt-verb" data-act="tell" data-serial="${m.serial | 0}" title="Private message">✉</button>`)
+        // ClassicUO puts a Kick button on every row and lets the server ignore a
+        // non-leader's press. We only draw it when we ARE the leader: a button
+        // that silently does nothing is worse than an absent one.
+        + (iAmLeader && !isSelf ? `<button class="pt-verb kick" data-act="kick" data-serial="${m.serial | 0}" title="Remove from party">✕</button>` : "")
         + `</div>`
         + `<div class="pt-bar"><i style="width:${pct}%"></i></div>`
+        + `<div class="pt-bar mana"><i style="width:${mpct}%"></i></div>`
+        + `<div class="pt-bar stam"><i style="width:${spct}%"></i></div>`
         + `</div>`;
     }
     list.innerHTML = html;
@@ -1275,9 +1347,37 @@ function refreshParty() {
 }
 // Wire the party panel once at startup: Invite/Leave buttons + the Accept/Decline
 // prompt (delegated so it survives innerHTML rebuilds).
+// Stat lockers, wired once and delegated — the row markup is static, but the
+// icon text is rewritten on every status refresh. Cycle order matches the skills
+// window and ClassicUO's `StatusGump`: up → down → locked → up.
+function wireStatLocks() {
+  document.getElementById("statusbar").addEventListener("click", (e) => {
+    const el = e.target.closest(".st-lock");
+    if (!el) return;
+    const next = ((el.dataset.lock | 0) + 1) % 3;
+    sendInput("statlock:" + (el.dataset.stat | 0) + ":" + next);
+  });
+}
+
 function wireParty() {
   document.getElementById("pt-invite").addEventListener("click", () => sendInput("partyinvite"));
   document.getElementById("pt-leave").addEventListener("click", () => sendInput("partyleave"));
+  document.getElementById("pt-loot").addEventListener("change", (e) => {
+    partyLootMe = !!e.target.checked;
+    localStorage.setItem("anima.partyLoot", partyLootMe ? "1" : "0");
+    sendInput("partyloot:" + (partyLootMe ? 1 : 0));
+  });
+  // Per-member verbs, delegated so they survive the list's innerHTML rebuild.
+  document.getElementById("pt-list").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-act]");
+    if (!btn) return;
+    const serial = btn.dataset.serial | 0;
+    if (btn.dataset.act === "kick") { sendInput("partykick:" + serial); return; }
+    // A private party message is a normal chat line addressed to one member, so
+    // it goes through the chat bar rather than a prompt: type it where every
+    // other line is typed, and press Enter.
+    startPartyTell(serial, btn.closest(".pt-row").querySelector(".pt-name").textContent);
+  });
   document.getElementById("pt-invite-prompt").addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-act]");
     if (!btn) return;
