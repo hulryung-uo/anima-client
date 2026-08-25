@@ -223,11 +223,18 @@ pub fn build_scene(
     };
     let shop = serde_json::to_string(&shop).unwrap_or_else(|_| "null".into());
 
-    // Targeting UI state: is the server waiting for a target, and is it an
-    // object (kind 0) or ground (kind 1) cursor?
+    // Targeting UI state: is the server waiting for a target, is it an
+    // object (kind 0) or ground (kind 1) cursor, and is the pending action
+    // neutral / harmful / beneficial (`flag`, the 0x6C cursor-type byte —
+    // ClassicUO's `TargetType`: 0 neutral, 1 harmful, 2 beneficial; 3 = cancel
+    // never reaches here because it clears `pending_target` instead). The
+    // client colours the reticle from it and gates its criminal-action confirm
+    // on it — out of war mode an offensive spell otherwise looks exactly like a
+    // heal. Already decoded by the core (`World::TargetCursor::cursor_flag`);
+    // this only stopped it being dropped on the way to the browser.
     let target = match s.world.pending_target {
-        Some(tc) => json!({ "active": 1, "kind": tc.target_type }),
-        None => json!({ "active": 0, "kind": 0 }),
+        Some(tc) => json!({ "active": 1, "kind": tc.target_type, "flag": tc.cursor_flag }),
+        None => json!({ "active": 0, "kind": 0, "flag": 0 }),
     };
     // Pending 0x99 house/multi placement footprint, if any — see
     // `placement_json`'s doc. Formatted below into an optional (possibly
@@ -251,7 +258,7 @@ pub fn build_scene(
     } = match map {
         Some(map) => {
             apply_surface_overhead(&s.world, map, multis, max_z, &mut mobiles);
-            emit_tiles(
+            let emission = emit_tiles(
                 &s.world,
                 map,
                 multis,
@@ -261,7 +268,11 @@ pub fn build_scene(
                 max_z,
                 no_draw_roofs,
                 &mut lights,
-            )
+            );
+            // After the tile loop, so the static/multi torches it appends are
+            // occluded by the same rule the item ones are.
+            apply_light_occlusion(&s.world, map, multis, max_z, &mut lights);
+            emission
         }
         None => TileEmission::default(),
     };

@@ -25,6 +25,14 @@ function releaseMoveKeys() {
 // `mouseup`, so callers must also hook `pointerup` or rightDown stays true and
 // the avatar keeps running toward the cursor (iso-up = northwest).
 function endRightMouse(clientX, clientY) {
+  // ClassicUO ends follow mode on a right-click (GameSceneInputHandler:829) —
+  // but only one that landed on the WORLD: that arm sits after its
+  // `if (!UIManager.IsMouseOverWorld) return false`. This fires on every
+  // right-release window-wide, including the one that just closed a gump, so
+  // it asks whether the press it is closing actually started on the world:
+  // `rightDown` is set by the canvas's own mousedown, `rmbEntity` by a PIXI
+  // entity press, and a press on a DOM panel sets neither.
+  if (rightDown || rmbEntity) stopFollowing();
   rightDown = false;
   if (rmbEntity) {
     if (rmbEntity.timer) { clearTimeout(rmbEntity.timer); rmbEntity.timer = null; }
@@ -106,6 +114,11 @@ function activeMove() {
   if (chatting || wmOn) return null;   // don't walk while typing or with the world map open
   if (rightDown) { const m = mouseMove(); if (m) { standUp(); return m; } }
   if (held.size) { standUp(); return { dir: [...held].pop(), run: keyboardWantsRun() }; }
+  // Follow mode walks us with the SERVER pathfinder rather than a direction
+  // intent, so it returns nothing here — see `followTick`. Ticked from the one
+  // function the render loop already calls every frame; `steerBoat` (06-movement)
+  // sends from this same per-frame path for the same reason.
+  followTick();
   return null;
 }
 
@@ -123,6 +136,7 @@ let targetUIHidden = false;     // user pressed Esc → hide crosshair/banner lo
 // target cursor first; otherwise shift = attack, double = use, single = request name.
 function onEntityPointerDown(serial, e, isItem) {
   if (e.button === 2) {               // right-button on an entity
+    stopFollowing();                  // as on empty ground — a right-click ends follow mode
     // RMB on an entity is ambiguous: a *quick tap* = open its context menu, a
     // *hold or drag* = steer the character. To stop the two from firing together we
     // DON'T steer immediately here (the canvas mousedown checks `rmbEntity` and skips
@@ -145,10 +159,18 @@ function onEntityPointerDown(serial, e, isItem) {
   if (inspectPick) { inspectPicked({ serial }); return; }
   if (scene && scene.target && scene.target.active === 1 && !targetUIHidden) {
     targetConsumedAt = performance.now();
-    sendInput("target:" + serial);   // answer the object-target cursor
-    endTargetUI();
+    // A harmful cursor aimed at an innocent (or a beneficial one at a criminal)
+    // asks first — see `confirmCriminalTarget`. It answers the cursor itself
+    // once the player says yes, so this click is finished either way.
+    if (!confirmCriminalTarget(serial, isItem)) return;
+    resolveObjectTarget(serial);
     return;
   }
+  // Alt + left-click a MOBILE = follow it (ClassicUO GameSceneInputHandler:717-728).
+  // Deliberately below the target-cursor branch: while the server is waiting for a
+  // target, the click belongs to that cursor — Alt is only a movement modifier when
+  // nothing else wants the click.
+  if (e.altKey && !isItem) { startFollowing(serial); return; }
   if (clickPend && clickPend.serial === serial) {  // second click in time → double-click
     clearTimeout(clickPend.timer); clickPend = null;
     // Any double-click ends a sit (see trySit()) before deciding what this one does —
@@ -166,6 +188,9 @@ function onEntityPointerDown(serial, e, isItem) {
     // empty window. Mobiles never do this.
     if (isItem) {
       const it = (scene.items || []).find((x) => (x.serial >>> 0) === (serial >>> 0));
+      // ClassicUO `ManualOpenedCorpses`: opening a corpse by hand opts it out of
+      // the auto-open path's `SkipEmptyCorpse` hide — you asked to see it.
+      if (it && (it.g | 0) === CORPSE_GRAPHIC) manualOpenedCorpses.add(serial >>> 0);
       if (it && it.c) openContainer(serial);
       else if (it) trySit(it); // no-op unless `it.g` is a chair/bench/stool/throne we're next to
     } else {
@@ -271,6 +296,10 @@ function onStaticPointerDown(sp, e) {
     // unremapped ids. (ClassicUO sends `Static.Graphic`, which its own
     // `SetGraphicBySeason` has already overwritten, so a winter tree fails
     // there; `OriginalGraphic` is what it should send and what `st.g` is.)
+    // ClassicUO stores the ADJUSTED z here too (`TargetManager.Target`:
+    // `z += itemData.Height` then `LastTargetInfo.SetStatic(graphic, x, y, z)`
+    // and `TargetPacket` with the same z), so a replay resends identical bytes.
+    rememberTargetTile(st.x, st.y, staticTargetZ(st), st.g);
     sendInput(`targetxy:${st.x | 0}:${st.y | 0}:${staticTargetZ(st)}:${st.g | 0}`);
     endTargetUI();
     return;
@@ -558,7 +587,8 @@ function endTargetUI() { targetUIHidden = true; updateTargetUI(); }
 // gump art the play server doesn't ship. PIXI owns the canvas cursor (it swaps to
 // `cursorStyles[mode]` as you hover entities), so we drive it through cursorStyles
 // rather than fighting it with a raw style.cursor that PIXI would overwrite.
-let CURSOR_ARROW = "auto", CURSOR_TARGET = "crosshair", CURSOR_TARGET_WAR = "crosshair";
+let CURSOR_ARROW = "auto", CURSOR_TARGET = "crosshair", CURSOR_TARGET_WAR = "crosshair",
+    CURSOR_TARGET_GOOD = "crosshair";
 function cursorFromCanvas(size, hotx, hoty, paint) {
   const c = document.createElement("canvas"); c.width = c.height = size;
   const g = c.getContext("2d"); paint(g);
@@ -587,17 +617,39 @@ function buildGameCursors() {
       g.beginPath(); g.arc(0, 0, 1.4, 0, Math.PI * 2); g.fill();            // centre dot
     }
   });
-  CURSOR_TARGET = reticle("#ffd23f");     // amber reticle — neutral/beneficial target
-  CURSOR_TARGET_WAR = reticle("#ff4d4d"); // red reticle — war / harmful target
+  // ClassicUO tints the target aura by the 0x6C cursor type (GameCursor.cs:361-379):
+  // Neutral hue 0x03b2, Harmful 0x0023 (red), Beneficial 0x005A (blue).
+  CURSOR_TARGET = reticle("#ffd23f");      // amber reticle — neutral target
+  CURSOR_TARGET_WAR = reticle("#ff4d4d");  // red reticle — harmful target (or war, pre-`flag`)
+  CURSOR_TARGET_GOOD = reticle("#6cb8ff"); // blue reticle — beneficial target
   applyCursorMode();
 }
 // Point the canvas cursor at the arrow, or the target reticle while a target cursor
 // is up (red in war mode). Updates PIXI's cursorStyles so it survives entity hovers,
 // and sets the style directly for an immediate switch (PIXI only re-applies on move).
+// The 0x6C cursor type of the pending target — ClassicUO's `TargetType`:
+// 0 neutral, 1 harmful, 2 beneficial (3 = cancel never arrives; it clears the
+// cursor in the core instead). `null` when the scene predates the field, which
+// is the only case the war-mode guess below is still used for.
+function targetCursorFlag() {
+  const t = scene && scene.target;
+  return t && typeof t.flag === "number" ? t.flag | 0 : null;
+}
+// Which reticle the pending target deserves. This is the whole point of
+// carrying the flag: out of war mode an offensive spell used to show the same
+// amber reticle a heal did, so nothing on screen distinguished "this will flag
+// you criminal" from "this will cure you".
+function targetReticle() {
+  const f = targetCursorFlag();
+  if (f == null) return (scene && scene.war) ? CURSOR_TARGET_WAR : CURSOR_TARGET;
+  if (f === 1) return CURSOR_TARGET_WAR;
+  if (f === 2) return CURSOR_TARGET_GOOD;
+  return CURSOR_TARGET;
+}
 function applyCursorMode() {
   if (!app || !app.renderer) return;
   const targeting = !!(scene && scene.target && scene.target.active === 1 && !targetUIHidden);
-  const base = targeting ? ((scene && scene.war) ? CURSOR_TARGET_WAR : CURSOR_TARGET) : CURSOR_ARROW;
+  const base = targeting ? targetReticle() : CURSOR_ARROW;
   const cs = app.renderer.events && app.renderer.events.cursorStyles;
   if (cs) { cs.default = base; cs.pointer = targeting ? base : CURSOR_ARROW; }
   if (app.canvas) app.canvas.style.cursor = base;
@@ -608,10 +660,19 @@ function updateTargetUI() {
   if (active && !prevTargetActive) targetUIHidden = false; // fresh request → show again
   prevTargetActive = active;
   const show = active && !targetUIHidden;
-  applyCursorMode();               // arrow ↔ target reticle (red in war mode)
+  applyCursorMode();               // arrow ↔ target reticle, coloured by cursor type
   const hint = document.getElementById("targethint");
-  if (hint) hint.style.display = show ? "block" : "none";
-  if (!show) clearTargetHighlight();   // target resolved/cancelled → drop any highlight
+  if (hint) {
+    hint.style.display = show ? "block" : "none";
+    // Same information as the reticle colour, in words — a reticle tint is easy
+    // to miss mid-fight and the consequence of missing it is a criminal flag.
+    const f = show ? targetCursorFlag() : null;
+    hint.className = f === 1 ? "harmful" : f === 2 ? "beneficial" : "";
+    hint.textContent = (f === 1 ? "Select a HARMFUL target…" : f === 2 ? "Select a BENEFICIAL target…"
+                                                             : "Select a target…")
+      + "   ( Esc to cancel · F last · V self )";
+  }
+  if (!show) { clearTargetHighlight(); hideCriminalConfirm(); }   // resolved/cancelled → drop highlight + any confirm
 }
 // While a target cursor is active, the entity (mobile or world item) under the cursor
 // is tinted gold so the player can see exactly what they're about to target. Only one
@@ -636,3 +697,238 @@ function targetHighlightOff(sp) {
   if (targetHL && targetHL.sp === sp) clearTargetHighlight();
 }
 
+
+// ---- last target · target verbs · follow mode -------------------------------
+//
+// ClassicUO keeps a `LastTargetInfo` (TargetManager.cs:115) updated by every
+// resolved target and replays it into the *current* cursor with `TargetLast()`
+// (:466); the same manager exposes target-self / bandage-self / bandage-target /
+// attack-last as macro types (MacroManager.cs:2294-2329). None of that was
+// reachable here: a cursor could only be answered by clicking a moving sprite.
+//
+// The store has ClassicUO's three shapes — an entity, a map static, or a land
+// tile — because the 0x6C reply differs between them (`target:` vs `targetxy:`),
+// and a replay has to resend the same bytes the original click did.
+let lastTargetInfo = null;   // { serial } | { g, x, y, z } | null
+
+// ClassicUO deliberately does NOT record yourself (TargetManager.cs:262:
+// `if (entity != _world.Player) LastTargetInfo.SetEntity(serial)`) — a self-cast
+// must not overwrite the mob you were fighting.
+function rememberTargetEntity(serial) {
+  const me = scene && scene.player;
+  if (me && (serial >>> 0) === (me.serial >>> 0)) return;
+  lastTargetInfo = { serial: serial >>> 0 };
+}
+// A static (graphic != 0) or a land tile (graphic 0) — ClassicUO's SetStatic /
+// SetLand, which differ only in whether a graphic is carried.
+function rememberTargetTile(x, y, z, g) {
+  lastTargetInfo = { g: g | 0, x: x | 0, y: y | 0, z: z | 0 };
+}
+// The single place an object-target cursor is answered from a click or a hotkey.
+function resolveObjectTarget(serial) {
+  rememberTargetEntity(serial);
+  sendInput("target:" + (serial >>> 0));
+  endTargetUI();
+}
+
+// ClassicUO `TargetManager.TargetLast()` (:466): only meaningful while a cursor
+// is actually up — with none open it returns silently, and so do we. With a
+// cursor open but nothing remembered ClassicUO would send its cleared buffer
+// (serial 0, graphic 0xFFFF); we say so in the journal instead of putting a
+// junk reply on the wire.
+function targetLast() {
+  if (!targetingActive()) return;
+  if (!lastTargetInfo) { addSysMessage("No last target."); return; }
+  targetConsumedAt = performance.now();
+  if (lastTargetInfo.serial != null) { resolveObjectTarget(lastTargetInfo.serial); return; }
+  const t = lastTargetInfo;
+  sendInput(`targetxy:${t.x}:${t.y}:${t.z}:${t.g}`);
+  endTargetUI();
+}
+// ClassicUO MacroType.TargetSelf — answer the open cursor with our own serial.
+// Same reply the centre-band click in setupInput sends, without needing the body
+// to be un-occluded and clickable.
+function targetSelf() {
+  if (!targetingActive() || !(scene && scene.player)) return;
+  targetConsumedAt = performance.now();
+  sendInput("target:" + (scene.player.serial >>> 0));   // never recorded as last target
+  endTargetUI();
+}
+
+// ClassicUO `PlayerMobile.FindBandage()` (PlayerMobile.cs:107): the FIRST clean
+// bandage (0x0E21) sitting directly in the backpack — not recursive, and bloody
+// bandages (0x0E20) don't count. `scene.contItems` only carries a container the
+// server has actually pushed contents for, so this can legitimately come up
+// empty until the backpack has been opened once; say so rather than no-op.
+// Both entry points — this hotkey and the `bandageself` macro verb — go through
+// the ONE search, `cbFind` (07-hud.js), which walks everything carried rather
+// than only the backpack's direct children and picks the plainest hue as
+// ClassicUO's FindItem does. They were briefly two implementations, with two
+// top-level constants of the same name that made the page a SyntaxError; the
+// constant now lives in 00-state.js and the macro path is the one that was
+// verified live (a real bandage stack going 10 to 9), so the hotkey inherits
+// the evidence rather than carrying a second, untested copy.
+function findBandage() {
+  const it = cbFind(BANDAGE_GRAPHIC, null);
+  return it ? (it.serial >>> 0) : 0;
+}
+// ClassicUO MacroType.BandageSelf / BandageTarget on a modern client
+// (MacroManager.cs:1324-1337): `Send_TargetSelectedObject(bandage, target)` —
+// one 0xBF/0x2C packet, no cursor round trip. `bandage:<item>[:<target>]` is
+// exactly that packet (target 0 = ourselves, resolved by the driver).
+function bandageSelf() {
+  const b = findBandage();
+  if (!b) { addSysMessage("You have no bandages."); return; }
+  sendInput("bandage:" + b);
+}
+function bandageLastTarget() {
+  if (!lastTargetInfo || lastTargetInfo.serial == null) { addSysMessage("No last target."); return; }
+  const b = findBandage();
+  if (!b) { addSysMessage("You have no bandages."); return; }
+  sendInput("bandage:" + b + ":" + lastTargetInfo.serial);
+}
+// ClassicUO MacroType.AttackSelectedTarget. Our own remembered target is the
+// closer analogue of ClassicUO's `SelectedTarget` than the server's `attacklast`
+// is: that one replays `World::last_attack` — the serial we last sent an *attack*
+// for — which is a different thing from the last target a cursor resolved onto.
+// Fall back to it when nothing has been targeted this session.
+function attackLastTarget() {
+  if (lastTargetInfo && lastTargetInfo.serial != null) { sendInput("attack:" + lastTargetInfo.serial); return; }
+  sendInput("attacklast");
+}
+
+// ---- criminal-action confirmation (ClassicUO TargetManager.cs:263-300) -------
+// A harmful cursor landing on an Innocent is how a blue character goes criminal
+// (guard-whacked in town, and on a Felucca ruleset the first step toward red),
+// so ClassicUO puts a QuestionGump in front of it. The mirror case — a
+// beneficial cursor on a criminal/murderer/gray — flags you too, and is off by
+// default there (Profile.cs:106-107), so it is off by default here.
+let crimConfirm = null;   // { serial } while the modal is up, else null
+function confirmCriminalTarget(serial, isItem) {
+  if (isItem) return true;                       // `SerialHelper.IsMobile` — items never flag
+  const me = scene && scene.player;
+  if (!me || (serial >>> 0) === (me.serial >>> 0)) return true;   // ClassicUO's `serial != Player`
+  // ClassicUO gates on OUR OWN notoriety being Innocent(1) or Ally(2). Ours can
+  // be 0/Unknown — 08-overlays.js leans on that when it colours your own name
+  // blue — but do NOT read that as "always 0": measured live against ServUO it
+  // was 3 (gray) for a GM character, and ServUO's 0x22 MovementAck does carry
+  // `Notoriety.Compute(m, m)` on every accepted step (Packets.cs:4521), which
+  // the core simply doesn't keep. So branch on the value and treat only the
+  // unknown 0 as Innocent — the safe side, since that is the one that still
+  // warns.
+  if ((me.noto | 0) > 2) return true;            // already gray/criminal/red — nothing left to warn about
+  const m = ((scene && scene.mobiles) || []).find((x) => (x.serial >>> 0) === (serial >>> 0));
+  if (!m) return true;
+  const flag = targetCursorFlag(), noto = m.noto | 0;
+  // NotorietyFlag: 1 Innocent · 2 Ally · 3 Gray · 4 Criminal · 5 Enemy · 6 Murderer.
+  const harmful = flag === 1 && settings.criminalQuery && noto === 1;
+  const beneficial = flag === 2 && settings.beneficialCriminalQuery && (noto === 3 || noto === 4 || noto === 6);
+  if (!harmful && !beneficial) return true;
+  showCriminalConfirm(serial, m.name);
+  return false;
+}
+function hideCriminalConfirm() {
+  crimConfirm = null;
+  const el = document.getElementById("crimconfirm");
+  if (el) el.style.display = "none";
+}
+let crimConfirmWired = false;
+function showCriminalConfirm(serial, name) {
+  const el = document.getElementById("crimconfirm");
+  if (!el) { resolveObjectTarget(serial); return; }   // no markup → don't silently eat the click
+  crimConfirm = { serial: serial >>> 0 };
+  const who = document.getElementById("crimconfirm-who");
+  if (who) who.textContent = name ? "Target: " + name : "";
+  if (!crimConfirmWired) {
+    crimConfirmWired = true;
+    // Yes still has to answer the cursor the click was for; the cursor stays open
+    // on No, exactly as ClassicUO's QuestionGump leaves it.
+    document.getElementById("crimconfirm-yes").addEventListener("click", () => {
+      const c = crimConfirm; hideCriminalConfirm();
+      if (c && targetingActive()) resolveObjectTarget(c.serial);
+    });
+    document.getElementById("crimconfirm-no").addEventListener("click", hideCriminalConfirm);
+  }
+  el.style.display = "block";
+}
+
+// ---- follow mode (ClassicUO GameSceneInputHandler.cs:717-728 / GameScene.cs:736-759) ----
+// Alt + left-click a mobile and the walker trails it until a right-click. Purely
+// client-side there and here: it is a repeated pathfind request, not a protocol
+// verb. ClassicUO drives its own `Pathfinder.WalkTo(x, y, z, 1)`; ours drives the
+// play server's `walkto` route, which is the same A* one tick behind.
+let followTarget = 0;       // serial we're trailing, 0 = not following
+let followSentAt = 0;       // perf-ms of the last walkto we issued
+let followSentTile = null;  // "x,y" that walkto was aimed at (null = no route of ours is live)
+const FOLLOW_DIST = 3;          // ClassicUO GameScene.cs:750 re-paths only while `distance > 3`
+const FOLLOW_REPATH_MS = 400;   // one route per walk cadence; a new walkto resets the server's
+                                // denied-tile blacklist, so re-issuing faster than it can step is wasteful
+const FOLLOW_REFRESH_MS = 2000; // re-issue the same goal this often, so a route the server
+                                // abandoned (blocked, runaway guard) doesn't strand us
+function startFollowing(serial) {
+  serial = serial >>> 0;
+  const me = scene && scene.player;
+  if (!me || serial === (me.serial >>> 0)) return;
+  // ClassicUO's arm is `ent is Mobile` — you cannot follow an item.
+  if (!((scene.mobiles || []).some((m) => (m.serial >>> 0) === serial))) return;
+  followTarget = serial;
+  followSentAt = 0; followSentTile = null;
+  addSysMessage("Now following.");     // ClassicUO ResGeneral.NowFollowing
+}
+function stopFollowing() {
+  if (!followTarget) return;
+  const hadRoute = followSentTile != null;
+  followTarget = 0; followSentAt = 0; followSentTile = null;
+  // ClassicUO's StopFollowing also calls `Pathfinder.StopAutoWalk()`; without
+  // that the character keeps walking the rest of the route after you've said
+  // stop. The play server has no "cancel route" verb — only a manual `walk` or
+  // a fresh `walkto` clears `auto_goal` — so re-aim the route at the tile we're
+  // already on, which `prepare_walkto` resolves to an empty path and a stop. It
+  // costs one "walkto (x,y): already there" System line in the journal, which
+  // is much cheaper than walking on unasked; only sent when a route was live.
+  if (hadRoute && scene && scene.player) sendInput(`walkto:${scene.player.x | 0},${scene.player.y | 0}`);
+  addSysMessage("Stopped following.");  // ClassicUO ResGeneral.StoppedFollowing
+}
+// Called once per rendered frame from `activeMove`, and only when nothing else
+// wants to move us — a held key or RMB steering returns before this, which is
+// what lets manual walking suspend follow the way ClassicUO's
+// `!Pathfinder.AutoWalking` gate does (and the server drops `auto_goal` on any
+// manual `walk`, so the two agree).
+function followTick() {
+  if (!followTarget) return;
+  const me = scene && scene.player;
+  if (!me) return;
+  const m = ((scene.mobiles) || []).find((x) => (x.serial >>> 0) === followTarget);
+  // ClassicUO stops when the mobile is gone or past ClientViewRange; anything
+  // out of our view range is already absent from `scene.mobiles`, so the two
+  // conditions collapse into one here.
+  if (!m) { stopFollowing(); return; }
+  // UO "Distance" is Chebyshev — a diagonal is one tile.
+  const d = Math.max(Math.abs((m.x | 0) - (me.x | 0)), Math.abs((m.y | 0) - (me.y | 0)));
+  if (d <= FOLLOW_DIST) return;
+  const now = performance.now();
+  if (now - followSentAt < FOLLOW_REPATH_MS) return;
+  const tile = (m.x | 0) + "," + (m.y | 0);
+  if (tile === followSentTile && now - followSentAt < FOLLOW_REFRESH_MS) return;
+  followSentTile = tile; followSentAt = now;
+  sendInput("walkto:" + tile);
+}
+
+// ---- built-in target hotkeys ------------------------------------------------
+// ClassicUO ships these as macro types with no default key, because its macro
+// editor can bind anything; ours are fixed keys documented in the HUD legend.
+// Registered at file scope (like 01-audio.js's unlock listeners) rather than in
+// `setupInput`, which lives in 13-macros.js — and deliberately BEFORE it in
+// listener order, so `macroFor` is consulted here first: a user macro bound to
+// one of these combos wins, and none of these codes is one setupInput handles.
+window.addEventListener("keydown", (e) => {
+  if (chatting || e.repeat) return;
+  if (isTypingTarget(e.target)) return;
+  if (e.ctrlKey || e.altKey || e.metaKey) return;    // plain / Shift only
+  if (typeof macroFor === "function" && macroFor(e)) return;  // a user macro owns this combo
+  switch (e.code) {
+    case "KeyF": e.preventDefault(); e.shiftKey ? attackLastTarget() : targetLast(); return;
+    case "KeyV": if (e.shiftKey) return; e.preventDefault(); targetSelf(); return;
+    case "KeyX": e.preventDefault(); e.shiftKey ? bandageLastTarget() : bandageSelf(); return;
+  }
+});

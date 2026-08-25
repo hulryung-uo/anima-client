@@ -562,6 +562,59 @@ function grabItem(serial) {
   sendPlacement(`drop:${serial >>> 0}:65535:65535:0:${bp}`, serial >>> 0);
 }
 
+// ---- auto-open corpses (ClassicUO PlayerMobile.TryOpenCorpses) --------------
+//
+// A newly seen corpse near you is double-clicked for you. ClassicUO triggers it
+// from three places — a 0x2006 arriving on the ground (PacketHandlers.cs:5729,
+// :6394), the death animation (:3745), and every step you take
+// (PlayerMobile.OnPositionChanged) — which together amount to "whenever the set
+// of nearby corpses may have changed". Driven off the poll here, which is the
+// same set of moments and one scan instead of three call sites.
+//
+// `CORPSE_GRAPHIC` is ClassicUO's `Item.IsCorpse`; the serial set is its
+// `AutoOpenedCorpses`, so a corpse you close by hand does not immediately
+// re-open.
+const CORPSE_GRAPHIC = 0x2006;
+const autoOpenedCorpses = new Set();
+// ClassicUO's `ManualOpenedCorpses`: a corpse you double-clicked yourself is
+// never the one `SkipEmptyCorpse` hides, even if we had auto-opened it earlier.
+// Filled by the double-click path in 12-input.js.
+const manualOpenedCorpses = new Set();
+const AUTO_CORPSE_MEMORY = 512;   // ServUO recycles serials; don't remember forever
+function autoOpenCorpses(s) {
+  if (!settings.autoOpenCorpses) return;
+  const me = s && s.player;
+  if (!me) return;
+  // ClassicUO's `CorpseOpenOptions`, whose default (3) is both guards at once:
+  // don't open while a target cursor is up (the window would swallow the click
+  // the cursor is waiting for) and don't open while hidden (a window opening on
+  // its own is a giveaway). Fixed at that default rather than adding two more
+  // settings for a pair that is on by default and rarely changed.
+  if (typeof targetingActive === "function" && targetingActive()) return;
+  if (me.hidden) return;
+  const range = Math.max(1, settings.autoOpenCorpseRange | 0);
+  for (const it of (s.items || [])) {
+    if ((it.g | 0) !== CORPSE_GRAPHIC) continue;
+    const serial = it.serial >>> 0;
+    if (autoOpenedCorpses.has(serial)) continue;
+    // UO "Distance" is Chebyshev.
+    if (Math.max(Math.abs((it.x | 0) - (me.x | 0)), Math.abs((it.y | 0) - (me.y | 0))) > range) continue;
+    autoOpenedCorpses.add(serial);
+    // ClassicUO queues a real double-click and lets the reply open the window.
+    // Same here: `use:` and the server's 0x24 lands in `ingestContainerOpens`,
+    // so a corpse the server refuses (out of range, already gone) never leaves
+    // an empty window behind.
+    sendInput("use:" + serial);
+  }
+  // Sets iterate in insertion order, so the oldest serials are the ones dropped.
+  while (autoOpenedCorpses.size > AUTO_CORPSE_MEMORY) {
+    autoOpenedCorpses.delete(autoOpenedCorpses.values().next().value);
+  }
+  while (manualOpenedCorpses.size > AUTO_CORPSE_MEMORY) {
+    manualOpenedCorpses.delete(manualOpenedCorpses.values().next().value);
+  }
+}
+
 function openContainer(serial) {
   serial = serial >>> 0;
   const existing = dialogWindow("containers", serial);
@@ -650,6 +703,17 @@ function refreshContainer(serial) {
   const win = dialogWindow("containers", serial);
   if (!win) return;
   const items = (scene && scene.contItems || []).filter((it) => (it.cont >>> 0) === serial);
+  // ClassicUO's `SkipEmptyCorpse` (ContainerGump.cs:98-104): a corpse that WE
+  // opened automatically and that turns out to be empty stays hidden rather than
+  // covering the screen after every kill. Hidden, not closed — 0x3C contents
+  // arrive after the 0x24 that opened the window, so an empty corpse and one
+  // whose items are still in flight look identical at this instant; the next
+  // refresh reveals it the moment anything lands in it. A corpse you opened by
+  // hand is never hidden (ClassicUO's `ManualOpenedCorpses`).
+  if (settings.skipEmptyCorpse && autoOpenedCorpses.has(serial)
+      && !manualOpenedCorpses.has(serial) && isCorpseContainer(serial)) {
+    win.el.style.display = items.length ? "" : "none";
+  }
   // No signature check here: every caller already means "rebuild now". The
   // dialog driver stamps `win._sig = sig` BEFORE calling update() (dialogs.js
   // syncDialogFamily), so a second guard against that same field could only
@@ -1231,6 +1295,85 @@ registerDialog({
   close: (win) => { win.el.remove(); if (popupEl === win.el) { popupEl = null; popupSerial = 0; } },
 });
 
+
+// ---- client-side context menus (ClassicUO ContextMenuControl) ---------------
+//
+// A different thing from the SERVER popup menu right above, which this reuses
+// the markup and CSS of: that one's entries arrive on the wire (0xBF/0x13 →
+// 0xBF/0x14) and are answered with `popupsel:`; these are ours and run a local
+// function. ClassicUO's is `ContextMenuControl` + `ContextMenuItemEntry`,
+// triggered from `Control.cs:641-646` when a right-click lands on a gump that
+// declines to close (`CanCloseWithRightClick == false`), and it uses it in only
+// three places — the world map (WorldMapGump.cs:266-345), the resizable
+// journal's tabs, and the counter bar.
+//
+// Two things a wire menu never needs and this does: a checkmark column for
+// toggle entries (ClassicUO's `ContextMenuItemEntry(text, action, canBeSelected,
+// defaultValue)`) and separators (its `new ContextMenuItemEntry("")`).
+//
+// entries: [{ label, run, checked, disabled }]; an entry with no `label` is a
+// separator. `checked` may be a boolean or a function, so an open menu that
+// toggles something re-reads it rather than showing a stale tick.
+let clientMenuEl = null;
+let clientMenuAway = null;   // the dismiss listeners, while one is open
+function hideClientMenu() {
+  if (!clientMenuEl) return;
+  clientMenuEl.remove();
+  clientMenuEl = null;
+  if (clientMenuAway) { clientMenuAway(); clientMenuAway = null; }
+}
+function openClientMenu(x, y, entries) {
+  hideClientMenu();
+  const rows = entries.filter((e) => e && e.label);
+  const el = document.createElement("div");
+  el.className = "popup-menu client-menu";
+  // Same cursor anchoring + clamp as the server menu; the height estimate uses
+  // the real row count (separators are thinner, so this over-reserves slightly,
+  // which is the safe direction).
+  el.style.left = Math.max(4, Math.min(x, window.innerWidth - 220)) + "px";
+  el.style.top = Math.max(4, Math.min(y, window.innerHeight - (rows.length * 26 + 12))) + "px";
+  for (const ent of entries) {
+    if (!ent || !ent.label) {
+      const sep = document.createElement("div");
+      sep.className = "popup-sep";
+      el.appendChild(sep);
+      continue;
+    }
+    const row = document.createElement("div");
+    row.className = "popup-row" + (ent.disabled ? " popup-row-off" : "");
+    const on = typeof ent.checked === "function" ? ent.checked() : ent.checked;
+    // A checkable entry keeps its tick column even when unticked, so a column of
+    // toggles doesn't jitter left and right as they're switched.
+    row.textContent = (ent.checked === undefined ? "" : on ? "\u2713 " : "\u2003 ") + ent.label;
+    if (!ent.disabled) {
+      row.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        hideClientMenu();
+        if (ent.run) ent.run();
+      });
+    }
+    el.appendChild(row);
+  }
+  document.body.appendChild(el);
+  clientMenuEl = el;
+  // Dismissal: a click anywhere outside (rows stop propagation and close
+  // themselves first) or Escape. Both are registered in the CAPTURE phase and
+  // removed with the menu, so Escape closes the menu WITHOUT also reaching the
+  // window-closing Escape chain in setupInput underneath it.
+  const away = (ev) => { if (!el.contains(ev.target)) hideClientMenu(); };
+  const esc = (ev) => {
+    if (ev.code !== "Escape") return;
+    ev.preventDefault(); ev.stopPropagation();
+    hideClientMenu();
+  };
+  window.addEventListener("mousedown", away, true);
+  window.addEventListener("keydown", esc, true);
+  clientMenuAway = () => {
+    window.removeEventListener("mousedown", away, true);
+    window.removeEventListener("keydown", esc, true);
+  };
+  return el;
+}
 
 function buildGumpWindow(g, { previous } = {}) {
   const serial = g.serial >>> 0;

@@ -54,6 +54,48 @@ function makeDraggable(win, handle, onMove) {
   });
 }
 
+// ---- right-click closes a window (ClassicUO Gump.CloseWithRightClick) -------
+//
+// Right-clicking a gump closes it. In ClassicUO that is `Gump.cs:182-194` gated
+// on `CanCloseWithRightClick`, set at 82 sites across the gump tree; here every
+// window already shares one frame (`makeWindowFrame` → `.gump-win`) and one
+// close affordance (`.gump-close`), so one delegated listener covers all of them
+// and cannot drift out of sync with a newly added panel.
+//
+// It also stops the OTHER half of this gap: Chrome's own context menu popping up
+// over the game. Only the PIXI canvas suppressed that (13-macros.js), so every
+// DOM panel leaked it.
+//
+// Opt-outs mirror ClassicUO's `CanCloseWithRightClick = false` set — the info bar
+// (InfoBarGump.cs:28) and counter bar (CounterBarGump.cs:147) — where a
+// right-click opens that window's own context menu instead (Control.cs:641-646).
+// The world map (WorldMapGump.cs:109) is in that set too and is not a
+// `.gump-win`; its menu lives with the map, in 07-hud.js.
+const RIGHT_CLICK_KEEP_OPEN = new Set(["infobar", "counterbar"]);
+document.addEventListener("contextmenu", (e) => {
+  const t = e.target;
+  if (!t || !t.closest) return;
+  // Text fields keep the browser's own menu. ClassicUO never had to decide this
+  // (it isn't in a browser), and cut/copy/paste in a book page, a profile or the
+  // chat bar has no in-game equivalent to replace it with.
+  if (t.closest("input, textarea, [contenteditable]")) return;
+  // A window that handles its own right-click — containers (10-housing.js), tip
+  // notices, text-entry dialogs, profiles (11-dragdrop.js) — has already
+  // preventDefault()ed by the time this bubbles up. Its close already ran; don't
+  // run a second one on the same click.
+  if (e.defaultPrevented) return;
+  e.preventDefault();               // no Chrome menu anywhere over the client
+  const win = t.closest(".gump-win");
+  if (!win || RIGHT_CLICK_KEEP_OPEN.has(win.id)) return;
+  // Reuse the ✕ rather than re-deriving each window's close path: it is the same
+  // handler for the static panels and for everything `makeWindowFrame` builds,
+  // and for a server gump it is the one that answers with button 0 the way
+  // ClassicUO's `CloseWithRightClick` does. A frame with no wired ✕ has no close
+  // affordance at all, and right-click correctly does nothing for it either.
+  const closer = win.querySelector(".gump-close");
+  if (closer) closer.click();
+});
+
 // --- paperdoll (toggled by the 'P' key; ✕/Esc close) ---
 // pdTarget: null = our own doll; a serial = another mobile's doll (double-click an
 // NPC/player to inspect their equipment, ClassicUO-style).
