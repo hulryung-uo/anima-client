@@ -2054,3 +2054,66 @@ went unnoticed: plenty of effects looked correct.
 
 Not verified: the tints and the pose cancellation as drawn pixels. Both are
 browser-side rendering, and no browser was driven.
+
+---
+
+Closed 2026-08-25 (the rest of the survey): the render tail and every remaining
+UI row, run as three parallel workstreams in one worktree. Details are in the
+four commits; what belongs here is what changed about the *inventory* and about
+the gate.
+
+**The survey was wrong or incomplete in fourteen places**, and re-deriving each
+row from ClassicUO before building it is what found them. The ones that would
+have produced wrong code:
+
+- **"A fireball lights the ground it passes over"** — false on this data. The
+  common effect graphics (`0x36D4`, `0x36CB`, `0x36B0`, `0x36E4`, `0x373A`,
+  `0x3735`) carry no LightSource flag and ClassicUO does not light them either.
+  What is flagged is fire columns, lava and some fields. The path is ported
+  faithfully; expect it to fire rarely.
+- **`AddLight`'s special graphic ranges**, filed by the survey as "minor, listed
+  only for the record", were the more valuable half of that row: they are why
+  every ServUO spell field was unlit.
+- **ClassicUO has no personal player light.** Our unconditional shape-1 light on
+  the player is ours, not a port; the comment crediting `AddLight`'s mobile arm
+  was wrong. Kept deliberately (a torchless player in a dungeon would see
+  nothing) and exempt from occlusion for the same reason.
+- **Chat history is Ctrl+Q/Ctrl+W, not Up/Down**, the latch prefix set differs
+  and three of its prefixes need a trailing space, a non-party health bar is one
+  line rather than four fields, and `tspell`/`tskill`/`tharvest` are not bindable
+  macro verbs in ClassicUO either.
+- The target-cursor emission is at `scene/mod.rs:228-231`, **not** in
+  `scene/dialogs.rs`, which contains no target path at all. (That error was in
+  the brief, not the survey.)
+
+**Two ServUO findings** worth keeping: `0xBF/0x0C` CloseStatus is a no-op
+(`PacketHandlers.cs:2250`), so the parity row for it had nothing to gain; and
+walking away does **not** remove a mobile from your world — `SetLocation:10102`
+only notifies clients about the mobile that moved.
+
+**One deliberate non-port.** A dynamic item's light *shape* is on the wire
+(`item.LightID`, from the same 0xF3/0x1A direction byte we already keep), and we
+do not read it: on this ServUO tree `BaseLight` never sets `Light`, so every
+ordinary torch sends 0 and a faithful port would make a dropped lit torch cast an
+arched-window beam. The tiledata fallback gives it its real shape instead.
+
+**And the gate grew a step, because it had a hole that could ship a dead
+client.** Two workstreams independently added a top-level `const BANDAGE_GRAPHIC`
+in different files. The browser concatenates every `<script>` into one scope, so
+that is a SyntaxError which aborts the *later* file entirely — `setupInput` would
+never have run. `node --check` compiles each file alone and is structurally blind
+to it. `scripts/check-web-globals.mjs` now compiles all the scripts together, in
+the load order read from `index.html`, using `new vm.Script` for **compile only**
+— V8's own duplicate-lexical check, no regex, no DOM, no execution. It is in CI
+as well as `check.sh`, because a step that exists only locally does not defend
+against the case it was written for.
+
+**On verification.** Every row here has offline assertions against the real
+`web/js` in a fake-DOM harness (446 + 174 + 301) and the live checks each
+workstream could reach with one shard and one GM account. Standing shortfalls,
+recorded rather than smoothed over: nothing in the render row was seen as pixels;
+the criminal-action confirmation never fired from a real click because a gray GM
+is correctly excluded by ClassicUO's own rule; the party health-bar shape and the
+normalised mana/stamina need a second account nobody has; and the drag-select
+body box is 9-12px generous on three sides and 1-4px **short at the feet**,
+inside its pre-registered threshold but measured and written down.
