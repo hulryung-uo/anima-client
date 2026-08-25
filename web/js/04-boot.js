@@ -242,6 +242,23 @@ function fxRetire(p, i, W, H, expired, topY) {
   return false;
 }
 
+// Does an ART graphic emit light, and which `light.mul` shape? Only the effect
+// pass above asks: every other light in the scene is resolved server-side, but an
+// effect's art changes frame by frame and the browser is the only thing that
+// knows which frame is up. One `/iteminfo` round trip per graphic, memoized
+// forever (there are a few dozen effect graphics in the whole game).
+// null = in flight; `{lt, lid}` once it lands.
+const fxArtLight = new Map();
+function artLightInfo(g) {
+  if (fxArtLight.has(g)) return fxArtLight.get(g);
+  fxArtLight.set(g, null);
+  fetch(`iteminfo/${g}`)
+    .then((r) => r.json())
+    .then((j) => fxArtLight.set(g, { lt: !!(j && j.lt), lid: (j && j.lid) | 0 }))
+    .catch(() => fxArtLight.set(g, { lt: false, lid: 0 }));
+  return null;
+}
+
 function initFx() {
   fxCanvas = document.getElementById("fx");
   if (!fxCanvas) return;
@@ -296,19 +313,19 @@ function fxFrame(now) {
       const tinted = [];           // coloured lights, drawn additively after the erase
       ctx.save();
       ctx.globalCompositeOperation = "destination-out";
-      for (const L of scene.lights) {
-        const sx = (ox + isoX(L.x, L.y) * camZoom) * cssX;
-        const sy = (oy + isoY(L.x, L.y, L.z) * camZoom) * cssY;
+      // Erase one light's hole in the veil, centred on screen (sx, sy). Shared by
+      // the scene's light list and the live-effect pass after it.
+      const punch = (sx, sy, id, colour, r) => {
         // The real shape from light.mul when we have it — every light-emitting
         // graphic names one through its tiledata Quality byte, and they are not
         // circles: a wall torch throws a lopsided cone, a campfire a wide oval.
         // ClassicUO draws these additively into a light buffer; this overlay
         // subtracts instead, so the server hands over the same mask with the
         // intensity in the alpha channel (see anima-assets `lights.rs`).
-        const img = lightShape(L.id, L.c);
+        const img = lightShape(id, colour);
         if (img) {
           const w = img.width * camZoom * cssX, h = img.height * camZoom * cssY;
-          if (sx < -w || sy < -h || sx > W + w || sy > H + h) continue;
+          if (sx < -w || sy < -h || sx > W + w || sy > H + h) return;
           ctx.globalAlpha = center;
           ctx.drawImage(img, sx - w / 2, sy - h / 2, w, h);   // centred, as ClassicUO draws it
           ctx.globalAlpha = 1;
@@ -316,13 +333,13 @@ function fxFrame(now) {
           // veil — a red brazier should tint what it lights. Queue it for the
           // additive pass below, which is ClassicUO's light buffer: the erase
           // above brightens, this colours.
-          if (L.c) tinted.push([img, sx, sy, w, h]);
-          continue;
+          if (colour) tinted.push([img, sx, sy, w, h]);
+          return;
         }
         // No shape (no light.mul on the server, or an id it has no entry for):
         // the plain radial falloff this pass used before.
-        const rad = (L.r || 3) * 44 * cssX;
-        if (sx < -rad || sy < -rad || sx > W + rad || sy > H + rad) continue; // off-screen
+        const rad = (r || 3) * 44 * cssX;
+        if (sx < -rad || sy < -rad || sx > W + rad || sy > H + rad) return; // off-screen
         const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, rad);
         g.addColorStop(0, "rgba(0,0,0," + center.toFixed(3) + ")");
         g.addColorStop(1, "rgba(0,0,0,0)");
@@ -330,6 +347,37 @@ function fxFrame(now) {
         ctx.beginPath();
         ctx.arc(sx, sy, rad, 0, 6.283);
         ctx.fill();
+      };
+      for (const L of scene.lights) {
+        // `dx`/`dy` (world px, so they scale with the camera): ClassicUO's
+        // per-facing nudge for a light a mobile is CARRYING, so the flame sits in
+        // the hand rather than at the feet (`GameScene.AddLight`:466-497, ported
+        // in scene/entities.rs `worn_light_offset`). Absent on every other light.
+        const sx = (ox + (isoX(L.x, L.y) + (L.dx | 0)) * camZoom) * cssX;
+        const sy = (oy + (isoY(L.x, L.y, L.z) + (L.dy | 0)) * camZoom) * cssY;
+        punch(sx, sy, L.id, L.c, L.r);
+      }
+      // A live EFFECT whose art is a light source lights the ground it passes
+      // over — ClassicUO `GameEffectView.Draw` (`:248-251`) adds a light at the
+      // effect's own draw position whenever `data.IsLight` and the effect has a
+      // Source. It cannot come from `scene.lights`: a bolt's position is
+      // interpolated here, 60×/s, between two 150 ms polls. The light's SHAPE is
+      // the source's, not the art's — ClassicUO passes `AddLight(Source, Source,
+      // …)`, which for a mobile caster lands on the `obj is Mobile` arm and its
+      // shape 1. (It also runs `LightColors` on the caster's BODY graphic there;
+      // that table is keyed by item/static graphics, so the colour is left white
+      // rather than porting a lookup that is meaningless on a body id.)
+      for (const o of fxEffects) {
+        if (!o.src || o.kind === 1) continue; // no Source → no light; lightning is gump art
+        if (!o.sprite || o.sprite.destroyed || !o.sprite.visible) continue;
+        const g = o.frames[Math.floor((now - o.born) / o.fm) % o.frames.length] | 0;
+        const info = artLightInfo(g);
+        if (!info || !info.lt) continue;
+        // `drawEffects` foot-anchors the sprite at `isoY + HALF`; a light's
+        // anchor is the tile centre, which is that same point less HALF — the
+        // relation `scene.lights` already has to an item's sprite.
+        punch((ox + o.sprite.x * camZoom) * cssX,
+              (oy + (o.sprite.y - HALF) * camZoom) * cssY, 1, 0, 3);
       }
       ctx.restore();
       // The colour half. ClassicUO adds its (coloured) light buffer onto the

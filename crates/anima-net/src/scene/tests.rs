@@ -461,13 +461,243 @@ fn resolve_shop_name_resolves_cliloc_shaped_ids_bare_and_hashed() {
 #[test]
 fn stack_fields_marks_stackable_only_when_flagged() {
     // A stack of reagents (Stackable tiledata flag set): "amount" + "st":1 so
-    // the renderer offers the split-stack dialog.
-    assert_eq!(stack_fields(40, true), json!({ "amount": 40, "st": 1 }));
+    // the renderer offers the split-stack dialog, and "pl":1 so it draws as a
+    // heap (ClassicUO's second sprite at -5,-5).
+    assert_eq!(
+        stack_fields(40, true, false),
+        json!({ "amount": 40, "st": 1, "pl": 1 })
+    );
     // A non-stackable item (e.g. a sword) never gets "st", even with
     // amount > 1 (shouldn't normally happen, but the field must still be
     // omitted so the renderer doesn't offer to split it).
-    assert_eq!(stack_fields(1, false), json!({ "amount": 1 }));
-    assert_eq!(stack_fields(5, false), json!({ "amount": 5 }));
+    assert_eq!(stack_fields(1, false, false), json!({ "amount": 1 }));
+    assert_eq!(stack_fields(5, false, false), json!({ "amount": 5 }));
+}
+
+#[test]
+fn stack_fields_pile_bit_follows_classicuo_item_view() {
+    // ClassicUO `ItemView.Draw`: `!IsMulti && !IsCoin && Amount > 1 &&
+    // IsStackable`. One of the four failing is enough to suppress the pile.
+    // A single stackable item is not a pile.
+    assert_eq!(
+        stack_fields(1, true, false),
+        json!({ "amount": 1, "st": 1 })
+    );
+    // Coins are excluded — they carry amount-tiered art instead. All three of
+    // `Item.IsCoin`'s graphics, not just gold.
+    assert_eq!(
+        stack_fields(600, true, true),
+        json!({ "amount": 600, "st": 1 })
+    );
+    // Not stackable → no pile even at a nonsense amount.
+    assert_eq!(stack_fields(9, false, false), json!({ "amount": 9 }));
+}
+
+#[test]
+fn worn_light_offset_matches_classicuo_add_light() {
+    // ClassicUO `GameScene.AddLight` (`:466-497`), relative to the tile centre
+    // both of its mobile call sites pass. Five of the eight facings move the
+    // flame into the hand; North, West and Up leave it on the body.
+    assert_eq!(worn_light_offset(0), (0, 0)); // North
+    assert_eq!(worn_light_offset(1), (22, 33)); // Right
+    assert_eq!(worn_light_offset(2), (22, 55)); // East
+    assert_eq!(worn_light_offset(3), (0, 55)); // Down
+    assert_eq!(worn_light_offset(4), (-22, 55)); // South
+    assert_eq!(worn_light_offset(5), (-22, 33)); // Left
+    assert_eq!(worn_light_offset(6), (0, 0)); // West
+    assert_eq!(worn_light_offset(7), (0, 0)); // Up
+                                              // The running bit (0x80) rides in the same byte a mobile's direction does;
+                                              // it must not fall through to the no-offset arm.
+    assert_eq!(worn_light_offset(0x80 | 2), (22, 55));
+}
+
+#[test]
+fn light_blocked_only_by_an_opaque_wall_in_the_band() {
+    const OPAQUE: u64 = 0;
+    // A torch at z=0: the floor it stands on never blocks it…
+    assert!(!light_blocked(0, 127, &[(0, OPAQUE), (4, OPAQUE)]));
+    // …but a wall piece from z+5 up does. That 5 is ClassicUO's `z5`.
+    assert!(light_blocked(0, 127, &[(5, OPAQUE)]));
+    assert!(light_blocked(0, 127, &[(40, OPAQUE)]));
+    // Above the draw ceiling it has already been culled, so it cannot block.
+    assert!(!light_blocked(0, 20, &[(20, OPAQUE)]));
+    assert!(light_blocked(0, 20, &[(19, OPAQUE)]));
+    // A window/grate/archway (`TileFlag.Transparent`) lets the light through.
+    assert!(!light_blocked(0, 127, &[(10, FLAG_TRANSPARENT)]));
+    // Transparent is 0x4, NOT the 0x8 Translucent next door — a translucent
+    // curtain still blocks.
+    assert!(light_blocked(0, 127, &[(10, FLAG_TRANSLUCENT)]));
+    // A torch raised onto a table still shines over a low wall beside it.
+    assert!(!light_blocked(20, 127, &[(10, OPAQUE)]));
+    assert!(!light_blocked(0, 127, &[]));
+}
+
+#[test]
+fn classicuo_light_ranges_force_shape_2_without_a_tiledata_flag() {
+    // No map: `item_light_range` is a pure graphic test, and `item_light`'s
+    // range arm must not need one either.
+    let look = Look {
+        map: None,
+        anim: None,
+        animdata: None,
+        tileart: None,
+    };
+    // `ItemView.Draw`'s two ranges — ServUO's spell fields live in them.
+    for g in [0x3E02, 0x3E07, 0x3E0B, 0x3914, 0x3922, 0x3929] {
+        assert!(look.item_light_range(g), "0x{g:04X}");
+        assert!(look.ground_item_is_light(g), "0x{g:04X}");
+        assert_eq!(look.item_light(g).0, 2, "0x{g:04X} is AddLight's shape 2");
+    }
+    // Just outside both ranges, and the flag is all that is left.
+    for g in [0x3E01, 0x3E0C, 0x3913, 0x392A] {
+        assert!(!look.item_light_range(g), "0x{g:04X}");
+        assert!(!look.ground_item_is_light(g), "0x{g:04X}");
+    }
+    // `AddLight`'s third special graphic is a lone id, not a range: a candelabra
+    // is IsLight with tiledata shape 1, and ClassicUO overrides it to 2.
+    assert_eq!(look.item_light(0x0B1D).0, 2);
+    assert!(
+        !look.item_light_range(0x0B1D),
+        "…but it is not part of the GATE"
+    );
+}
+
+/// The three ways a carried light differs from one on the ground, against real
+/// tiledata: it exists at all, it sits on the WEARER's tile, and it takes the
+/// facing nudge. Graphic 0x0A12 is tiledata's "torch" (LightSource, light.mul
+/// shape 2).
+#[test]
+#[ignore] // needs ~/dev/uo/uo-resource
+fn a_carried_torch_lights_its_wearers_tile() {
+    let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+    let map = MapData::open(&dir).expect("open map data");
+    const TORCH: u16 = 0x0A12;
+    const MOB: u32 = 0x201;
+    const HELD: u32 = 0x202;
+    let look = Look {
+        map: Some(&map),
+        anim: None,
+        animdata: None,
+        tileart: None,
+    };
+
+    let mut world = anima_core::World::new();
+    let m = world.mobile_mut(MOB);
+    m.pos.x = 100;
+    m.pos.y = 200;
+    m.pos.z = 5;
+    m.direction = 2; // East
+    let it = world.item_mut(HELD);
+    it.serial = HELD;
+    it.graphic = TORCH;
+    it.container = Some(MOB);
+    it.layer = 1; // one-handed
+    it.pos.x = 4000; // an equipped item's own coords are meaningless
+    it.pos.y = 4000;
+
+    // [0] is the player's own glow; [1] is the torch, on the WEARER's tile.
+    let lights = lights_json(&world, &look, 0, 0, 0);
+    assert_eq!(lights.len(), 2, "{lights:?}");
+    assert_eq!(
+        (
+            lights[1]["x"].as_i64(),
+            lights[1]["y"].as_i64(),
+            lights[1]["z"].as_i64()
+        ),
+        (Some(100), Some(200), Some(5)),
+        "a held light follows the body, not the item's stale coords"
+    );
+    assert_eq!(
+        lights[1]["id"].as_u64(),
+        Some(2),
+        "light.mul shape from tiledata"
+    );
+    assert_eq!(
+        (lights[1]["dx"].as_i64(), lights[1]["dy"].as_i64()),
+        (Some(22), Some(55)),
+        "facing East puts the flame in the hand"
+    );
+
+    // Facing North takes no nudge, and the keys are omitted rather than zeroed.
+    world.mobile_mut(MOB).direction = 0;
+    let lights = lights_json(&world, &look, 0, 0, 0);
+    assert!(
+        lights[1].get("dx").is_none() && lights[1].get("dy").is_none(),
+        "{lights:?}"
+    );
+
+    // The same torch loose in a backpack lights nothing: `layer == 0`.
+    world.item_mut(HELD).layer = 0;
+    assert_eq!(lights_json(&world, &look, 0, 0, 0).len(), 1);
+
+    // …and one whose holder is not a mobile we can see lights nothing either.
+    world.item_mut(HELD).layer = 1;
+    world.item_mut(HELD).container = Some(0xDEAD);
+    assert_eq!(lights_json(&world, &look, 0, 0, 0).len(), 1);
+
+    // The gate is asymmetric, as ClassicUO's is: a spell-field graphic lights
+    // the GROUND (`ItemView`'s extra range test) but not a wearer (`MobileView`
+    // tests the tiledata flag alone) — and this one has no flag to test.
+    let it = world.item_mut(HELD);
+    it.graphic = 0x3915; // ServUO PoisonField
+    it.layer = 1;
+    it.container = Some(MOB);
+    assert!(!map.item_is_light(0x3915), "the range items carry no flag");
+    assert_eq!(lights_json(&world, &look, 0, 0, 0).len(), 1, "not worn");
+    let it = world.item_mut(HELD);
+    it.container = None;
+    it.pos.x = 300;
+    it.pos.y = 400;
+    let lights = lights_json(&world, &look, 0, 0, 0);
+    assert_eq!(lights.len(), 2, "on the ground it glows: {lights:?}");
+    assert_eq!(lights[1]["id"].as_u64(), Some(2), "AddLight's shape 2");
+    assert_eq!(lights[1]["x"].as_i64(), Some(300));
+}
+
+/// The occlusion pass end to end, against a real Britain stone wall: ClassicUO
+/// tests the tile at `(x + 1, y + 1)`, so a light one tile up-left of the wall
+/// is the one it kills.
+#[test]
+#[ignore] // needs ~/dev/uo/uo-resource
+fn a_light_behind_a_britain_wall_is_dropped() {
+    let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+    let mut map = MapData::open(&dir).expect("open map data");
+    let world = anima_core::World::new();
+    // (1491,1620) is a four-storey Britain wall — stone at z=10, plaster at 20
+    // and 40, a beam at 60, all opaque; (1490,1620) carries no statics at all.
+    let light = |x: i64, y: i64, z: i32| json!({ "x": x, "y": y, "z": z, "r": 3, "id": 2 });
+
+    let mut lights = vec![
+        light(0, 0, 0),       // index 0: the player's own glow, always exempt
+        light(1490, 1619, 0), // in front of it sits the wall
+        light(1489, 1619, 0), // in front of it sits nothing
+    ];
+    apply_light_occlusion(&world, &mut map, None, 127, &mut lights);
+    assert_eq!(lights.len(), 2, "the walled-in light is gone: {lights:?}");
+    assert_eq!(
+        lights[0]["x"].as_i64(),
+        Some(0),
+        "the personal glow survives"
+    );
+    assert_eq!(lights[1]["x"].as_i64(), Some(1489));
+
+    // Raise the light above the whole wall and it shines again — the band is
+    // `[z + 5, maxZ)`, so a torch on the roof clears every storey below it.
+    let mut lights = vec![light(0, 0, 0), light(1490, 1619, 60)];
+    apply_light_occlusion(&world, &mut map, None, 127, &mut lights);
+    assert_eq!(lights.len(), 2, "{lights:?}");
+
+    // Lower the draw ceiling under the wall (standing inside a building) and the
+    // wall stops blocking, because it is no longer drawn.
+    let mut lights = vec![light(0, 0, 0), light(1490, 1619, 0)];
+    apply_light_occlusion(&world, &mut map, None, 10, &mut lights);
+    assert_eq!(lights.len(), 2, "{lights:?}");
+
+    // Even a light standing exactly where the player is gets tested, unless it
+    // is the personal one — the exemption is positional, not by content.
+    let mut lights = vec![light(1490, 1619, 0), light(1490, 1619, 0)];
+    apply_light_occlusion(&world, &mut map, None, 127, &mut lights);
+    assert_eq!(lights.len(), 1);
 }
 
 #[test]

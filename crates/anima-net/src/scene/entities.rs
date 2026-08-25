@@ -225,7 +225,11 @@ pub(super) fn items_json(
             if it.graphic != 0x2006 {
                 merge_obj(
                     &mut v,
-                    stack_fields(it.amount, look.item_stackable(it.graphic)),
+                    stack_fields(
+                        it.amount,
+                        look.item_stackable(it.graphic),
+                        look.item_is_coin(it.graphic),
+                    ),
                 );
                 // Dye hue (omitted when the item is undyed). A corpse is excluded
                 // because its `hue` below is the dead creature's Corpse.def-remapped
@@ -270,12 +274,39 @@ pub(super) fn items_json(
 /// light sources (wall torches, lamps) to the same list.
 pub(super) const LIGHT_CAP: usize = 64;
 
+/// ClassicUO `AddLight`'s per-facing pixel nudge for a light a MOBILE is
+/// carrying (`GameScene.cs:466-497`), so the flame sits in the hand rather than
+/// at the feet. Relative to the tile centre, which is what both call sites pass
+/// (`MobileView.cs:44-48` builds `drawX/drawY` as `pos + offset + 22`, the same
+/// point `ItemView` gives a ground light). North, West and Up get no nudge —
+/// the light stays centred on the body.
+///
+/// ClassicUO has a third call site (`MobileView.DrawLayer`, `:845`) that offsets
+/// from the worn LAYER SPRITE's own origin instead, for a light item whose art
+/// is actually drawn on the character; that origin is a per-frame draw-centre
+/// this side of the wire cannot know, so every worn light uses the tile-centre
+/// form here.
+pub(super) fn worn_light_offset(dir: u8) -> (i32, i32) {
+    match dir & 7 {
+        1 => (22, 33),  // Right
+        2 => (22, 55),  // East
+        3 => (0, 55),   // Down
+        4 => (-22, 55), // South
+        5 => (-22, 33), // Left
+        _ => (0, 0),    // North / West / Up
+    }
+}
+
 /// Per-object light sources for the renderer's night glow. Returns a list the
 /// caller keeps appending to, not a finished one.
 pub(super) fn lights_json(world: &World, look: &Look, px: i64, py: i64, pz: i32) -> Vec<Value> {
     let mut lights: Vec<Value> = Vec::new();
-    // The player's own glow. ClassicUO gives a mobile light shape 1
-    // (`AddLight`'s `obj is Mobile _` arm), which is its large soft one.
+    // The player's own glow — OUR addition, not a port. ClassicUO has no
+    // personal light: all eight of its `AddLight` call sites are a static, a
+    // multi, a ground item, a worn item or an effect, and the `obj is Mobile _`
+    // arm they reach is only ever entered by the effect one. It stays because a
+    // torchless player in a dungeon otherwise sees nothing at all, and it is
+    // exempt from the occlusion pass below for the same reason.
     lights.push(json!({ "x": px, "y": py, "z": pz, "r": 5, "id": 1 }));
     for it in world.items.values() {
         if lights.len() >= LIGHT_CAP {
@@ -284,16 +315,109 @@ pub(super) fn lights_json(world: &World, look: &Look, px: i64, py: i64, pz: i32)
         // A multi's own entry carries a multi id in `graphic`, not an ART
         // graphic — skip it here (any light-emitting components are handled
         // per-component in the tile loop below, alongside static lights).
-        if !it.is_multi && it.container.is_none() && look.item_is_light(it.graphic) {
-            // `id` is the light.mul shape (tiledata Quality/layer, ClassicUO
-            // `AddLight`); `r` stays as the fallback radius for a renderer that
-            // has no shape for it.
-            let (lid, lcolor) = look.item_light(it.graphic);
-            lights.push(json!({ "x": it.pos.x, "y": it.pos.y, "z": it.pos.z, "r": 3,
-                                "id": lid, "c": lcolor }));
+        // The gate differs by where the item is: a GROUND item also lights from
+        // ClassicUO's special graphic ranges (`Look::item_light_range` — this is
+        // what makes a spell field glow), while a worn one is flag-only, which
+        // is exactly how `ItemView` and `MobileView` differ.
+        let ground = it.container.is_none();
+        let lights_up = if ground {
+            look.ground_item_is_light(it.graphic)
+        } else {
+            look.item_is_light(it.graphic)
+        };
+        if it.is_multi || !lights_up {
+            continue;
+        }
+        // `id` is the light.mul shape (tiledata Quality/layer, ClassicUO
+        // `AddLight`); `r` stays as the fallback radius for a renderer that
+        // has no shape for it.
+        let (lid, lcolor) = look.item_light(it.graphic);
+        match it.container {
+            None => lights.push(json!({ "x": it.pos.x, "y": it.pos.y, "z": it.pos.z, "r": 3,
+                                        "id": lid, "c": lcolor })),
+            // A lit torch, lantern or candle a mobile is WEARING or holding.
+            // ClassicUO lights these from `MobileView` (`:429`, `:439`, `:845`)
+            // — an equipped light source glows exactly like one on the ground,
+            // which is what makes a torch worth carrying. `layer != 0` is the
+            // "really equipped" test: everything else with a container serial
+            // is loose in a pack, where it emits nothing.
+            Some(holder) => {
+                if it.layer == 0 {
+                    continue;
+                }
+                let Some(m) = world.mobiles.get(&holder) else {
+                    continue;
+                };
+                let (dx, dy) = worn_light_offset(m.direction);
+                let mut v = json!({ "x": m.pos.x, "y": m.pos.y, "z": m.pos.z, "r": 3,
+                                    "id": lid, "c": lcolor });
+                if dx != 0 {
+                    v["dx"] = json!(dx);
+                }
+                if dy != 0 {
+                    v["dy"] = json!(dy);
+                }
+                lights.push(v);
+            }
         }
     }
     lights
+}
+
+/// ClassicUO `AddLight`'s occlusion test (`GameScene.cs:409-438`): a light is
+/// dropped when the tile diagonally in FRONT of it — `(x + 1, y + 1)`, the one
+/// between the source and the camera — carries a non-transparent Static or
+/// Multi standing between `z + 5` and the draw ceiling. That is what stops a
+/// wall torch inside a building from shining out through its wall, and it is
+/// the reason a lit room goes dark the moment you step outside it.
+///
+/// Index 0 is exempt: [`lights_json`] puts the player's own glow there, and
+/// that light is ours rather than ClassicUO's (see its comment). Occluding it
+/// would black the screen out whenever the player stood with a wall on their
+/// lower-right.
+///
+/// ClassicUO also requires the blocker to be `AllowedToDraw`. The `tz < max_z`
+/// half of that is here; the rest of it (a per-object flag the render list
+/// sets) has no equivalent on this side, so a blocker the ceiling rule has
+/// already faded out can still stop a light.
+pub(super) fn apply_light_occlusion(
+    world: &World,
+    map: &mut MapData,
+    multis: Option<&Multis>,
+    max_z: i32,
+    lights: &mut Vec<Value>,
+) {
+    let scan = TileScan::build(world, map);
+    let mut idx = 0usize;
+    lights.retain(|l| {
+        let i = idx;
+        idx += 1;
+        if i == 0 {
+            return true;
+        }
+        let (Some(x), Some(y), Some(z)) = (l.get("x"), l.get("y"), l.get("z")) else {
+            return true;
+        };
+        let tx = x.as_i64().unwrap_or(0) + 1;
+        let ty = y.as_i64().unwrap_or(0) + 1;
+        if tx < 0 || ty < 0 {
+            return true;
+        }
+        let lz = z.as_i64().unwrap_or(0) as i32;
+        !light_blocked(lz, max_z, &roof_scan_tiles(&scan, multis, map, tx, ty))
+    });
+}
+
+/// The blocker half of [`apply_light_occlusion`], split out so the rule can be
+/// tested without a map. ClassicUO `GameScene.cs:414-437`: only a Static or a
+/// Multi blocks (a dynamic item never does), only an opaque one, and only while
+/// it stands in the band `[z + 5, _maxZ)` — high enough to be a wall rather than
+/// the floor the light sits on, low enough that the draw ceiling has not already
+/// cut it away.
+pub(super) fn light_blocked(z: i32, max_z: i32, tiles: &[(i32, u64)]) -> bool {
+    tiles
+        .iter()
+        .any(|&(tz, flags)| flags & FLAG_TRANSPARENT == 0 && tz < max_z && tz >= z + 5)
 }
 
 /// The player's worn items (container == us, on a real layer), which drive the

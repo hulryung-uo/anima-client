@@ -125,6 +125,7 @@ async function poll() {
     refreshParty();   // keep the party panel live + surface incoming invites (0xBF/0x06)
     refreshTipNotices(scene); // pageable tips / close-only notices (0xA6)
     refreshLogoutAck(scene); // restore UI if the server denied a 0xD1 logout
+    autoOpenCorpses(scene); // ClassicUO TryOpenCorpses — double-click a new corpse in range for the player
     updateTargetUI(); // reflect the server's target-cursor state (crosshair + banner)
     updatePlacementPreview(); // rebuild/clear the house-footprint preview if scene.placement changed
     updateHouseDesignGhost(); // rebuild/clear the design-piece ghost if the session/selection changed
@@ -750,8 +751,12 @@ function syncWorld(s) {
     // the CorpseEquip list, and the sprite has to lose that layer with it. So
     // the equipment is part of the change key, not just the body frame.
     const corpseEquipSig = corpseUrl ? corpseLayerSig(it) : "";
+    // `pl` (see below) is in the change key because it flips on `amount` alone:
+    // dropping a second arrow onto a single one changes neither the graphic nor
+    // the position, and the sprite has to grow its second copy anyway.
+    const pile = !!it.pl;
     if (e && e.g === stackG && e.hue === iHue && e.x === it.x && e.y === it.y && e.z === iz
-        && e.corpseUrl === corpseUrl && e.equipSig === corpseEquipSig) {
+        && e.corpseUrl === corpseUrl && e.equipSig === corpseEquipSig && e.pile === pile) {
       // Ceiling state is deliberately NOT in the change key above: it must flip
       // the fade source on the LIVING sprite, not rebuild it — rebuilding is
       // what popped. Same shape as the statics loop.
@@ -783,6 +788,27 @@ function syncWorld(s) {
     } else {
       sp.anchor.set(0.5, 1.0);
       sp.x = x; sp.y = y + HALF;
+    }
+    // A ground stack of more than one draws as a HEAP. ClassicUO `ItemView.Draw`
+    // (`:137-151`) draws the same art twice, the second copy at `(-5, -5)`, when
+    // `!IsMulti && !IsCoin && Amount > 1 && ItemData.IsStackable` — the server
+    // evaluates all four and ships the verdict as `pl` (coins are excluded
+    // because they carry amount-tiered art instead). 200 arrows or a spilled
+    // corpse's ingots used to be pixel-identical to a single one.
+    //
+    // A CHILD of the item sprite rather than a second pooled sprite, so it
+    // inherits position, depth, the alpha passes and the pool's own teardown for
+    // free. PIXI draws a child after its parent, where ClassicUO draws the
+    // offset copy first — with two copies of one texture at one alpha the
+    // composite is identical either way, and the un-offset copy stays the click
+    // target because the child takes no pointer events.
+    if (pile && !corpseUrl) {
+      const heap = new PIXI.Sprite(tex);
+      heap.anchor.set(0.5, 1.0);
+      heap.x = -5; heap.y = -5;
+      heap.eventMode = "none";
+      sp.addChild(heap);
+      sp._pile = heap; // followed by tickAnimatedStatics' frame swap
     }
     // WORN LAYERS over the death pose, in the same per-direction order and with
     // the same per-frame draw-centers a living mobile's clothes use — this is
@@ -842,7 +868,7 @@ function syncWorld(s) {
     // A corpse whose layer art is still loading stores no signature, so the next
     // poll rebuilds it with the frames that have since arrived.
     itemPool.set(key, { sp, g: stackG, hue: iHue, x: it.x, y: it.y, z: iz, corpseUrl, url: itemTexUrl,
-                        equipSig: layersDone ? corpseEquipSig : null });
+                        pile, equipSig: layersDone ? corpseEquipSig : null });
     markDirty();
   }
   for (const [k, e] of itemPool) {

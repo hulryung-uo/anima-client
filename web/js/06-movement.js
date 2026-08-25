@@ -842,6 +842,9 @@ function tickAnimatedStatics(now) {
     if (!tex) { tex = texFor(sp._frameUrls ? sp._frameUrls[idx] : `art/static/${sp._afids[idx]}.png`); frames[idx] = tex; }
     if (!tex) continue; // frame not loaded yet → keep the current texture
     sp.texture = tex; sp._fidx = idx; changed = true;
+    // An animated STACK (syncWorld's `_pile` heap copy) has to cycle with the
+    // sprite it doubles, or the second copy freezes on frame 0 behind it.
+    if (sp._pile && !sp._pile.destroyed) sp._pile.texture = tex;
   }
   if (changed) markDirty();
 }
@@ -1225,6 +1228,65 @@ function seatForEntity(st, ent, faceDir, isSelf) {
   return { x: mx, y: my, z: found.z, graphic: found.graphic, ...chairSeatFor(faceDir, found.entry) };
 }
 
+// ---- random idle fidget (ClassicUO `Mobile.SetIdleAnimation`, Mobile.cs:367-508) ----
+// A mobile that has genuinely stood still re-arms a 30-60 s timer and then plays
+// one of its body's two or three Fidget groups. Without it every NPC, monster and
+// player standing around is a statue holding frame 0 of its stand group.
+//
+// The GROUP table is the server's (`/idleanim/<body>`): picking a row needs
+// mobtypes.txt's offset/UOP flags and "does this group have frames at all", none
+// of which the browser has. The CLOCK is ours, which is the same split every
+// other animation here already uses.
+const IDLE_MIN_MS = 30000;   // `CalculateRandomIdleTime`: 30 s + rand(0..30 s)
+// ClassicUO's own per-frame pacing for a `SetAnimation`-driven pose:
+// `currentDelay += currentDelay * (_animationInterval + 1)` (Mobile.cs:603) with
+// the interval `SetIdleAnimation` picks (1) — so 80 + 80*2. A fidget is a slow,
+// deliberate gesture, not a walk cycle.
+const IDLE_FRAME_MS = CHAR_ANIM_DELAY * 3;
+// body(+flying) -> {g:[3], e:[3]} once loaded, null while the fetch is in flight,
+// false when this body has no fidget at all. `has()` is what gates the refetch.
+const idleGroups = new Map();
+function idleGroupsFor(body, flying) {
+  const k = `${body | 0}/${flying ? 1 : 0}`;
+  if (idleGroups.has(k)) return idleGroups.get(k);
+  idleGroups.set(k, null);
+  fetch(`idleanim/${body | 0}` + (flying ? "?fly=1" : ""))
+    .then((r) => r.json())
+    .then((j) => idleGroups.set(k, (j && j.g && j.g.length === 3) ? j : false))
+    .catch(() => idleGroups.set(k, false));
+  return null;
+}
+function idleRearm(st, now) { st.idleAt = now + IDLE_MIN_MS + Math.random() * IDLE_MIN_MS; }
+// One entity's idle clock, ticked once per rendered frame from drawMobs (where
+// the body/mount/war/ghost state is already resolved). Returns nothing; its whole
+// effect is to occasionally set `st.act`, which the pose branch below then plays
+// exactly like a server-sent one — which is what ClassicUO does too
+// (`SetIdleAnimation` sets `AnimationFromServer = true`).
+function tickIdleAnim(st, now, body, moving, mounted, war, flying, ghost) {
+  // ClassicUO re-arms in `SetAnimation` (:364) and on every step (:845), so the
+  // timer only ever expires after 30-60 s of genuine standing still. Re-arming
+  // while `st.act` is live covers the first of those without reaching into the
+  // 0x6E/0xE2 ingest: it just measures from the end of the pose instead of its
+  // start.
+  if (st.idleAt === undefined || moving || st.act || st.death) { idleRearm(st, now); return; }
+  if (now < st.idleAt) return;
+  // Re-armed BEFORE the suppression checks, as ClassicUO does — `SetIdleAnimation`
+  // calls `CalculateRandomIdleTime` on its first line, outside the guard.
+  idleRearm(st, now);
+  if (mounted || war || ghost) return; // `!IsMounted && !InWarMode`
+  const info = idleGroupsFor(body, flying);
+  if (!info) return;                   // still loading, or this body has none
+  // `RandomHelper.GetValue(0, 2)` is INCLUSIVE of 2 (`_random.Next(low, high+1)`),
+  // so all three table entries are reachable. If the rolled group has no frames,
+  // ClassicUO flips the index (`first_value == 0 ? 1 : 0`, so 2 also lands on 0)
+  // and gives up if that one is missing too.
+  let i = Math.floor(Math.random() * 3);
+  if (!info.e[i]) i = i === 0 ? 1 : 0;
+  if (!info.e[i]) return;
+  st.act = { group: info.g[i] | 0, idle: true, fwd: true, startMs: now, frameMs: IDLE_FRAME_MS };
+  markDirty();
+}
+
 function drawMobs() {
   // Mobiles live *inside* the depth-sorted `world` container (not a top layer) so
   // statics in front occlude them. Sprites are PERSISTENT and updated in place —
@@ -1308,6 +1370,10 @@ function drawMobs() {
     // War-mode combat stance applies to our own avatar (the only mobile whose war
     // state the server tells us); others fall back to the normal idle stand.
     const inWar = isSelf && !!(scene && scene.war);
+    // Fidget when nothing else is happening. Runs before `st.act` is read below,
+    // so a fidget that fires this frame starts on this frame.
+    tickIdleAnim(st, performance.now(), bodyAnim, moving, mounted, inWar,
+                 !!(ent && ent.fly), ghost);
     // A one-shot 0x6E action (combat swing, bow, get-hit) takes over the pose while
     // it plays, then expires → revert to walk/stand/war. We only retire it once the
     // group's real frame count has loaded (so a placeholder count can't cut it short).
@@ -1318,10 +1384,16 @@ function drawMobs() {
     // resolveActionGroup() folds those onto the body's real group set; a *typed*
     // 0xE2 event instead needs resolveTypedAnimGroup()'s ClassicUO-style dispatch,
     // which can also decide there's nothing to play (e.g. an emote while mounted).
+    // A client-generated fidget (`act.idle`) already holds a real animation group
+    // — `/idleanim` resolved it against mobtypes.txt — so it must NOT go through
+    // resolveActionGroup's `% 35` fold, which would turn a flying gargoyle's
+    // group 66 into 31.
     const ag = (act && !ghost)
-      ? (act.typed
-          ? resolveTypedAnimGroup(act.typ, act.action, act.mode, bodyAnim, atype, mounted)
-          : resolveActionGroup(act.group, bodyAnim, atype))
+      ? (act.idle
+          ? act.group
+          : act.typed
+            ? resolveTypedAnimGroup(act.typ, act.action, act.mode, bodyAnim, atype, mounted)
+            : resolveActionGroup(act.group, bodyAnim, atype))
       : 0;
     if (act && !ghost) {
       if (ag == null) {

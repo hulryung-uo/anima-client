@@ -223,6 +223,13 @@ pub(super) fn parse_animinfo_url(url: &str) -> Option<(u16, u8, u8)> {
     ))
 }
 
+/// Match `/idleanim/<body>` → body. Serves the fidget groups ClassicUO would
+/// pick between for that body (see [`anima_assets::anim::Anim::idle_groups`]);
+/// the renderer memoizes one lookup per body and owns the idle clock itself.
+pub(super) fn parse_idleanim_url(url: &str) -> Option<u16> {
+    url.strip_prefix("/idleanim/")?.parse().ok()
+}
+
 /// Match `/iteminfo/<graphic>` → graphic. Resolves a worn item's AnimID.
 pub(super) fn parse_iteminfo_url(url: &str) -> Option<u16> {
     url.strip_prefix("/iteminfo/")?.parse().ok()
@@ -307,6 +314,15 @@ pub(super) fn has_fx_query(raw_url: &str) -> bool {
         .split('?')
         .nth(1)
         .is_some_and(|q| q.split('&').any(|kv| kv == "fx=1"))
+}
+
+/// `?fly=1` on an `/idleanim` request: the body is a gargoyle in flight, which
+/// ClassicUO gives its own pair of idle groups.
+pub(super) fn has_fly_query(raw_url: &str) -> bool {
+    raw_url
+        .split('?')
+        .nth(1)
+        .is_some_and(|q| q.split('&').any(|kv| kv == "fly=1"))
 }
 
 pub(super) fn parse_color_query(raw_url: &str) -> u16 {

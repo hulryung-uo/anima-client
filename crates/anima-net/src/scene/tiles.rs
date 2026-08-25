@@ -123,6 +123,13 @@ pub(super) const FLAG_FOLIAGE: u64 = 0x2_0000;
 /// (`TileDataLoader.cs:441`), and 109 of the 272 carry both.
 pub(super) const FLAG_TRANSLUCENT: u64 = 0x8;
 
+/// `TileFlag.Transparent` (**0x4**, `TileDataLoader.cs:421`) — NOT its 0x8
+/// neighbour above. ClassicUO reads it in exactly one place we care about:
+/// `AddLight`'s occlusion test, where a Static/Multi only blocks a light if it
+/// is *not* transparent (`GameScene.cs:420-427`). A window, a grate or an
+/// archway therefore lets a torch shine through it.
+pub(super) const FLAG_TRANSPARENT: u64 = 0x4;
+
 /// `TileFlag.MultiMovable` (ClassicUO `TileDataLoader.cs`) — the piece belongs
 /// to a movable multi (a boat's own foliage/deco). Only read by
 /// [`foliage_hidden`], which must NOT strip a boat bare when winter comes.

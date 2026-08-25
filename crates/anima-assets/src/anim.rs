@@ -75,6 +75,25 @@ pub const MONSTER_DIE1: u8 = 2;
 pub const ANIMAL_DIE1: u8 = 8;
 pub const PEOPLE_DIE1: u8 = 21;
 
+/// ClassicUO's fidget table (`Mobile._animationIdle`, `Mobile.cs:80-95`) — one
+/// row per `AnimationGroups` kind, indexed by a `RandomHelper.GetValue(0, 2)`
+/// that is INCLUSIVE of 2, so the third entry really is reachable. Low and High
+/// repeat `Fidget1` there; People has a real third fidget.
+const IDLE_LOW: [u8; 3] = [9, 10, 9]; // LowAnimationGroup Fidget1/Fidget2/Fidget1
+const IDLE_HIGH: [u8; 3] = [17, 18, 17]; // HighAnimationGroup Fidget1/Fidget2/Fidget1
+const IDLE_PEOPLE: [u8; 3] = [5, 6, 34]; // PeopleAnimationGroup Fidget1/Fidget2/Fidget3
+/// The idle group a `UseUopAnimation` body that is NOT people-kind fidgets with
+/// (`SetIdleAnimation`, `Mobile.cs:446-457`). Its war-mode sibling (28) is
+/// unreachable from here: war mode suppresses the fidget outright.
+const UOP_IDLE: u8 = 26;
+/// A flying gargoyle's two idle groups. ClassicUO picks 66 unless
+/// `GetValue(0, 2)` rolls 0, i.e. 2:1 — which is exactly what this row gives
+/// when the caller rolls a uniform index into it.
+const GARGOYLE_FLY_IDLE: [u8; 3] = [66, 67, 66];
+/// ClassicUO `Mobile.IsGargoyle` (`Mobile.cs:161`). The client-version gate on
+/// the first body is not modelled — this tree only ever serves a modern client.
+const GARGOYLE_BODIES: [u16; 2] = [0x029A, 0x029B];
+
 /// ClassicUO `AnimationsLoader.MAX_ACTIONS`: the UOP per-body group-replace
 /// table size (gargoyle uses close to all of these). Also the exclusive upper
 /// bound a resolved UOP "action" (group after `AnimationSequence.uop`
@@ -323,6 +342,84 @@ impl Anim {
             1 => ANIMAL_DIE1,
             _ => PEOPLE_DIE1,
         }
+    }
+
+    /// ClassicUO `Animations.AnimationExists`: does `(body, group)` have any
+    /// frames at all? Direction 0, like the original — a group that exists is
+    /// stored for every direction. Ours runs through [`Self::replaced_group`]
+    /// (inside [`Self::frame_count`]) where ClassicUO's does not, so this
+    /// answers "is there anything to DRAW for that group", which is the
+    /// question every caller actually has.
+    pub fn animation_exists(&self, body: u16, group: u8) -> bool {
+        self.frame_count(body, group, 0).is_some_and(|n| n > 0)
+    }
+
+    /// The three fidget groups ClassicUO would choose between for `body`, in
+    /// its own index order, each paired with whether it exists.
+    ///
+    /// This is the *group-choosing* half of `Mobile.SetIdleAnimation`
+    /// (`Mobile.cs:367-508`); the timing half (re-arm at `30 s + rand(0..30 s)`,
+    /// suppressed while mounted or in war mode) belongs to whoever owns the
+    /// animation clock. The caller rolls `RandomHelper.GetValue(0, 2)` itself
+    /// and applies ClassicUO's fallback: if the rolled entry does not exist,
+    /// flip the index (0↔1, and 2→0 — `first_value == 0 ? 1 : 0`) and try once
+    /// more; if that one is missing too, play no fidget at all.
+    ///
+    /// One deliberate departure: ClassicUO returns from the `UseUopAnimation`
+    /// and flying-gargoyle branches BEFORE its existence check, so it can pick
+    /// a group with no frames and freeze the body on frame 0. Those rows are
+    /// existence-checked here like any other, which turns that into "no
+    /// fidget" — the same outcome the ordinary path already has.
+    pub fn idle_groups(&self, body: u16, flying: bool) -> [(u8, bool); 3] {
+        let flags = self.mobtypes.get(&body).map_or(0, |e| e.flags);
+        // `SetIdleAnimation` reinterprets the type from the offset flags before
+        // it picks a row, in this order: `CalculateOffsetLowGroupExtended`
+        // (0x20) forces Monster, else `CalculateOffsetByLowGroup` (0x40) forces
+        // Animal. (Same idea as `death_group`, opposite precedence — that one
+        // checks 0x40 first and lets 0x20 overwrite it.)
+        let low_extended = flags & 0x20 != 0;
+        let kind = if low_extended {
+            0
+        } else if flags & 0x40 != 0 {
+            1
+        } else {
+            self.anim_type(body)
+        };
+        let row = if flags & 0x1_0000 != 0 {
+            // UseUopAnimation. A non-people body has one idle group; a people
+            // body only diverges when it is a gargoyle in flight.
+            if kind != 2 {
+                [UOP_IDLE; 3]
+            } else if flying && GARGOYLE_BODIES.contains(&body) {
+                GARGOYLE_FLY_IDLE
+            } else {
+                IDLE_PEOPLE
+            }
+        } else {
+            match kind {
+                0 => IDLE_HIGH,
+                1 => IDLE_LOW,
+                _ => IDLE_PEOPLE,
+            }
+        };
+        let mut out = [(0u8, false); 3];
+        for (slot, &g) in out.iter_mut().zip(row.iter()) {
+            // The `CalculateOffsetLowGroupExtended` bodies (a crow, say) borrow
+            // the monster row but often have no Fidget2: ClassicUO substitutes
+            // the replaced group 17 when 18 is missing and 17 is there, and
+            // otherwise gives up on the fidget and stands (High.Stand = 1).
+            let g = if low_extended && g == 18 {
+                if !self.animation_exists(body, 18) && self.animation_exists(body, 17) {
+                    self.replaced_group(body, 17)
+                } else {
+                    MONSTER_STAND
+                }
+            } else {
+                g
+            };
+            *slot = (g, self.animation_exists(body, g));
+        }
+        out
     }
 
     /// Resolve `Bodyconv.def`: return the `(file index, graphic)` to read `body`
@@ -1284,6 +1381,51 @@ fn parse_anim_sequence_entry(buf: &[u8]) -> Option<(u16, Vec<(u8, i32)>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn human_idle_groups_are_the_people_fidget_row() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let anim = Anim::open(&dir).expect("open anim");
+        // Human male (0x190): ClassicUO's People row is Fidget1/Fidget2/Fidget3
+        // = 5/6/34, and a human body has all three.
+        let rows = anim.idle_groups(400, false);
+        assert_eq!(rows.map(|(g, _)| g), [5, 6, 34]);
+        assert!(
+            rows.iter().all(|(_, e)| *e),
+            "a human has every fidget: {rows:?}"
+        );
+        // Flying only diverges for a gargoyle body, and only a UOP one.
+        assert_eq!(anim.idle_groups(400, true).map(|(g, _)| g), [5, 6, 34]);
+    }
+
+    #[test]
+    #[ignore] // needs ~/dev/uo/uo-resource
+    fn animal_and_monster_idle_groups_use_their_own_rows() {
+        let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
+        let anim = Anim::open(&dir).expect("open anim");
+        // Whatever mobtypes.txt says each body is, the row it gets must be that
+        // kind's fidget pair — never the people one, which would index past the
+        // end of a 13- or 22-group body.
+        for body in [1u16, 4, 6, 34, 50, 200, 210, 400, 401] {
+            let rows = anim.idle_groups(body, false);
+            let groups = rows.map(|(g, _)| g);
+            let known = [
+                IDLE_LOW,
+                IDLE_HIGH,
+                IDLE_PEOPLE,
+                [UOP_IDLE; 3],
+                // The `CalculateOffsetLowGroupExtended` substitution for a
+                // missing Fidget2: 17 stays, 18 becomes 17 or High.Stand.
+                [17, 17, 17],
+                [17, MONSTER_STAND, 17],
+            ];
+            assert!(
+                known.contains(&groups),
+                "body {body} idle row {groups:?} is not a ClassicUO fidget row"
+            );
+        }
+    }
 
     #[test]
     #[ignore] // needs ~/dev/uo/uo-resource

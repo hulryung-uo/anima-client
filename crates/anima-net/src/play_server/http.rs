@@ -567,9 +567,44 @@ pub(super) fn handle_request(ctx: Ctx) {
         ));
         r.add_header(ctype("application/json"));
         let _ = req.respond(r);
+    } else if let Some(body) = parse_idleanim_url(&url) {
+        // The three fidget groups ClassicUO would choose between for this body,
+        // each with whether it actually has frames. The renderer rolls the
+        // index and runs the clock (30-60 s of standing still, suppressed while
+        // mounted or in war mode) — only the group table needs the data files.
+        let idle = anim
+            .as_ref()
+            .map(|a| a.idle_groups(body, has_fly_query(&raw_url)));
+        let (g, e) = match idle {
+            Some(rows) => (
+                rows.iter()
+                    .map(|(g, _)| g.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                rows.iter()
+                    .map(|(_, e)| u8::from(*e).to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            None => (String::new(), String::new()),
+        };
+        let mut r = Response::from_string(format!("{{\"g\":[{g}],\"e\":[{e}]}}"));
+        r.add_header(ctype("application/json"));
+        let _ = req.respond(r);
     } else if let Some(graphic) = parse_iteminfo_url(&url) {
         let anim_id = tiledata.as_ref().map(|t| t.item_anim(graphic)).unwrap_or(0);
-        let mut r = Response::from_string(format!("{{\"anim\":{anim_id}}}"));
+        // `lt`/`lid`: does this ART graphic emit light, and which `light.mul`
+        // shape. ClassicUO asks the same two questions of an EFFECT's art
+        // (`GameEffectView.cs:248`, `data.IsLight` on the effect's current
+        // animated graphic), and the browser owns the effect's live position —
+        // so it looks the flag up per graphic here and adds the light itself.
+        let (is_light, light_id) = tiledata.as_ref().map_or((false, 0), |t| {
+            (t.item_is_light(graphic), t.item_layer(graphic))
+        });
+        let lt = u8::from(is_light);
+        let mut r = Response::from_string(format!(
+            "{{\"anim\":{anim_id},\"lt\":{lt},\"lid\":{light_id}}}"
+        ));
         r.add_header(ctype("application/json"));
         let _ = req.respond(r);
     } else if let Some((body, group, dir, frame)) = parse_anim_url(&url) {

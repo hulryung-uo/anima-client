@@ -21,11 +21,24 @@ pub(super) fn merge_obj(v: &mut Value, fields: Value) {
 /// item loop in [`build_scene`]): `amount` always, `st:1` only when the tile is
 /// Stackable — so the renderer's drag-split dialog only offers items the server
 /// would actually accept a partial lift from (ClassicUO `GameActions.PickUp`'s
-/// `IsStackable` gate). Pure (no Session/MapData), so it's unit-testable directly.
-pub(super) fn stack_fields(amount: u16, stackable: bool) -> Value {
+/// `IsStackable` gate).
+///
+/// `pl:1` is the DRAW half of the same question, and it is a different test:
+/// ClassicUO `ItemView.Draw` (`:137-151`) draws the art a second time at
+/// `(-5, -5)` when `!IsMulti && !IsCoin && Amount > 1 && IsStackable`, so a
+/// heap of arrows or ingots reads as a heap instead of a single item. Coins are
+/// excluded because they have their own amount-tiered graphics instead
+/// (`Item.DisplayedGraphic`). `is_multi` isn't a parameter: the item loop that
+/// calls this has already dropped multis.
+///
+/// Pure (no Session/MapData), so it's unit-testable directly.
+pub(super) fn stack_fields(amount: u16, stackable: bool, coin: bool) -> Value {
     let mut v = json!({ "amount": amount });
     if stackable {
         v["st"] = json!(1);
+    }
+    if stackable && !coin && amount > 1 {
+        v["pl"] = json!(1);
     }
     v
 }

@@ -119,11 +119,37 @@ impl Look<'_> {
         self.map.map_or(0, |m| m.item_light_id(g))
     }
 
-    /// A light source's `(shape id, colour)`, applying ClassicUO's two rules:
-    /// a shape id above 200 is really **a colour riding on the standard shape**
-    /// (`AddLight`: `Color = ID - 200; ID = 1`), and otherwise the graphic is
-    /// looked up in its colour table. Colour 0 = plain white.
+    /// Three graphic ranges ClassicUO lights **without consulting the tiledata
+    /// flag at all**: `ItemView.Draw` (`:29-35`) calls `AddLight` when
+    /// `IsLight || DisplayedGraphic in 0x3E02..=0x3E0B || in 0x3914..=0x3929`,
+    /// and `AddLight` itself (`GameScene.cs:446-453`) then forces shape 2 for
+    /// those two ranges plus `0x0B1D`, ahead of every other id rule.
+    ///
+    /// On this install none of the two ranges' graphics carries `LightSource`,
+    /// and ServUO's `PoisonField`/`FireField`/`EnergyField`/`ParalyzeField` all
+    /// place items inside them — so without this a spell field on the ground is
+    /// the one dynamic light that never lights anything. The GATE is
+    /// item-only, exactly as ClassicUO has it: `StaticView`/`MultiView`/
+    /// `MobileView` each test `ItemData.IsLight` alone.
+    pub(super) fn item_light_range(&self, g: u16) -> bool {
+        matches!(g, 0x3E02..=0x3E0B | 0x3914..=0x3929)
+    }
+
+    /// Does this ground item light the scene? The tiledata flag, or one of the
+    /// ranges above ([`Self::item_light_range`]).
+    pub(super) fn ground_item_is_light(&self, g: u16) -> bool {
+        self.item_is_light(g) || self.item_light_range(g)
+    }
+
+    /// A light source's `(shape id, colour)`, applying ClassicUO's three rules
+    /// in its own order: the special ranges above are shape 2; a shape id above
+    /// 200 is really **a colour riding on the standard shape** (`AddLight`:
+    /// `Color = ID - 200; ID = 1`); otherwise the graphic is looked up in its
+    /// colour table. Colour 0 = plain white.
     pub(super) fn item_light(&self, g: u16) -> (u8, u16) {
+        if self.item_light_range(g) || g == 0x0B1D {
+            return (2, anima_assets::lights::light_color_for(g).unwrap_or(0));
+        }
         let id = self.item_light_id(g);
         if id > 200 {
             return (1, id as u16 - 200);
@@ -212,6 +238,15 @@ impl Look<'_> {
             .and_then(|t| t.get(g as u32))
             .map(|info| info.stack_graphic(amount as u32) as u16)
             .unwrap_or(g)
+    }
+
+    /// ClassicUO `Item.IsCoin` (`Game/GameObjects/Item.cs:71`) — the three coin
+    /// graphics that carry their own amount-tiered art (`DisplayedGraphic`
+    /// returns `Graphic + 1` above 1 and `+ 2` above 5) and so must never be
+    /// drawn as a double-sprite pile. Gold is only one of the three, which is
+    /// why this is a set and not an `== 0x0EED`.
+    pub(super) fn item_is_coin(&self, g: u16) -> bool {
+        matches!(g, 0x0EEA | 0x0EED | 0x0EF0)
     }
 
     /// A dyed item's art hue, PartialHue-aware (see [`item_art_hue`]). Every
