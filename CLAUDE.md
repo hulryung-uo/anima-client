@@ -26,6 +26,21 @@ page is `/?wasm=1` + `anima-relay` + `anima-net --bin assets` `/terrain.json`).
 custom housing (0xD8 viewing), delete-character (0x83), `speech.mul` keywords,
 and skills.mul / `*.def` aliases / MUL fallback / Tier 5 assets are done.) See DESIGN.md §6.
 
+**When that backlog first read "Remaining: none", it was not finished — it was
+exhausted.** Re-surveying ClassicUO against the shipped code (not against the
+doc) found real defects and closed a further round: night/dusk/dungeon darkness
+never rendered at all; map statics were not click targets, so lumberjacking and
+mining a cave floor were impossible; `tiledata.rs` read item height and name from
+an offset four bytes wrong, making every static height an ASCII character and
+`nodraw` culling dead; the running bit and the flying flag were masked off every
+mobile update; 0xF0 party/guild map tracking was absent both directions; and the
+target cursor never said harmful or beneficial. Also landed: idle fidgets, worn
+and held lights with occlusion, ground piles, macro sequences with delay/
+waitTarget and mouse/wheel bindings, persistent name plates, pinned health bars,
+right-click window close, client context menus, Alt+click follow and auto-open
+corpses. The lesson is recorded because it will recur: **the gaps doc is a record
+of what was done, not a description of what is left.**
+
 ## Conventions
 - **Rust**, edition 2021. Core stays **near-zero-dep: one documented exception**
   (`miniz_oxide`, for the protocol-mandated 0xDD zlib) until there's a concrete
@@ -45,4 +60,16 @@ handler-by-handler, validate against captures (strangler migration).
 ```bash
 cargo build             # workspace
 cargo test --workspace  # ignored tests require local real-data files
+bash scripts/check.sh --skip-desktop   # the real gate; CI runs the same steps
 ```
+`check.sh` is stricter than a bare `cargo clippy`: it runs
+`clippy --all-targets -- -D warnings`. **Read its exit code from the command
+itself** — backgrounding it and reading the wrapper's status has already shipped
+a red commit here.
+
+One of its steps is not obvious: `scripts/check-web-globals.mjs` compiles every
+`web/js/*.js` **together**, in the load order read out of `index.html`, because
+the browser puts them in ONE scope. Two top-level `const`s of the same name in
+different files is a SyntaxError that aborts the later file and kills the client,
+and `node --check` — which compiles each file alone — cannot see it. That has
+happened; the step exists because of it.
