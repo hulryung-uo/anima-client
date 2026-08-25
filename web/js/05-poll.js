@@ -803,7 +803,10 @@ function syncWorld(s) {
     // Same resting alpha as a static (see that stamp for why it latches once).
     // The item pool destroys and rebuilds the sprite on any graphic change, so
     // this cannot outlive the graphic it was derived from.
-    sp._baseAlpha = it.tr ? A_TRANSLUCENT : 1;
+    // `hid` is the item-flags 0x80 bit: ServUO sends invisible items only to
+    // staff, and ClassicUO draws them translucent rather than dropping them, so
+    // a GM can see what they are standing on. Same treatment as a `tr` item.
+    sp._baseAlpha = (it.tr || it.hid) ? A_TRANSLUCENT : 1;
     if (sp._baseAlpha !== 1) sp.alpha = sp._baseAlpha;
     sp._hz = ceilHidden(it) ? 1 : 0;
     if (sp._hz) { sp.alpha = 0; sp.visible = false; setAlphaSource(sp, "ceil", 0); }

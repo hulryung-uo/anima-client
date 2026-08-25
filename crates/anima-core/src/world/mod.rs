@@ -89,6 +89,23 @@ pub struct Mobile {
 pub struct Item {
     pub serial: u32,
     pub graphic: u16,
+    /// The item flags byte (0x1A's optional trailer / 0xF3's fixed one). ServUO
+    /// `Item::GetPacketFlags` sets exactly two bits: `0x80` when the item is not
+    /// `Visible`, and `0x20` when `Movable || ForceShowProperties`.
+    ///
+    /// The second is easy to misread. `ForceShowProperties` is
+    /// `IsLockedDown || IsSecure`, so a locked-down house container has `0x20`
+    /// SET despite being immovable — this byte does not identify lockdowns.
+    /// What a clear `0x20` on a heavy graphic identifies is world furniture: a
+    /// forge, an anvil, a fixed loom — which is ClassicUO's `IsLocked`
+    /// (`(Flags & Movable) == 0 && ItemData.Weight > 90`). The weight half needs
+    /// `tiledata.mul`, which this crate deliberately cannot see, so the
+    /// combined judgement is made where the tiledata is: `anima-net`'s scene
+    /// builder, which emits it as the item's `lk` field.
+    ///
+    /// Use [`Item::flag_movable`] / [`Item::flag_hidden`] rather than testing
+    /// bits at call sites.
+    pub flags: u8,
     /// Stack count for a normal item; for a corpse (`graphic == 0x2006`) the server
     /// overloads this field with the dead creature's BODY id instead (ServUO
     /// `Corpse.Amount = owner.Body`; ClassicUO `Item.GetGraphicForAnimation`
@@ -1644,6 +1661,22 @@ const MAX_HUE_PICKERS: usize = 512;
 /// UO's stock client view range (tiles), sent as the default before any 0xC8
 /// ClientViewRange packet arrives. See [`World::client_view_range`].
 const DEFAULT_CLIENT_VIEW_RANGE: u8 = 18;
+
+impl Item {
+    /// ServUO's `0x20`: the item is `Movable`, **or** locked down/secured
+    /// (`ForceShowProperties`). Not a movability test on its own — see
+    /// [`Item::flags`].
+    pub fn flag_movable(&self) -> bool {
+        self.flags & 0x20 != 0
+    }
+
+    /// ServUO's `0x80`: the item is not `Visible`. Only staff are sent these at
+    /// all; ClassicUO draws them translucent rather than hiding them, so a GM
+    /// can see what they are standing on.
+    pub fn flag_hidden(&self) -> bool {
+        self.flags & 0x80 != 0
+    }
+}
 
 impl World {
     pub fn new() -> Self {

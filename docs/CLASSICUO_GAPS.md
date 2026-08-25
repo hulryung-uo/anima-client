@@ -1935,3 +1935,70 @@ not drop the connection over either.
 
 **Not verified:** anything that needs a second player — a real kick, a private
 party message arriving, another member's bars moving. One account, one shard.
+
+---
+
+Closed 2026-08-25 (item flags, and a spellbook hotkey that had to disagree with
+ClassicUO): the tail of the network survey.
+
+**The item flags byte was skipped on 0x1A and never reached on 0xF3.** ServUO
+`Item::GetPacketFlags` sets two bits: `0x80` when the item is not `Visible`, and
+`0x20` when `Movable || ForceShowProperties`.
+
+The second bit is easy to misread, and the survey did: `ForceShowProperties` is
+`IsLockedDown || IsSecure`, so a locked-down house container has `0x20` **set**
+despite being immovable. This byte does not identify lockdowns. What a *clear*
+`0x20` on a heavy graphic identifies is world furniture, which is exactly
+ClassicUO's `IsLocked` — `(Flags & Movable) == 0 && ItemData.Weight > 90` — and
+that has real consumers there: `GameActions.cs:457` refuses to pick such an item
+up at all, rather than sending a 0x07 whose only possible answer is a 0x27
+reject.
+
+Both halves of that test live in different places — the flag is on the wire, the
+weight is in `tiledata.mul`, which `anima-core` deliberately cannot see — so the
+combined judgement is made in the scene builder and shipped as one `lk` bit. The
+renderer refuses the drag and says so. `0x80` becomes `hid`, drawn translucent
+exactly as ClassicUO does, so a staff account can see what it is standing on
+instead of the item vanishing.
+
+On 0x1A the byte is optional: ServUO sets the `y & 0x4000` bit only when the
+flags are non-zero (`WorldItem`), so an absent byte means 0 rather than
+"unknown" — and 0 is meaningful, being precisely the immovable-and-visible case.
+
+**Live-verified.** A GM-spawned forge and anvil (`0x06AD`, `0x06A5`) arrive with
+`lk: 1` while ordinary loose items on the same tiles do not; `[set Visible false`
+on an item flips `hid` to 1 and back when restored.
+
+**`Send_OpenSpellBook` (0x12 type 0x43) — and here we deliberately do NOT match
+ClassicUO byte-for-byte.** ClassicUO writes the book type as a raw byte
+(`[0x12][len=5][0x43][type]`). ServUO reads this packet's body as a
+NUL-terminated string and then does `int.TryParse(command, out booktype)`
+(`PacketHandlers.TextCommand`, case 0x43). A raw `1` is the character U+0001,
+`TryParse` fails on it, and ServUO falls back to `booktype = 1` — so ClassicUO's
+form opens Magery *by accident* and cannot open any other book. We send the
+decimal text, which is what the parse on the other end is asking for.
+
+Live-verified: on a fresh connection `scene.spellbooks` is `[]`, and
+`openspellbook:1` fills it immediately — 0x12/0x43 out, `OpenSpellbookRequest`
+server-side, contents back on 0xBF/0x1B. Note this particular test does not
+discriminate between the two forms (both land on Magery); the parse is the
+evidence, and only the text form can select book type 101 or 201.
+
+**Deliberately NOT ported from the survey's one-liner table**, recorded so nobody
+re-derives them:
+
+- **Container grid index (0x3C/0x25).** ClassicUO's grid-loot gump uses it; our
+  container windows position by the item's own (x, y) like the classic gump, and
+  our grid mode lays out by slot order. Nothing to read it with.
+- **Speech font (0x1C/0xAE).** Overhead text renders in one font here by design;
+  honouring the server's choice would need the ASCII font atlases we do not ship.
+- **0xEC/0xED equip/unequip macro.** Per-item 0x13 equip already works and is
+  what every UI path uses; these add a KR-client convenience with no new
+  capability.
+- **0xBF sub 0x0C (close status-bar gump).** ServUO never writes one — this is
+  OSI/other-shard parity only, and there is nothing on this stack to test it
+  against.
+
+The **0x11 renamable flag** is left alone for the same reason it was marginal:
+we already ship `build_rename_request`, and the flag only says whether a UI
+should *offer* rename. Worth doing the day a rename affordance exists.

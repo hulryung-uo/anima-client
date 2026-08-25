@@ -147,6 +147,22 @@ pub(super) fn items_json(
             if look.item_foliage(it.graphic) {
                 v["f"] = json!(1);
             }
+            // ClassicUO `Item.IsLocked`: `(Flags & Movable) == 0 && Weight > 90`.
+            // Both halves are needed and they live in different places — the flag
+            // is on the wire, the weight is in tiledata, which the core cannot
+            // see — so the judgement is made here and shipped as one bit. The
+            // renderer refuses to drag these, as ClassicUO does
+            // (`GameActions.cs:457`), instead of sending a 0x07 that can only
+            // come back as a 0x27 reject.
+            if !it.flag_movable() && look.item_weight(it.graphic) > 90 {
+                v["lk"] = json!(1);
+            }
+            // ServUO sends invisible items only to staff; ClassicUO draws them
+            // translucent rather than dropping them, so a GM can see what they
+            // are standing on.
+            if it.flag_hidden() {
+                v["hid"] = json!(1);
+            }
             // Ceiling hiding — purely a DRAW decision, as in terrain.rs. The roof
             // clause matches ClassicUO, which runs items through the same
             // `_noDrawRoofs && IsRoof` branch as statics, so an item lying on a roof

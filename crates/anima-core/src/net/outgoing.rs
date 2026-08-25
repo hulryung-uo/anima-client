@@ -1306,6 +1306,20 @@ fn build_ascii_action(typ: u8, body: &str) -> Vec<u8> {
     finish_variable(w.into_vec())
 }
 
+/// Open a spellbook by type — `0x12` type `0x43`.
+///
+/// **Deliberately not byte-for-byte with ClassicUO.** `Send_OpenSpellBook`
+/// writes the type as a RAW BYTE (`[0x12][len=5][0x43][type]`), but ServUO reads
+/// this packet's body as a NUL-terminated string and then does
+/// `int.TryParse(command, out booktype)` (`PacketHandlers.TextCommand`, case
+/// 0x43). A raw `1` is the character U+0001, `TryParse` fails on it, and ServUO
+/// falls back to `booktype = 1` — so ClassicUO's form works for Magery by
+/// accident and cannot open any other book. We send the decimal text, which is
+/// what the parse on the other end is actually asking for.
+pub fn build_open_spellbook(book_type: u16) -> Vec<u8> {
+    build_ascii_action(0x43, &book_type.to_string())
+}
+
 /// OpenDoor `0x12` type `0x58` — ClassicUO `Send_OpenDoor`. The server opens
 /// the door on the tile the player is facing; there is no serial on the wire.
 /// Layout: `[0x12][len:u16=5][0x58][0x00]`.

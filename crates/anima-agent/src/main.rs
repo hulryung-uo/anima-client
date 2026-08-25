@@ -112,6 +112,7 @@ fn main() {
                 Action::WalkTo { x, y } => format!("walkto({x},{y})"),
                 Action::Say { text, mode } => format!("{}({text:?})", mode.name()),
                 Action::PartySay { text } => format!("party({text:?})"),
+                Action::OpenSpellbook { book_type } => format!("openspellbook({book_type})"),
                 Action::PickUp { serial, .. } => format!("pickup(0x{serial:08X})"),
                 Action::Drop {
                     serial,

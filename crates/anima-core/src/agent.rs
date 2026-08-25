@@ -692,6 +692,12 @@ pub enum Action {
     /// wire; ServUO looks at facing. Distinct from [`Action::Use`] on a door,
     /// which double-clicks a specific serial.
     OpenDoor,
+    /// Open a spellbook from the pack by book type (UO 0x12 type 0x43).
+    /// 1 = Magery, 101 = Necromancy, 201 = Chivalry, 401 = Bushido,
+    /// 501 = Ninjitsu, 601 = Spellweaving. Double-clicking the book already
+    /// works; this is the hotkey path, and the only one when the book is not
+    /// visible in an open container.
+    OpenSpellbook { book_type: u16 },
     /// Re-equip the weapon most recently worn (UO 0xD7 sub 0x1E). ServUO's
     /// `EquipLastWeaponRequest` swaps it back onto the one-hand layer.
     EquipLastWeapon,

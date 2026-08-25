@@ -133,6 +133,13 @@ impl Look<'_> {
 
     /// Does an item graphic carry the Foliage flag (tree/bush)? Used so the
     /// renderer can fade it when it would occlude the player.
+    /// Tiledata weight for an item graphic. 0 when there is no tiledata, which
+    /// makes the `> 90` locked test fall closed — an item is never refused a drag
+    /// because an asset file is missing.
+    pub(super) fn item_weight(&self, g: u16) -> u8 {
+        self.map.map_or(0, |m| m.item_weight(g))
+    }
+
     pub(super) fn item_foliage(&self, g: u16) -> bool {
         self.map
             .is_some_and(|m| m.item_flags(g) & FLAG_FOLIAGE != 0)

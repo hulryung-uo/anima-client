@@ -230,6 +230,11 @@ pub(super) fn parse_command(body: &str) -> Option<Action> {
             })
         }
         "opendoor" => arg.is_empty().then_some(Action::OpenDoor),
+        // openspellbook[:<type>] — 0x12 type 0x43. Defaults to 1 (Magery),
+        // the same book ServUO falls back to when the type will not parse.
+        "openspellbook" => Some(Action::OpenSpellbook {
+            book_type: arg.parse().unwrap_or(1),
+        }),
         "lastweapon" => arg.is_empty().then_some(Action::EquipLastWeapon),
         "allnames" => arg.is_empty().then_some(Action::AllNames),
         // racechange:<skin>:<hairStyle>:<hairHue>:<beardStyle>:<beardHue>

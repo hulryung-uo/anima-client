@@ -328,6 +328,7 @@ mod walkto_pathing_tests {
                 name: String::new(),
                 direction: 0,
                 is_multi: false,
+                ..Default::default()
             },
         );
         world.items.insert(
@@ -347,6 +348,7 @@ mod walkto_pathing_tests {
                 name: String::new(),
                 direction: 0,
                 is_multi: false,
+                ..Default::default()
             },
         );
         // Seal the real ~29-tile detour around the east end of this building

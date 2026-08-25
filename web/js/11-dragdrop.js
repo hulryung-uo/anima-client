@@ -53,8 +53,23 @@ function endGroundDrag() {
 // Lift an item onto the cursor (UO pickup): set the shared held state, send the
 // `pickup` ONCE, and show the floating ghost that now follows the mouse until the
 // item is placed. Reused by every drag source so lifting behaves identically.
+// Is this ground item one the server will never let us lift? `lk` is the scene's
+// verdict on ClassicUO's `IsLocked` — the item flags say immovable AND tiledata
+// says it is heavy world furniture (a forge, an anvil). ClassicUO refuses the
+// drag outright (`GameActions.cs:457`) rather than sending a 0x07 whose only
+// possible answer is a 0x27 reject, and the refusal is what makes a fixed object
+// feel fixed instead of feeling broken.
+function itemIsLocked(serial) {
+  const want = serial >>> 0;
+  for (const it of ((scene && scene.items) || [])) {
+    if ((it.serial >>> 0) === want) return !!it.lk;
+  }
+  return false;
+}
+
 function liftToCursor(serial, g, amount, clientX, clientY, hue) {
   serial = serial >>> 0; g = g | 0; amount = amount || 1; hue = hue | 0;
+  if (itemIsLocked(serial)) { addSysMessage("That is locked down."); return; }
   // Where it came from, read BEFORE the pickup — the server drops the item out
   // of its container the moment it accepts one. Only the counter bar uses this
   // (to put an item back exactly where it was after binding a slot to it), which

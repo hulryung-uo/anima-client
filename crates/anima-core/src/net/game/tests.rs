@@ -4997,3 +4997,38 @@ fn f0_any_understood_reply_marks_the_shard_as_speaking_tracking() {
     }
     assert!(!w3.map_tracking);
 }
+
+/// The item flags byte on 0x1A is optional: ServUO sets the `y & 0x4000` bit
+/// only when the byte is non-zero (`WorldItem`), so its absence means 0 rather
+/// than "unknown" — and 0 is a meaningful value, not a missing one.
+#[test]
+fn world_item_flags_are_read_when_present_and_zero_when_not() {
+    let frame = |y: u16, tail: &[u8]| {
+        let mut p = PacketWriter::new();
+        p.u8(0x1A).u16(0).u32(0x4001).u16(0x0E75).u16(100).u16(y);
+        let mut v = p.into_vec();
+        v.extend_from_slice(tail);
+        let n = v.len() as u16;
+        v[1..3].copy_from_slice(&n.to_be_bytes());
+        v
+    };
+
+    // No 0x4000 bit → no flags byte on the wire → 0.
+    let mut w = World::new();
+    assert!(apply_packet(&mut w, &frame(200, &[5i8 as u8])));
+    assert_eq!(w.items[&0x4001].flags, 0);
+    assert!(!w.items[&0x4001].flag_movable());
+    assert!(!w.items[&0x4001].flag_hidden());
+
+    // 0x4000 set → the byte follows the z. Movable + hidden together.
+    let mut w2 = World::new();
+    assert!(apply_packet(
+        &mut w2,
+        &frame(200 | 0x4000, &[5i8 as u8, 0xA0])
+    ));
+    assert_eq!(w2.items[&0x4001].flags, 0xA0);
+    assert!(w2.items[&0x4001].flag_movable());
+    assert!(w2.items[&0x4001].flag_hidden());
+    // The coordinate must have the flag bit stripped, not carry it into y.
+    assert_eq!(w2.items[&0x4001].pos.y, 200);
+}

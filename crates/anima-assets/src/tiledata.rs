@@ -352,6 +352,17 @@ impl TileData {
             .unwrap_or_default()
     }
 
+    /// Weight of an item graphic, straight after the flags field. 255 is UO's
+    /// "cannot be picked up" sentinel; ClassicUO's `IsLocked` compares against
+    /// 90, which is the threshold that separates carryable goods from world
+    /// furniture.
+    pub fn item_weight(&self, graphic: u16) -> u8 {
+        let w_off = self.flags_size();
+        self.item_entry_off(graphic)
+            .map(|off| self.data[off + w_off])
+            .unwrap_or(0)
+    }
+
     /// Height of a static/item graphic (used for Z stacking/walkability).
     pub fn item_height(&self, graphic: u16) -> u8 {
         let h_off = self.flags_size() + ITEM_HEIGHT_AFTER_FLAGS;

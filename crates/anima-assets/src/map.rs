@@ -477,6 +477,12 @@ impl MapData {
         self.tiledata.item_height(graphic)
     }
 
+    /// Tiledata weight of an item graphic. ClassicUO's `IsLocked` compares this
+    /// against 90 to separate carryable goods from world furniture.
+    pub fn item_weight(&self, graphic: u16) -> u8 {
+        self.tiledata.item_weight(graphic)
+    }
+
     /// Tiledata flags of an item graphic (e.g. Background 0x1 for draw-sort).
     pub fn item_flags(&self, graphic: u16) -> u64 {
         self.tiledata.item_flags(graphic)

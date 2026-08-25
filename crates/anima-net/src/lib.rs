@@ -40,10 +40,10 @@ use anima_core::net::outgoing::{
     build_house_design_sync, build_hue_picker_response, build_invoke_virtue,
     build_legacy_menu_response, build_logout_request, build_map_add_pin, build_map_change_pin,
     build_map_clear_pins, build_map_insert_pin, build_map_remove_pin, build_map_toggle_editable,
-    build_open_door, build_open_uo_store, build_opl_request, build_party_accept,
-    build_party_can_loot, build_party_decline, build_party_invite, build_party_leave,
-    build_party_message, build_party_private_message, build_party_remove, build_pick_up,
-    build_ping, build_popup_request, build_popup_select, build_profile_request,
+    build_open_door, build_open_spellbook, build_open_uo_store, build_opl_request,
+    build_party_accept, build_party_can_loot, build_party_decline, build_party_invite,
+    build_party_leave, build_party_message, build_party_private_message, build_party_remove,
+    build_pick_up, build_ping, build_popup_request, build_popup_select, build_profile_request,
     build_profile_update, build_prompt_response, build_query_guild_positions,
     build_query_party_positions, build_quest_arrow_click, build_quest_menu_request,
     build_rename_request, build_say, build_sell, build_single_click, build_skill_lock,
@@ -939,6 +939,7 @@ impl Session {
             }
             Action::UseSkill { skill } => self.send(&build_use_skill(*skill))?,
             Action::OpenDoor => self.send(&build_open_door())?,
+            Action::OpenSpellbook { book_type } => self.send(&build_open_spellbook(*book_type))?,
             Action::EquipLastWeapon => {
                 let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
                 self.send(&build_equip_last_weapon(serial))?;

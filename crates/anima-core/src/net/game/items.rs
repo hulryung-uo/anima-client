@@ -71,6 +71,9 @@ pub(super) fn world_item_hs(world: &mut World, frame: &[u8]) -> PResult<()> {
     let z = r.i8()?;
     let direction = r.u8()?;
     let hue = r.u16()?;
+    // `[flags:u8][unk2:u16]` trail the hue on 0xF3 (ClassicUO `UpdateItemSA`).
+    // We used to stop reading at the hue, so this byte was never touched at all.
+    let flags = r.u8().unwrap_or(0);
     let is_multi = data_type == 0x02;
     let mut graphic = graphic.wrapping_add(graphic_inc as u16);
     if is_multi {
@@ -91,6 +94,7 @@ pub(super) fn world_item_hs(world: &mut World, frame: &[u8]) -> PResult<()> {
     it.container = None;
     it.layer = 0;
     it.direction = direction & 0x07;
+    it.flags = flags;
     it.is_multi = is_multi;
     Ok(())
 }
@@ -230,9 +234,14 @@ pub(super) fn world_item(world: &mut World, frame: &[u8]) -> PResult<()> {
         y &= 0x7FFF;
         hue = r.u16()?;
     }
+    // ServUO sets the 0x4000 bit only when the flags byte is non-zero
+    // (`WorldItem`: `if (flags != 0) y |= 0x4000;`), so an absent byte really
+    // does mean 0 — not "unknown". 0 reads as immovable and visible, which for a
+    // heavy graphic is exactly what `Item::locked` is about.
+    let mut flags = 0u8;
     if y & 0x4000 != 0 {
         y &= 0x3FFF;
-        r.skip(1)?; // flags
+        flags = r.u8()?;
     }
 
     let it = world.item_mut(serial);
@@ -241,6 +250,7 @@ pub(super) fn world_item(world: &mut World, frame: &[u8]) -> PResult<()> {
     it.pos.y = y;
     it.pos.z = z;
     it.hue = hue;
+    it.flags = flags;
     it.amount = if amount == 0 { 1 } else { amount };
     it.container = None; // on the ground
     it.direction = direction & 0x07;

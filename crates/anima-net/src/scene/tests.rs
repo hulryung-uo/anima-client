@@ -1131,6 +1131,7 @@ fn closed_door_blocks_strictly_but_not_for_planning() {
             name: String::new(),
             direction: 0,
             is_multi: false,
+            ..Default::default()
         },
     );
 
@@ -1207,6 +1208,7 @@ fn tile_walkable_for_planning_denies_a_door_tile_with_a_non_door_blocker_too() {
                 name: String::new(),
                 direction: 0,
                 is_multi: false,
+                ..Default::default()
             },
         );
         world.items.insert(
@@ -1226,6 +1228,7 @@ fn tile_walkable_for_planning_denies_a_door_tile_with_a_non_door_blocker_too() {
                 name: String::new(),
                 direction: 0,
                 is_multi: false,
+                ..Default::default()
             },
         );
         assert!(
@@ -1277,6 +1280,7 @@ fn explain_tile_walkable_for_planning_names_the_door_only_when_it_alone_blocks()
             name: String::new(),
             direction: 0,
             is_multi: false,
+            ..Default::default()
         },
     );
 
@@ -1314,6 +1318,7 @@ fn explain_tile_walkable_for_planning_names_the_door_only_when_it_alone_blocks()
             name: String::new(),
             direction: 0,
             is_multi: false,
+            ..Default::default()
         },
     );
     let (z, door) = explain_tile_walkable_for_planning(&world, &mut map, None, 1611, 1591, 5);
@@ -1422,6 +1427,7 @@ fn synth_item(
         name: String::new(),
         direction: 0,
         is_multi,
+        ..Default::default()
     }
 }
 
@@ -2646,6 +2652,7 @@ fn can_step_to_allows_the_stairs_climb_and_still_blocks_a_door_and_a_wall() {
             name: String::new(),
             direction: 0,
             is_multi: false,
+            ..Default::default()
         },
     );
     match can_step_to(
@@ -3555,6 +3562,7 @@ fn container_info_resolves_graphic_and_falls_back() {
             name: String::new(),
             direction: 0,
             is_multi: false,
+            ..Default::default()
         },
     );
     w.push_container_open(BAG, 0x003C);
