@@ -2219,3 +2219,38 @@ synthetic calls: pressing on a "dagger" plate and moving 110px puts
 `{serial: 1073867404, g: 3922, amount: 1}` on the cursor, releasing clears it,
 and the server agrees — the dagger is on the ground afterwards with no complaint
 in the journal, so both the pickup and the drop were accepted.
+
+---
+
+Closed 2026-08-25 (the criminal-action confirmation, actually fired): the last
+item on the not-verified list that was verifiable at all. It was reported as
+"harness-only, because this GM's own notoriety is gray and ClassicUO correctly
+excludes that character". That was right, and I initially thought it was not —
+reading only the inner block of `TargetManager.cs:272-281`, which tests the
+TARGET's notoriety, and missing the enclosing guard at :266:
+
+```csharp
+if (SerialHelper.IsMobile(serial) && serial != _world.Player &&
+    (_world.Player.NotorietyFlag == Innocent || _world.Player.NotorietyFlag == Ally))
+```
+
+So there are two gates, not one: the CASTER must be Innocent or Ally, and only
+then does the target's flag decide. Our `confirmCriminalTarget` matches both,
+including the self-exclusion and treating an unknown 0 as Innocent (the side that
+still warns).
+
+Which also says exactly how to test it: the caster has to be blue. ServUO's
+`AutoCreateAccounts` gives us one — a second `play` client on another port is a
+normal player at notoriety 1, and a GM-spawned banker is another. With a real
+Magic Arrow scroll giving a real harmful cursor (`scene.target` =
+`{active:1, flag:1, kind:0}`), targeting the innocent banker returns **false**
+from `confirmCriminalTarget` — the target is withheld — and the panel appears
+reading "This may flag you criminal!" with Yes and No. **No** dismisses it and
+leaves the cursor up, which is ClassicUO's behaviour: its `QuestionGump` callback
+sends the target only on `true`, so a refusal simply never sends and you are free
+to pick something else.
+
+Still not verified, and now genuinely unverifiable here: an **effect light**, since
+no effect art on this data carries the LightSource flag (see the correction
+above), and the exact hand position of a worn light, which needs the worn
+sprite's own per-frame draw centre and cannot be known on this side of the wire.
