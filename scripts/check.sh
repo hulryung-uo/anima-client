@@ -47,6 +47,13 @@ run cargo check -p anima-wasm --target wasm32-unknown-unknown
 while IFS= read -r js; do
     run node --check "$js"
 done < <(find web -name '*.js' -not -path 'web/vendor/*' | sort)
+# …and the same scripts compiled TOGETHER, in index.html's order, because that
+# is how the browser loads them: classic scripts sharing one global scope. Two
+# files declaring the same top-level `const` is a SyntaxError that kills the
+# LATER file outright — lose 13-macros.js that way and the client has no input
+# handlers at all. `node --check` above compiles each file alone and is blind
+# to it, which is how one reached the working tree.
+run node scripts/check-web-globals.mjs
 
 if [ "${1-}" != "--skip-desktop" ]; then
     # CI runs this as a separate macOS/Windows job; it is the slow one (Tauri).

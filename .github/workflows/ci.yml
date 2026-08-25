@@ -32,6 +32,12 @@ jobs:
         run: cargo check -p anima-wasm --target wasm32-unknown-unknown
       - name: Check web JavaScript syntax
         run: find web -name "*.js" -not -path "web/vendor/*" -print0 | xargs -0 -n1 node --check
+      # The step above compiles each file ALONE. These are classic scripts
+      # sharing one global scope, so two files declaring the same top-level
+      # `const` is a SyntaxError that kills the later file — and only shows up
+      # when they are compiled together, the way the browser loads them.
+      - name: Check web scripts share one scope
+        run: node scripts/check-web-globals.mjs
 
   desktop:
     name: Desktop compile (${{ matrix.os }})
