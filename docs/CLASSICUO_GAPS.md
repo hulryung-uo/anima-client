@@ -2142,3 +2142,53 @@ tint at its 0.6 cap:
 Still not seen as pixels: an effect light (no live effect has light-flagged art
 on this data — see the correction above), and the exact hand position of a worn
 light, which needs the worn sprite's own draw centre.
+
+---
+
+Corrected 2026-08-25 (what a second account showed): the party rows above were
+shipped with one shortfall recorded honestly — "the party health-bar shape and
+the normalised mana/stamina need a second account nobody has". ServUO's
+`Config/Accounts.cfg` has `AutoCreateAccounts=True` and no per-IP limit, so a
+second client is a `play` binary on another port. Running one disproved three
+things this repo believed, two of them written by me.
+
+**Confirmed first, so the rest is trustworthy:** a real party shows our own entry
+with true values (100/100 hits, 100/100 mana, 10/10 stam) and the other member
+with **25/25 for all three** — ServUO's `AttributeNormalizer` fixed max. Damaging
+them to a real 12/80 (15%) arrives as 3/25 (12%), the integer truncation of
+`cur * 25 / max`, so the bar is coarse to 4% and rounds down. That is UO, not us.
+
+**1. `partyMemberInView` was wrong.** It decided "out of range" by absence from
+`scene.mobiles`. ServUO never removes a mobile from your world when YOU walk
+away — `Mobile.SetLocation:10102` only tells clients about the mobile that moved
+— so a member 171 tiles off was still listed, with the position they had when we
+last saw them. The test reported everyone as in view forever. It now asks the
+server instead: 0xF0 reports exactly the members you CANNOT see, so presence in
+`scene.tracked.party` IS the answer, with a distance fallback for a shard that
+does not speak 0xF0.
+
+**2. The "frozen bar fix" could never have worked.** The party panel polled
+`statusreq` (0x34 type 4) for out-of-range members, on the claim — written in
+`commands.rs` and repeated in the commit — that this is what makes the server
+answer with their real mana and stamina. It is not. ServUO gates BOTH answering
+branches on distance: `Mobile.OnStatsQuery` sends `MobileStatus` only
+`if (InUpdateRange(this, from) && from.CanSee(this))`, and the party branch it
+delegates to, `Party.OnStatsQuery`, repeats `Utility.InUpdateRange(beholder,
+beheld)` before sending `MobileAttributesN`. Party attributes are otherwise
+pushed only on join/rejoin. Watched live: a member regenerating from 23 to 38
+real hits left our copy pinned at 4/25 for a full minute, with and without the
+polling. The polling is removed — it was a packet every five seconds that could
+never be answered — and what remains is honest: the row is **dimmed** to say the
+reading is old, and 0xF0 still says where they are, which is the part UO makes
+available.
+
+**3. Leaving a party left a ghost pin.** ServUO answers `QueryPartyLocations`
+only while a party exists, so after a disband nothing overwrites the last
+snapshot and the world map keeps a marker on the tile a former member was last
+seen at. `party_positions` is cleared when the member list empties, pinned by a
+test.
+
+Also closed by the same session: **0xF0's populated records**, which the original
+note listed as unverified because it needs two accounts. With a real party, a
+member 171 tiles away arrives as `{serial, x: 1602, y: 1591, map: 0}` — exactly
+the member who cannot be seen, which is the whole point of the packet.

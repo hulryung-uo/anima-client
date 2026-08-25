@@ -414,6 +414,14 @@ pub(super) fn parse_party(world: &mut World, r: &mut PacketReader) -> PResult<()
             }
             world.party.leader = members.first().copied().unwrap_or(0);
             world.party.members = members;
+            // Leaving a party must drop the 0xF0 position snapshot with it.
+            // ServUO answers `QueryPartyLocations` only while a party exists, so
+            // once we are out nothing ever overwrites the last snapshot and the
+            // world map keeps a ghost pin on the tile a former member was last
+            // seen at — measured with two accounts.
+            if world.party.members.is_empty() {
+                world.party_positions.clear();
+            }
             // We're now in (or out of) a party; any outstanding invite is resolved.
             world.party.pending_invite = None;
         }

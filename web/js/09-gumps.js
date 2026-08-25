@@ -1273,33 +1273,53 @@ function closeParty() {
 let partyLootMe = localStorage.getItem("anima.partyLoot") === "1";
 
 // Is this member close enough that the server is still pushing their vitals?
-// ServUO sends 0xA1-3 only while a mobile is in update range and visible, so a
-// member missing from `scene.mobiles` has frozen bars, not zeroed ones.
+//
+// The obvious test — "are they in `scene.mobiles`?" — is WRONG, and this
+// function used to use it. ServUO never removes a mobile from your world when
+// YOU walk away: `Mobile.SetLocation` (:10102) only tells clients about the
+// mobile that actually moved. Measured with two accounts: a party member 171
+// tiles away was still in `scene.mobiles`, carrying the position they had when
+// we last saw them. So that test reports every member as in view forever, the
+// row never dims, `statusreq` never fires, and the frozen-bar case this was
+// built to fix stays broken.
+//
+// The right signal is the server's own: 0xF0 reports exactly the members you
+// CANNOT see (`ProtocolExtensions.cs` skips anyone `InUpdateRange && CanSee`),
+// so presence in `scene.tracked.party` IS the answer, decided by ServUO rather
+// than guessed here. Distance is the fallback for a shard with no 0xF0 — the
+// last position we hold is stale, but a stale position that is already far away
+// cannot belong to someone still in range.
+const PARTY_VIEW_TILES = 18; // ServUO's update range
 function partyMemberInView(serial) {
-  const ms = (scene && scene.mobiles) || [];
   const want = serial >>> 0;
-  if (((scene.player && scene.player.serial) >>> 0) === want) return true;
-  for (const m of ms) if ((m.serial >>> 0) === want) return true;
-  return false;
+  const me = scene && scene.player;
+  if (!me) return true;
+  if ((me.serial >>> 0) === want) return true;
+
+  const tracked = scene.tracked;
+  if (tracked && tracked.on) {
+    return !(tracked.party || []).some((t) => (t.serial >>> 0) === want);
+  }
+  const m = ((scene.mobiles) || []).find((x) => (x.serial >>> 0) === want);
+  if (!m) return false;
+  return Math.max(Math.abs((m.x | 0) - (me.x | 0)),
+                  Math.abs((m.y | 0) - (me.y | 0))) <= PARTY_VIEW_TILES;
 }
 
-// Ask the server for an out-of-view member's real attributes (0x34 type 4). This
-// is the whole point of `statusreq`: without it a member who walks away leaves
-// their bars stuck at the last value we heard, forever. Throttled per member —
-// the panel refreshes on every scene poll, and one request per member per five
-// seconds is enough to keep a healer honest without spamming the wire.
-const partyStatusAsked = new Map();
-const PARTY_STATUS_MS = 5000;
-function refreshStalePartyStatus(members) {
-  const now = Date.now();
-  for (const m of members) {
-    const serial = m.serial | 0;
-    if (!serial || partyMemberInView(serial)) { partyStatusAsked.delete(serial); continue; }
-    if (now - (partyStatusAsked.get(serial) || 0) < PARTY_STATUS_MS) continue;
-    partyStatusAsked.set(serial, now);
-    sendInput("statusreq:" + serial);
-  }
-}
+// NOTE on refreshing an out-of-range member: you cannot. This code used to poll
+// `statusreq` (0x34 type 4) for members outside update range, on the claim that
+// it is "what makes the server answer with their real mana/stamina". A test with
+// two accounts disproved that. ServUO gates BOTH answering branches on range:
+// `Mobile.OnStatsQuery` sends `MobileStatus` only `if (InUpdateRange(this, from)
+// && from.CanSee(this))`, and the party branch it then calls,
+// `Party.OnStatsQuery`, repeats `Utility.InUpdateRange(beholder, beheld)` before
+// sending `MobileAttributesN`. Party attributes are otherwise pushed only on
+// join/rejoin. So a request for the exact case it was written for — a member too
+// far away for their bars to be updating — is answered by nothing, and polling
+// it was a packet every five seconds that could never work.
+//
+// What is left is honest: the row is DIMMED to say the reading is old, and 0xF0
+// still tells us where they are, which is the part UO does make available.
 
 function refreshParty() {
   const party = (scene && scene.party) || { leader: 0, members: [], invite: 0 };
@@ -1342,7 +1362,6 @@ function refreshParty() {
     && (party.leader | 0) === ((scene.player && scene.player.serial) | 0);
   document.getElementById("pt-loot").checked = partyLootMe;
   document.getElementById("pt-loot-row").style.display = members.length ? "" : "none";
-  refreshStalePartyStatus(members);
   if (!members.length) {
     list.innerHTML = '<div class="pt-empty">Not in a party.</div>';
   } else {
@@ -1365,8 +1384,9 @@ function refreshParty() {
       const mpct = (m.manaMax | 0) > 0 ? Math.max(0, Math.min(100, Math.round((m.mana | 0) * 100 / (m.manaMax | 0)))) : 0;
       const spct = (m.stamMax | 0) > 0 ? Math.max(0, Math.min(100, Math.round((m.stam | 0) * 100 / (m.stamMax | 0)))) : 0;
       // A member out of update range stops receiving 0xA1-3 pushes, so their bars
-      // freeze at whatever we last heard. Dim the row rather than showing a
-      // confident stale reading; `statusreq` below is what un-freezes it.
+      // freeze at whatever we last heard — and nothing can un-freeze them, see the
+      // note above `refreshParty`. Dim the row rather than show a confident stale
+      // reading; that honesty is the whole feature.
       const stale = !partyMemberInView(m.serial);
       html += `<div class="pt-row${isLeader ? " leader" : ""}${stale ? " pt-stale" : ""}">`
         + `<div class="pt-head">`

@@ -556,8 +556,17 @@ pub(super) fn parse_command(body: &str) -> Option<Action> {
             can_loot: arg == "1" || arg == "on",
         }),
         // statusreq[:<serial>] — 0x34 MobileQuery type 4. Omitted/0 = ourselves.
-        // For a fellow party member this is what makes the server answer with
-        // 0x2D full attributes, i.e. their real mana/stamina.
+        //
+        // This comment used to claim that asking about a fellow party member is
+        // "what makes the server answer with their real mana/stamina". Measured
+        // with two accounts: it is not, once they are out of range. ServUO gates
+        // BOTH answering branches on distance — `Mobile.OnStatsQuery` sends
+        // `MobileStatus` only `if (InUpdateRange(this, from) && from.CanSee(this))`,
+        // and the party branch it delegates to, `Party.OnStatsQuery`, repeats
+        // `Utility.InUpdateRange(beholder, beheld)` before sending
+        // `MobileAttributesN`. Party attributes are otherwise pushed only on
+        // join/rejoin. So this refreshes someone you can already see, and answers
+        // nothing for someone you cannot.
         "statusreq" => Some(Action::StatusRequest {
             serial: parse_serial(arg).unwrap_or(0),
         }),

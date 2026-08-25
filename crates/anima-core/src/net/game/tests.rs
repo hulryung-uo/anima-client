@@ -5032,3 +5032,57 @@ fn world_item_flags_are_read_when_present_and_zero_when_not() {
     // The coordinate must have the flag bit stripped, not carry it into y.
     assert_eq!(w2.items[&0x4001].pos.y, 200);
 }
+
+/// Leaving a party has to drop the 0xF0 position snapshot with it. ServUO
+/// answers `QueryPartyLocations` only while a party exists (`if (party != null)`),
+/// so once we are out nothing ever overwrites the last snapshot — and the world
+/// map keeps a pin on the tile a former member was last seen at. Found with two
+/// accounts, not by reading the code.
+#[test]
+fn leaving_a_party_clears_the_tracked_positions() {
+    let mut w = World::new();
+    w.player = Some(crate::types::Serial(0x42));
+
+    // In a party, with a position for the member we cannot see.
+    let mut p = PacketWriter::new();
+    p.u8(0xBF)
+        .u16(0)
+        .u16(0x0006)
+        .u8(0x01)
+        .u8(2)
+        .u32(0x42)
+        .u32(0xBEEF);
+    let mut frame = p.into_vec();
+    let n = frame.len() as u16;
+    frame[1..3].copy_from_slice(&n.to_be_bytes());
+    assert!(apply_packet(&mut w, &frame));
+    assert_eq!(w.party.members.len(), 2);
+
+    let mut q = PacketWriter::new();
+    q.u8(0xF0)
+        .u16(0)
+        .u8(0x01)
+        .u32(0xBEEF)
+        .u16(1602)
+        .u16(1591)
+        .u8(0)
+        .u32(0);
+    let mut qf = q.into_vec();
+    let n = qf.len() as u16;
+    qf[1..3].copy_from_slice(&n.to_be_bytes());
+    assert!(apply_packet(&mut w, &qf));
+    assert_eq!(w.party_positions.len(), 1);
+
+    // An empty member list is how a disband arrives; the pin must go with it.
+    let mut e = PacketWriter::new();
+    e.u8(0xBF).u16(0).u16(0x0006).u8(0x01).u8(0);
+    let mut ef = e.into_vec();
+    let n = ef.len() as u16;
+    ef[1..3].copy_from_slice(&n.to_be_bytes());
+    assert!(apply_packet(&mut w, &ef));
+    assert!(w.party.members.is_empty());
+    assert!(
+        w.party_positions.is_empty(),
+        "a former member must not stay pinned to the map"
+    );
+}
