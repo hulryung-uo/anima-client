@@ -1208,6 +1208,107 @@
       .hdesign-floor-btn.active { color: #fff; background: rgba(138, 180, 248, .3); border-color: #4a7ab8; }
       .hdesign-actions { display: flex; flex-wrap: wrap; gap: 6px; }
       .hdesign-actions .dlg-btn { flex: 1; min-width: 64px; text-align: center; }
+      /* ---- name plates, pinned health bars, drag-select, chat mode ----
+         (G4/G6/G8/G9: ClassicUO NameOverheadGump / HealthBarGump /
+         DragSelect / SystemChatControl.) */
+      /* A plate is a name label that TAKES CLICKS — #names is pointer-events:none,
+         so this is what lets the label answer a target cursor or be dragged off
+         into a health bar. The chip background is what tells them apart on screen. */
+      .nm-label.np-plate {
+        pointer-events: auto; cursor: pointer;
+        padding: 0 4px; border-radius: 3px;
+        background: rgba(8, 11, 16, .72); border: 1px solid rgba(120, 130, 145, .5);
+      }
+      .nm-label.np-plate:hover { border-color: #8ab4f8; background: rgba(20, 28, 40, .88); }
+      /* A UO-font label is a CSS MASK over its background colour — the background IS
+         the text, and `mask-size: 100% 100%` stretches to the border box, so padding
+         or a border would smear the glyphs. Frame it with an outline, which takes
+         no space, and leave its background alone. */
+      .nm-label.uo.np-plate {
+        padding: 0; border: 0;
+        outline: 1px solid rgba(120, 130, 145, .55); outline-offset: 1px;
+      }
+      .nm-label.uo.np-plate:hover { outline-color: #8ab4f8; }
+      #hbars { position: fixed; inset: 0; pointer-events: none; z-index: 24; }
+      .hb-win {
+        position: fixed; width: 122px; pointer-events: auto; user-select: none;
+        background: rgba(8, 11, 16, .92); border: 1px solid #3a4250; border-radius: 5px;
+        padding: 3px 4px 4px; box-shadow: 0 2px 10px rgba(0, 0, 0, .45);
+        font: 11px ui-monospace, Menlo, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+      }
+      .hb-title { display: flex; align-items: center; gap: 4px; cursor: move; }
+      .hb-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+      .hb-close { color: #6b7280; cursor: pointer; padding: 0 2px; }
+      .hb-close:hover { color: #e5484d; }
+      .hb-line { height: 5px; margin-top: 3px; background: #1b2028; border: 1px solid #000; border-radius: 2px; overflow: hidden; }
+      .hb-line > i { display: block; height: 100%; width: 0; background: #46a758; }
+      .hb-mana > i { background: #4f8cf7; }
+      .hb-stam > i { background: #d9a441; }
+      /* One HP line unless the entity is a party member — nothing else on the wire
+         ever carries another mobile's mana or stamina. */
+      .hb-win:not(.wide) .hb-mana, .hb-win:not(.wide) .hb-stam { display: none; }
+      .hb-win.gone { opacity: .6; border-color: #2a2f37; }   /* ClassicUO's _outOfRange grey */
+      #dragsel {
+        position: fixed; display: none; z-index: 23; pointer-events: none;
+        border: 1px solid #8ab4f8; background: rgba(138, 180, 248, .14);
+      }
+      #dragsel.on { display: block; }
+      /* The latched speech channel, shown above the bar the way ClassicUO shows it
+         beside the input (AppendChatModePrefix). */
+      #chatmode {
+        position: fixed; left: 50%; transform: translateX(-50%); bottom: 54px;
+        display: none; padding: 2px 8px; border-radius: 3px;
+        background: rgba(138, 180, 248, .18); border: 1px solid #4a7ab8; color: #cfe0ff;
+        font: 600 11px ui-monospace, Menlo, sans-serif; letter-spacing: .08em; text-transform: uppercase;
+      }
+      #chatmode.on { display: block; }
+      /* Macro editor: the staged step list, and the Options panel's new selects. */
+      #mc-steps { margin: 4px 0 6px; }
+      .mc-step { display: flex; align-items: center; gap: 6px; padding: 1px 0; font-size: 11px; color: #b6bcc6; }
+      .mc-stepn { color: #6b7280; min-width: 14px; }
+      .opt-sel { background: #11151c; color: #e8ecf2; border: 1px solid #3a4250; border-radius: 3px; padding: 1px 3px; }
+
+      /* ---- targeting: cursor type, criminal-action confirm ---------------- */
+      /* The 0x6C cursor flag in words as well as in the reticle colour
+         (ClassicUO tints its target aura by the same byte). */
+      #targethint.harmful { border-color: #b03030; background: rgba(176,48,48,.24); color: #ffc0c0; }
+      #targethint.beneficial { border-color: #2c6ab0; background: rgba(44,106,176,.22); color: #bfe0ff; }
+      /* ClassicUO's QuestionGump for a target that would flag you criminal
+         (TargetManager.cs:281). It sits above everything and the cursor stays
+         open behind it until the question is answered. */
+      #crimconfirm {
+        position: fixed; top: 52px; left: 50%; transform: translateX(-50%);
+        display: none; z-index: 45; padding: 12px 18px 10px; border-radius: 8px;
+        border: 1px solid #b03030; background: rgba(24,10,10,.96);
+        box-shadow: 0 6px 24px rgba(0,0,0,.6); text-align: center;
+        font-size: 13px; color: #ffd0d0; user-select: none;
+      }
+      #crimconfirm-text { font-weight: 600; letter-spacing: .02em; line-height: 1.35; }
+      #crimconfirm-who { display: block; margin-top: 3px; font-size: 11px; color: #c9a0a0; font-weight: 400; }
+      #crimconfirm-btns { margin-top: 9px; display: flex; gap: 8px; justify-content: center; }
+      #crimconfirm-btns button {
+        cursor: pointer; padding: 3px 16px; border-radius: 5px; font-size: 12px;
+        border: 1px solid #6a3030; background: #2a1414; color: #ffd0d0;
+      }
+      #crimconfirm-btns button:hover { background: #3a1c1c; color: #fff; }
+      /* ---- client-side context menus (ClassicUO ContextMenuControl) -------- */
+      /* Same chrome as the server popup menu above; only separators and the
+         disabled state are new (a wire menu has neither). */
+      .popup-sep { height: 1px; margin: 4px 6px; background: #2a2f37; }
+      .popup-row-off { color: #6b7280; cursor: default; }
+      .popup-row-off:hover { background: none; color: #6b7280; }
+      .client-menu { min-width: 190px; }
+      /* ---- world-map markers manager (ClassicUO MarkersManagerGump) -------- */
+      .wm-markers .gump-body { max-height: 320px; overflow-y: auto; min-width: 260px; }
+      .wmm-empty { padding: 8px 4px; color: #6b7280; font-size: 11px; }
+      .wmm-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 11px; }
+      .wmm-name { flex: 1; color: #e8ecf2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .wmm-co { color: #8a929c; font-family: ui-monospace, monospace; }
+      .wmm-btn {
+        cursor: pointer; border: 1px solid #2a2f37; background: #14181e; color: #b6bcc6;
+        border-radius: 4px; font-size: 10px; padding: 1px 5px; flex: none;
+      }
+      .wmm-btn:hover { background: #1e242c; color: #fff; }
     </style>
   </head>
   <body>
@@ -1342,9 +1443,21 @@
            stays render-on-demand. -->
       <canvas id="fx"></canvas>
       <input id="chatbar" type="text" maxlength="128" autocomplete="off" spellcheck="false"
-             placeholder="say…   ( /p party · /w whisper · /y yell · /e emote · /g guild · /a alliance · Esc = cancel )" />
+             placeholder="say…   ( /p party · /w whisper · /y yell · /e emote · /g guild · /a alliance · ↑ history · Esc = cancel )" />
+      <span id="chatmode"></span>
     </div>
+    <!-- Pinned per-entity health bars (drag a name plate off, or drag-select a
+         crowd) and the drag-select rubber band. -->
+    <div id="hbars"></div>
+    <div id="dragsel"></div>
     <div id="targethint">Select a target…  ( Esc to cancel )</div>
+    <div id="crimconfirm">
+      <div id="crimconfirm-text">This may flag<br>you criminal!<span id="crimconfirm-who"></span></div>
+      <div id="crimconfirm-btns">
+        <button type="button" id="crimconfirm-yes">Yes</button>
+        <button type="button" id="crimconfirm-no">No</button>
+      </div>
+    </div>
     <div id="deadbanner">You are dead</div>
     <div id="tip"></div>
     <canvas id="minimap" width="180" height="180"></canvas>
@@ -1358,7 +1471,7 @@
       <canvas id="wmcanvas"></canvas>
       <div id="wmfilter"></div>
       <div id="wmclose">✕</div>
-      <div id="wmhint">drag = pan · wheel = zoom · dbl-click = marker · shift-click = remove · B/Esc = close</div>
+      <div id="wmhint">drag = pan · wheel = zoom · right-click = menu · dbl-click = marker · shift-click = remove · B/Esc = close</div>
     </div>
     <div id="hud">
       <h1>ANIMA · BRITANNIA</h1>
@@ -1380,7 +1493,10 @@
       <div id="status">connecting…</div>
       <div id="diag" class="legend" style="margin-top:6px; color:#6b7280"></div>
       <div class="legend" style="margin-top:10px">
-        <b>controls:</b> WASD/arrows move · Q/E/Z/C diagonals · Enter chat · M map · P doll · I bag · K spells · L skills · O macros · G all-names · R guard-zone lines · J journal · N <button id="mutebtn" type="button" style="cursor:pointer">sound</button> · <button id="optbtn" type="button" style="cursor:pointer">⚙ options</button> · <button id="logoutbtn" type="button" style="cursor:pointer">⎋ log out</button>
+        <b>controls:</b> WASD/arrows move · Q/E/Z/C diagonals · Alt+click = follow · Enter chat · M map · P doll · I bag · K spells · L skills · O macros · G all-names · R guard-zone lines · J journal · N <button id="mutebtn" type="button" style="cursor:pointer">sound</button> · <button id="optbtn" type="button" style="cursor:pointer">⚙ options</button> · <button id="logoutbtn" type="button" style="cursor:pointer">⎋ log out</button>
+      </div>
+      <div class="legend" style="margin-top:6px">
+        <b>targeting:</b> F last target · Shift+F attack last · V target self · X bandage self · Shift+X bandage last · right-click closes a window
       </div>
     </div>
     <div id="options" class="gump-win">
@@ -1549,29 +1665,24 @@
         <div id="mc-add">
           <div class="mc-frow">
             <label class="mc-lbl">Key</label>
-            <input id="mc-key" class="mc-input" type="text" readonly placeholder="click, then press a key…" />
+            <input id="mc-key" class="mc-input" type="text" readonly
+                   placeholder="click, then press a key / mouse button / wheel…" />
           </div>
           <div class="mc-frow">
             <label class="mc-lbl">Action</label>
-            <select id="mc-type" class="mc-input">
-              <option value="say">say</option>
-              <option value="cast">cast spell</option>
-              <option value="skill">use skill</option>
-              <option value="ability">ability</option>
-              <option value="war">war mode</option>
-              <option value="open">open window</option>
-              <option value="opendoor">open door</option>
-              <option value="lastweapon">equip last weapon</option>
-              <option value="allnames">all names</option>
-              <option value="virtue">invoke virtue</option>
-              <option value="emote">emote</option>
-            </select>
+            <!-- Options are generated from MACRO_VERBS (js/13-macros.js) so the
+                 verb list lives in exactly one place. -->
+            <select id="mc-type" class="mc-input"></select>
           </div>
           <div class="mc-frow">
             <label class="mc-lbl">Param</label>
             <span id="mc-param"></span>
           </div>
+          <!-- Steps staged so far. Empty until "Add step" is used, so binding a
+               single action is still one click on "Add macro". -->
+          <div id="mc-steps"></div>
           <div id="mc-msg" class="mc-msg"></div>
+          <button id="mc-step-btn" class="mc-btn">Add step</button>
           <button id="mc-add-btn" class="mc-btn">Add macro</button>
         </div>
       </div>

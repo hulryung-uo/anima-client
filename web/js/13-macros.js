@@ -1,26 +1,53 @@
 // ---- user macros / hotkeys (client-only; persisted in localStorage) ----
-// A macro is { id, key, ctrl, alt, shift, action } where `key` is a KeyboardEvent
-// `e.code` and `action` is one of:
-//   { t:"say", text } · { t:"cast", id } · { t:"skill", id } · { t:"ability", id }
-//   { t:"war", on:0|1|"toggle" } · { t:"open", win:"paperdoll|backpack|spellbook|skills|minimap|worldmap" }
-//   { t:"opendoor" } · { t:"lastweapon" } · { t:"allnames" } · { t:"virtue", id } · { t:"emote", text }
-// Execution reuses the existing sendInput(...) commands + window toggles, so this is
-// purely a client-side layer with no server changes.
+// A macro is
+//   { id, key, button, wheel, ctrl, alt, shift, actions: [ {t, …}, … ] }
+// bound to ONE trigger — a keyboard `e.code` (`key`), an extra mouse button
+// (`button`, a DOM `MouseEvent.button`: 1 middle / 3 back / 4 forward) or a
+// wheel direction (`wheel`: "up" | "down") — running its `actions` IN ORDER.
+// That is ClassicUO's model: a `Macro` is a linked list of `MacroObject`s
+// (MacroManager.Update/Process, MacroManager.cs:360-399) and bindings are not
+// keyboard-only — `FindMacro(MouseButtonType…)` and `FindMacro(bool wheelUp…)`
+// (:304, :321) are looked up from `OnExtraMouseDown` (Middle/XButton1/XButton2,
+// GameSceneInputHandler.cs:280-290, :916) and `OnMouseWheel` (:973).
+//
+// `delay` and `waitTarget` are ordinary steps in that list, exactly as
+// `MacroType.Delay` / `MacroType.WaitForTarget` are — which is what makes
+// "cast → wait for the cursor → answer it" one keypress.
+//
+// Every verb lives in ONE descriptor in MACRO_VERBS below (label, editor
+// controls, summary line, and what it does) instead of the four hand-synced
+// sites it used to take — a `<select>` option in index.html, `mcBuildParam`,
+// the Add-button if-chain, and the old `runMacroAction` switch. Execution is
+// still nothing but
+// `sendInput(...)` commands the server already accepts plus local window
+// toggles, so this stays a purely client-side layer.
 const MACRO_KEY = "anima.macros";
 let macros = [];
 let macrosOn = false;
 let warOn = 0;                  // local guess of war stance, for { t:"war", on:"toggle" }
-let mcPending = null;           // combo captured in the editor's key field, pending "Add"
+let mcPending = null;           // trigger captured in the editor's key field, pending "Add"
+let mcSteps = [];               // steps staged in the editor, pending "Add"
+let mcRowUsed = false;          // the visible verb row has already been staged as a step
 
-// Keys macros may NOT override: movement (KEY_DIR) + the bound window/chat/editor keys.
-// These are handled before macro dispatch and rejected at add-time.
+// Keys macros may NOT override: movement (KEY_DIR) + the bound window/chat/editor
+// keys. This list must contain EVERY code the game keydown handles with a
+// `return` before it reaches `macroFor` — a code handled there but missing here
+// is worse than a rejection, because the editor accepts the binding and it then
+// silently never fires. (Found exactly that live: R, and the four zoom keys, had
+// been added to the handler without being added here.)
 const RESERVED_CODES = new Set([
   ...Object.keys(KEY_DIR),
   "KeyT", "Enter", "NumpadEnter",
   "KeyM", "KeyB", "KeyP", "KeyI", "KeyK", "KeyL", "KeyN", "KeyO", "KeyY", "KeyG", "KeyH", "KeyU", "KeyJ",
+  "KeyR",                                          // guard-zone lines
+  "Equal", "NumpadAdd", "Minus", "NumpadSubtract", // camera zoom in/out
   "Escape",
   "Tab", "Space", // war-mode toggle / auto-attack (handled in the game keydown)
 ]);
+// Mouse buttons a macro may bind. Left is the world click and right is the steer
+// (and both are load-bearing here), so this is exactly ClassicUO's set: middle
+// and the two thumb buttons.
+const MOUSE_LABEL = { 1: "MouseMid", 3: "MouseBack", 4: "MouseFwd" };
 const OPEN_FNS = {
   paperdoll: () => togglePaperdoll(),
   backpack: () => openBackpack(),
@@ -30,6 +57,133 @@ const OPEN_FNS = {
   worldmap: () => toggleWorldmap(),
   status: () => toggleStatus(),
 };
+// ---- the verb schema -------------------------------------------------------
+// `params` (omitted = the verb takes none) is the list of editor controls, each
+// { kind: "text" | "int" | "select", … }; `build(vals)` turns their values into
+// the stored action or returns null to reject; `text(a)` is the one-line summary
+// in the macro list; `run(a, rt)` executes one step and returns ClassicUO's
+// `Process()` result — 0 "step done, advance" or 1 "not done, come back to this
+// same step" (its MRC_BREAK_PARSER). Only waitTarget ever returns 1.
+const MACRO_VERBS = [
+  { t: "say", label: "say", params: [{ kind: "text", ph: "text to say", max: 128 }],
+    build: ([v]) => (v.trim() ? { t: "say", text: v.trim() } : null),
+    text: (a) => `say "${a.text}"`,
+    run: (a) => { if (a.text) sendInput("say:" + a.text); return 0; } },
+  { t: "emote", label: "emote", params: [{ kind: "text", ph: "bow, salute, …", max: 32 }],
+    build: ([v]) => (v.trim() ? { t: "emote", text: v.trim() } : null),
+    text: (a) => `emote ${a.text}`,
+    run: (a) => { if (a.text) sendInput("animate:" + a.text); return 0; } },
+  { t: "cast", label: "cast spell", params: [{ kind: "int", ph: "spell id" }],
+    build: ([v]) => ({ t: "cast", id: v }), text: (a) => `cast #${a.id}`,
+    run: (a) => { castSpell(a.id); return 0; } },
+  { t: "skill", label: "use skill", params: [{ kind: "int", ph: "skill id" }],
+    build: ([v]) => ({ t: "skill", id: v }), text: (a) => `use skill #${a.id}`,
+    run: (a) => { sendInput("useskill:" + a.id); return 0; } },
+  { t: "ability", label: "weapon ability", params: [{ kind: "int", ph: "ability id" }],
+    build: ([v]) => ({ t: "ability", id: v }), text: (a) => `ability #${a.id}`,
+    run: (a) => { sendInput("ability:" + a.id); return 0; } },
+  { t: "virtue", label: "invoke virtue", params: [{ kind: "int", ph: "virtue id" }],
+    build: ([v]) => ({ t: "virtue", id: v }), text: (a) => `virtue #${a.id}`,
+    run: (a) => { sendInput("virtue:" + a.id); return 0; } },
+  { t: "war", label: "war mode",
+    params: [{ kind: "select", opts: [["toggle", "toggle"], ["1", "on"], ["0", "off"]] }],
+    build: ([v]) => ({ t: "war", on: v === "toggle" ? "toggle" : (v === "1" ? 1 : 0) }),
+    text: (a) => `war ${a.on}`,
+    run: (a) => {
+      let on = a.on;
+      if (on === "toggle") { warOn = warOn ? 0 : 1; on = warOn; }
+      else { on = a.on ? 1 : 0; warOn = on; }
+      sendInput("war:" + on);
+      return 0;
+    } },
+  { t: "open", label: "open window",
+    params: [{ kind: "select", opts: [["paperdoll", "paperdoll"], ["backpack", "backpack"],
+      ["spellbook", "spellbook"], ["skills", "skills"], ["minimap", "minimap"],
+      ["worldmap", "worldmap"], ["status", "status"]] }],
+    build: ([v]) => ({ t: "open", win: v }), text: (a) => `open ${a.win}`,
+    run: (a) => { const fn = OPEN_FNS[a.win]; if (fn) fn(); return 0; } },
+  { t: "opendoor", label: "open door", text: () => "open door",
+    run: () => { sendInput("opendoor"); return 0; } },
+  { t: "lastweapon", label: "equip last weapon", text: () => "equip last weapon",
+    run: () => { sendInput("lastweapon"); return 0; } },
+  { t: "allnames", label: "all names", text: () => "all names",
+    run: () => { sendInput("allnames"); return 0; } },
+  { t: "attacklast", label: "attack last target", text: () => "attack last target",
+    run: () => { sendInput("attacklast"); return 0; } },
+  // ClassicUO `MacroType.BandageSelf` on a 5.0.2.0+ client: find the bandages and
+  // send 0xBF/0x2C with them and the target already chosen, no cursor round trip
+  // (MacroManager.cs:1325-1338). Target 0 is our command layer's "myself" sentinel.
+  { t: "bandageself", label: "bandage self", text: () => "bandage self",
+    run: () => {
+      const b = cbFind(BANDAGE_GRAPHIC, null);
+      if (b) sendInput("bandage:" + (b.serial >>> 0) + ":0");
+      else setStatus("No bandages.");
+      return 0;
+    } },
+  { t: "statlock", label: "set stat lock",
+    params: [{ kind: "select", opts: [["0", "strength"], ["1", "dexterity"], ["2", "intelligence"]] },
+             { kind: "select", opts: [["0", "up"], ["1", "down"], ["2", "locked"]] }],
+    build: ([s, l]) => ({ t: "statlock", stat: +s, lock: +l }),
+    text: (a) => `${["str", "dex", "int"][a.stat] || a.stat} lock ${["up", "down", "locked"][a.lock] || a.lock}`,
+    run: (a) => { sendInput(`statlock:${a.stat | 0}:${a.lock | 0}`); return 0; } },
+  { t: "disarm", label: "disarm (wrestling)", text: () => "disarm",
+    run: () => { sendInput("disarm"); return 0; } },
+  { t: "stun", label: "stun (wrestling)", text: () => "stun",
+    run: () => { sendInput("stun"); return 0; } },
+  { t: "flying", label: "toggle gargoyle flight", text: () => "toggle flying",
+    run: () => { sendInput("flying"); return 0; } },
+  { t: "statusreq", label: "request own status", text: () => "request status",
+    run: () => { sendInput("statusreq"); return 0; } },
+  { t: "help", label: "help request", text: () => "help request",
+    run: () => { sendInput("help"); return 0; } },
+  { t: "guildmenu", label: "guild menu", text: () => "guild menu",
+    run: () => { sendInput("guildmenu"); return 0; } },
+  { t: "questmenu", label: "quest menu", text: () => "quest menu",
+    run: () => { sendInput("questmenu"); return 0; } },
+  { t: "uostore", label: "UO store", text: () => "UO store",
+    run: () => { sendInput("uostore"); return 0; } },
+  // ---- sequencing steps (ClassicUO MacroType.Delay / WaitForTarget) ----
+  { t: "delay", label: "· wait (ms)", params: [{ kind: "int", ph: "milliseconds" }],
+    build: ([v]) => ({ t: "delay", ms: v }), text: (a) => `wait ${a.ms}ms`,
+    // ClassicUO's Delay sets the macro-wide `_nextTimer` and still advances, so
+    // the pause lands BEFORE the following step, not on this one
+    // (MacroManager.cs:1167-1175 + the `_nextTimer <= Ticks` gate at :389).
+    run: (a, rt) => { if (rt) rt.nextAt = performance.now() + Math.max(0, a.ms | 0); return 0; } },
+  { t: "waittarget", label: "· wait for target cursor", text: () => "wait for target cursor",
+    // ClassicUO MacroType.WaitForTarget (MacroManager.cs:1129-1146): arm a
+    // deadline on first visit, then hold this step until either the cursor is up
+    // or the deadline passes — it never fails the macro, it just stops waiting.
+    run: (a, rt) => {
+      if (!rt) return 0;
+      if (!rt.waitUntil) rt.waitUntil = performance.now() + MACRO_WAIT_TARGET_MS;
+      const up = !!(scene && scene.target && scene.target.active === 1);
+      if (up || performance.now() > rt.waitUntil) { rt.waitUntil = 0; return 0; }
+      return 1;
+    } },
+  // ---- client-only toggles (ClassicUO's NamesOnOff / CloseAllHealthBars /
+  // AlwaysRun / ToggleDrawRoofs / ToggleTreeStumps / ToggleVegetation) ----
+  { t: "plates", label: "toggle name plates", text: () => "toggle name plates",
+    run: () => { toggleNamePlates(); return 0; } },
+  { t: "closebars", label: "close all health bars", text: () => "close all health bars",
+    run: () => { closeAllHealthBars(); return 0; } },
+  { t: "alwaysrun", label: "toggle always-run", text: () => "toggle always-run",
+    run: () => { settings.alwaysRun = !settings.alwaysRun; saveSettings(); renderOptions(); return 0; } },
+  { t: "drawroofs", label: "toggle draw roofs", text: () => "toggle draw roofs",
+    run: () => { settings.drawRoofs = !settings.drawRoofs; saveSettings(); renderOptions(); rebuildStatics(); rebuildItems(); return 0; } },
+  { t: "treestumps", label: "toggle tree stumps", text: () => "toggle tree stumps",
+    run: () => { settings.treeStumps = !settings.treeStumps; saveSettings(); renderOptions(); rebuildStatics(); return 0; } },
+  { t: "vegetation", label: "toggle vegetation", text: () => "toggle vegetation",
+    run: () => { settings.hideVegetation = !settings.hideVegetation; saveSettings(); renderOptions(); rebuildStatics(); return 0; } },
+  // The escape hatch: send any `/input` command verbatim. ClassicUO has no
+  // equivalent, but every verb above is one of these with a form around it, and
+  // without it a command the server already accepts is unreachable from a macro
+  // until someone adds a descriptor for it.
+  { t: "send", label: "raw command (advanced)", params: [{ kind: "text", ph: "e.g. targetcancel", max: 128 }],
+    build: ([v]) => (v.trim() ? { t: "send", cmd: v.trim() } : null),
+    text: (a) => `send "${a.cmd}"`,
+    run: (a) => { if (a.cmd) sendInput(a.cmd); return 0; } },
+];
+const MACRO_VERB = new Map(MACRO_VERBS.map((v) => [v.t, v]));
 
 function loadMacros() {
   try { const raw = localStorage.getItem(MACRO_KEY); if (raw) { const a = JSON.parse(raw); if (Array.isArray(a)) macros = a; } } catch {}
@@ -37,75 +191,102 @@ function loadMacros() {
 function saveMacros() {
   try { localStorage.setItem(MACRO_KEY, JSON.stringify(macros)); } catch {}
 }
+// A macro saved before sequences existed stored its single step as `action`.
+// Read both shapes rather than migrating on load, so an old blob keeps its key
+// bindings even if this build never gets as far as saving.
+function macroActions(m) {
+  return Array.isArray(m.actions) ? m.actions : (m.action ? [m.action] : []);
+}
 function codeLabel(code) {
   if (code.startsWith("Key")) return code.slice(3);
   if (code.startsWith("Digit")) return code.slice(5);
   if (code.startsWith("Numpad")) return "Num" + code.slice(6);
   return code;
 }
-function comboLabel(m) {
+function triggerLabel(m) {
   const p = [];
   if (m.ctrl) p.push("Ctrl"); if (m.alt) p.push("Alt"); if (m.shift) p.push("Shift");
-  p.push(codeLabel(m.key));
+  if (m.wheel) p.push(m.wheel === "up" ? "Wheel↑" : "Wheel↓");
+  else if (m.button != null) p.push(MOUSE_LABEL[m.button] || "Mouse" + m.button);
+  else p.push(codeLabel(m.key || ""));
   return p.join("+");
 }
 function actionSummary(a) {
-  switch (a.t) {
-    case "say": return `say "${a.text}"`;
-    case "cast": return `cast #${a.id}`;
-    case "skill": return `use skill #${a.id}`;
-    case "ability": return `ability #${a.id}`;
-    case "war": return `war ${a.on}`;
-    case "open": return `open ${a.win}`;
-    case "opendoor": return "open door";
-    case "lastweapon": return "equip last weapon";
-    case "allnames": return "all names";
-    case "virtue": return `virtue #${a.id}`;
-    case "emote": return `emote ${a.text}`;
-    case "drawroofs": return "toggle draw roofs";
-    default: return a.t;
-  }
+  const v = MACRO_VERB.get(a.t);
+  return v ? v.text(a) : a.t;
 }
-// Find a macro matching this keydown (modifiers must match; reserved keys never match).
+function macroSummary(m) {
+  const acts = macroActions(m);
+  return acts.map(actionSummary).join(" → ") || "(empty)";
+}
+// Modifiers must match exactly, as ClassicUO's FindMacro does (`obj.Alt == alt
+// && obj.Ctrl == ctrl && obj.Shift == shift`).
+function modsMatch(m, e) {
+  return !!m.ctrl === e.ctrlKey && !!m.alt === e.altKey && !!m.shift === e.shiftKey;
+}
+// Find a macro matching this keydown (reserved keys never match).
 function macroFor(e) {
   if (RESERVED_CODES.has(e.code)) return null;
-  for (const m of macros) {
-    if (m.key === e.code && !!m.ctrl === e.ctrlKey && !!m.alt === e.altKey && !!m.shift === e.shiftKey) return m;
-  }
+  for (const m of macros) if (!m.wheel && m.button == null && m.key === e.code && modsMatch(m, e)) return m;
   return null;
 }
-function runMacroAction(a) {
-  switch (a.t) {
-    case "say": if (a.text) sendInput("say:" + a.text); break;
-    case "cast": castSpell(a.id); break;
-    case "skill": sendInput("useskill:" + a.id); break;
-    case "ability": sendInput("ability:" + a.id); break;
-    case "opendoor": sendInput("opendoor"); break;
-    case "lastweapon": sendInput("lastweapon"); break;
-    case "allnames": sendInput("allnames"); break;
-    case "virtue": sendInput("virtue:" + a.id); break;
-    case "emote": if (a.text) sendInput("animate:" + a.text); break;
-    case "war": {
-      let on = a.on;
-      if (on === "toggle") { warOn = warOn ? 0 : 1; on = warOn; }
-      else { on = a.on ? 1 : 0; warOn = on; }
-      sendInput("war:" + on);
-      break;
-    }
-    case "open": { const fn = OPEN_FNS[a.win]; if (fn) fn(); break; }
-    case "drawroofs":
-      settings.drawRoofs = !settings.drawRoofs;
-      saveSettings();
-      rebuildStatics();
-      rebuildItems();
-      break;
+function macroForButton(button, e) {
+  for (const m of macros) if (m.button === button && modsMatch(m, e)) return m;
+  return null;
+}
+function macroForWheel(up, e) {
+  const w = up ? "up" : "down";
+  for (const m of macros) if (m.wheel === w && modsMatch(m, e)) return m;
+  return null;
+}
+
+// ---- the runner ------------------------------------------------------------
+// ClassicUO drives a macro from the game loop: `Process()` answers 0 (advance),
+// 1 (break the parser — retry this step later) or 2 (stop), and ONE `_nextTimer`
+// gates the whole macro, which is why `Delay` doesn't stall the step it sits on
+// (MacroManager.cs:360-399: `Update` at :360, `Process` at :381). Same machine here, pumped by setTimeout rather than
+// a frame hook. One macro runs at a time and a fresh trigger replaces it, as
+// `SetMacroToExecute` does (MacroManager.cs:355, called from
+// GameSceneInputHandler.ExecuteMacro:1522-1526).
+const MACRO_TICK_MS = 50;
+const MACRO_WAIT_TARGET_MS = 5000;   // ClassicUO Constants.WAIT_FOR_TARGET_DELAY
+const MACRO_STEPS_MAX = 32;          // editor cap; also bounds a runaway saved blob
+let macroRun = null;                 // { actions, i, nextAt, waitUntil } | null
+let macroTimer = 0;
+
+function stopMacro() {
+  macroRun = null;
+  if (macroTimer) { clearTimeout(macroTimer); macroTimer = 0; }
+}
+function runMacro(m) {
+  const actions = macroActions(m);
+  stopMacro();
+  if (!actions.length) return;
+  macroRun = { actions, i: 0, nextAt: 0, waitUntil: 0 };
+  pumpMacro();
+}
+function macroSleep(ms) {
+  macroTimer = setTimeout(() => { macroTimer = 0; pumpMacro(); }, Math.max(0, ms));
+}
+function pumpMacro() {
+  while (macroRun) {
+    const now = performance.now();
+    if (now < macroRun.nextAt) { macroSleep(macroRun.nextAt - now); return; }
+    if (macroRun.i >= macroRun.actions.length) { macroRun = null; return; }
+    const a = macroRun.actions[macroRun.i];
+    const v = MACRO_VERB.get(a && a.t);
+    // An unknown verb (a blob saved by a newer build) is skipped, not fatal —
+    // the rest of the sequence still runs.
+    if (!v) { macroRun.i++; continue; }
+    if (v.run(a, macroRun) === 1) { macroSleep(MACRO_TICK_MS); return; }
+    macroRun.i++;
   }
 }
 function toggleMacros() {
   macrosOn = !macrosOn;
   const w = document.getElementById("macros");
   w.classList.toggle("on", macrosOn);
-  if (macrosOn) { renderMacroList(); document.getElementById("mc-key").focus(); }
+  if (macrosOn) { renderMacroList(); renderMacroSteps(); document.getElementById("mc-key").focus(); }
 }
 function closeMacros() { macrosOn = false; document.getElementById("macros").classList.remove("on"); }
 function renderMacroList() {
@@ -115,86 +296,147 @@ function renderMacroList() {
   for (const m of macros) {
     const row = document.createElement("div");
     row.className = "mc-row";
-    const combo = document.createElement("span"); combo.className = "mc-combo"; combo.textContent = comboLabel(m);
-    const act = document.createElement("span"); act.className = "mc-act"; act.textContent = actionSummary(m.action);
+    const combo = document.createElement("span"); combo.className = "mc-combo"; combo.textContent = triggerLabel(m);
+    const act = document.createElement("span"); act.className = "mc-act"; act.textContent = macroSummary(m);
     const del = document.createElement("span"); del.className = "mc-del"; del.textContent = "✕"; del.title = "delete";
     del.addEventListener("click", () => { macros = macros.filter((x) => x.id !== m.id); saveMacros(); renderMacroList(); });
     row.append(combo, act, del);
     list.appendChild(row);
   }
 }
+// The steps staged for the macro being built. Empty renders nothing at all, so
+// the editor looks exactly as it did for the one-step case.
+function renderMacroSteps() {
+  const el = document.getElementById("mc-steps");
+  if (!el) return;
+  if (!mcSteps.length) { el.innerHTML = ""; return; }
+  el.innerHTML = "";
+  mcSteps.forEach((a, i) => {
+    const row = document.createElement("div");
+    row.className = "mc-step";
+    const n = document.createElement("span"); n.className = "mc-stepn"; n.textContent = (i + 1) + ".";
+    const t = document.createElement("span"); t.className = "mc-act"; t.textContent = actionSummary(a);
+    const del = document.createElement("span"); del.className = "mc-del"; del.textContent = "✕"; del.title = "remove step";
+    del.addEventListener("click", () => { mcSteps.splice(i, 1); renderMacroSteps(); });
+    row.append(n, t, del);
+    el.appendChild(row);
+  });
+}
+// Build the parameter controls for the selected verb from its descriptor.
 function mcBuildParam() {
-  const t = document.getElementById("mc-type").value;
+  const v = MACRO_VERB.get(document.getElementById("mc-type").value);
   const p = document.getElementById("mc-param");
-  if (t === "say") p.innerHTML = '<input id="mc-pv" class="mc-input" type="text" maxlength="128" placeholder="text to say" />';
-  else if (t === "emote") p.innerHTML = '<input id="mc-pv" class="mc-input" type="text" maxlength="32" placeholder="bow, salute, …" />';
-  else if (t === "cast" || t === "skill" || t === "ability" || t === "virtue")
-    p.innerHTML = '<input id="mc-pv" class="mc-input" type="number" min="0" placeholder="id" />';
-  else if (t === "war")
-    p.innerHTML = '<select id="mc-pv" class="mc-input"><option value="toggle">toggle</option><option value="1">on</option><option value="0">off</option></select>';
-  else if (t === "open")
-    p.innerHTML = '<select id="mc-pv" class="mc-input"><option>paperdoll</option><option>backpack</option><option>spellbook</option><option>skills</option><option>minimap</option><option>worldmap</option><option>status</option></select>';
-  else p.innerHTML = "";
+  const params = (v && v.params) || [];
+  p.innerHTML = params.map((c, i) => {
+    const id = `mc-pv${i}`;
+    if (c.kind === "text") return `<input id="${id}" class="mc-input mc-pv" type="text" maxlength="${c.max || 64}" placeholder="${c.ph || ""}" />`;
+    if (c.kind === "int") return `<input id="${id}" class="mc-input mc-pv" type="number" min="${c.min != null ? c.min : 0}" placeholder="${c.ph || "id"}" />`;
+    return `<select id="${id}" class="mc-input mc-pv">`
+      + c.opts.map(([val, label]) => `<option value="${val}">${label}</option>`).join("") + `</select>`;
+  }).join(" ");
+}
+// Read the parameter controls and build the action, or return null with `msg`
+// set — one place for the whole verb table instead of a per-verb if-chain.
+function mcReadAction(msg) {
+  const v = MACRO_VERB.get(document.getElementById("mc-type").value);
+  if (!v) return null;
+  const params = v.params || [];
+  if (!params.length) return { t: v.t };
+  const vals = [];
+  for (let i = 0; i < params.length; i++) {
+    const el = document.getElementById("mc-pv" + i);
+    const raw = el ? el.value : "";
+    if (params[i].kind === "int") {
+      const n = parseInt(raw, 10);
+      if (!Number.isFinite(n) || n < (params[i].min != null ? params[i].min : 0)) {
+        msg.textContent = `Enter a valid number for "${v.label}".`;
+        return null;
+      }
+      vals.push(n);
+    } else vals.push(raw);
+  }
+  const a = v.build(vals);
+  if (!a) msg.textContent = `Enter a value for "${v.label}".`;
+  return a;
 }
 function setupMacroEditor() {
   const win = document.getElementById("macros");
   const keyInput = document.getElementById("mc-key");
   const typeSel = document.getElementById("mc-type");
   const addBtn = document.getElementById("mc-add-btn");
+  const stepBtn = document.getElementById("mc-step-btn");
   const msg = document.getElementById("mc-msg");
+  // The verb list comes from MACRO_VERBS, so index.html never has to know it.
+  typeSel.innerHTML = MACRO_VERBS.map((v) => `<option value="${v.t}">${v.label}</option>`).join("");
   // Keep all editor typing out of the game-input handler (it lives on window).
   win.addEventListener("keydown", (e) => {
     e.stopPropagation();
     if (e.code === "Escape") { e.preventDefault(); closeMacros(); }
   });
-  // Key-capture field: focus it and press a key → record e.code + modifiers.
+  // Trigger-capture field: focus it and press a key, an extra mouse button, or
+  // the wheel → record it plus the modifiers held at that moment.
   keyInput.addEventListener("keydown", (e) => {
     e.preventDefault(); e.stopPropagation();
     if (e.code === "Escape") { mcPending = null; keyInput.value = ""; return; }
     if (/^(Control|Alt|Shift|Meta)/.test(e.code)) return;   // ignore bare modifier presses
     mcPending = { key: e.code, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey };
-    keyInput.value = comboLabel(mcPending);
+    keyInput.value = triggerLabel(mcPending);
   });
-  typeSel.addEventListener("change", mcBuildParam);
+  keyInput.addEventListener("mousedown", (e) => {
+    if (!(e.button in MOUSE_LABEL)) return;                 // left/right stay the world's
+    e.preventDefault(); e.stopPropagation();
+    mcPending = { button: e.button, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey };
+    keyInput.value = triggerLabel(mcPending);
+  });
+  keyInput.addEventListener("wheel", (e) => {
+    e.preventDefault(); e.stopPropagation();
+    if (!e.deltaY) return;
+    mcPending = { wheel: e.deltaY < 0 ? "up" : "down", ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey };
+    keyInput.value = triggerLabel(mcPending);
+  }, { passive: false });
+  // Touching the verb or its parameters makes the visible row live again, so
+  // "Add macro" picks it up as the last step (see the Add handler).
+  typeSel.addEventListener("change", () => { mcRowUsed = false; mcBuildParam(); });
+  document.getElementById("mc-param").addEventListener("input", () => { mcRowUsed = false; });
   mcBuildParam();
+  // "Add step" stages the current verb; "Add macro" binds everything staged
+  // (plus whatever verb is showing, so the one-step case is still one click).
+  stepBtn.addEventListener("click", () => {
+    msg.textContent = "";
+    if (mcSteps.length >= MACRO_STEPS_MAX) { msg.textContent = `A macro is capped at ${MACRO_STEPS_MAX} steps.`; return; }
+    const a = mcReadAction(msg);
+    if (!a) return;
+    mcSteps.push(a);
+    mcRowUsed = true;
+    renderMacroSteps();
+    for (const el of document.querySelectorAll("#mc-param .mc-pv")) if (el.tagName === "INPUT") el.value = "";
+  });
   addBtn.addEventListener("click", () => {
     msg.textContent = "";
-    if (!mcPending) { msg.textContent = "Click the Key field and press a key first."; return; }
-    if (RESERVED_CODES.has(mcPending.key)) { msg.textContent = codeLabel(mcPending.key) + " is reserved — pick another key."; return; }
-    const t = typeSel.value;
-    const pv = document.getElementById("mc-pv");
-    let action;
-    if (t === "say") {
-      const text = pv.value.trim();
-      if (!text) { msg.textContent = "Enter the text to say."; return; }
-      action = { t: "say", text };
-    } else if (t === "cast" || t === "skill" || t === "ability" || t === "virtue") {
-      const id = parseInt(pv.value, 10);
-      if (!Number.isFinite(id) || id < 0) { msg.textContent = "Enter a valid numeric id."; return; }
-      action = { t, id };
-    } else if (t === "emote") {
-      const text = pv.value.trim();
-      if (!text) { msg.textContent = "Enter the emote verb (bow, salute, …)."; return; }
-      action = { t: "emote", text };
-    } else if (t === "opendoor" || t === "lastweapon" || t === "allnames") {
-      action = { t };
-    } else if (t === "war") {
-      const v = pv.value;
-      action = { t: "war", on: v === "toggle" ? "toggle" : (v === "1" ? 1 : 0) };
-    } else if (t === "open") {
-      action = { t: "open", win: pv.value };
+    if (!mcPending) { msg.textContent = "Click the Key field, then press a key / mouse button / wheel."; return; }
+    if (mcPending.key && RESERVED_CODES.has(mcPending.key)) {
+      msg.textContent = codeLabel(mcPending.key) + " is reserved — pick another key."; return;
     }
+    const actions = mcSteps.slice();
+    // Anything still showing in the param row is the last (or only) step — unless
+    // "Add step" already took it, which is the only way a parameterless verb
+    // (nothing to clear) would otherwise be staged twice.
+    const trailing = mcRowUsed ? null : mcReadAction(msg);
+    if (trailing) actions.push(trailing);
+    else if (!actions.length) return;         // nothing staged AND nothing valid showing
+    else msg.textContent = "";                // staged steps are enough; ignore the empty row
     const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    macros.push({ id, key: mcPending.key, ctrl: mcPending.ctrl, alt: mcPending.alt, shift: mcPending.shift, action });
+    macros.push({ id, key: mcPending.key, button: mcPending.button, wheel: mcPending.wheel,
+                  ctrl: mcPending.ctrl, alt: mcPending.alt, shift: mcPending.shift, actions });
     saveMacros();
     mcPending = null; keyInput.value = "";
-    if (pv && pv.tagName === "INPUT") pv.value = "";
+    mcSteps = []; mcRowUsed = false; renderMacroSteps();
+    for (const el of document.querySelectorAll("#mc-param .mc-pv")) if (el.tagName === "INPUT") el.value = "";
     renderMacroList();
   });
   document.getElementById("mc-close").addEventListener("click", closeMacros);
   makeDraggable(win, document.getElementById("mc-title"));
 }
-
 // Spell quick-cast chord: press K, then a circle digit (1-8), then a spell digit
 // (1-8) → cast that Magery spell by position. E.g. K 1 1 = Clumsy, K 1 2 = Create
 // Food, K 8 8 = Water Elemental. Active for ~1.5s after each key.
@@ -311,7 +553,7 @@ function setupInput() {
     }
     // User macros: a non-reserved key+modifier combo runs its bound action.
     const mac = macroFor(e);
-    if (mac) { e.preventDefault(); runMacroAction(mac.action); return; }
+    if (mac) { e.preventDefault(); runMacro(mac); return; }
     if (e.code in KEY_DIR) {
       const d = KEY_DIR[e.code];
       // No direct send here: the prediction (enqueueSteps/processSteps) drives the
@@ -330,6 +572,38 @@ function setupInput() {
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) releaseMoveKeys();
   });
+  // Extra-mouse-button and wheel macro bindings (ClassicUO `OnExtraMouseDown`
+  // for Middle/XButton1/XButton2 and `OnMouseWheel`). Both listen in the CAPTURE
+  // phase on `window`, NOT on the canvas: the camera's wheel-zoom listener is
+  // bound to the canvas itself (04-boot.js), and capture on an ancestor is
+  // dispatched before anything on the target, which is the only ordering that
+  // does not depend on which file happened to register first.
+  // `stopPropagation` then keeps the zoom out of a wheel the user has bound —
+  // the same precedence ClassicUO gives it (its macro lookup precedes the zoom,
+  // GameSceneInputHandler.cs:991-1004).
+  const macroGate = (e) => !chatting && !isTypingTarget(e.target) && e.target === app.canvas;
+  window.addEventListener("mousedown", (e) => {
+    if (!(e.button in MOUSE_LABEL) || !macroGate(e)) return;
+    const m = macroForButton(e.button, e);
+    if (!m) return;
+    // …and preventDefault so the thumb buttons don't navigate history and the
+    // middle button doesn't start the browser's autoscroll.
+    e.preventDefault(); e.stopPropagation();
+    runMacro(m);
+  }, true);
+  // Chrome fires the history navigation off the click, not the mousedown, so the
+  // bound button has to be swallowed there too.
+  window.addEventListener("auxclick", (e) => {
+    if (!(e.button in MOUSE_LABEL) || !macroGate(e)) return;
+    if (macroForButton(e.button, e)) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+  window.addEventListener("wheel", (e) => {
+    if (!e.deltaY || !macroGate(e)) return;
+    const m = macroForWheel(e.deltaY < 0, e);
+    if (!m) return;
+    e.preventDefault(); e.stopPropagation();
+    runMacro(m);
+  }, { capture: true, passive: false });
   // Right-button movement: suppress the context menu, track the cursor, and hold
   // state. Position is tracked window-wide so dragging off-canvas still steers.
   const canvas = app.canvas;
@@ -383,9 +657,60 @@ function setupInput() {
     }
     const g = clientToGlobal(e.clientX, e.clientY);
     const t = groundTileAt(g.x, g.y);
+    rememberTargetTile(t.x, t.y, t.z, 0);   // ClassicUO LastTargetInfo.SetLand — replayed by the F hotkey
     sendInput(`targetxy:${t.x}:${t.y}:${t.z}:0`);
     endTargetUI();
   });
+  // ---- drag-select → pinned health bars (ClassicUO EnableDragSelect) ----
+  // Sweep a rectangle over a crowd with the modifier held and every mobile inside
+  // it gets its own pinned bar, auto-tiled down the left of the screen
+  // (GameSceneInputHandler.cs:126-278). Refused while Ctrl+Shift is down, because
+  // that chord is the name-plate gesture — upstream refuses for exactly that
+  // reason and cites the issue it came from (`DragSelectModifierActive`, :99-107).
+  //
+  // ClassicUO starts a selection only over nothing / a static / land / a multi /
+  // a locked item (`CanDragSelectOnObject`, :90-97). The equivalent test here is
+  // `!groundDrag && !cursorItem`: a press that landed on a draggable world item
+  // has already armed the item drag from PIXI's pointerdown, which runs before
+  // this DOM mousedown, and both are cleared on release.
+  let dragSel = null;                       // { x, y } start point, client px
+  const dragSelModOk = (e) => {
+    if (e.ctrlKey && e.shiftKey) return false;
+    const k = settings.dragSelectMod;
+    return k === "none" ? true : k === "ctrl" ? !!e.ctrlKey : !!e.shiftKey;
+  };
+  const dragSelBox = () => document.getElementById("dragsel");
+  const dragSelPaint = (x2, y2) => {
+    const el = dragSelBox();
+    if (!el || !dragSel) return;
+    el.style.left = Math.min(dragSel.x, x2) + "px";
+    el.style.top = Math.min(dragSel.y, y2) + "px";
+    el.style.width = Math.abs(x2 - dragSel.x) + "px";
+    el.style.height = Math.abs(y2 - dragSel.y) + "px";
+    el.classList.add("on");
+  };
+  const dragSelEnd = () => { dragSel = null; const el = dragSelBox(); if (el) el.classList.remove("on"); };
+  canvas.addEventListener("mousedown", (e) => {
+    if (e.button !== 0 || !settings.dragSelect || !dragSelModOk(e)) return;
+    if (groundDrag || cursorItem) return;                       // an item press owns this drag
+    if (scene && scene.target && scene.target.active === 1 && !targetUIHidden) return;
+    if (scene && scene.houseDesign) return;
+    e.preventDefault();                                         // no text selection while sweeping
+    dragSel = { x: e.clientX, y: e.clientY };
+  });
+  window.addEventListener("mousemove", (e) => { if (dragSel) dragSelPaint(e.clientX, e.clientY); });
+  window.addEventListener("mouseup", (e) => {
+    if (!dragSel || e.button !== 0) return;
+    const start = dragSel;
+    dragSelEnd();
+    // A press that never moved is an ordinary click, not a sweep (:399-402).
+    if (Math.abs(e.clientX - start.x) < 4 && Math.abs(e.clientY - start.y) < 4) return;
+    doDragSelect(start.x, start.y, e.clientX, e.clientY);
+  });
+  // A release the window never sees (dragged out of the tab, an OS gesture) would
+  // otherwise leave the rubber band painted on screen with nothing to end it.
+  window.addEventListener("blur", dragSelEnd);
+  window.addEventListener("pointercancel", dragSelEnd);
   // (Click-to-walk removed per user request — left-click on empty ground no longer
   // pathfinds/auto-walks. The server-side `walkto` route + pathfinder remain.)
   window.addEventListener("mousemove", track);
@@ -452,8 +777,20 @@ function setupInput() {
   bar.addEventListener("keydown", (e) => {
     e.stopPropagation();
     if (e.code === "Enter" || e.code === "NumpadEnter") { e.preventDefault(); submitChat(); }
-    else if (e.code === "Escape") { e.preventDefault(); closeChat(); }
+    else if (e.code === "Escape") { e.preventDefault(); clearChatMode(); closeChat(); }
+    // History recall. ClassicUO binds this to Ctrl+Q / Ctrl+W
+    // (SystemChatControl.cs:605, :635) — Ctrl+W closes the browser tab and is not
+    // interceptable from a page, so the bar uses the arrow keys a text field has
+    // no other use for. Ctrl+Q is kept as the authentic alias for "older".
+    else if (e.code === "ArrowUp" || (e.code === "KeyQ" && e.ctrlKey)) { e.preventDefault(); chatRecall(-1); }
+    else if (e.code === "ArrowDown") { e.preventDefault(); chatRecall(1); }
+    // Backspace on an empty line drops the latched channel, exactly as upstream
+    // does (`SDLK_BACKSPACE when … string.IsNullOrEmpty` → Mode = Default, :705).
+    else if (e.code === "Backspace" && !bar.value && chatMode) { e.preventDefault(); clearChatMode(); }
   });
+  // The prefix latch runs off every keystroke, the way ClassicUO's runs off every
+  // frame — so the mode flips the moment the prefix is complete, not on send.
+  bar.addEventListener("input", chatLatchCheck);
   bar.addEventListener("blur", () => { if (chatting) closeChat(); });
   // World map: drag to pan, wheel to zoom, ✕/label to open/close.
   const wmc = document.getElementById("wmcanvas");
@@ -516,8 +853,8 @@ function setupInput() {
   const optDesc = (k) => OPTIONS.find((o) => o.key === k);
   optBody.addEventListener("change", (e) => {
     const k = e.target.dataset.k; if (!k) return;
-    const o = optDesc(k); if (!o || o.kind !== "checkbox") return;
-    settings[k] = e.target.checked;
+    const o = optDesc(k); if (!o || (o.kind !== "checkbox" && o.kind !== "select")) return;
+    settings[k] = o.kind === "select" ? e.target.value : e.target.checked;
     saveSettings();
     if (o.onChange) o.onChange();
     markDirty();
@@ -655,23 +992,31 @@ function setupInput() {
   });
 }
 // In-game chat bar (replaces window.prompt). Enter opens it; type and Enter sends;
-// Esc cancels. A leading prefix routes the channel; anything else is normal
-// in-game speech.
+// Up/Down walk the history; Esc cancels the line AND drops any latched channel.
+// A leading prefix routes the channel (or latches it — see `latch` below);
+// anything else is normal in-game speech.
 //
 // Each entry maps a set of typed prefixes to the `/input` command that carries
 // it. Party is its own packet (0xBF/0x06); the rest are ordinary speech with a
 // different MessageType byte, which the server routes — see
 // `anima_core::agent::SpeechMode`.
+//
+// `latch` marks the ones that are real SPEECH CHANNELS, so typing the prefix
+// LATCHES the bar into that channel for every following line instead of routing
+// one — ClassicUO's persistent `SystemChatControl.Mode` (SystemChatControl.cs:
+// 479-552, and the Mode setter at :228-296 which strips the prefix and shows a
+// label). The channel-management verbs below take an argument or none at all and
+// would be nonsense as a mode, so they stay one-shot.
 const CHAT_PREFIXES = [
-  { keys: ["p", "party"], cmd: "party" },
-  { keys: ["w", "whisper"], cmd: "whisper" },
-  { keys: ["y", "yell", "shout"], cmd: "yell" },
-  { keys: ["e", "em", "emote", "me"], cmd: "emote" },
-  { keys: ["g", "guild"], cmd: "guild" },
-  { keys: ["a", "alliance", "ally"], cmd: "alliance" },
+  { keys: ["p", "party"], cmd: "party", latch: true },
+  { keys: ["w", "whisper"], cmd: "whisper", latch: true },
+  { keys: ["y", "yell", "shout"], cmd: "yell", latch: true },
+  { keys: ["e", "em", "emote", "me"], cmd: "emote", latch: true },
+  { keys: ["g", "guild"], cmd: "guild", latch: true },
+  { keys: ["a", "alliance", "ally"], cmd: "alliance", latch: true },
   // Server chat system (0xB2). `/c hello` talks in the joined channel; the
   // channel verbs take a name. `chatopen` first — see `parse_command`.
-  { keys: ["c", "chat"], cmd: "chatsay" },
+  { keys: ["c", "chat"], cmd: "chatsay", latch: true },
   { keys: ["cjoin", "chatjoin"], cmd: "chatjoin" },
   { keys: ["ccreate", "chatcreate"], cmd: "chatcreate" },
 ];
@@ -681,16 +1026,106 @@ const CHAT_BARE_PREFIXES = [
   { keys: ["chatopen"], cmd: "chatopen" },
   { keys: ["cleave", "chatleave"], cmd: "chatleave" },
 ];
+// ClassicUO's single-character mode latches (SystemChatControl.cs:486-547).
+// `space: true` means the character only latches when the NEXT one is a space,
+// exactly as upstream requires for `:`/`;`/`!`.
+//
+// ClassicUO's seventh is `/` → Party. We deliberately do not take it: `/` already
+// opens this client's own `/<word> <text>` routing (`/p`, `/w`, `/g`, …), which
+// is typed far more often here, and latching on the bare slash would eat the
+// first keystroke of every one of those. `/p ` latches Party instead — see
+// `chatLatchCheck`.
+const CHAT_CHAR_MODES = [
+  { ch: "\\", cmd: "guild" },
+  { ch: "|", cmd: "alliance" },
+  { ch: ",", cmd: "chatsay" },
+  { ch: ";", cmd: "whisper", space: true },
+  { ch: ":", cmd: "emote", space: true },
+  { ch: "!", cmd: "yell", space: true },
+];
+const CHAT_MODE_LABEL = {
+  party: "Party", whisper: "Whisper", yell: "Yell", emote: "Emote",
+  guild: "Guild", alliance: "Alliance", chatsay: "Chat",
+};
 // A pending `partytell` target: the chat bar's next line goes to this member
 // privately instead of being spoken. ClassicUO opens a dedicated one-line prompt
 // for this; we reuse the chat bar so a private message is typed exactly where
 // every other line is typed, with the target shown in the placeholder.
 let chatTellTarget = 0;
+// The latched channel (a CHAT_PREFIXES `cmd`), or "" for ordinary speech.
+// ClassicUO keeps this across sends and across closing the bar, and so do we.
+let chatMode = "";
+// ClassicUO's `_messageHistory` — (mode, text) pairs, and an index that walks
+// them; both are static there, i.e. per session and not persisted, so ours are
+// plain module state too (SystemChatControl.cs:41-42, :821-822).
+const chatHistory = [];
+const CHAT_HISTORY_MAX = 50;
+let chatHistoryIdx = 0;
+
 function startPartyTell(serial, name) {
   chatTellTarget = serial | 0;
   openChat();
   const bar = document.getElementById("chatbar");
   bar.placeholder = "to " + (name || "member") + "…";
+}
+
+function chatModeEl() { return document.getElementById("chatmode"); }
+// Show/hide the mode label beside the bar. ClassicUO puts the same word
+// ("Whisper", "Guild", …) left of the input so a latched channel is never
+// invisible (`AppendChatModePrefix`, :397-415).
+function paintChatMode() {
+  const el = chatModeEl();
+  if (!el) return;
+  const label = chatTellTarget ? "Tell" : CHAT_MODE_LABEL[chatMode] || "";
+  el.textContent = label;
+  el.classList.toggle("on", !!label && chatting);
+}
+function setChatMode(cmd, rest) {
+  chatMode = cmd;
+  const bar = document.getElementById("chatbar");
+  if (rest != null) bar.value = rest;
+  paintChatMode();
+}
+function clearChatMode() { setChatMode("", null); }
+// Run after every keystroke, like ClassicUO's per-frame check: a prefix at the
+// START of the line latches the channel and is consumed. Only while the bar is
+// in plain-speech mode — once latched, the characters are just text, which is
+// what makes a latched channel usable at all.
+function chatLatchCheck() {
+  if (chatMode || chatTellTarget) return;
+  const bar = document.getElementById("chatbar");
+  const t = bar.value;
+  if (!t) return;
+  for (const m of CHAT_CHAR_MODES) {
+    if (t[0] !== m.ch) continue;
+    if (m.space) { if (t.length > 1 && t[1] === " ") setChatMode(m.cmd, t.slice(2)); }
+    else setChatMode(m.cmd, t.slice(1));
+    return;
+  }
+  // `/p `, `/whisper `, … — this client's own vocabulary, latching on the space
+  // that ends the prefix word. `/p hello` therefore still sends "hello" to the
+  // party exactly as it always did; the only change is that the NEXT line goes
+  // there too, until Esc or Backspace-on-empty clears it.
+  const w = /^\/([a-z]+)\s/i.exec(t);
+  if (!w) return;
+  const route = CHAT_PREFIXES.find((p) => p.latch && p.keys.includes(w[1].toLowerCase()));
+  if (route) setChatMode(route.cmd, t.slice(w[0].length));
+}
+// Walk the history. `d` is -1 (older) / +1 (newer). ClassicUO restores BOTH the
+// text and the mode it was sent in (:629-631, :658-660); so does this. Walking
+// past the newest entry clears the line, as its Ctrl+W does (:664-667).
+function chatRecall(d) {
+  if (!chatHistory.length) return;
+  const bar = document.getElementById("chatbar");
+  chatHistoryIdx = Math.max(0, Math.min(chatHistory.length, chatHistoryIdx + d));
+  if (chatHistoryIdx >= chatHistory.length) {
+    bar.value = "";
+    setChatMode("", null);
+    return;
+  }
+  const h = chatHistory[chatHistoryIdx];
+  setChatMode(h.mode, h.text);
+  bar.setSelectionRange(bar.value.length, bar.value.length);
 }
 
 function openChat() {
@@ -700,6 +1135,8 @@ function openChat() {
   if (wasMoving) { sendInput("stop"); wasMoving = false; }
   const bar = document.getElementById("chatbar");
   bar.value = ""; bar.classList.add("on"); bar.focus();
+  chatHistoryIdx = chatHistory.length;   // a fresh line: history starts at the end
+  paintChatMode();
 }
 function closeChat() {
   chatting = false;
@@ -707,6 +1144,7 @@ function closeChat() {
   const bar = document.getElementById("chatbar");
   bar.placeholder = "";
   bar.classList.remove("on"); bar.blur();
+  paintChatMode();
 }
 function submitChat() {
   const bar = document.getElementById("chatbar");
@@ -715,21 +1153,37 @@ function submitChat() {
   // clicking a member, so a leading "/w" in the text is part of the message.
   if (text && chatTellTarget) {
     sendInput("partytell:" + chatTellTarget + ":" + text);
+    pushChatHistory("", text);
     closeChat();
     return;
   }
   if (text) {
-    const bare = /^\/([a-z]+)$/i.exec(text);
-    const bareRoute = bare && CHAT_BARE_PREFIXES.find((p) => p.keys.includes(bare[1].toLowerCase()));
-    const m = /^\/([a-z]+)\s+(.+)$/i.exec(text);
-    const route = m && CHAT_PREFIXES.find((p) => p.keys.includes(m[1].toLowerCase()));
-    // An unrecognized "/word" is spoken verbatim rather than swallowed — the
-    // shard may well define it as a server command (e.g. "/help").
-    if (bareRoute) sendInput(bareRoute.cmd);
-    else if (route) sendInput(route.cmd + ":" + m[2].trim());
-    else sendInput("say:" + text);
+    pushChatHistory(chatMode, text);
+    // A latched channel takes the line verbatim — the prefix characters are not
+    // re-read, matching ClassicUO's `if (Mode == ChatMode.Default)` guard around
+    // the whole prefix parser. Backspace on an empty line (or Esc) gets you back.
+    if (chatMode) sendInput(chatMode + ":" + text);
+    else {
+      const bare = /^\/([a-z]+)$/i.exec(text);
+      const bareRoute = bare && CHAT_BARE_PREFIXES.find((p) => p.keys.includes(bare[1].toLowerCase()));
+      const m = /^\/([a-z]+)\s+(.+)$/i.exec(text);
+      const route = m && CHAT_PREFIXES.find((p) => p.keys.includes(m[1].toLowerCase()));
+      // An unrecognized "/word" is spoken verbatim rather than swallowed — the
+      // shard may well define it as a server command (e.g. "/help").
+      if (bareRoute) sendInput(bareRoute.cmd);
+      else if (route) sendInput(route.cmd + ":" + m[2].trim());
+      else sendInput("say:" + text);
+    }
   }
   closeChat();
+}
+// ClassicUO appends on send and parks the index one PAST the end, so the first
+// step back lands on the line just sent (:821-822).
+function pushChatHistory(mode, text) {
+  const last = chatHistory[chatHistory.length - 1];
+  if (!last || last.text !== text || last.mode !== mode) chatHistory.push({ mode, text });
+  while (chatHistory.length > CHAT_HISTORY_MAX) chatHistory.shift();
+  chatHistoryIdx = chatHistory.length;
 }
 function sendInput(cmd) {
   if (WASM_MODE) wasmSendInput(cmd);

@@ -381,6 +381,192 @@ function buildPoiFilter() {
     }
   }
 }
+// ---- world-map view options (ClassicUO WorldMapGump's context menu) ---------
+//
+// ClassicUO puts ~22 entries behind a right-click on the map
+// (WorldMapGump.cs:266-345) — that gump is one of only three places its
+// client-side `ContextMenuControl` is used at all. This map had pan, zoom, place
+// names, a POI filter, user markers and a coordinate readout, all of them fixed:
+// no way to flip the projection, no way to unpin the view and look at somewhere
+// else, no goto, and markers editable only by shift-clicking a pin.
+//
+// Persisted like the POI filter and the markers next to it, in localStorage —
+// ClassicUO keeps the same set in the profile (`SaveSettings`).
+const WM_OPTS_KEY = "anima.wmopts";
+const WM_OPTS_DEFAULTS = {
+  flip: true,          // ClassicUO `_flipMap` — true there too (WorldMapGump.cs:63); false = north-up
+  places: true,        // built-in place names
+  pois: true,          // the POI layer (and its filter panel)
+  markers: true,       // ClassicUO ShowAllMarkers
+  markerNames: true,   // ClassicUO ShowMarkerNames
+  tracked: true,       // ClassicUO ShowPartyMembers — out-of-view party/guild (0xF0)
+  mobiles: false,      // ClassicUO ShowMobiles — mobiles currently in view
+  coords: true,        // ClassicUO ShowYourCoordinates / ShowMouseCoordinates
+};
+let wmOpts = Object.assign({}, WM_OPTS_DEFAULTS);
+try { Object.assign(wmOpts, JSON.parse(localStorage.getItem(WM_OPTS_KEY) || "{}")); } catch (e) {}
+function saveWmOpts() { try { localStorage.setItem(WM_OPTS_KEY, JSON.stringify(wmOpts)); } catch (e) {} }
+// ClassicUO `FreeView` (WorldMapGump.cs:148): the view stops following the
+// player and stays where it was put. `null` = pinned to the player, which is
+// the only thing this map could do before — dragging it just slid the offset
+// the player was still dragging along behind them.
+let wmFree = null;   // { x, y } world tile the view is centred on, or null
+let wmGoto = null;   // { x, y } from "Go to location…" — ClassicUO's `_gotoMarker`
+// The tile the view is centred on. Every projection below goes through this
+// rather than reading the player directly, which is the whole of free view.
+function wmCenterTile() {
+  if (wmFree) return [wmFree.x | 0, wmFree.y | 0];
+  const p = scene && scene.player;
+  return [p ? p.x | 0 : 0, p ? p.y | 0 : 0];
+}
+// Unpin/repin without the view jumping: whatever tile is under the canvas
+// centre right now becomes the anchor, and the pan offset folds into it.
+function wmSetFreeView(on) {
+  if (on === !!wmFree) return;
+  if (on) {
+    const cv = document.getElementById("wmcanvas");
+    const [cx, cy] = wmScreenToWorld(cv.clientWidth / 2, cv.clientHeight / 2, cv.clientWidth, cv.clientHeight);
+    wmFree = { x: cx, y: cy };
+  } else {
+    wmFree = null;   // ClassicUO's FreeView setter also drops straight back onto the player
+    wmGoto = null;
+  }
+  wmPan = { x: 0, y: 0 };
+  drawWorldmap();
+}
+function wmGotoLocation() {
+  const [cx, cy] = wmCenterTile();
+  const raw = window.prompt("Go to location — x, y:", cx + ", " + cy);
+  if (raw === null) return;
+  const m = /^\s*(-?\d+)\s*[, ]\s*(-?\d+)\s*$/.exec(raw);
+  if (!m) { addSysMessage("Go to: expected two numbers, e.g. 1420, 1690"); return; }
+  // ClassicUO's GoToMarker forces FreeView on and drops a temporary marker at
+  // the destination, so you can see where you asked to look.
+  wmFree = { x: +m[1], y: +m[2] };
+  wmGoto = { x: +m[1], y: +m[2] };
+  wmPan = { x: 0, y: 0 };
+  drawWorldmap();
+}
+// ClassicUO's AddMarkerOnPlayer — the one marker you place without aiming.
+function wmAddMarkerOnPlayer() {
+  const p = scene && scene.player;
+  if (!p) return;
+  const name = window.prompt(`Marker at (${p.x}, ${p.y}) — name:`, "");
+  if (name === null) return;
+  wmMarkers.push({ x: p.x | 0, y: p.y | 0, name: name.trim() });
+  saveMarkers(); drawWorldmap();
+}
+
+// The map's own right-click menu. ClassicUO reaches this through
+// `CanCloseWithRightClick == false` on the world map (WorldMapGump.cs:109) —
+// right-click opens the menu instead of closing the window (Control.cs:641-646),
+// which is exactly the opt-out the delegated close handler in 09-gumps.js
+// honours for the same reason.
+//
+// Not carried over from ClassicUO's set, and why: per-facet view (one
+// `worldmap.png` is rendered for the shard's current facet — a second facet
+// would need the server to render it), Show houses/boats (no multi list reaches
+// the scene), top-most (this map is a modal overlay, always on top), sextant
+// coordinates, marker fonts/files and the map-tile cache reset (no cache — one
+// image).
+function wmOpenMenu(clientX, clientY) {
+  const flag = (key, label, after) => ({
+    label, checked: () => !!wmOpts[key],
+    run: () => { wmOpts[key] = !wmOpts[key]; saveWmOpts(); if (after) after(); drawWorldmap(); },
+  });
+  openClientMenu(clientX, clientY, [
+    { label: "Free view", checked: () => !!wmFree, run: () => wmSetFreeView(!wmFree) },
+    { label: "Go to location…", run: wmGotoLocation },
+    flag("flip", "Flip map"),
+    {},
+    flag("places", "Show place names"),
+    flag("pois", "Show points of interest", applyWmFilterVisibility),
+    flag("markers", "Show markers"),
+    flag("markerNames", "Show marker names"),
+    flag("tracked", "Show party & guild"),
+    flag("mobiles", "Show mobiles in view"),
+    flag("coords", "Show coordinates"),
+    {},
+    { label: "Markers manager…", run: openMarkersManager },
+    { label: "Add marker on player", run: wmAddMarkerOnPlayer },
+    {},
+    { label: "Close map", run: closeWorldmap },
+  ]);
+}
+// The POI category filter is the POI layer's control surface, so it follows the
+// layer's own show/hide rather than sitting there filtering something invisible.
+function applyWmFilterVisibility() {
+  const f = document.getElementById("wmfilter");
+  if (f) f.style.display = wmOpts.pois ? "" : "none";
+}
+
+// ---- markers manager (ClassicUO MarkersManagerGump) -------------------------
+// The user markers were reachable only by shift-clicking their pin on the
+// canvas — you had to be able to see one to delete it, and there was no way to
+// rename or list them. An ordinary draggable window, built with the same frame
+// every other panel uses.
+let markersWin = null;
+function closeMarkersManager() {
+  if (markersWin) { markersWin.el.remove(); markersWin = null; }
+}
+function openMarkersManager() {
+  if (markersWin) { bringToFront(markersWin.el); renderMarkersManager(); return; }
+  const { el, body } = makeWindowFrame({
+    cls: "wm-markers", title: "MAP MARKERS", pos: { left: 240, top: 120 },
+    onClose: closeMarkersManager,
+  });
+  markersWin = { el, body };
+  renderMarkersManager();
+}
+function renderMarkersManager() {
+  if (!markersWin) return;
+  const body = markersWin.body;
+  body.innerHTML = "";
+  if (!wmMarkers.length) {
+    const empty = document.createElement("div");
+    empty.className = "wmm-empty";
+    empty.textContent = "No markers. Double-click the map to add one.";
+    body.appendChild(empty);
+    return;
+  }
+  wmMarkers.forEach((mk, i) => {
+    const row = document.createElement("div");
+    row.className = "wmm-row";
+    const nm = document.createElement("span");
+    nm.className = "wmm-name";
+    nm.textContent = mk.name || "(unnamed)";
+    const co = document.createElement("span");
+    co.className = "wmm-co";
+    co.textContent = `${mk.x}, ${mk.y}`;
+    const btn = (label, title, fn) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "wmm-btn"; b.textContent = label; b.title = title;
+      b.addEventListener("click", fn);
+      return b;
+    };
+    row.appendChild(nm);
+    row.appendChild(co);
+    // "Go" is ClassicUO's marker double-click → GoToMarker: free view, centred there.
+    row.appendChild(btn("go", "centre the map here", () => {
+      wmFree = { x: mk.x | 0, y: mk.y | 0 };
+      wmGoto = { x: mk.x | 0, y: mk.y | 0 };
+      wmPan = { x: 0, y: 0 };
+      drawWorldmap();
+    }));
+    row.appendChild(btn("✎", "rename", () => {
+      const name = window.prompt("Marker name:", mk.name || "");
+      if (name === null) return;
+      mk.name = name.trim();
+      saveMarkers(); renderMarkersManager(); drawWorldmap();
+    }));
+    row.appendChild(btn("✕", "delete", () => {
+      wmMarkers.splice(i, 1);
+      saveMarkers(); renderMarkersManager(); drawWorldmap();
+    }));
+    body.appendChild(row);
+  });
+}
+
 function loadWorldmap() {
   if (wmImg || wmLoading) return;
   wmLoading = true;
@@ -400,28 +586,49 @@ function loadWorldmap() {
   img.onerror = () => { wmLoading = false; if (wmOn) setTimeout(loadWorldmap, 1500); }; // 503 while building → retry
   img.src = "worldmap.png?v=2";
 }
+let wmMenuWired = false;
 function openWorldmap() {
-  wmOn = true; wmPan = { x: 0, y: 0 };       // re-center on the player
+  wmOn = true; wmPan = { x: 0, y: 0 };       // re-center on the view anchor (player, or free view)
   document.getElementById("worldmap").classList.add("on");
   held.clear();
+  if (!wmMenuWired) {
+    wmMenuWired = true;
+    // ClassicUO WorldMapGump.cs:109 sets `CanCloseWithRightClick = false` so the
+    // right-click opens the menu instead. stopPropagation keeps the delegated
+    // close handler (09-gumps.js) out of it, and preventDefault the browser's.
+    document.getElementById("worldmap").addEventListener("contextmenu", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      wmOpenMenu(e.clientX, e.clientY);
+    });
+  }
+  applyWmFilterVisibility();
   loadWorldmap(); loadPois(); buildPoiFilter(); drawWorldmap();
 }
-function closeWorldmap() { wmOn = false; document.getElementById("worldmap").classList.remove("on"); }
+function closeWorldmap() {
+  wmOn = false;
+  document.getElementById("worldmap").classList.remove("on");
+  hideClientMenu();       // the map's own menu is anchored to it — don't leave it floating
+  closeMarkersManager();
+}
 function toggleWorldmap() { wmOn ? closeWorldmap() : openWorldmap(); }
 // Canvas px → world tile (x,y), inverting the iso transform used to draw the map.
 function wmScreenToWorld(sx, sy, w, h) {
-  const px = scene && scene.player ? scene.player.x : 0;
-  const py = scene && scene.player ? scene.player.y : 0;
+  const [px, py] = wmCenterTile();
   const rx = sx - (w / 2 + wmPan.x), ry = sy - (h / 2 + wmPan.y), s = wmScale;
-  const a = (rx + ry) / (2 * s), b = (ry - rx) / (2 * s); // image-pixel offset from player
+  // Inverse of the transform `drawWorldmap` applies. Flipped (ClassicUO's
+  // default) the map is rotated 45° into the game's own iso orientation;
+  // unflipped it is the plain north-up square the .png actually is.
+  const a = wmOpts.flip ? (rx + ry) / (2 * s) : rx / s;   // image-pixel offset from the view anchor
+  const b = wmOpts.flip ? (ry - rx) / (2 * s) : ry / s;
   return [Math.round(px + a * WORLDMAP_STEP), Math.round(py + b * WORLDMAP_STEP)];
 }
 // World tile (x,y) → canvas px (forward iso transform; matches the drawn map).
 function wmWorldToScreen(wx, wy, w, h) {
-  const px = scene && scene.player ? scene.player.x : 0;
-  const py = scene && scene.player ? scene.player.y : 0;
+  const [px, py] = wmCenterTile();
   const a = (wx - px) / WORLDMAP_STEP, b = (wy - py) / WORLDMAP_STEP, s = wmScale;
-  return [w / 2 + wmPan.x + s * (a - b), h / 2 + wmPan.y + s * (a + b)];
+  return wmOpts.flip
+    ? [w / 2 + wmPan.x + s * (a - b), h / 2 + wmPan.y + s * (a + b)]
+    : [w / 2 + wmPan.x + s * a, h / 2 + wmPan.y + s * b];
 }
 // A tracked member's name, if the party list happens to know it. `scene.tracked`
 // carries serials only — the server has no reason to resend a name we were told
@@ -454,10 +661,14 @@ function drawWorldmap() {
   if (!wmImg) { ctx.fillStyle = "#9aa0a6"; ctx.font = "14px monospace"; ctx.fillText("rendering world map…", 16, 26); return; }
   const px = scene && scene.player ? scene.player.x : 0;
   const py = scene && scene.player ? scene.player.y : 0;
-  const ipx = px / WORLDMAP_STEP, ipy = py / WORLDMAP_STEP, s = wmScale;
+  const [cx, cy] = wmCenterTile();           // free view: not necessarily the player
+  const ipx = cx / WORLDMAP_STEP, ipy = cy / WORLDMAP_STEP, s = wmScale;
   ctx.save();
   ctx.translate(w / 2 + wmPan.x, h / 2 + wmPan.y);
-  ctx.transform(s, s, -s, s, 0, 0);          // iso: image pixel (a,b) → s·(a-b, a+b)
+  // ClassicUO's `_flipMap` (WorldMapGump.cs:1976/2357/…): on (its default) the
+  // map is rotated 45° into the game's iso orientation, off it is north-up.
+  if (wmOpts.flip) ctx.transform(s, s, -s, s, 0, 0);   // iso: image pixel (a,b) → s·(a-b, a+b)
+  else ctx.transform(s, 0, 0, s, 0, 0);                // north-up: (a,b) → s·(a, b)
   ctx.imageSmoothingEnabled = true;          // bilinear → smooth, not blocky/low-res
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(wmImg, -ipx, -ipy);          // player's pixel at the origin
@@ -473,7 +684,7 @@ function drawWorldmap() {
     wmLabelBoxes.push({ l, r, t, b }); return true;
   };
   // place-name labels (cull off-canvas; fade names when zoomed far out).
-  if (s >= 0.6) {
+  if (s >= 0.6 && wmOpts.places) {
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.font = "11px ui-monospace, monospace"; ctx.lineWidth = 2.5;
     for (const [lx, ly, name] of PLACES) {
@@ -486,7 +697,7 @@ function drawWorldmap() {
   }
   // points of interest (filtered by enabled category); drawn UNDER the user
   // markers + player dot so those stay on top. Draw-only — never blocks clicks.
-  if (wmPois && wmPois.length) {
+  if (wmOpts.pois && wmPois && wmPois.length) {
     const showLabels = s >= 1.2;
     ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.font = "10px ui-monospace, monospace";
     for (const p of wmPois) {
@@ -505,12 +716,12 @@ function drawWorldmap() {
   }
   // user markers: a cyan pin + label, drawn over everything.
   ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.font = "11px ui-monospace, monospace";
-  for (const mk of wmMarkers) {
+  for (const mk of (wmOpts.markers ? wmMarkers : [])) {
     const [sx, sy] = wmWorldToScreen(mk.x, mk.y, w, h);
     if (sx < -20 || sy < -20 || sx > w + 20 || sy > h + 20) continue;
     ctx.fillStyle = "#39d0ff"; ctx.strokeStyle = "#04121a"; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(sx, sy, 3.5, 0, 7); ctx.fill(); ctx.stroke();
-    if (mk.name) {
+    if (wmOpts.markerNames && mk.name) {
       ctx.lineWidth = 2.5; ctx.strokeStyle = "rgba(0,0,0,.85)";
       ctx.strokeText(mk.name, sx + 6, sy); ctx.fillStyle = "#bfeeff"; ctx.fillText(mk.name, sx + 6, sy);
     }
@@ -520,7 +731,7 @@ function drawWorldmap() {
   // you cannot see and omits the rest, so anyone still in view is already a
   // mobile on the game canvas and never appears here. Drawn under the player dot
   // and over the POI/user markers.
-  const tracked = scene && scene.tracked;
+  const tracked = wmOpts.tracked && scene && scene.tracked;
   if (tracked) {
     const myMap = (scene.facet | 0) || 0;
     ctx.textAlign = "left"; ctx.textBaseline = "middle";
@@ -552,17 +763,50 @@ function drawWorldmap() {
     plot(tracked.guild, "#c08cff", "#1a0a2a");  // guild first: party wins on overlap
     plot(tracked.party, "#5fd0ff", "#04121a");
   }
-  // player marker sits where the origin lands (canvas center + pan).
-  const mx = w / 2 + wmPan.x, my = h / 2 + wmPan.y;
+  // Mobiles currently in view (ClassicUO ShowMobiles), in their notoriety colour
+  // — the same dots the minimap draws, on the map that can actually be zoomed
+  // out far enough for them to mean something. In-view only: `scene.mobiles` is
+  // everything the server has told us about, and there is no other source.
+  if (wmOpts.mobiles) {
+    const meSerial = (scene && scene.player && scene.player.serial) >>> 0;
+    for (const mb of ((scene && scene.mobiles) || [])) {
+      if ((mb.serial >>> 0) === meSerial) continue;   // the player has their own marker below
+      const [sx, sy] = wmWorldToScreen(mb.x | 0, mb.y | 0, w, h);
+      if (sx < -4 || sy < -4 || sx > w + 4 || sy > h + 4) continue;
+      ctx.fillStyle = cssColor(notoColor(mb.noto));
+      ctx.beginPath(); ctx.arc(sx, sy, 2.5, 0, 7); ctx.fill();
+    }
+  }
+  // "Go to location…" destination (ClassicUO's aquamarine `_gotoMarker`).
+  if (wmGoto) {
+    const [gx, gy] = wmWorldToScreen(wmGoto.x, wmGoto.y, w, h);
+    ctx.strokeStyle = "#7fffd4"; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(gx - 8, gy); ctx.lineTo(gx + 8, gy);
+    ctx.moveTo(gx, gy - 8); ctx.lineTo(gx, gy + 8);
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(gx, gy, 5, 0, 7); ctx.stroke();
+  }
+  // Player marker. Pinned, this is the canvas centre by construction; in free
+  // view the player is wherever they actually are, possibly off-screen.
+  const [mx, my] = wmWorldToScreen(px, py, w, h);
   ctx.fillStyle = "#ff4d4d"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5;
   ctx.beginPath(); ctx.arc(mx, my, 4, 0, 7); ctx.fill(); ctx.stroke();
-  // coordinate readouts (player + cursor), ClassicUO-style.
+  // coordinate readouts (player + cursor), ClassicUO-style. Free view adds a
+  // third line, because a map that has stopped following you needs to say so —
+  // otherwise an unpinned map just looks like one that stopped updating.
+  if (!wmOpts.coords) return;
   ctx.textAlign = "left"; ctx.textBaseline = "top"; ctx.font = "12px ui-monospace, monospace";
-  ctx.fillStyle = "rgba(8,11,16,.7)"; ctx.fillRect(8, 8, 168, wmMouse ? 36 : 20);
-  ctx.fillStyle = "#e8ecf2"; ctx.fillText(`you  (${px}, ${py})`, 14, 12);
+  const lines = 1 + (wmMouse ? 1 : 0) + (wmFree ? 1 : 0);
+  ctx.fillStyle = "rgba(8,11,16,.7)"; ctx.fillRect(8, 8, 168, 4 + lines * 16);
+  let ty = 12;
+  ctx.fillStyle = "#e8ecf2"; ctx.fillText(`you  (${px}, ${py})`, 14, ty); ty += 16;
   if (wmMouse) {
     const [wx, wy] = wmScreenToWorld(wmMouse.x, wmMouse.y, w, h);
-    ctx.fillStyle = "#9aa0a6"; ctx.fillText(`cur  (${wx}, ${wy})`, 14, 28);
+    ctx.fillStyle = "#9aa0a6"; ctx.fillText(`cur  (${wx}, ${wy})`, 14, ty); ty += 16;
+  }
+  if (wmFree) {
+    ctx.fillStyle = "#7fffd4"; ctx.fillText(`free (${wmFree.x}, ${wmFree.y})`, 14, ty);
   }
 }
 // Add / remove markers at a canvas point (double-click adds, shift-click removes
@@ -1251,4 +1495,212 @@ function inspectDump() {
   inspectCopy(`${d.kind}: ${d.title}\n`
     + d.rows.map(([k, v]) => `${k} = ${v}`).join("\n")
     + `\n\nscene record:\n${JSON.stringify(d.raw, null, 1)}`);
+}
+
+// ---- pinned health bars (ClassicUO's HealthBarGump) ------------------------
+//
+// The transient bar that `drawBars` floats under a sprite dies with that sprite:
+// it goes when the mobile walks out of view or behind a roof, it cannot be
+// moved, and it cannot be clicked. ClassicUO's answer is a real window per entity —
+// created by dragging a name plate off (NameOverheadGump.DoDrag, :199-260), from
+// the paperdoll, or by sweeping a rectangle over a crowd (drag-select) — which
+// stays put, greys out rather than vanishing when the entity leaves view
+// (HealthBarGump.cs:390-460 — the `entity == null` / `_outOfRange` branch), and
+// answers the target cursor when clicked
+// (`OnMouseDown`, :184-196). All three are what a healer or a PvPer uses.
+//
+// Two shapes, exactly as upstream: three lines (HP / mana / stamina) for a party
+// member, one HP line for anyone else (HealthBarGump.cs:1050-1160 builds the
+// single-line variant for the non-party case). That is not a simplification —
+// the server never tells us a stranger's mana or stamina at all. A party
+// member's DO arrive, normalised to /25 by ServUO's `AttributeNormalizer`, which
+// is why these are drawn as ratios and never printed as numbers.
+//
+// Session-only, like ClassicUO's own default (`Profile.SaveHealthbars` is false):
+// restoring a wall of grey bars for serials that no longer exist is worse than
+// starting empty.
+const HB_TILE_X = 100, HB_TILE_Y = 100;   // ClassicUO DragSelectStartX/Y (Profile.cs:209)
+const HB_STEP = 4;                        // px between auto-tiled bars
+// A three-line (party) bar's height. Single-line bars tile with a small gap
+// rather than being measured — the alternative is a forced reflow per bar while
+// a sweep is spawning them.
+const HB_ROW_H = 46;
+const pinnedBars = new Map();             // serial -> { el, nameEl, lines: [el,…], sig }
+
+function hbarsEl() {
+  let el = document.getElementById("hbars");
+  if (!el) { el = document.createElement("div"); el.id = "hbars"; document.body.appendChild(el); }
+  return el;
+}
+// The party member record for a serial, or null. Party membership decides the
+// bar's SHAPE, so it is read once per refresh rather than per line.
+function hbPartyMember(s, serial) {
+  const p = s && s.party;
+  if (!p || !p.members) return null;
+  return p.members.find((m) => (m.serial >>> 0) === (serial >>> 0)) || null;
+}
+function hbMobile(s, serial) {
+  return ((s && s.mobiles) || []).find((m) => (m.serial >>> 0) === (serial >>> 0)) || null;
+}
+// Drag by the title bar. Deliberately not `makeDraggable`: that one restores and
+// persists geometry keyed on the element id, and these windows are per-serial and
+// session-only, so there is no id worth keying on.
+function hbDrag(win, handle) {
+  handle.addEventListener("mousedown", (e) => {
+    if (e.button !== 0 || (e.target.classList && e.target.classList.contains("hb-close"))) return;
+    e.preventDefault(); e.stopPropagation();
+    hbarsEl().appendChild(win);                       // clicked bar comes to the front
+    const r = win.getBoundingClientRect();
+    const dx = e.clientX - r.left, dy = e.clientY - r.top;
+    const move = (ev) => {
+      win.style.left = Math.max(0, Math.min(window.innerWidth - 40, ev.clientX - dx)) + "px";
+      win.style.top = Math.max(0, Math.min(window.innerHeight - 20, ev.clientY - dy)) + "px";
+    };
+    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  });
+}
+// Where the next auto-tiled bar goes (drag-select spawns a row of them).
+// ClassicUO walks DOWN from DragSelectStartY and starts a new COLUMN when it
+// runs off the bottom (GameSceneInputHandler.cs:220-231).
+function hbNextTile() {
+  let x = HB_TILE_X, y = HB_TILE_Y;
+  const h = HB_ROW_H;
+  for (let i = 0; i < pinnedBars.size; i++) {
+    y += h + HB_STEP;
+    if (y >= window.innerHeight - 60) { y = HB_TILE_Y; x += 130; }
+    if (x >= window.innerWidth - 60) { x = HB_TILE_X; }
+  }
+  return { x, y };
+}
+// Pin a bar for `serial`. Already pinned → just raise it (ClassicUO skips a
+// mobile that already has one during drag-select, :204-207).
+function pinHealthBar(serial, x, y) {
+  serial = serial >>> 0;
+  const existing = pinnedBars.get(serial);
+  if (existing) { hbarsEl().appendChild(existing.el); return existing; }
+  const pos = (x == null || y == null) ? hbNextTile() : { x, y };
+  const el = document.createElement("div");
+  el.className = "hb-win";
+  el.dataset.serial = String(serial);
+  el.style.left = Math.round(pos.x) + "px";
+  el.style.top = Math.round(pos.y) + "px";
+  el.innerHTML = '<div class="hb-title"><span class="hb-name"></span><span class="hb-close" title="close">✕</span></div>'
+    + '<div class="hb-line hb-hp"><i></i></div>'
+    + '<div class="hb-line hb-mana"><i></i></div>'
+    + '<div class="hb-line hb-stam"><i></i></div>';
+  const title = el.querySelector(".hb-title");
+  el.querySelector(".hb-close").addEventListener("click", (e) => { e.stopPropagation(); closeHealthBar(serial); });
+  // Clicking the bar answers a target cursor, so a heal can be aimed at a bar
+  // instead of at a sprite that may be behind a wall (HealthBarGump.cs:184-196).
+  el.addEventListener("mouseup", (e) => {
+    if (e.button !== 0) return;
+    if (!(scene && scene.target && scene.target.active === 1) || targetUIHidden) return;
+    sendInput("target:" + serial);
+    endTargetUI();
+  });
+  el.addEventListener("dblclick", () => sendInput("use:" + serial));
+  hbDrag(el, title);
+  hbarsEl().appendChild(el);
+  const rec = { el, nameEl: el.querySelector(".hb-name"),
+                hp: el.querySelector(".hb-hp > i"), mana: el.querySelector(".hb-mana > i"),
+                stam: el.querySelector(".hb-stam > i"), sig: null, name: "" };
+  pinnedBars.set(serial, rec);
+  // ClassicUO forces a status request the moment a bar is created
+  // (BaseHealthBarGump ctor, :34) — without it a mobile we have never queried
+  // shows a bar with no numbers in it.
+  sendInput("statusreq:" + serial);
+  refreshHealthBars(scene);
+  return rec;
+}
+function closeHealthBar(serial) {
+  const rec = pinnedBars.get(serial >>> 0);
+  if (!rec) return;
+  rec.el.remove();
+  pinnedBars.delete(serial >>> 0);
+}
+// ClassicUO MacroType.CloseAllHealthBars.
+function closeAllHealthBars() {
+  for (const rec of pinnedBars.values()) rec.el.remove();
+  pinnedBars.clear();
+}
+// Repaint every pinned bar from the scene. Called once per poll (from `hud`),
+// not per frame: these are DOM nodes and nothing in them changes faster than the
+// server tells us.
+function refreshHealthBars(s) {
+  if (!pinnedBars.size) return;
+  for (const [serial, rec] of pinnedBars) {
+    const mob = hbMobile(s, serial);
+    const party = hbPartyMember(s, serial);
+    // Out of range is ClassicUO's `_outOfRange`: the bar stays, goes grey, and
+    // keeps the last name we knew rather than closing itself (:390-460, and
+    // CloseHealthBarType defaults to 0 = never auto-close).
+    const gone = !mob && !party;
+    const name = (mob && mob.name) || (party && party.name) || rec.name || "unknown";
+    if (name !== rec.name) { rec.nameEl.textContent = name; rec.name = name; }
+    const hits = mob ? (mob.hits | 0) : party ? (party.hits | 0) : 0;
+    const hitsMax = mob ? (mob.hitsMax | 0) : party ? (party.hitsMax | 0) : 0;
+    const noto = mob ? (mob.noto | 0) : 0;
+    const poisoned = !!(mob && mob.poisoned);
+    // Three lines for a party member (the only entity whose mana/stamina the
+    // server ever sends us), one for everybody else.
+    const wide = !!party;
+    const mana = party ? (party.mana | 0) : 0, manaMax = party ? (party.manaMax | 0) : 0;
+    const stam = party ? (party.stam | 0) : 0, stamMax = party ? (party.stamMax | 0) : 0;
+    const sig = [gone, hits, hitsMax, noto, poisoned, wide, mana, manaMax, stam, stamMax].join("|");
+    if (rec.sig === sig) continue;
+    rec.sig = sig;
+    rec.el.classList.toggle("gone", gone);
+    rec.el.classList.toggle("wide", wide);
+    rec.nameEl.style.color = gone ? "#7b8794" : cssColor(notoColor(noto));
+    const frac = hitsMax > 0 ? Math.max(0, Math.min(1, hits / hitsMax)) : 0;
+    rec.hp.style.width = (frac * 100).toFixed(1) + "%";
+    // Same rule as the overhead bar: poison recolours, it never shortens.
+    rec.hp.style.background = gone ? "#4b5563" : cssColor(poisoned ? POISON_COLOR : hpColor(frac));
+    if (wide) {
+      rec.mana.style.width = (manaMax > 0 ? (mana / manaMax) * 100 : 0).toFixed(1) + "%";
+      rec.stam.style.width = (stamMax > 0 ? (stam / stamMax) * 100 : 0).toFixed(1) + "%";
+    }
+  }
+}
+// Commit a drag-select sweep: pin a bar for every mobile whose sprite intersects
+// the swept rectangle (ClassicUO `DoDragSelect`, GameSceneInputHandler.cs:126-275).
+// The gesture itself lives with the other canvas handlers in 13-macros.js.
+//
+// Upstream intersects the mobile's real `FrameInfo` rect; we approximate the body
+// with a fixed box around the interpolated feet anchor, because the drawn mobile
+// is composed of a dozen part sprites rather than one, and a sweep does not need
+// pixel accuracy. Same screen math as `drawBars`: camera transform, camZoom, then
+// the canvas→CSS stretch.
+const DS_HALF_W = 22, DS_HEIGHT = 72;   // world px: roughly one tile wide, a body tall
+function doDragSelect(x1, y1, x2, y2) {
+  if (!scene) return;
+  const l = Math.min(x1, x2), r = Math.max(x1, x2);
+  const t = Math.min(y1, y2), b = Math.max(y1, y2);
+  const self = (scene.player && scene.player.serial) >>> 0;
+  const fx = window.innerWidth / app.renderer.width, fy = window.innerHeight / app.renderer.height;
+  let n = 0;
+  for (const m of scene.mobiles || []) {
+    const serial = m.serial >>> 0;
+    if (serial === self || m.so) continue;          // never ourselves, never an undrawn mobile
+    if (pinnedBars.has(serial)) continue;           // already has one (:204-207)
+    // ClassicUO `DragSelectHumanoidsOnly` uses its own wider `IsHuman`; this is
+    // the human-body test the rest of this client already uses (the one that
+    // decides whether double-clicking opens a paperdoll).
+    if (settings.dragSelectHumanoids && !((m.body | 0) >= 400 && (m.body | 0) <= 407)) continue;
+    // `DragSelectHostileOnly` skips Ally / Innocent / Invulnerable. Upstream also
+    // skips `IsRenamable` (your own pets); the wire never gives us that bit, so a
+    // tamed follower with a hostile notoriety can still be swept up here.
+    if (settings.dragSelectHostile && ((m.noto | 0) === 1 || (m.noto | 0) === 2 || (m.noto | 0) === 7)) continue;
+    const st = anim.get("m" + serial);
+    if (!st) continue;                              // not interpolated yet / left view
+    const cx = (app.stage.x + isoX(st.rx, st.ry) * camZoom) * fx;
+    const feet = (app.stage.y + isoY(st.rx, st.ry, st.rz != null ? st.rz : st.z) * camZoom) * fy;
+    const hw = DS_HALF_W * camZoom * fx, hh = DS_HEIGHT * camZoom * fy;
+    if (cx + hw < l || cx - hw > r || feet < t || feet - hh > b) continue;
+    pinHealthBar(serial);
+    n++;
+  }
+  setStatus(n ? `Pinned ${n} health bar${n === 1 ? "" : "s"}.` : "Nothing in the selection.");
 }

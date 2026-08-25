@@ -249,6 +249,15 @@ const LIFT_REJECT_MSG = [
 
 // ---- user settings (persisted to localStorage; edited via the Options panel) ----
 const SETTINGS_KEY = "anima.settings";
+// Bandages. ClassicUO `PlayerMobile.FindBandage()` looks for graphic 0x0E21
+// (PlayerMobile.cs:107-118); 0x0E20 is the *bloody* one and does not count.
+// Lives here because two features need it — the bandage hotkeys in 12-input.js
+// and the bandageself macro verb in 13-macros.js — and two top-level `const`s of
+// one name across two script tags is a SyntaxError that kills the later file
+// outright. That very collision happened while both were being written; see
+// scripts/check-web-globals.mjs, which now catches it.
+const BANDAGE_GRAPHIC = 0x0E21;
+
 const SETTINGS_DEFAULTS = {
   sfx: true, sfxVol: 0.4,        // sound effects on/off + volume
   footsteps: true,               // ClassicUO EnableFootstepsSound (default true there too)
@@ -261,6 +270,11 @@ const SETTINGS_DEFAULTS = {
   guardZones: false,             // guard-zone (guard line) boundary overlay — off by default
   debugMove: false,               // movement/Z debug HUD (WalkTo rejects, predicted vs server pos)
   autoOpenDoors: true,            // walking into a closed door opens it (ClassicUO TryOpenDoors) — on by default
+  autoOpenCorpses: false,         // ClassicUO AutoOpenCorpses — a nearby new corpse double-clicks itself
+  autoOpenCorpseRange: 2,         // ClassicUO AutoOpenCorpseRange (its own default)
+  skipEmptyCorpse: false,         // ClassicUO SkipEmptyCorpse — hide an auto-opened corpse that has nothing in it
+  criminalQuery: true,            // ClassicUO EnabledCriminalActionQuery — confirm a harmful target on an innocent
+  beneficialCriminalQuery: false, // ClassicUO EnabledBeneficialCriminalActionQuery (off there too)
   gridLoot: true,                 // corpses open a click-to-loot grid instead of the authentic corpse gump
   gridContainers: false,          // ALL containers as a titled grid (icon+name) vs the authentic gump art (default)
   // ClassicUO ContainersScale (OptionsGump, 50–200, default 100). Applied to
@@ -279,6 +293,14 @@ const SETTINGS_DEFAULTS = {
   drawRoofs: true,
   alwaysRun: false,            // ClassicUO AlwaysRun — keyboard walks run without Shift
   alwaysRunUnlessHidden: true, // ClassicUO AlwaysRunUnlessHidden — walk while hidden
+  // ---- name plates (ClassicUO NameOverHeadManager) ----
+  namePlates: false,           // "stay active": plates without holding Ctrl+Shift (NameOverheadToggled)
+  plateFilter: "all",          // NameOverheadTypeAllowed: all | mobiles | items | mobcorpses
+  // ---- drag-select → pinned health bars (ClassicUO EnableDragSelect) ----
+  dragSelect: true,            // sweep a rectangle over a crowd to pin one bar per mobile
+  dragSelectMod: "shift",      // DragSelectModifierKey: none | ctrl | shift
+  dragSelectHumanoids: false,  // DragSelectHumanoidsOnly
+  dragSelectHostile: false,    // DragSelectHostileOnly (skips ally/innocent/invulnerable)
 };
 let settings = Object.assign({}, SETTINGS_DEFAULTS);
 try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}")); } catch (e) {}
@@ -331,11 +353,24 @@ const OPTIONS = [
   { key: "names", kind: "checkbox", cat: "interface", label: "Overhead names" },
   { key: "bars", kind: "checkbox", cat: "interface", label: "HP bars" },
   { key: "damage", kind: "checkbox", cat: "interface", label: "Damage numbers" },
+  { key: "namePlates", kind: "checkbox", cat: "interface", label: "Name plates stay on" },
+  { key: "plateFilter", kind: "select", cat: "interface", label: "Name plates show",
+    opts: [["all", "everything"], ["mobiles", "mobiles only"], ["items", "items only"], ["mobcorpses", "mobiles + corpses"]] },
+  { key: "dragSelect", kind: "checkbox", cat: "interface", label: "Drag-select health bars" },
+  { key: "dragSelectMod", kind: "select", cat: "interface", label: "Drag-select modifier",
+    opts: [["none", "none"], ["ctrl", "Ctrl"], ["shift", "Shift"]] },
+  { key: "dragSelectHumanoids", kind: "checkbox", cat: "interface", label: "…humanoids only" },
+  { key: "dragSelectHostile", kind: "checkbox", cat: "interface", label: "…hostiles only" },
   { key: "guardZones", kind: "checkbox", cat: "interface", label: "Guard-zone lines (R)", onChange: () => updateGuardZones(scene) },
   { key: "debugMove", kind: "checkbox", cat: "interface", label: "Movement debug" },
 
   { key: "abilities", kind: "checkbox", cat: "gameplay", label: "Weapon abilities", onChange: () => refreshAbilities(true) },
   { key: "autoOpenDoors", kind: "checkbox", cat: "gameplay", label: "Auto-open doors" },
+  { key: "autoOpenCorpses", kind: "checkbox", cat: "gameplay", label: "Auto-open corpses" },
+  { key: "autoOpenCorpseRange", kind: "intRange", cat: "gameplay", label: "…within tiles", min: 1, max: 5 },
+  { key: "skipEmptyCorpse", kind: "checkbox", cat: "gameplay", label: "…skip empty ones", onChange: () => refreshOpenContainers() },
+  { key: "criminalQuery", kind: "checkbox", cat: "gameplay", label: "Confirm criminal actions" },
+  { key: "beneficialCriminalQuery", kind: "checkbox", cat: "gameplay", label: "…and helping criminals" },
   { key: "alwaysRun", kind: "checkbox", cat: "gameplay", label: "Always run" },
   { key: "alwaysRunUnlessHidden", kind: "checkbox", cat: "gameplay", label: "Walk while hidden" },
   { key: "gridLoot", kind: "checkbox", cat: "gameplay", label: "Click-to-loot corpses", onChange: () => refreshOpenContainers() },
@@ -378,11 +413,19 @@ function renderOptions() {
   const sli = (o) => `<div class="opt-row"><label for="opt-${o.key}">${o.label}</label>`
     + `<input type="range" id="opt-${o.key}" data-k="${o.key}" data-int="1" min="${o.min}" max="${o.max}" value="${settings[o.key] | 0}">`
     + `<span class="opt-val" id="optv-${o.key}">${settings[o.key] | 0}</span></div>`;
+  // A fixed set of named choices (ClassicUO's radio-button groups — the name-plate
+  // type filter, the drag-select modifier). `data-k` + the `change` dispatcher are
+  // the same as a checkbox's; only the value read differs (string, not boolean).
+  const sel = (o) => `<div class="opt-row"><label for="opt-${o.key}">${o.label}</label>`
+    + `<select id="opt-${o.key}" data-k="${o.key}" class="opt-sel">`
+    + o.opts.map(([v, t]) => `<option value="${v}"${settings[o.key] === v ? " selected" : ""}>${t}</option>`).join("")
+    + `</select></div>`;
   const btn = (o) => `<label class="opt-row"><button type="button" class="dlg-btn ${o.cls}">${o.label}</button></label>`;
   let html = OPTIONS.filter((o) => o.cat === optCat).map((o) => {
     if (o.kind === "checkbox") return cb(o);
     if (o.kind === "range") return sl(o);
     if (o.kind === "intRange") return sli(o);
+    if (o.kind === "select") return sel(o);
     return btn(o);
   }).join("");
   // Logout keeps its own rendering: it is the one control whose LABEL changes

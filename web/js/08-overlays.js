@@ -150,9 +150,16 @@ function showNameOverhead(serial, tries) {
   const sv = serial >>> 0;
   const isSelf = scene.player && sv === (scene.player.serial >>> 0);
   let name, noto;
-  // ServUO doesn't send your OWN notoriety (self arrives via 0x20/0x22, which carry
-  // no noto byte), so it comes through as 0 — default yourself to Innocent (blue), the
-  // classic "your name" colour. Other mobiles carry real notoriety (crim/murderer/…).
+  // ServUO DOES send your own notoriety, and this comment used to say it does not.
+  // 0x22 MovementAck carries `Notoriety.Compute(m, m)` on every accepted step
+  // (`Packets.cs:4521`) and 0x77 MobileMoving is sent to your own state with the
+  // same value (`Mobile.cs:11398`) — which is why `mobiles.rs` captures notoriety
+  // for self as well, and why `scene.player.noto` reads 3 on a gray GM rather than
+  // 0. Measured live before this comment was rewritten.
+  //
+  // The `|| 1` is therefore a FALLBACK for a shard that genuinely sends nothing,
+  // not the normal path: a real 0 means "unknown", and Innocent blue is the
+  // classic colour for your own name.
   if (isSelf) { name = scene.player.name; noto = (scene.player.noto | 0) || 1; }
   else {
     const m = (scene.mobiles || []).find((x) => (x.serial >>> 0) === sv);
@@ -699,12 +706,185 @@ function placeNameLabel(boxes, cx, bottom, w, h) {
   return bottom;
 }
 
+// ---- name plates / "object handles" (ClassicUO's NameOverHeadManager) -------
+//
+// Hold Ctrl+Shift, or latch it on, and every entity in view gets a client-side
+// name plate: `useObjectHandles = NameOverHeadManager.IsToggled || Keyboard.Ctrl
+// && Keyboard.Shift` (GameScene.cs:571), applied per object at
+// GameSceneDrawingSorting.cs:831 for mobiles and :892 for ITEMS. A filter picks
+// All / Mobiles only / Items only / Mobiles+Corpses
+// (NameOverHeadManager.IsAllowed, NameOverHeadHandlerGump.cs:38-125).
+//
+// The item half is the point: mobile names we already draw whenever the server
+// has told us one, but nothing in this client has ever named a thing on the
+// ground except by hovering it one at a time.
+const plateMods = { ctrl: false, shift: false };
+// Tracked here rather than reusing `shiftHeld` (13-macros.js) because that one
+// is only maintained while the game keydown handler runs — it early-returns
+// while chatting or while a form field has focus, and a plate mode that got
+// stuck on because you tabbed away is worse than none.
+window.addEventListener("keydown", (e) => { plateMods.ctrl = e.ctrlKey; plateMods.shift = e.shiftKey; });
+window.addEventListener("keyup", (e) => { plateMods.ctrl = e.ctrlKey; plateMods.shift = e.shiftKey; });
+window.addEventListener("blur", () => { plateMods.ctrl = plateMods.shift = false; });
+function platesActive() { return !!settings.namePlates || (plateMods.ctrl && plateMods.shift); }
+// ClassicUO MacroType.NamesOnOff → `NameOverHeadManager.ToggleOverheads()`.
+function toggleNamePlates() {
+  settings.namePlates = !settings.namePlates;
+  saveSettings();
+  renderOptions();
+  setStatus("Name plates " + (settings.namePlates ? "on" : "off"));
+  markDirty();
+}
+// `NameOverHeadManager.IsAllowed`, for the four filters the handler gump offers.
+function plateAllowed(isMobile, isCorpse) {
+  switch (settings.plateFilter) {
+    case "mobiles": return isMobile;
+    case "items": return !isMobile;
+    case "mobcorpses": return isMobile || isCorpse;
+    default: return true;   // "all"
+  }
+}
+const itemPlateDivs = new Map();   // item serial -> DOM div
+const platePending = new Set();    // graphics whose /tilename lookup is in flight
+// How many ground items get a plate at once. ClassicUO has no such cap, but each
+// of ours is a DOM node laid out every frame, and a looted battlefield can put
+// hundreds of items in view. The nearest N to the player win; the rest are
+// simply not labelled (they still hover-tooltip as before).
+const PLATE_ITEM_MAX = 60;
+
+// ClassicUO `NameOverheadGump.SetName` for an item (:61, :70-95): the OPL name if we
+// already have one; otherwise an amount prefix for a non-corpse stack, then the
+// tiledata name, then cliloc `1020000 + graphic`.
+//
+// Those last two are exactly what the play server's `/tilename/<graphic>` route
+// resolves (`tile_name_json` — tiledata first, cliloc second), so they cost one
+// memoized lookup per distinct GRAPHIC rather than a wire request per item.
+// Deliberately NO `oplreq` burst here: an OPL we already hold is free, but
+// asking for sixty of them the moment Ctrl+Shift goes down is a wire storm the
+// user did not ask for, and the tiledata name is what ClassicUO would fall back
+// to anyway.
+//
+// Returns "" while the lookup is in flight or when neither source names it —
+// ClassicUO likewise returns false from `SetName` and shows nothing.
+function itemPlateName(it) {
+  const serial = it.serial >>> 0;
+  const opl = oplName(serial);
+  if (opl) return opl;
+  const g = it.g | 0;
+  if (!staticNameCache.has(g)) {
+    // `staticTileName` has no in-flight guard of its own (it is written for a
+    // one-off click), so the guard lives here — without it every frame would
+    // fire another fetch for the same graphic until the first one landed.
+    if (!platePending.has(g)) {
+      platePending.add(g);
+      staticTileName(g, () => { platePending.delete(g); markDirty(); });
+    }
+    return "";
+  }
+  const nm = staticNameCache.get(g);
+  if (!nm) return "";
+  const amt = it.amount | 0;
+  return (g !== 0x2006 && amt > 1) ? amt + " " + nm : nm;
+}
+// A plate is clickable, unlike the passive name labels. ClassicUO gives it three
+// gestures and we give it the same three:
+//   • a single click ANSWERS A TARGET CURSOR and does nothing otherwise
+//     (NameOverheadGump.OnMouseUp, :314-361 — the no-cursor branch only handles
+//     dropping a held item, which is the drag-drop layer's job here);
+//   • a double click attacks in war mode, else uses/opens (`OnMouseDoubleClick`, :274-301);
+//   • dragging a MOBILE's plate off pins a health bar (`DoDrag`, :199-260).
+// Dragging an ITEM's plate picks the item up upstream (`GameActions.PickUp`,
+// :265); that path lives in the drag-drop layer here, so an item plate is click/double-click only.
+function wirePlate(el, serial, isMobile) {
+  el.addEventListener("mouseup", (e) => {
+    if (e.button !== 0 || el._dragged) { el._dragged = false; return; }
+    if (!(scene && scene.target && scene.target.active === 1) || targetUIHidden) return;
+    sendInput("target:" + serial);
+    endTargetUI();
+  });
+  el.addEventListener("dblclick", (e) => {
+    e.preventDefault();
+    const war = !!(scene && scene.war);
+    if (isMobile && war) { sendInput("attack:" + serial); return; }
+    sendInput("use:" + serial);
+    // A container/corpse also needs its loot window opened locally — `use:` alone
+    // is only the wire half, exactly as the sprite double-click path does it.
+    const it = isMobile ? null : (scene && scene.items || []).find((x) => (x.serial >>> 0) === serial);
+    if (it && it.c) openContainer(serial);
+  });
+  if (!isMobile) return;
+  el.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    // Cleared HERE, not in the mouseup below: a drag that ends off the label
+    // never fires that handler, and a stale flag would swallow the next click.
+    el._dragged = false;
+    const sx = e.clientX, sy = e.clientY;
+    const move = (ev) => {
+      if (Math.abs(ev.clientX - sx) <= 4 && Math.abs(ev.clientY - sy) <= 4) return;
+      done();
+      el._dragged = true;
+      pinHealthBar(serial, ev.clientX - 60, ev.clientY - 20);
+    };
+    const done = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", done); };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", done);
+  });
+}
+// One pass over the ground items, pushing a label job per plate. Shares
+// `nameJobs` with the mobile labels so the de-collide pass below sees both.
+function collectItemPlates(nameJobs, seenItems) {
+  const px = scene.player ? scene.player.x | 0 : 0, py = scene.player ? scene.player.y | 0 : 0;
+  const cands = [];
+  for (const it of scene.items || []) {
+    if (it.serial === undefined || !it.g) continue;
+    if (it.nd || it.fh) continue;                       // never-drawn / seasonally culled
+    if (!plateAllowed(false, (it.g | 0) === 0x2006)) continue;
+    const e = itemPool.get(it.serial);
+    if (!e || !e.sp || !e.sp.visible || e.sp.alpha < 0.05) continue;   // no art yet, or under a roof
+    const d = Math.abs((it.x | 0) - px) + Math.abs((it.y | 0) - py);
+    cands.push({ it, sp: e.sp, d });
+  }
+  // Only worth ordering when the cap will actually bite.
+  if (cands.length > PLATE_ITEM_MAX) cands.sort((a, b) => a.d - b.d);
+  const fx = window.innerWidth / app.renderer.width, fy = window.innerHeight / app.renderer.height;
+  for (let i = 0; i < cands.length && i < PLATE_ITEM_MAX; i++) {
+    const { it, sp } = cands[i];
+    const nm = itemPlateName(it);
+    if (!nm) continue;                                   // unnamed or still loading
+    const serial = it.serial >>> 0;
+    const id = "i" + serial;
+    seenItems.add(id);
+    let d = itemPlateDivs.get(id);
+    if (!d) {
+      d = document.createElement("div");
+      d.className = "nm-label np-plate";
+      namesEl().appendChild(d);
+      itemPlateDivs.set(id, d);
+      wirePlate(d, serial, false);
+    }
+    if (d._t !== nm) { d.textContent = nm; d._t = nm; d._measure = true; }
+    // Anchor to the top of the ART, not the tile: a ground item is foot-anchored
+    // at `isoY(x, y, z) + HALF` (05-poll.js's item pool) but a corpse drawn as a
+    // resolved death pose is anchored at its draw-centre instead, so the sprite's
+    // own anchor is what decides where its top edge is.
+    const cx = (app.stage.x + (sp.x + (0.5 - sp.anchor.x) * sp.width) * camZoom) * fx;
+    const top = sp.y - sp.anchor.y * sp.height - 2;
+    nameJobs.push({ d, serial, cx, naturalBottom: (app.stage.y + top * camZoom) * fy, nm });
+  }
+}
+
 // Draw a name + HP bar above each OTHER mobile, anchored to its interpolated iso
 // position (like the overhead speech). Objects are cached per serial and only
 // redrawn when their value/notoriety changes; pruned when the mobile leaves view.
 function drawBars(now) {
   if (!scene) return;
   const seen = new Set();
+  const seenItems = new Set(); // …and the same for the item plates' own div map
+  // Ctrl+Shift (or the latched setting) turns on the plate mode; it can only ADD
+  // labels, never take away one `settings.names` already asked for.
+  const plates = platesActive();
+  const plateMobiles = plates && plateAllowed(true, false);
   const nameBoxes = []; // this pass's placed name-label boxes, for placeNameLabel()
   const nameJobs = []; // {d, serial, cx, naturalBottom, nm} — laid out after the loop, once, in a deterministic order
   let changed = false;
@@ -771,11 +951,25 @@ function drawBars(now) {
     // any in-canvas text comes out enlarged/blocky. A DOM overlay is always crisp at
     // the native display resolution. We place it at the entity's *screen* position
     // (camera transform + the canvas→CSS stretch). "no draw" placeholders are skipped.
-    const nm = (m.name || "").trim();
-    if (settings.names && nm && !/^no\s*draw$/i.test(nm)) {
+    // The server's name if it has told us one; otherwise the OPL's first line,
+    // the same fallback `showNameOverhead` uses. ClassicUO instead fires a 0x98
+    // NameRequest per mobile the moment a handle opens (Entity.Update, :131-143);
+    // ours deliberately does not — our nearest equivalent, `allnames`, is a burst
+    // of up to 60 single-clicks whose replies arrive as overhead speech and
+    // journal lines, which is not a thing to do silently on a keychord. Bind the
+    // `all names` macro (or press G) to fill the gaps.
+    const nm = (m.name || (plateMobiles ? oplName(serial) : "") || "").trim();
+    if (nm && !/^no\s*draw$/i.test(nm) && (settings.names || plateMobiles)) {
       seen.add(id);
       let d = nameDivs.get(id);
-      if (!d) { d = document.createElement("div"); d.className = "nm-label"; namesEl().appendChild(d); nameDivs.set(id, d); }
+      if (!d) {
+        d = document.createElement("div"); d.className = "nm-label";
+        namesEl().appendChild(d); nameDivs.set(id, d);
+        wirePlate(d, serial, true);
+      }
+      // Only a plate takes clicks: the passive name label has always been
+      // decoration and must keep letting clicks through to the sprite under it.
+      if (d._plate !== plateMobiles) { d.classList.toggle("np-plate", plateMobiles); d._plate = plateMobiles; }
       // Only a text change invalidates the cached size — mark it for the read
       // phase below instead of measuring inline (that would force a reflow per
       // label per frame, since the loop just dirtied this div's layout).
@@ -794,6 +988,13 @@ function drawBars(now) {
       const d = nameDivs.get(id); if (d) d.style.display = "none";
     }
   }
+  // Ground items never get a name from the server the way a mobile does, so the
+  // plate mode is the only thing that ever labels one — collected here so both
+  // kinds share one de-collide pass and cannot overlap each other.
+  // (`collectItemPlates` re-tests each item against the filter — corpses pass in
+  // "mobiles + corpses", ordinary items don't — so this only asks whether ANY
+  // item could qualify.)
+  if (plates && settings.plateFilter !== "mobiles") collectItemPlates(nameJobs, seenItems);
   // Read phase: only labels whose text changed this frame (d._measure, set
   // above) need a fresh offsetWidth/Height — that's the only thing that can
   // actually change a label's size, so steady state (no text changes) reads
@@ -822,6 +1023,7 @@ function drawBars(now) {
   // Prune name/bar objects whose mobile left view (don't leak PIXI objects / DOM).
   for (const [id, g] of hpBars) if (!seen.has(id)) { barLayer.removeChild(g); g.destroy(); hpBars.delete(id); changed = true; }
   for (const [id, d] of nameDivs) if (!seen.has(id)) { d.remove(); nameDivs.delete(id); }
+  for (const [id, d] of itemPlateDivs) if (!seenItems.has(id)) { d.remove(); itemPlateDivs.delete(id); }
   for (const [id, mk] of tgtMarkers) if (!seen.has(id)) { barLayer.removeChild(mk); mk.destroy(); tgtMarkers.delete(id); changed = true; }
   if (changed) markDirty(); // first appearance / value change → repaint once
 }
@@ -1186,6 +1388,7 @@ function hud(s) {
     if (atBottom) j.scrollTop = j.scrollHeight;
   }
   refreshStatus(s);   // keep the pull-out status bar live (if open)
+  refreshHealthBars(s); // …and every pinned per-entity health bar (07-hud.js)
 }
 function updateDiag() {
   set("diag", `fps ${diag.fps} · poll ${diag.poll.toFixed(0)}ms · sync ${diag.sync.toFixed(1)}ms · sprites ${diag.tiles} · ents ${diag.ents} · worst ${diag.worstFrame.toFixed(0)}ms`);
