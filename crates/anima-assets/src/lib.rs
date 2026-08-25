@@ -43,7 +43,7 @@ pub use customhouse::{
 };
 pub use fonts::Fonts;
 pub use gump::Gumps;
-pub use hues::{apply_hue, Hues};
+pub use hues::{apply_hue, apply_hue_channel, Hues};
 pub use lights::Lights;
 pub use map::{LandTile, MapData, StaticTile, ZReason, MAP_HEIGHT, MAP_WIDTH};
 pub use mapdif::{MapDiffs, MapPatchCounts};

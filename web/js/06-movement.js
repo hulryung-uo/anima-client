@@ -440,6 +440,36 @@ function enqueueSteps(now) {
 // the step's target at its own decoupled catch-up rate (see below); a completed
 // step commits to the base and the next begins (carrying the time remainder for
 // continuous motion). Turns are consumed instantly (facing only).
+// ---- per-state sprite tints --------------------------------------------------
+// ClassicUO's `overridedHue` (`Views/MobileView.cs:70-133`): a whole-mobile state
+// tint that REPLACES every layer's own dye, body and equipment alike (it is
+// passed into each layer's draw and overwrites the hue there, :677/:731). We
+// showed none of these — poison, the one that matters, was visible only as a
+// colour on a 30px health bar, when in UO a poisoned creature is green from
+// across the screen and that is how you pick a cure target mid-fight.
+const HUE_HIDDEN = 0x038E;         // grey-blue wash
+const HUE_DEAD_CREATURE = 0x0386;
+const HUE_POISON = 0x0044;         // Profile.PoisonHue, default on
+const HUE_PARALYZED = 0x014C;      // Profile.ParalyzedHue, default on
+const HUE_INVULNERABLE = 0x0030;   // Profile.InvulnerableHue, default on
+
+// `dead`/`hidden` come from the caller because it already resolved them.
+// Order is ClassicUO's, and the order is load-bearing: hidden and dead are
+// `else if` (exclusive), while poison / paralysis / invulnerability are three
+// consecutive plain `if`s, so each later one overwrites the earlier.
+function mobileStateHue(ent, hidden, dead, body) {
+  if (hidden) return HUE_HIDDEN;
+  // A dead *creature* greys out; a human ghost keeps its own translucent
+  // treatment, which we already do with alpha.
+  if (dead) return bodyIsHuman(body | 0) ? 0 : HUE_DEAD_CREATURE;
+  if (!ent) return 0;
+  let h = 0;
+  if (ent.poisoned) h = HUE_POISON;
+  if (ent.para) h = HUE_PARALYZED;
+  if (ent.yellow) h = HUE_INVULNERABLE;
+  return h;
+}
+
 // ---- footstep sounds ---------------------------------------------------------
 // These are CLIENT-generated: ServUO never sends one (grepping it for 0x12B /
 // 0x129 finds only a Huffman table entry), so without this the world is silent
@@ -680,6 +710,9 @@ function renderFrame(dt) {
     me.rx = pred.rx; me.ry = pred.ry; me.rz = pred.rz; me.z = pred.z; me.dir = pred.dir;
     // Boat offsets carry a standing passenger without playing a walk cycle.
     me.animMoving = carriedByBoat ? false : pred.moving;
+    // Same rule for ourselves — but not while a boat is carrying us, since that
+    // is the deck moving, not our legs, and a pose should survive the ride.
+    if (me.animMoving && me.act) me.act = null;
     me.stepDur = stepDelay(!!(moveIntent && moveIntent.run), mounted());
     // Leg cadence tied to GROUND COVERED (cyclesPerTile): walking unchanged
     // (80ms/frame); running takes bigger strides so the legs don't whirl. Phase
@@ -716,6 +749,14 @@ function renderFrame(dt) {
     const dist = Math.hypot(dx, dy);
     const mv = dist > 0.06 || now < (st.moveUntil || 0);
     st.animMoving = mv;
+    // Walking beats a server-sent pose. ClassicUO drops the animation the moment
+    // it evaluates a step — `if (AnimationFromServer) SetAnimation(0xFF)` in
+    // `Mobile.ProcessSteps` (:704-709), and again when the queue empties
+    // (:275-283) — so a mobile that is struck or swings and then steps switches
+    // to its walk cycle instantly instead of gliding across the ground still
+    // cycling the swing frames. `st.act` is only ever set from 0x6E/0xE2, which
+    // is exactly what `AnimationFromServer` marks there.
+    if (mv && st.act) st.act = null;
     // Leg cadence tied to ground covered. The run flag is the SERVER's now
     // (`scene.mobiles[].run`, the 0x80 bit of the direction byte) — this used to
     // infer it from the measured step cadence, which misread whenever the poll
@@ -1341,6 +1382,10 @@ function drawMobs() {
       frame = 0;
     }
     const skinHue = ent && ent.hue ? ent.hue : 0;
+    // A state tint outranks every dye on the mobile, exactly as ClassicUO's
+    // `overridedHue` does — so it is resolved once here and substituted into
+    // both the body URL and every equipment layer's.
+    const stateHue = mobileStateHue(ent, hidden, ghost, st.body);
     // Compose the character from stable PARTS (mount, body, each worn layer). Two
     // fixes for the walk/run "naked↔dressed" flicker and the layer-swap bug:
     //  • PER-PART last-good texture (`st.partTex`): when a part's texture for the
@@ -1391,7 +1436,8 @@ function drawMobs() {
       part("mount", `anim/${mountAnim}/${mg}/${d}/${mFrame}.png`, -1, false, mountAnim, mg, mFrame);
     }
     // BODY (hued by skin).
-    part("body", bodyAnim ? `anim/${bodyAnim}/${group}/${d}/${frame}.png${skinHue ? `?hue=${skinHue}` : ""}` : null, 0, pick, bodyAnim, group, frame);
+    const bodyHue = stateHue || skinHue;
+    part("body", bodyAnim ? `anim/${bodyAnim}/${group}/${d}/${frame}.png${bodyHue ? `?hue=${bodyHue}` : ""}` : null, 0, pick, bodyAnim, group, frame);
     // SHADOW, behind everything. ClassicUO draws exactly one per mobile — an
     // extra pass over the BODY frame only (`MobileView.Draw`'s `hasShadow`
     // branch, `entity = null`), never per worn layer, so overlapping clothes
@@ -1419,7 +1465,8 @@ function drawMobs() {
       // full dressed frame is decoded before it's shown (kills per-frame layer lag).
       if (moving && st.prevEquipKey !== `${group}/${d}`) {
         for (const e of worn) for (let f = 0; f < frames; f++) {
-          texFor(`anim/${e.anim}/${group}/${d}/${f}.png${e.hue ? `?hue=${e.hue}` : ""}`);
+          const ph = stateHue || e.hue;
+          texFor(`anim/${e.anim}/${group}/${d}/${f}.png${ph ? `?hue=${ph}` : ""}`);
         }
         st.prevEquipKey = `${group}/${d}`;
       }
@@ -1436,7 +1483,8 @@ function drawMobs() {
         const fk = `${e.anim}/${group}/${d}`;
         const n = frameCount.has(fk) ? Math.max(1, frameCount.get(fk)) : 0;
         const idx = n > 0 ? (frame % n) : frame;
-        part("L" + e.layer, `anim/${e.anim}/${group}/${d}/${idx}.png${e.hue ? `?hue=${e.hue}` : ""}`,
+        const lh = stateHue || e.hue;
+        part("L" + e.layer, `anim/${e.anim}/${group}/${d}/${idx}.png${lh ? `?hue=${lh}` : ""}`,
           1 + layerRank(e.layer, d), false, e.anim, group, idx);
       }
     }

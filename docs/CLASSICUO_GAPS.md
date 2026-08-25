@@ -2002,3 +2002,55 @@ re-derives them:
 The **0x11 renamable flag** is left alone for the same reason it was marginal:
 we already ship `build_rename_request`, and the flag only says whether a UI
 should *offer* rename. Worth doing the day a rename affordance exists.
+
+---
+
+Closed 2026-08-25 (three rendering rules we had wrong, not missing): from the
+render survey's tail. All client-side except one query parameter.
+
+**Walking now beats a server-sent pose.** ClassicUO drops the animation the
+moment it evaluates a step — `if (AnimationFromServer) SetAnimation(0xFF)` in
+`Mobile.ProcessSteps` (:704-709), and again when the queue empties (:275-283).
+We retired `st.act` only when its own frame count ran out and gave it priority
+over the walk branch unconditionally, so a mobile that was struck or swung and
+then stepped glided across the ground still cycling the swing frames. `st.act`
+is set from 0x6E/0xE2 and nothing else, which is exactly what
+`AnimationFromServer` marks there, so clearing it while moving is the same rule.
+Not while a boat carries us: that is the deck moving, not our legs.
+
+**Per-state sprite tints.** ClassicUO's `overridedHue`
+(`Views/MobileView.cs:70-133`) is a whole-mobile tint that REPLACES every
+layer's own dye — body and equipment alike, since it is passed into each layer's
+draw and overwrites the hue there (:677, :731). We applied none of them, handling
+these states with alpha only. Poison is the real loss: in UO a poisoned creature
+is green from across the screen, which is how a healer picks a cure target
+mid-fight, and we showed it only as a colour on a 30px health bar.
+
+Ported with ClassicUO's own precedence, which is load-bearing: hidden (`0x038E`)
+and dead (`0x0386`, creatures only) are `else if` and therefore exclusive, while
+poison (`0x0044`), paralysis (`0x014C`) and invulnerability (`0x0030`) are three
+consecutive plain `if`s, so each later one overwrites the earlier. All three
+highlight toggles default **on** in `Profile.cs`.
+
+Paralysis needed a new scene field: `Mobile::paralyzed` had been parsed from the
+status-flags 0x01 bit since the beginning and never emitted. Live-verified —
+`[set Frozen true` on a spawned orc flips `para` to true.
+
+**Hued effects used the wrong colour-ramp channel.** ClassicUO's shader has two
+hued branches and this is the whole difference between them: `HUED` does
+`get_rgb(color.r, hue)` while `EFFECT_HUED` does `get_rgb(color.g, hue)`
+(`IsometricWorld.fx:119` vs `:161-164`), and effect art goes through the second.
+Our `apply_hue` always indexed by red. Effect art is mostly coloured rather than
+greyscale, so `r != g` and the wrong channel lands on a different step of the
+ramp — a hued fireball at the wrong brightness.
+
+`apply_hue_channel` takes the channel and the art route accepts `?fx=1`, which is
+part of the tile cache key since the same graphic and hue now give two different
+images. **Measured live:** requesting six of eight effect graphics both ways
+returns different bytes — including 0x36CB (the explosion), 0x36D4 (fireball) and
+0x36E4 (snowball) — while two return byte-identical PNGs, those being the
+greyscale sources where the two rules agree. That is also why the wrong channel
+went unnoticed: plenty of effects looked correct.
+
+Not verified: the tints and the pose cancellation as drawn pixels. Both are
+browser-side rendering, and no browser was driven.

@@ -521,7 +521,16 @@ pub(super) fn handle_request(ctx: Ctx) {
     } else if let Some(id) = parse_music_url(&url) {
         serve_music(music, id, req);
     } else if let Some((is_static, g)) = parse_art_url(&url) {
-        serve_art(art, hues, tile_cache, is_static, g, hue, req);
+        serve_art(
+            art,
+            hues,
+            tile_cache,
+            is_static,
+            g,
+            hue,
+            has_fx_query(&raw_url),
+            req,
+        );
     } else if let Some(id) = parse_light_url(&url) {
         serve_light(lights, id, parse_color_query(&raw_url), req);
     } else if let Some(id) = parse_texmap_url(&url) {

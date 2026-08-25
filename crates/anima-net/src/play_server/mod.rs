@@ -1502,7 +1502,7 @@ impl PlayServer {
 
 // Keyed by (is_static, graphic, hue) so hued effect frames don't collide with the
 // plain terrain/static art.
-type TileCache = Arc<Mutex<ByteCache<(bool, u16, u16), Vec<u8>>>>;
+type TileCache = Arc<Mutex<ByteCache<(bool, u16, u16, bool), Vec<u8>>>>;
 // Keyed by (body, group, dir, frame, hue) so hued + un-hued frames don't collide.
 // Cached anim frame: (PNG bytes, draw-center cx, cy). The center is sent to the
 // client as headers so it can position each part (body/equipment/mount) correctly.

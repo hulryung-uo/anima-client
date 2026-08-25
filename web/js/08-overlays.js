@@ -636,7 +636,13 @@ function drawEffects(now) {
     const g = o.frames[Math.floor(age / o.fm) % o.frames.length] | 0;
     // Lightning frames are GUMP art (0x4E20 strip); everything else is ART tiles.
     const base = o.kind === 1 ? `gump/${g}.png` : `art/static/${g}.png`;
-    const tex = texFor(base + (o.hue ? `?hue=${o.hue}` : ""));
+    // `fx=1`: hue effect art the way ClassicUO's EFFECT_HUED shader branch does,
+    // indexing the ramp by GREEN rather than red (`IsometricWorld.fx:161-164`
+    // vs `:119`). Effect art is mostly coloured rather than greyscale, so the
+    // two channels disagree and the wrong one lands on a different step of the
+    // ramp — a hued fireball at the wrong brightness. Lightning is GUMP art and
+    // is drawn unhued, so it never needs the flag.
+    const tex = texFor(base + (o.hue ? `?hue=${o.hue}&fx=1` : ""));
     if (tex && o.sprite.texture !== tex) o.sprite.texture = tex;
     o.sprite.visible = !!o.sprite.texture && o.sprite.texture !== PIXI.Texture.EMPTY;
 

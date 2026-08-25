@@ -86,6 +86,20 @@ impl Hues {
 /// that is `px[0] >> 3`, not a 0..255 rescale, which would map dark reds
 /// (5-bit 1 → 8-bit 8) onto ramp 0.
 pub fn apply_hue(img: &mut crate::art::Image, hues: &Hues, hue: u16) {
+    apply_hue_channel(img, hues, hue, false)
+}
+
+/// As [`apply_hue`], but `effect` selects the GREEN channel as the ramp index.
+///
+/// ClassicUO's shader has two hued branches and they differ in exactly this:
+/// `HUED`/`PARTIAL_HUED` do `get_rgb(color.r, hue)` while `EFFECT_HUED` does
+/// `get_rgb(color.g, hue)` (`IsometricWorld.fx:119` vs `:161-164`), and effect
+/// art goes through the second — `GameEffectView` passes `effect: true` to
+/// `GetHueVector`. Effect art is mostly coloured rather than greyscale, so
+/// `r != g` and the wrong channel picks a different step of the ramp: a hued
+/// fireball comes out at the wrong brightness. On a grey source the two agree
+/// exactly, which is why plenty of effects looked right anyway.
+pub fn apply_hue_channel(img: &mut crate::art::Image, hues: &Hues, hue: u16, effect: bool) {
     let id = hue & 0x3FFF;
     if id == 0 {
         return;
@@ -98,7 +112,7 @@ pub fn apply_hue(img: &mut crate::art::Image, hues: &Hues, hue: u16) {
         if partial && !(px[0] == px[1] && px[1] == px[2]) {
             continue; // partial hue: leave non-gray pixels untouched
         }
-        let ramp = px[0] >> 3;
+        let ramp = if effect { px[1] >> 3 } else { px[0] >> 3 };
         let c = hues.color(id, ramp);
         px[0] = c[0];
         px[1] = c[1];
@@ -139,6 +153,52 @@ mod tests {
         img.rgba = vec![0, 255, 0, 255];
         apply_hue(&mut img, &hues, 1);
         assert_eq!(img.rgba[1], 0, "ramp follows red, not max(r,g,b)");
+    }
+
+    /// Effect art takes the ramp index from GREEN, not red — ClassicUO's shader
+    /// has two hued branches and that is the whole difference between them
+    /// (`IsometricWorld.fx:161-164` vs `:119`). On a grey pixel the two agree,
+    /// which is why the wrong channel went unnoticed for so long.
+    #[test]
+    fn effect_hue_indexes_ramp_by_green_channel() {
+        // Tag each ramp slot in BLUE this time, so the assertion cannot be
+        // satisfied by the channel being read.
+        let mut ramp = [[0u8; 4]; BLOCK_COLORS];
+        for (i, slot) in ramp.iter_mut().enumerate() {
+            *slot = [0, 0, i as u8, 255];
+        }
+        let hues = test_hues(ramp);
+
+        // r and g deliberately disagree: red 255 (ramp 31) vs green 8 (ramp 1).
+        let px = vec![255, 8, 0, 255];
+
+        let mut sprite = crate::art::Image {
+            width: 1,
+            height: 1,
+            rgba: px.clone(),
+        };
+        apply_hue_channel(&mut sprite, &hues, 1, false);
+        assert_eq!(sprite.rgba[2], 31, "sprite art follows red");
+
+        let mut effect = crate::art::Image {
+            width: 1,
+            height: 1,
+            rgba: px,
+        };
+        apply_hue_channel(&mut effect, &hues, 1, true);
+        assert_eq!(effect.rgba[2], 1, "effect art follows green");
+
+        // A grey source is the case where both rules agree — the reason plenty
+        // of hued effects looked correct under the wrong channel.
+        for effect in [false, true] {
+            let mut grey = crate::art::Image {
+                width: 1,
+                height: 1,
+                rgba: vec![80, 80, 80, 255],
+            };
+            apply_hue_channel(&mut grey, &hues, 1, effect);
+            assert_eq!(grey.rgba[2], 10, "grey agrees either way (effect={effect})");
+        }
     }
 
     #[test]

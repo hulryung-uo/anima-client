@@ -300,6 +300,15 @@ pub(super) fn tile_name_json(
 /// Extract `c=<n>` from a raw URL query string — a light's colour index. 0 (no
 /// Extract `c=<n>` from a raw URL query string — a light's colour index. 0 (no
 /// colour, plain white) if absent.
+/// `?fx=1` on an art URL: hue this graphic the way ClassicUO hues a graphical
+/// effect (green channel indexes the ramp) rather than a sprite (red).
+pub(super) fn has_fx_query(raw_url: &str) -> bool {
+    raw_url
+        .split('?')
+        .nth(1)
+        .is_some_and(|q| q.split('&').any(|kv| kv == "fx=1"))
+}
+
 pub(super) fn parse_color_query(raw_url: &str) -> u16 {
     let Some(q) = raw_url.split('?').nth(1) else {
         return 0;
@@ -512,6 +521,10 @@ pub(super) fn parse_art_url(url: &str) -> Option<(bool, u16)> {
     }
 }
 
+// Four asset handles plus four "which pixels" parameters. Grouping the latter
+// into a struct would only move the same four values one line up at the single
+// call site, so the lint is allowed rather than worked around.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn serve_art(
     art: &Option<Arc<Mutex<Art>>>,
     hues: &Option<Arc<Hues>>,
@@ -519,9 +532,14 @@ pub(super) fn serve_art(
     is_static: bool,
     g: u16,
     hue: u16,
+    // `?fx=1`: index the hue ramp by GREEN rather than red, which is what
+    // ClassicUO's `EFFECT_HUED` shader branch does for graphical-effect art
+    // (`IsometricWorld.fx:161-164` vs `:119`). Part of the cache key, since the
+    // same graphic and hue give different pixels under the two rules.
+    effect: bool,
     req: tiny_http::Request,
 ) {
-    let key = (is_static, g, hue);
+    let key = (is_static, g, hue, effect);
     if let Some(b) = cache.lock().unwrap().get_cloned(&key) {
         return respond_png(req, b);
     }
@@ -548,7 +566,7 @@ pub(super) fn serve_art(
         .map(|(mut i, paint)| {
             if paint != 0 {
                 if let Some(h) = hues.as_ref() {
-                    anima_assets::apply_hue(&mut i, h, paint);
+                    anima_assets::apply_hue_channel(&mut i, h, paint, effect);
                 }
             }
             i.to_png()

@@ -79,6 +79,17 @@ pub(super) fn tracked_json(world: &World) -> Value {
     })
 }
 
+/// `para` scene field: the mobile-update status-flags 0x01 bit. Parsed into
+/// `World` since the beginning and never emitted, so the renderer could not
+/// apply ClassicUO's paralysis tint. Only emitted when true.
+pub(super) fn paralyzed_field(paralyzed: bool) -> Value {
+    if paralyzed {
+        json!({ "para": true })
+    } else {
+        json!({})
+    }
+}
+
 /// `run` scene field: the mobile's last update carried `Direction.Running`.
 /// Only emitted when true, like [`hidden_field`] — the renderer's default is
 /// walking. It replaces a *guess* (the browser used to read running off how fast

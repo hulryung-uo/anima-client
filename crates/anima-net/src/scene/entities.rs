@@ -75,6 +75,7 @@ pub(super) fn mobiles_json(world: &World, look: &Look, player: &Mobile) -> Vec<V
             merge_obj(&mut v, running_field(m.running));
             merge_obj(&mut v, flying_field(m.flying));
             merge_obj(&mut v, poisoned_field(m.poisoned));
+            merge_obj(&mut v, paralyzed_field(m.paralyzed));
             merge_obj(&mut v, yellow_field(m.yellow_health));
             v
         })
