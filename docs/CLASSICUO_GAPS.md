@@ -2111,9 +2111,34 @@ against the case it was written for.
 **On verification.** Every row here has offline assertions against the real
 `web/js` in a fake-DOM harness (446 + 174 + 301) and the live checks each
 workstream could reach with one shard and one GM account. Standing shortfalls,
-recorded rather than smoothed over: nothing in the render row was seen as pixels;
+recorded rather than smoothed over:
 the criminal-action confirmation never fired from a real click because a gray GM
 is correctly excluded by ClassicUO's own rule; the party health-bar shape and the
 normalised mana/stamina need a second account nobody has; and the drag-select
 body box is 9-12px generous on three sides and 1-4px **short at the feet**,
 inside its pre-registered threshold but measured and written down.
+
+**The render row's "never seen as pixels" shortfall is now closed.** It was the
+largest one, so it was worth going back for with a CDP-driven browser rather
+than leaving it as a caveat. At `globallight 26`, with `scene.light` 26 and the
+tint at its 0.6 cap:
+
+- The world is genuinely dark, which is the light fix from earlier this week
+  visible for the first time rather than inferred from a scene field.
+- A torch dropped on the ground casts nothing while it is the unlit graphic
+  `0x0F6B` — correctly, it emits no light — and the moment `Burning` flips it to
+  `0x0A12` a light appears at its tile and a shaped, falling-off pool shows on
+  the grass and cobbles.
+- Equipping that torch moves the light onto the player's own tile and gives it
+  the per-facing nudge, and the nudge was checked against ClassicUO's table
+  rather than against the port's own tests: facing East gives `dx +22, dy +55`
+  and South `dx -22, dy +55`, while North and West give none — which is exactly
+  `GameScene.cs:468-495`, where those two directions have no `case` at all. The
+  pool is drawn down-and-right of the character, matching.
+- 100 arrows and a stack of ore each draw as two offset sprites, not one.
+- Fidgets fire on their own: a spawned mobile at +12 s and the player at +19.6 s,
+  both playing group 34, with the `/idleanim` tables fetched for bodies 400/401.
+
+Still not seen as pixels: an effect light (no live effect has light-flagged art
+on this data — see the correction above), and the exact hand position of a worn
+light, which needs the worn sprite's own draw centre.
