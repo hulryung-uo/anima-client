@@ -2192,3 +2192,30 @@ Also closed by the same session: **0xF0's populated records**, which the origina
 note listed as unverified because it needs two accounts. With a real party, a
 member 171 tiles away arrives as `{serial, x: 1602, y: 1591, map: 0}` — exactly
 the member who cannot be seen, which is the whole point of the packet.
+
+---
+
+Closed 2026-08-25 (item plates drag): the last row the parallel run left open.
+The name-plate workstream implemented ClassicUO's three plate gestures for
+mobiles but stopped short of the fourth for items, and said so plainly —
+`web/js/11-dragdrop.js` was not its file, so dragging an item's plate did
+nothing.
+
+ClassicUO's `NameOverheadGump.DoDrag` branches on what the plate names: a mobile
+(or a damageable item) pins a health bar, and `else if (entity != null)` calls
+`GameActions.PickUp`. Ours now does the same, and does it by arming the SAME
+`groundDrag` the world-sprite path arms rather than lifting the item itself. That
+is the point: the stack-split dialog, the locked-item refusal, the drag threshold
+and the one-motion place-on-release all come along unchanged instead of becoming
+a second implementation that drifts from the first.
+
+The arm passes the plate's `rect`, so it gets the container-cell promotion rule —
+leaving the box is what starts the drag — rather than the world sprite's
+hold-time heuristic. On a label this small that is also what stops a
+double-click's few pixels of drift from lifting the item by accident.
+
+**Verified in a real browser over CDP**, with dispatched mouse events rather than
+synthetic calls: pressing on a "dagger" plate and moving 110px puts
+`{serial: 1073867404, g: 3922, amount: 1}` on the cursor, releasing clears it,
+and the server agrees — the dagger is on the ground afterwards with no complaint
+in the journal, so both the pickup and the drop were accepted.

@@ -793,11 +793,13 @@ function itemPlateName(it) {
 //     dropping a held item, which is the drag-drop layer's job here);
 //   • a double click attacks in war mode, else uses/opens (`OnMouseDoubleClick`, :274-301);
 //   • dragging a MOBILE's plate off pins a health bar (`DoDrag`, :199-260).
-// Dragging an ITEM's plate picks the item up upstream (`GameActions.PickUp`,
-// :265); that path lives in the drag-drop layer here, so an item plate is click/double-click only.
+//   • dragging an ITEM's plate picks the item up (`DoDrag`'s `else if (entity
+//     != null)` arm → `GameActions.PickUp`, :265).
 function wirePlate(el, serial, isMobile) {
   el.addEventListener("mouseup", (e) => {
-    if (e.button !== 0 || el._dragged) { el._dragged = false; return; }
+    // `cursorItem` as well as `_dragged`: a drag that promoted lifted the item on
+    // a window listener, and this element's own mouseup still fires afterwards.
+    if (e.button !== 0 || el._dragged || cursorItem) { el._dragged = false; return; }
     if (!(scene && scene.target && scene.target.active === 1) || targetUIHidden) return;
     sendInput("target:" + serial);
     endTargetUI();
@@ -812,7 +814,32 @@ function wirePlate(el, serial, isMobile) {
     const it = isMobile ? null : (scene && scene.items || []).find((x) => (x.serial >>> 0) === serial);
     if (it && it.c) openContainer(serial);
   });
-  if (!isMobile) return;
+  if (!isMobile) {
+    // ITEM plate: arm the SAME `groundDrag` the world-sprite path arms rather
+    // than lifting here. Everything that hangs off it then comes along
+    // unchanged — the stack-split dialog, the locked-item refusal, the
+    // one-motion place-on-release — instead of being a second implementation
+    // that drifts from the first.
+    //
+    // `rect` is passed because a plate IS a real on-screen element, so it gets
+    // the container-cell rule (leaving the box promotes) rather than the world
+    // sprite's hold-time heuristic. On a label this small that is also what
+    // stops a double-click's drift from lifting the item.
+    el.addEventListener("mousedown", (e) => {
+      if (e.button !== 0 || cursorItem) return;
+      const it = ((scene && scene.items) || []).find((x) => (x.serial >>> 0) === serial);
+      if (!it) return;
+      e.preventDefault();
+      el._dragged = false;
+      groundDrag = {
+        serial, g: it.g | 0, amount: (it.amount | 0) || 1,
+        st: !!it.st, hue: it.hue | 0,
+        sx: e.clientX, sy: e.clientY, started: false, t: performance.now(),
+        rect: el.getBoundingClientRect(),
+      };
+    });
+    return;
+  }
   el.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
     e.preventDefault();
