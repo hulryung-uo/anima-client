@@ -304,26 +304,20 @@ test("an auto-opened corpse with nothing in it hides itself, and reveals the mom
   eq(winOf(ctx).el.style.display, "", "the next refresh reveals it");
 });
 
-// KNOWN BUG, documented rather than fixed.
-//
-// The hide is `win.el.style.display = items.length ? "" : "none"` INSIDE the
-// `settings.skipEmptyCorpse && …` guard, so turning the option off never
-// reaches the line that would put the window back. The Options row does call
-// refreshOpenContainers() on change, which clears the signature and re-renders
-// — the re-render simply skips the whole branch and leaves display:none behind.
-// The window stays invisible until it is closed and reopened.
-//
-// The assertion below pins the WRONG behaviour on purpose. If it starts
-// failing, the bug was fixed — delete this test. The fix is to clear the
-// display outside the guard, next to the other "shed the previous mode" resets.
-test("BUG: switching SkipEmptyCorpse off leaves an already-hidden corpse window invisible", () => {
+// Was a documented bug, now fixed. The hide used to live INSIDE the
+// `settings.skipEmptyCorpse` guard, so turning the option off never reached the
+// line that would put the window back and an already-hidden corpse stayed
+// invisible until it was closed and reopened. The reveal is unconditional now,
+// outside the guard, next to the other "shed the previous mode" resets.
+test("switching SkipEmptyCorpse off reveals a corpse window it had already hidden", () => {
   const ctx = world(contCtx(), { gump: 9, items: [] });
   ctx.run("settings.skipEmptyCorpse = true;");
   ctx.run(`autoOpenedCorpses.add(${BAG}); openContainer(${BAG});`);
   eq(winOf(ctx).el.style.display, "none", "hidden while the option is on");
   ctx.run("settings.skipEmptyCorpse = false; refreshOpenContainers();");
-  eq(winOf(ctx).el.style.display, "none",
-     "BUG: the option is off and the window re-rendered, but it is still display:none");
+  eq(winOf(ctx).el.style.display, "", "…and it comes back the moment the option goes off");
+  ctx.run("settings.skipEmptyCorpse = true; refreshOpenContainers();");
+  eq(winOf(ctx).el.style.display, "none", "…and hides again when it goes back on");
 });
 
 test("a corpse YOU opened is never hidden, however empty it is", () => {

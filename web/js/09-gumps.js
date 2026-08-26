@@ -1334,9 +1334,17 @@ function refreshParty() {
   // Mana and stamina belong in the signature: they were already on the wire
   // (`dialogs.rs` emits them per member) and hashing only hits/name meant a
   // member whose mana changed never repainted.
+  // Staleness is in the signature, and it has to be. `pt-stale` is decided from
+  // `scene.tracked.party`, and that list moving is often the ONLY thing that
+  // changes — worst in exactly the case the dimming exists for: once a member is
+  // out of range their vitals freeze, so their own half of this string stops
+  // moving too. Without this a two-person party standing still at full health
+  // never shows the "this reading is old" marker at all. (Second time in this
+  // one function: `refreshStalePartyStatus` sat behind the same guard.)
   const sig = `${party.leader}|${invite}|${partyLootMe ? 1 : 0}|` +
     (party.members || [])
-      .map((m) => `${m.serial}:${m.hits}:${m.hitsMax}:${m.mana}:${m.manaMax}:${m.stam}:${m.stamMax}:${m.name}`)
+      .map((m) => `${m.serial}:${m.hits}:${m.hitsMax}:${m.mana}:${m.manaMax}:${m.stam}:${m.stamMax}:${m.name}` +
+                  `:${partyMemberInView(m.serial) ? 1 : 0}`)
       .join(",");
   if (win._sig === sig) return;
   win._sig = sig;

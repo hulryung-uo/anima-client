@@ -710,9 +710,17 @@ function refreshContainer(serial) {
   // whose items are still in flight look identical at this instant; the next
   // refresh reveals it the moment anything lands in it. A corpse you opened by
   // hand is never hidden (ClassicUO's `ManualOpenedCorpses`).
+  //
+  // The reveal is UNCONDITIONAL, outside the guard. It used to sit inside it,
+  // which meant turning the option off never reached the line that would put the
+  // window back: an already-hidden corpse stayed invisible until it was closed
+  // and reopened, even though the Options row does re-render on change. Shedding
+  // the previous mode is exactly what the other toggles do here too.
+  win.el.style.display = "";
   if (settings.skipEmptyCorpse && autoOpenedCorpses.has(serial)
-      && !manualOpenedCorpses.has(serial) && isCorpseContainer(serial)) {
-    win.el.style.display = items.length ? "" : "none";
+      && !manualOpenedCorpses.has(serial) && isCorpseContainer(serial)
+      && !items.length) {
+    win.el.style.display = "none";
   }
   // No signature check here: every caller already means "rebuild now". The
   // dialog driver stamps `win._sig = sig` BEFORE calling update() (dialogs.js

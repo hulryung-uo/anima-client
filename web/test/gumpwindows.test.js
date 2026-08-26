@@ -255,33 +255,25 @@ test("with no 0xF0 at all, distance is the fallback — and an unseen member is 
   eq(ptRows(gone)[1].className.includes("pt-stale"), true, "not in the world at all → dimmed");
 });
 
-// KNOWN BUG, documented rather than fixed (this file does not change web/js).
-//
-// `pt-stale` is read from scene.tracked.party inside the render, but
-// scene.tracked is NOT part of refreshParty's signature — so when the ONLY
-// thing that changed is the 0xF0 tracking list, the guarded refresh returns
-// early and the row does not dim. That is worst in exactly the case the
-// dimming exists for: once a member is out of range their hits/mana/stam
-// FREEZE, so their own half of the signature stops moving too. In a
-// two-person party at full health, standing still, nothing changes and the
-// honest "this reading is old" marker simply never appears.
-//
-// The assertion below pins the WRONG behaviour on purpose. If it starts
-// failing, the bug was fixed — delete this test, and the fix belongs in
-// refreshParty's `sig`.
-test("BUG: the out-of-range dimming does not appear until some OTHER party field moves", () => {
+// Was a documented bug, now fixed: `pt-stale` is read from `scene.tracked.party`
+// inside the render, and that list moving is often the ONLY thing that changes.
+// Worst in exactly the case the dimming exists for — once a member is out of
+// range their hits/mana/stam FREEZE, so their own half of the signature stops
+// moving too, and a two-person party standing still at full health never showed
+// the marker at all. The signature carries each member's in-view state now.
+test("a member going out of range dims the row on the 0xF0 list ALONE", () => {
   const ctx = party(uiCtx(), {
     members: [M({ serial: 9, name: "Me", hits: 100, hitsMax: 100 }), M()],
     mobiles: [{ serial: 0x101, x: 101, y: 100, z: 0, name: "Bob" }],
     tracked: { on: 1, party: [] },
   });
   eq(ptRows(ctx)[1].className.includes("pt-stale"), false, "in range to start with");
+  // Nothing else moves: same hits, same mana, same stam, same name.
   ctx.run("scene.tracked.party = [{ serial: 0x101, x: 900, y: 900 }]; refreshParty();");
-  eq(ptRows(ctx)[1].className.includes("pt-stale"), false,
-     "BUG: 0xF0 now says we cannot see Bob, and the row is still undimmed");
-  ctx.run("scene.party.members[0].mana = 49; refreshParty();");
   eq(ptRows(ctx)[1].className.includes("pt-stale"), true,
-     "…it only lands once something already in the signature happens to move");
+     "0xF0 says we cannot see Bob, so the reading is marked old");
+  ctx.run("scene.tracked.party = []; refreshParty();");
+  eq(ptRows(ctx)[1].className.includes("pt-stale"), false, "…and it clears when they come back");
 });
 
 test("a member whose mana moved repaints — the signature covers every bar it draws", () => {
