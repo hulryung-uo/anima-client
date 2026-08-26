@@ -54,6 +54,11 @@ done < <(find web -name '*.js' -not -path 'web/vendor/*' | sort)
 # handlers at all. `node --check` above compiles each file alone and is blind
 # to it, which is how one reached the working tree.
 run node scripts/check-web-globals.mjs
+# …and the same scripts RUN, not just compiled: web/test loads them into a fake
+# DOM and drives the real renderer head-less. ~0.2s, no network, no shard, no UO
+# data files. `node --check` and the globals check above both stop at "it parses";
+# this is the first step that can tell you the client still works.
+run node web/test/run.js
 
 if [ "${1-}" != "--skip-desktop" ]; then
     # CI runs this as a separate macOS/Windows job; it is the slow one (Tauri).

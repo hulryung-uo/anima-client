@@ -38,6 +38,12 @@ jobs:
       # when they are compiled together, the way the browser loads them.
       - name: Check web scripts share one scope
         run: node scripts/check-web-globals.mjs
+      # Both steps above stop at "it parses". This one RUNS web/js: web/test
+      # loads the real scripts into a fake DOM and drives the renderer
+      # head-less — no network, no shard, no UO data files, seeded RNG and a
+      # test-owned clock so it cannot flake here.
+      - name: Run web/js tests
+        run: node web/test/run.js
 
   desktop:
     name: Desktop compile (${{ matrix.os }})

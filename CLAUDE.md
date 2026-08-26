@@ -73,3 +73,13 @@ the browser puts them in ONE scope. Two top-level `const`s of the same name in
 different files is a SyntaxError that aborts the later file and kills the client,
 and `node --check` — which compiles each file alone — cannot see it. That has
 happened; the step exists because of it.
+
+The step after it, `node web/test/run.js`, is the other half: it **runs** those
+scripts. `web/test/` loads the real `web/dialogs.js` + `web/js/*.js` into a fake
+DOM in one `vm` context (same file list, same `index.html` order) and drives the
+renderer head-less — no browser, no shard, no network, no UO data files. The
+clock, the timers, `Math.random` and `fetch` are all the test's to set, so it
+cannot flake in CI; the whole suite is ~0.2s. Both steps above stop at "it
+parses": a typo like `registerDialogs({` for `registerDialog({` passes them and
+kills the client, and only this step catches it — with the file and the line.
+**Read `web/test/README.md` before adding a test there.**
