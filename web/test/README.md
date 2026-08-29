@@ -73,6 +73,23 @@ and an exit code.
 - `ctx.fire(el, "click", {bubbles: true})`, `ctx.event(type, init)` — input.
 - `ctx.mount(html)` — just the markup a test needs.
 
+### What the fake DOM models, and what it does not
+
+Two stubs are worth knowing about because code under test reads them and a
+missing one is silence, not an error:
+
+- `el.dataset.x = v` writes the `data-x` attribute, as the browser does, so
+  `[data-x]` selectors match elements the client built. This was NOT true at
+  first, and `.cont-item[data-serial]` — the selector the client's own press
+  handler uses — silently matched nothing.
+- An `<img>` has no intrinsic size until a test gives it one: `el.natural =
+  {w, h}` sets `naturalWidth`/`naturalHeight` and makes `complete` true. Leaving
+  it unset is the real state of an image that has not loaded, and code that
+  reads pixels has to cope with it.
+- `el.alpha` (a `(x, y) => 0..255` function, or a `w*h` array) is the mask
+  `getImageData` returns for the last image drawn into a 2d context. That is how
+  a per-pixel hit test is testable at all.
+
 ### Rules
 
 1. **Deterministic or it does not go in.** Anything reading the clock or the RNG
