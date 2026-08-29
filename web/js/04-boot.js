@@ -349,12 +349,37 @@ function fxFrame(now) {
         ctx.fill();
       };
       for (const L of scene.lights) {
-        // `dx`/`dy` (world px, so they scale with the camera): ClassicUO's
-        // per-facing nudge for a light a mobile is CARRYING, so the flame sits in
-        // the hand rather than at the feet (`GameScene.AddLight`:466-497, ported
-        // in scene/entities.rs `worn_light_offset`). Absent on every other light.
-        const sx = (ox + (isoX(L.x, L.y) + (L.dx | 0)) * camZoom) * cssX;
-        const sy = (oy + (isoY(L.x, L.y, L.z) + (L.dy | 0)) * camZoom) * cssY;
+        // A CARRIED light has three placements in ClassicUO and the branch is
+        // decided by whether the item's art was actually drawn on the character:
+        //
+        //  • drawn  → `MobileView.DrawLayer:841-845` lights it from THAT
+        //    sprite's own position, with no per-facing nudge at all. A lit torch
+        //    on the one-hand layer is drawn, so this is the branch it takes.
+        //  • not drawn → `:429`/`:439` use the body's draw point plus the
+        //    per-facing nudge (`worn_light_offset`), which is what `dx`/`dy`
+        //    carry.
+        //
+        // The core cannot tell which applies — it does not know whether the
+        // layer produced a sprite this frame — so it sends both and the choice
+        // is made here, where the sprite either exists or does not. Using the
+        // nudge for a torch that IS drawn put the glow most of a tile below and
+        // beside the flame, which is what this branch fixes.
+        let wx = isoX(L.x, L.y) + (L.dx | 0);
+        let wy = isoY(L.x, L.y, L.z) + (L.dy | 0);
+        if (L.hs !== undefined && L.ly) {
+          const owner = (scene.player && (L.hs >>> 0) === (scene.player.serial >>> 0))
+            ? "self" : ("m" + (L.hs >>> 0));
+          const sp = mobSprites.get(owner + "#L" + (L.ly | 0) + "#0");
+          if (sp && sp.visible && sp.texture) {
+            // Sprites here are anchored bottom-centre; ClassicUO passes the
+            // layer frame's own draw point. Mid-height is where a torch's flame
+            // sits on the frame, and it needs no mirror bookkeeping.
+            wx = sp.x;
+            wy = sp.y - (sp.height || 0) / 2;
+          }
+        }
+        const sx = (ox + wx * camZoom) * cssX;
+        const sy = (oy + wy * camZoom) * cssY;
         punch(sx, sy, L.id, L.c, L.r);
       }
       // A live EFFECT whose art is a light source lights the ground it passes

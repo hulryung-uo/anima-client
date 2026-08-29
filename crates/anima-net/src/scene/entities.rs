@@ -349,8 +349,18 @@ pub(super) fn lights_json(world: &World, look: &Look, px: i64, py: i64, pz: i32)
                     continue;
                 };
                 let (dx, dy) = worn_light_offset(m.direction);
+                // `hs`/`ly` let the renderer take ClassicUO's THIRD call site
+                // (`MobileView.DrawLayer:841-845`): when the worn item's art is
+                // actually drawn on the character, the light comes from that
+                // sprite's own position and the per-facing nudge is not used at
+                // all. Only the `else` branches (`:429`, `:439`) — the item is
+                // NOT drawn — fall back to `drawX/drawY` plus the nudge. The
+                // core cannot know which applies, because it does not know
+                // whether the layer produced a sprite this frame; the browser
+                // draws it and does. So both are sent and the renderer picks.
                 let mut v = json!({ "x": m.pos.x, "y": m.pos.y, "z": m.pos.z, "r": 3,
-                                    "id": lid, "c": lcolor });
+                                    "id": lid, "c": lcolor,
+                                    "hs": holder, "ly": it.layer });
                 if dx != 0 {
                     v["dx"] = json!(dx);
                 }
