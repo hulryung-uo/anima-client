@@ -305,7 +305,15 @@ function fxFrame(now) {
     // in the night overlay at each light (torches/lamps + the player), so the
     // bright game world shows through as a glow. destination-out subtracts the
     // gradient's alpha from the darkness; a radial falloff makes a soft circle.
-    if (fxTint > 0.05 && scene && scene.lights && scene.lights.length && app && app.renderer) {
+    // NOT gated on `scene.lights.length`: this block draws the scene's lights AND
+    // the live-effect pass below it, and an effect over ground with no light of
+    // its own is exactly when a spell should be the thing lighting it. That
+    // coupling is latent rather than live today only because `lights_json` always
+    // pushes the player's own glow — and that glow is OUR addition, not a
+    // ClassicUO port (it has no personal light at all), so the day someone
+    // removes it for fidelity the effect lights would go dark with it and
+    // nothing would say why.
+    if (fxTint > 0.05 && scene && app && app.renderer) {
       const cssX = app.canvas.clientWidth / app.renderer.width;   // renderer→CSS px (x)
       const cssY = app.canvas.clientHeight / app.renderer.height; // renderer→CSS px (y)
       const ox = app.stage.position.x, oy = app.stage.position.y;
@@ -348,7 +356,7 @@ function fxFrame(now) {
         ctx.arc(sx, sy, rad, 0, 6.283);
         ctx.fill();
       };
-      for (const L of scene.lights) {
+      for (const L of (scene.lights || [])) {
         // A CARRIED light has three placements in ClassicUO and the branch is
         // decided by whether the item's art was actually drawn on the character:
         //

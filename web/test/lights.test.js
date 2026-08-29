@@ -49,10 +49,10 @@ test("a carried light is offset into the hand; a ground light is not", () => {
 
 test("an effect lights the ground only when its art says it emits light", async () => {
   const ctx = nightCtx();
-  // One ordinary ground light is in the scene as well, and it has to be: the
-  // effect pass sits INSIDE `if (… scene.lights.length …)` in fxFrame, so an
-  // effect over a tile with no other light source lights nothing. That is the
-  // client's behaviour today, not a claim that it is the right one.
+  // One ordinary ground light is in the scene as well, so this case also shows
+  // the two passes coexisting. It is no longer REQUIRED — see the test below,
+  // which is the one that pins an effect lighting ground that has no light of
+  // its own.
   ctx.run(`scene = { light: 30, weather: 0xFF, weatherN: 0, lights: [
     { x: 5, y: 5, z: 0, r: 3, id: 7, c: 0 } ] };`);
   // /iteminfo/<graphic> is the server's tiledata: `lt` is the light flag, `lid`
@@ -89,4 +89,40 @@ test("at noon the veil eases away and the whole pass stops drawing", () => {
   let drawn = [];
   for (let i = 0; i < 40; i++) drawn = frame(ctx, 1300 + i * 200);
   eq(drawn.length, 0, `nothing is drawn at noon (fxTint ${ctx.run("fxTint")})`);
+});
+
+// The effect pass used to sit inside `if (… scene.lights.length …)`, so a spell
+// over ground with nothing else lit on it lit nothing — which is precisely when
+// a spell should BE the light. It never actually bit, because `lights_json`
+// always pushes the player's own glow and the list is therefore never empty.
+// That glow is our own addition and not a ClassicUO port (it has no personal
+// light), so the coupling would have come alive the day anyone removed it for
+// fidelity. This test is what stops that happening quietly.
+test("an effect lights ground that has no light of its own", async () => {
+  const ctx = nightCtx();
+  ctx.run(`scene = { light: 30, weather: 0xFF, weatherN: 0, lights: [] };`);
+  ctx.setFetch((u) => (u === "iteminfo/14000" ? { anim: 0, lt: 1, lid: 2 } : { anim: 0, lt: 0, lid: 0 }));
+  ctx.run(`
+    fxEffects.length = 0;
+    fxEffects.push({ src: 5, kind: 0, born: 0, fm: 80, frames: [14000], hue: 0,
+                     sprite: { x: 100, y: 300, visible: true, destroyed: false } });
+  `);
+  frame(ctx, 1100);              // first pass only asks /iteminfo
+  await ctx.flush(2);
+  const drawn = frame(ctx, 1200);
+  eq(drawn.length, 1, "the effect lit the ground with no scene light present");
+  deepEq([drawn[0][1], drawn[0][2]], [100 - 50, 300 - 22 - 50],
+         "…at the effect's own position, as it does when other lights are around");
+});
+
+// A scene with no lights AND no effects still paints the darkness itself — the
+// veil is not conditional on anything having a glow in it.
+test("an empty light list still darkens the world", () => {
+  const ctx = nightCtx();
+  ctx.run(`scene = { light: 30, weather: 0xFF, weatherN: 0, lights: [] };
+           fxEffects.length = 0;`);
+  ctx.clearCalls();
+  ctx.setNow(1100); ctx.run("fxFrame(1100)");
+  eq(ctx.calls("drawImage").length, 0, "nothing to punch");
+  ok(ctx.calls("fillRect").length > 0, "…but the night veil is still drawn");
 });
