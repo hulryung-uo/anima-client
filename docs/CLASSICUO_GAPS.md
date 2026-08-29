@@ -2286,3 +2286,57 @@ Still not verified, and now genuinely unverifiable here: an **effect light**, si
 no effect art on this data carries the LightSource flag (see the correction
 above), and the exact hand position of a worn light, which needs the worn
 sprite's own per-frame draw centre and cannot be known on this side of the wire.
+
+
+## Dropping and picking items in a container, by the pixel
+
+Reported from play: things in the backpack "don't follow the mouse properly and
+don't land where you put them". Both halves were real and both were ours.
+
+**The drop was off by half an icon.** The held art is drawn CENTRED on the
+cursor — ClassicUO offsets it by `(w >> 1, h >> 1)` in
+`GameCursor.GetDraggingItemOffset` (:183-184), and our ghost's
+`translate(-50%,-50%)` is the same thing — but the placement sent the cursor
+point raw as the item's top-left. So the item jumped down and right of the ghost
+the instant the button came up. Measured live before the fix: a 44x33 item
+released at gump-local (120,70) had its ghost drawn at (98,54) and was stored at
+(120,70).
+
+`ContainerGump.cs:408-419` and `TradingGump.cs:279-300` are the same four steps
+in the same order, and the order is load-bearing — centre, push the far edge back
+inside, then the near edge, so an item wider than the box lands at 0 rather than
+at a negative coordinate. Both of our drop paths now go through one helper. The
+clamp also used a flat `ITEM_ICON_PX` where ClassicUO uses the held art's own
+size, which mis-clamped every item that is not square: most of them. After the
+fix the same measurement gives ghost, sent command, ClassicUO's arithmetic and
+the coordinate ServUO stored all reading (98,55).
+
+**The pick caught transparent pixels.** ClassicUO hit-tests a container item by
+its art (`ItemGump.Contains` → `Arts.PixelCheck`, :196-228), so a press through
+a transparent corner falls to whatever is drawn underneath. Our cells are divs
+and answered for their whole bounding box. In a real backpack that is the common
+case, not an edge case: on a 31-item pack, 286 of the cell pairs overlap, and
+there were **58 distinct points where the press grabbed an item that was fully
+transparent there** instead of the one under the cursor. After the fix, 0 — with
+the same probe, on the same pack.
+
+The mask is read once per icon URL off the already-loaded `<img>` and cached. An
+icon whose pixels cannot be read — still loading, or a tainted canvas — answers
+for its whole box exactly as before, so nothing becomes unclickable while art is
+in flight. `click` and `dblclick` are re-targeted in the capture phase rather
+than teaching each cell's own handler to re-check.
+
+One deliberate difference: ClassicUO draws a stackable of more than one TWICE,
+the second copy offset by (5,5) (`ItemGump.cs:146-159`), and accepts a hit at
+`(x-5, y-5)` for it. We draw such a stack once, so we test it once — the rule
+being kept is that the hit area is exactly what was painted. If the offset copy
+is ever drawn, its hit follows it.
+
+Two harness gaps surfaced while pinning this, and both could have hidden real
+bugs. `el.dataset.x = v` did not reflect into an attribute, so
+`.cont-item[data-serial]` — the selector the client's own press handler uses —
+silently matched nothing for any element the client built; a test driving the
+real container render would have exercised nothing and passed. `dataset` is
+attribute-backed now. And an `<img>` had no intrinsic size, so nothing that
+reads one could be tested at all; `el.natural` and `el.alpha` are the test's to
+set, and `getImageData` returns the last-drawn image's mask.

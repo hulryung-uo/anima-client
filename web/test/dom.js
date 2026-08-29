@@ -55,6 +55,9 @@ class ClassList {
   [Symbol.iterator]() { return this._set[Symbol.iterator](); }
 }
 
+// dataKey's inverse: `dataset.fooBar` is the attribute `data-foo-bar`.
+const attrKey = (k) => String(k).replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
+
 class Element {
   constructor(tag, doc) {
     this.nodeType = 1;
@@ -64,7 +67,19 @@ class Element {
     this.childNodes = [];
     this.parentNode = null;
     this.style = {};
-    this.dataset = {};
+    // Attribute-backed, like the browser's: the client writes `el.dataset.serial`
+    // and then matches `.cont-item[data-serial]`, so a dataset that did not
+    // reflect into attributes made that selector silently miss — a test driving
+    // the real container render would have exercised nothing and passed.
+    this.dataset = new Proxy({}, {
+      get: (_t, k) => (typeof k === "string" ? this.getAttribute("data-" + attrKey(k)) ?? undefined : undefined),
+      set: (_t, k, v) => { this.setAttribute("data-" + attrKey(k), v); return true; },
+      has: (_t, k) => this.hasAttribute("data-" + attrKey(k)),
+      deleteProperty: (_t, k) => { this.removeAttribute("data-" + attrKey(k)); return true; },
+      ownKeys: () => [...this.attributes.keys()].filter((n) => n.startsWith("data-")).map(dataKey),
+      getOwnPropertyDescriptor: (_t, k) => (this.hasAttribute("data-" + attrKey(k))
+        ? { value: this.getAttribute("data-" + attrKey(k)), enumerable: true, configurable: true } : undefined),
+    });
     this.classList = new ClassList(this);
     this.listeners = new Map();          // type -> [fn]
     this.rect = null;                    // a test may set a layout box here
@@ -78,13 +93,12 @@ class Element {
   hasAttribute(n) { return this.attributes.has(n); }
   removeAttribute(n) {
     this.attributes.delete(n);
-    if (n.startsWith("data-")) delete this.dataset[dataKey(n)];
-    else if (n in PROPS) this[n] = PROPS[n];
+    if (!n.startsWith("data-") && n in PROPS) this[n] = PROPS[n];
   }
   setAttribute(n, v) {
     v = String(v);
     this.attributes.set(n, v);
-    if (n.startsWith("data-")) this.dataset[dataKey(n)] = v;
+    if (n.startsWith("data-")) { /* the dataset Proxy reads straight from here */ }
     else if (n in PROPS) this[n] = n === "checked" || n === "disabled" || n === "selected" ? true : v;
     else if (n === "style") parseStyle(v, this.style);
   }
@@ -191,6 +205,16 @@ class Element {
   get offsetHeight() { return this.getBoundingClientRect().height; }
   get clientWidth() { return this.getBoundingClientRect().width; }
   get clientHeight() { return this.getBoundingClientRect().height; }
+  // An <img>'s intrinsic size, the test's to set (`el.natural = {w, h}`) the
+  // same way `el.rect` is. Nothing here decodes an image, so the honest default
+  // is 0 — which is what a real <img> reports before it has loaded, and what
+  // the code under test must cope with.
+  get naturalWidth() { return (this.natural && this.natural.w) || 0; }
+  get naturalHeight() { return (this.natural && this.natural.h) || 0; }
+  // Giving an <img> a natural size is what "it loaded" means here. Code that
+  // reads pixels has to cope with the un-loaded case too, so leaving `natural`
+  // unset is a real state a test can put the client in, not an omission.
+  get complete() { return !!this.natural; }
   focus() { this.ownerDocument.activeElement = this; }
   blur() { if (this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = this.ownerDocument.body; }
   select() {}

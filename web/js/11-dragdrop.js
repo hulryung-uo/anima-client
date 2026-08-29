@@ -38,6 +38,81 @@ const DRAG_HOLD_MS = 250;       // a small drift only becomes a drag after the b
 // from the far edge that its sprite still lands inside the bag.
 const ITEM_ICON_PX = 44;
 
+// ── which container item is actually under the cursor ────────────────────────
+// ClassicUO hit-tests a container item by its PIXELS — `ItemGump.Contains`
+// (:196-228) is an `Arts.PixelCheck` on the item's own art — so a press through
+// the transparent corner of one icon falls to whatever is drawn beneath it. Our
+// cells are plain divs and caught their whole bounding box, which in a real
+// backpack is most of the time wrong: measured live on a 31-item pack, 286 of
+// the cell pairs overlap and there were 58 distinct points where the press
+// grabbed an item that was fully transparent there instead of the one under the
+// cursor. That is the "it doesn't pick what I'm pointing at" half of the drag
+// feeling broken; the other half was the drop, above.
+//
+// ClassicUO also allows a second hit at `(x-5, y-5)` for a stackable of more
+// than one, because it draws such a stack TWICE, the second copy offset by
+// (5,5) (:146-159). We draw a stack once, so we test it once — the rule being
+// kept here is that the hit area is exactly what was painted. If the offset
+// copy is ever drawn, its hit follows it.
+const alphaMasks = new Map();      // icon URL → {w, h, a: Uint8Array} | null (undecodable)
+// `undefined` (not yet decodable) and `null` (never decodable — a tainted
+// canvas) are different answers on purpose: the first is temporary and the
+// caller retries next press, the second is cached so we stop trying.
+function alphaMaskFor(img) {
+  const key = img.currentSrc || img.src || "";
+  if (alphaMasks.has(key)) return alphaMasks.get(key);
+  if (!img.complete || !img.naturalWidth || !img.naturalHeight) return undefined;
+  let m = null;
+  try {
+    const c = document.createElement("canvas");
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const g = c.getContext("2d", { willReadFrequently: true });
+    g.drawImage(img, 0, 0);
+    const d = g.getImageData(0, 0, c.width, c.height).data;
+    const a = new Uint8Array(c.width * c.height);
+    for (let i = 0, j = 3; i < a.length; i++, j += 4) a[i] = d[j];
+    m = { w: c.width, h: c.height, a };
+  } catch (e) {
+    m = null;               // cross-origin art would taint the canvas; never throw at a click
+  }
+  alphaMasks.set(key, m);
+  return m;
+}
+// True if the icon is painted at this screen point. A cell we cannot read the
+// pixels of answers true, so an undecodable icon behaves exactly as it did
+// before rather than becoming unclickable.
+function cellOpaqueAt(cell, clientX, clientY) {
+  const img = cell.querySelector && cell.querySelector("img");
+  if (!img) return true;
+  const m = alphaMaskFor(img);
+  if (!m) return true;
+  const r = img.getBoundingClientRect();
+  if (!r.width || !r.height) return true;
+  // Map through the drawn box, not 1:1: a container body can be zoomed to the
+  // gump art's own scale, and then screen pixels are not art pixels.
+  const px = Math.floor((clientX - r.left) * m.w / r.width);
+  const py = Math.floor((clientY - r.top) * m.h / r.height);
+  if (px < 0 || py < 0 || px >= m.w || py >= m.h) return false;
+  return m.a[py * m.w + px] > 0;
+}
+// The item the cursor is really on: topmost painted pixel wins. Cells are
+// absolutely positioned siblings, so later in document order paints on top —
+// hence the reverse walk. Returns null when the point is over no item's art,
+// which is ClassicUO's answer too (the click belongs to the container, not to
+// the icon whose empty corner happened to be there).
+function contItemAt(clientX, clientY, from) {
+  const win = from && from.closest && from.closest(".container-win, .trade-win");
+  if (!win) return from || null;
+  const cells = win.querySelectorAll(".cont-item[data-serial]");
+  for (let i = cells.length - 1; i >= 0; i--) {
+    const cell = cells[i];
+    const r = cell.getBoundingClientRect();
+    if (clientX < r.left || clientX >= r.right || clientY < r.top || clientY >= r.bottom) continue;
+    if (cellOpaqueAt(cell, clientX, clientY)) return cell;
+  }
+  return null;
+}
+
 // Place/refresh the floating ghost image at the cursor (page coords).
 function moveGhost(clientX, clientY) {
   if (!dragGhost) return;
@@ -93,6 +168,43 @@ function clearCursorItem() {
   cursorItem = null; liftDrag = false;
   if (dragGhost) { dragGhost.remove(); dragGhost = null; }
 }
+// Where a released item's TOP-LEFT goes, in the drop box's own pixel space.
+//
+// The held art is drawn CENTRED on the cursor — ClassicUO offsets it by
+// `(w >> 1, h >> 1)` in `GameCursor.GetDraggingItemOffset` (:183-184) and our
+// ghost's `translate(-50%,-50%)` is the same thing — so the stored top-left has
+// to step back by that same half. Sending the cursor point raw stored the item
+// half an icon down and right of where it was let go, and the drop visibly
+// jumped away from the ghost the instant the button came up. Measured live: a
+// 44x33 item released at gump (120,70) drew its ghost at (98,54) and was then
+// stored at (120,70).
+//
+// `ContainerGump.cs:408-419` and `TradingGump.cs:279-300` are the same four
+// steps in the same order, and the order matters: centre, push the far edge
+// back inside, then the near edge — so an item wider than the box lands at 0
+// rather than at a negative coordinate.
+//
+// The size is the HELD art's, read off the ghost. ITEM_ICON_PX is only the
+// fallback for a ghost whose image has not loaded (or failed): it is the cell
+// size, and using it for everything also mis-clamped every item that is not
+// square — most of them.
+function heldArtSize() {
+  const w = (dragGhost && dragGhost.naturalWidth) || ITEM_ICON_PX;
+  const h = (dragGhost && dragGhost.naturalHeight) || ITEM_ICON_PX;
+  return { w, h };
+}
+function dropPointIn(box, clientX, clientY) {
+  const r = box.getBoundingClientRect();
+  const { w, h } = heldArtSize();
+  const bw = box.clientWidth, bh = box.clientHeight;
+  let x = Math.round(clientX - r.left) - (w >> 1);
+  let y = Math.round(clientY - r.top) - (h >> 1);
+  if (x + w > bw) x = bw - w;
+  if (y + h > bh) y = bh - h;
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  return { x, y };
+}
 function sendPlacement(command, serial) {
   pendingPlacements.push(serial >>> 0);
   if (pendingPlacements.length > MAX_PENDING_PLACEMENTS) pendingPlacements.shift();
@@ -138,9 +250,7 @@ function placeCursorItem(clientX, clientY) {
     let tgt = null;
     for (const [s, w] of dialogWindows("trades")) if (w.el === tradeWinEl) { tgt = s; break; }
     if (tgt == null) return false;
-    const r = tradeGrid.getBoundingClientRect();
-    const gx = Math.max(0, Math.min(150, Math.round(clientX - r.left)));
-    const gy = Math.max(0, Math.min(120, Math.round(clientY - r.top)));
+    const { x: gx, y: gy } = dropPointIn(tradeGrid, clientX, clientY);
     sendPlacement("drop:" + serial + ":" + gx + ":" + gy + ":0:" + tgt, serial);
     return true;
   }
@@ -156,11 +266,7 @@ function placeCursorItem(clientX, clientY) {
     // the moment the art defines the space, since a real bag is both a
     // different size and offset by its own chrome.
     const cbody = contWin.querySelector(".gump-body") || contWin;
-    const r = cbody.getBoundingClientRect();
-    const cw = Math.max(1, cbody.clientWidth - ITEM_ICON_PX);
-    const ch = Math.max(1, cbody.clientHeight - ITEM_ICON_PX);
-    const gx = Math.max(0, Math.min(cw, Math.round(clientX - r.left)));
-    const gy = Math.max(0, Math.min(ch, Math.round(clientY - r.top)));
+    const { x: gx, y: gy } = dropPointIn(cbody, clientX, clientY);
     sendPlacement("drop:" + serial + ":" + gx + ":" + gy + ":0:" + tgt, serial);
     return true;
   }
@@ -843,7 +949,8 @@ function setupItemDnD() {
       if (placeCursorItem(e.clientX, e.clientY)) clearCursorItem();
       return;                     // invalid spot → keep holding (the item stays on the cursor)
     }
-    const cell = e.target.closest && e.target.closest(".cont-item[data-serial]");
+    const hitCell = e.target.closest && e.target.closest(".cont-item[data-serial]");
+    const cell = hitCell && contItemAt(e.clientX, e.clientY, hitCell);
     if (cell) {
       // The opponent's half of an open trade window renders with the same
       // `.cont-item` markup (for the shared icon/tooltip styling) but is
@@ -872,6 +979,29 @@ function setupItemDnD() {
       }
     }
   }, true);
+  // The press above resolves its own cell by pixel, but `click` and `dblclick`
+  // are handlers the cells own (10-housing.js builds one per item), so a click
+  // through a transparent corner would still run the wrong item's. Re-target it
+  // here instead of teaching every handler to re-check: a window listener in the
+  // CAPTURE phase always runs before the cell's own, whatever order they were
+  // added in. A point over no art at all belongs to the container, so the event
+  // is stopped rather than handed on — that is what ClassicUO's pixel miss does.
+  for (const type of ["click", "dblclick"]) {
+    window.addEventListener(type, (e) => {
+      if (e.__pxRetarget) return;                 // our own re-fire: let it through
+      const from = e.target.closest && e.target.closest(".cont-item[data-serial]");
+      if (!from) return;
+      const real = contItemAt(e.clientX, e.clientY, from);
+      if (real === from) return;
+      e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      if (!real) return;
+      const ev = new MouseEvent(type, { clientX: e.clientX, clientY: e.clientY,
+                                        button: e.button, bubbles: true, cancelable: true });
+      ev.__pxRetarget = true;
+      real.dispatchEvent(ev);
+    }, true);
+  }
   // A mousedown anywhere outside an open split dialog abandons it (nothing was
   // ever lifted for this press, so there's nothing to undo). Its own OK/Cancel/✕
   // handle clicks on the dialog itself before this ever sees them.

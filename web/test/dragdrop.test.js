@@ -295,10 +295,15 @@ function dropTarget(ctx, html, rects) {
   return ctx.document;
 }
 // Lift an item and release the same press at (x, y) — the one-motion drag.
-function liftAndRelease(ctx, x, y, it = { serial: 0x201, g: 0x0F3F, amount: 1 }) {
+// `art` is the held graphic's intrinsic size: the drop centres the item on the
+// cursor, so it is part of every container/trade coordinate. Left unset the
+// ghost reports 0x0, exactly as a real <img> does before it loads, and the drop
+// falls back to ITEM_ICON_PX.
+function liftAndRelease(ctx, x, y, it = { serial: 0x201, g: 0x0F3F, amount: 1 }, art) {
   armWorld(ctx, it);
   ctx.setNow(1005);
   pointer(ctx, "pointermove", { clientX: 122, clientY: 100 });
+  if (art) ctx.get("dragGhost").natural = art;
   ctx.sent.length = 0;                                // drop the pickup; assert the placement
   pointer(ctx, "pointerup", { clientX: x, clientY: y });
 }
@@ -333,10 +338,44 @@ test("released over a container window it drops at the gump's own pixel space", 
   const body = ctx.run(`dialogWindow("containers", 0x777).body`);
   win.rect = { left: 200, top: 100, width: 260, height: 220 };
   body.rect = { left: 204, top: 120, width: 252, height: 196 };
-  liftAndRelease(ctx, 254, 170);
-  // Measured against the BODY (the coordinates ServUO stores), not the window
-  // minus a hardcoded title bar.
-  deepEq(ctx.sent, ["drop:513:50:50:0:1911"], "50,50 inside the bag, container 0x777");
+  // A 44x33 item released at (254,170) is 50,50 into the body — and the stored
+  // top-left is that minus half the art, because the ghost was drawn centred on
+  // the cursor (ClassicUO ContainerGump.cs:408-409). Sending 50,50 raw is what
+  // made a dropped item jump down and right of where it was let go.
+  liftAndRelease(ctx, 254, 170, undefined, { w: 44, h: 33 });
+  deepEq(ctx.sent, ["drop:513:28:34:0:1911"], "centred on 50,50 in the bag, container 0x777");
+});
+
+test("a container drop puts the item exactly where its ghost was drawn", () => {
+  const ctx = world(dndCtx(), { items: [{ serial: 0x201, g: 0x0F3F, amount: 1, x: 5, y: 5 }] });
+  ctx.run("openContainer(0x777)");
+  const win = ctx.run(`dialogWindow("containers", 0x777).el`);
+  const body = ctx.run(`dialogWindow("containers", 0x777).body`);
+  win.rect = { left: 200, top: 100, width: 260, height: 220 };
+  body.rect = { left: 204, top: 120, width: 252, height: 196 };
+  const art = { w: 44, h: 33 };
+  ctx.run("__ghostAt = null;");
+  // The ghost is `position:fixed` with translate(-50%,-50%), so its top-left on
+  // screen is the cursor minus half the art. Whatever the drop stores must land
+  // on that same pixel once the body's origin is added back.
+  liftAndRelease(ctx, 300, 200, undefined, art);
+  const stored = ctx.sent[0].split(":");
+  // `>> 1`, not `/ 2`: ClassicUO truncates the half too, so an odd-height item
+  // stores half a pixel above where CSS centres the ghost. Sub-pixel, and the
+  // same sub-pixel the reference client has.
+  eq(+stored[2] + 204, 300 - (art.w >> 1), "the stored x is where the ghost's left edge was");
+  eq(+stored[3] + 120, 200 - (art.h >> 1), "…and the stored y is its top edge");
+});
+
+test("an unloaded ghost falls back to the cell size rather than centring on zero", () => {
+  const ctx = world(dndCtx(), { items: [{ serial: 0x201, g: 0x0F3F, amount: 1, x: 5, y: 5 }] });
+  ctx.run("openContainer(0x777)");
+  const win = ctx.run(`dialogWindow("containers", 0x777).el`);
+  const body = ctx.run(`dialogWindow("containers", 0x777).body`);
+  win.rect = { left: 200, top: 100, width: 260, height: 220 };
+  body.rect = { left: 204, top: 120, width: 252, height: 196 };
+  liftAndRelease(ctx, 254, 170);        // no natural size: a real <img> mid-load
+  deepEq(ctx.sent, ["drop:513:28:28:0:1911"], "half of ITEM_ICON_PX, not half of nothing");
 });
 
 test("a drop past the container's far edge is clamped so the icon still lands inside", () => {
@@ -346,9 +385,24 @@ test("a drop past the container's far edge is clamped so the icon still lands in
   const body = ctx.run(`dialogWindow("containers", 0x777).body`);
   win.rect = { left: 200, top: 100, width: 260, height: 220 };
   body.rect = { left: 200, top: 120, width: 252, height: 196 };
-  liftAndRelease(ctx, 449, 313);
-  // 252 - 44 = 208 wide, 196 - 44 = 152 tall (ITEM_ICON_PX).
-  deepEq(ctx.sent, ["drop:513:208:152:0:1911"], "clamped to the body minus one icon");
+  // ClassicUO clamps with the HELD art, not a fixed cell: 252 - 44 = 208 wide,
+  // 196 - 33 = 163 tall. The old flat ITEM_ICON_PX mis-clamped every item that
+  // is not square, which is most of them.
+  liftAndRelease(ctx, 449, 313, undefined, { w: 44, h: 33 });
+  deepEq(ctx.sent, ["drop:513:208:163:0:1911"], "clamped so the whole icon stays inside");
+});
+
+test("an item wider than the container lands at 0, not at a negative coordinate", () => {
+  const ctx = world(dndCtx(), { items: [{ serial: 0x201, g: 0x0F3F, amount: 1, x: 5, y: 5 }] });
+  ctx.run("openContainer(0x777)");
+  const win = ctx.run(`dialogWindow("containers", 0x777).el`);
+  const body = ctx.run(`dialogWindow("containers", 0x777).body`);
+  win.rect = { left: 200, top: 100, width: 90, height: 90 };
+  body.rect = { left: 200, top: 120, width: 60, height: 40 };
+  // The far-edge clamp would put a 100x80 item at -40,-40; the near-edge clamp
+  // runs after it and wins. ClassicUO orders the two the same way.
+  liftAndRelease(ctx, 230, 140, undefined, { w: 100, h: 80 });
+  deepEq(ctx.sent, ["drop:513:0:0:0:1911"], "pinned to the container's origin");
 });
 
 test("released over a MOBILE it is a drop-on-mobile, not a drop at their feet", () => {
@@ -386,8 +440,10 @@ test("released over our own half of a trade window it goes into THAT session's c
   const grid = win.querySelector(".tr-mine-grid");
   win.rect = { left: 400, top: 100, width: 300, height: 260 };
   grid.rect = { left: 410, top: 150, width: 150, height: 120 };
-  liftAndRelease(ctx, 430, 170);
-  deepEq(ctx.sent, ["drop:513:20:20:0:2320"], "into Cid's session (0x910), at 20,20 in its grid");
+  liftAndRelease(ctx, 430, 170, undefined, { w: 44, h: 33 });
+  // TradingGump.cs:279-300 is the same centre-then-clamp as the container.
+  deepEq(ctx.sent, ["drop:513:0:4:0:2320"],
+         "into Cid's session (0x910), centred on 20,20 and pinned to the near edge");
 });
 
 test("released over nothing, the item stays on the cursor", () => {

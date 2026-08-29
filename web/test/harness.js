@@ -216,15 +216,31 @@ function make2d(calls) {
     createLinearGradient: () => ({ addColorStop() {} }),
     createPattern: () => ({}),
     measureText: (t) => ({ width: String(t).length * 6 }),
-    getImageData: (x, y, w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+    // Reads back the LAST image drawn into this context, when the test gave that
+    // image an alpha mask (`img.alpha = (x, y) => 0..255`, or a w*h array).
+    // Without one every pixel is transparent — the honest answer for a canvas
+    // nothing was painted into, and the state a real un-decoded image produces.
+    getImageData: (x, y, w, h) => {
+      const d = new Uint8ClampedArray(w * h * 4);
+      const src = ctx.__lastImage;
+      const a = src && src.alpha;
+      if (a) {
+        for (let py = 0; py < h; py++) for (let px = 0; px < w; px++) {
+          const v = typeof a === "function" ? a(px, py) : a[py * w + px];
+          d[(py * w + px) * 4 + 3] = v | 0;
+        }
+      }
+      return { width: w, height: h, data: d };
+    },
     putImageData() {}, createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
     setTransform() {}, resetTransform() {}, getTransform: () => ({}),
   };
   for (const m of ["clearRect", "fillRect", "strokeRect", "save", "restore", "beginPath",
                    "closePath", "arc", "arcTo", "ellipse", "rect", "roundRect", "fill",
                    "stroke", "clip", "moveTo", "lineTo", "quadraticCurveTo", "bezierCurveTo",
-                   "translate", "scale", "rotate", "drawImage", "fillText", "strokeText",
+                   "translate", "scale", "rotate", "fillText", "strokeText",
                    "setLineDash"]) ctx[m] = rec(m);
+  ctx.drawImage = (...a) => { ctx.__lastImage = a[0]; calls.push(["drawImage", ...a]); };
   return ctx;
 }
 
