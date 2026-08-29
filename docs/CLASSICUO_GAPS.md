@@ -2018,6 +2018,15 @@ is set from 0x6E/0xE2 and nothing else, which is exactly what
 `AnimationFromServer` marks there, so clearing it while moving is the same rule.
 Not while a boat carries us: that is the deck moving, not our legs.
 
+Pinning this one live turned out to be impossible by construction: `animMoving`
+is assigned on the line above the cancel, so no sampler can ever catch a frame
+that is both posed and moving, and driving a real shard only produced
+circumstantial evidence (a bow held 2736 ms standing still but 144-162 ms while
+walking, with movement live on the very next sample, six times out of eight).
+`web/test/posecancel.test.js` stages the overlap exactly instead, including the
+case the shard never scheduled — a 0x6E arriving *mid-step*, which must never
+get a frame of its own.
+
 **Per-state sprite tints.** ClassicUO's `overridedHue`
 (`Views/MobileView.cs:70-133`) is a whole-mobile tint that REPLACES every
 layer's own dye — body and equipment alike, since it is passed into each layer's
@@ -2035,6 +2044,29 @@ highlight toggles default **on** in `Profile.cs`.
 Paralysis needed a new scene field: `Mobile::paralyzed` had been parsed from the
 status-flags 0x01 bit since the beginning and never emitted. Live-verified —
 `[set Frozen true` on a spawned orc flips `para` to true.
+
+Re-checked as pixels later, and the ports held: a poisoned dragon requested
+`?hue=68` and drew green over every wing, not merely on its bar (the shard
+emoted "*a dragon looks ill.*" beside it), and fetching one frame through the
+asset route at each of the five hues gives (6,106,0) green for poison,
+(42,42,42) and (67,67,67) grey for dead and hidden, and (106,71,0) for yellow
+hits. Paralysis renders a dark red rather than anything frost-coloured — that is
+simply what `0x014C` is in this `hues.mul`, and `0x014C` is what `Profile.cs:102`
+says. Precedence was confirmed on a live mobile carrying paralysis and yellow
+hits at once: it drew `0x30`, the later of the two.
+
+**One guard was missing from that port.** ClassicUO qualifies both the paralysis
+and the yellow-hits tint with `NotorietyFlag != Invulnerable`
+(`MobileView.cs:126`, `:135`) and qualifies poison with nothing; we checked
+notoriety nowhere. An invulnerable mobile already reads as invulnerable from its
+notoriety colour, and painting the whole body over that hides it. Now guarded on
+`noto == 7`, a field every mobile in the scene already carried.
+
+This one is a read of ClassicUO, not an observation: notoriety 7 could not be
+produced on the ServUO build here. `[set Blessed true` returns Innocent with the
+yellow-hits flag set, and so do a banker and a town crier — so on this shard the
+guard is unreachable and the behaviour is unchanged. It bites only on a shard
+whose vendors are invulnerable.
 
 **Hued effects used the wrong colour-ramp channel.** ClassicUO's shader has two
 hued branches and this is the whole difference between them: `HUED` does

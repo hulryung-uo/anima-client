@@ -452,6 +452,7 @@ const HUE_DEAD_CREATURE = 0x0386;
 const HUE_POISON = 0x0044;         // Profile.PoisonHue, default on
 const HUE_PARALYZED = 0x014C;      // Profile.ParalyzedHue, default on
 const HUE_INVULNERABLE = 0x0030;   // Profile.InvulnerableHue, default on
+const NOTO_INVULNERABLE = 7;       // NotorietyFlag.Invulnerable
 
 // `dead`/`hidden` come from the caller because it already resolved them.
 // Order is ClassicUO's, and the order is load-bearing: hidden and dead are
@@ -463,10 +464,20 @@ function mobileStateHue(ent, hidden, dead, body) {
   // treatment, which we already do with alpha.
   if (dead) return bodyIsHuman(body | 0) ? 0 : HUE_DEAD_CREATURE;
   if (!ent) return 0;
+  // Both the paralysis and the yellow-hits tint carry the same guard in
+  // ClassicUO (`NotorietyFlag != Invulnerable`, :126/:135) and poison carries
+  // none. An invulnerable mobile is already drawn as invulnerable by its
+  // notoriety colour, so re-tinting the whole body would only hide that. This
+  // one is a read of ClassicUO rather than an observation: the ServUO build
+  // tested against never reports notoriety 7 — a blessed NPC came back
+  // Innocent with the yellow-hits flag set, and so did vendors and a town
+  // crier — so the guard is unreachable there and only bites on a shard whose
+  // vendors are invulnerable.
+  const invul = (ent.noto | 0) === NOTO_INVULNERABLE;
   let h = 0;
   if (ent.poisoned) h = HUE_POISON;
-  if (ent.para) h = HUE_PARALYZED;
-  if (ent.yellow) h = HUE_INVULNERABLE;
+  if (ent.para && !invul) h = HUE_PARALYZED;
+  if (ent.yellow && !invul) h = HUE_INVULNERABLE;
   return h;
 }
 
