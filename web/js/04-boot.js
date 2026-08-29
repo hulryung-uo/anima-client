@@ -371,11 +371,15 @@ function fxFrame(now) {
             ? "self" : ("m" + (L.hs >>> 0));
           const sp = mobSprites.get(owner + "#L" + (L.ly | 0) + "#0");
           if (sp && sp.visible && sp.texture) {
-            // Sprites here are anchored bottom-centre; ClassicUO passes the
-            // layer frame's own draw point. Mid-height is where a torch's flame
-            // sits on the frame, and it needs no mirror bookkeeping.
-            wx = sp.x;
-            wy = sp.y - (sp.height || 0) / 2;
+            // The drawn branch lights from the BODY's draw point, not from the
+            // flame. `AddLight(owner, entity, mirror ? x + width : x, y)` sits
+            // inside `DrawInternal(… int x, int y …)`, and the worn-layer call
+            // passes `drawX, drawY` — the same pair the body is drawn from. So
+            // the light lands where the character stands, which is the tile
+            // point, `-3` for the `posY -= 3` that precedes it. The per-facing
+            // nudge belongs to the OTHER branch and is not used here.
+            wx = isoX(L.x, L.y);
+            wy = isoY(L.x, L.y, L.z) - 3;
           }
         }
         const sx = (ox + wx * camZoom) * cssX;
