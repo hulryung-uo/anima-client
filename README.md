@@ -4,13 +4,13 @@ A **new, from-scratch Ultima Online client**, built AI-native and cross-platform
 (Windows + macOS). The **body** of the Anima family: a headless Rust core that
 speaks UO, plus renderers on top of it.
 
-![The web/PixiJS renderer live against a ServUO shard: real isometric UO terrain
-and sprites, minimap, and HUD](docs/img/screenshot.png)
+![The Britain moongate: the blue portal inside its ring of standing stones, with
+the world map and HUD alongside](docs/img/screenshot.png)
 
-*Live against a real ServUO shard — genuine `artLegacyMUL`/`anim` sprites in
-isometric projection, the minimap, and the HUD. No pre-baked scene: every tile,
-sprite and animation frame is read from your own UO installation and driven by
-real server packets.*
+*The Britain moongate, live against a real ServUO shard. Genuine
+`artLegacyMUL`/`anim` sprites in isometric projection, the minimap, and the HUD.
+No pre-baked scene: every tile, sprite and animation frame is read from your own
+UO installation and driven by real server packets.*
 
 ![The same street at night: the world is dark, the street lamp and a carried
 torch light it](docs/img/night.png)
