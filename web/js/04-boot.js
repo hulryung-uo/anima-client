@@ -370,7 +370,8 @@ function fxFrame(now) {
           const owner = (scene.player && (L.hs >>> 0) === (scene.player.serial >>> 0))
             ? "self" : ("m" + (L.hs >>> 0));
           const sp = mobSprites.get(owner + "#L" + (L.ly | 0) + "#0");
-          if (sp && sp.visible && sp.texture) {
+          const st = anim.get(owner);
+          if (sp && sp.visible && sp.texture && st) {
             // The drawn branch lights from the BODY's draw point, not from the
             // flame. `AddLight(owner, entity, mirror ? x + width : x, y)` sits
             // inside `DrawInternal(… int x, int y …)`, and the worn-layer call
@@ -378,8 +379,17 @@ function fxFrame(now) {
             // the light lands where the character stands, which is the tile
             // point, `-3` for the `posY -= 3` that precedes it. The per-facing
             // nudge belongs to the OTHER branch and is not used here.
-            wx = isoX(L.x, L.y);
-            wy = isoY(L.x, L.y, L.z) - 3;
+            //
+            // From the INTERPOLATED position, not the light's tile. ClassicUO's
+            // `drawX/drawY` are `posX + Offset.X` and `posY + (Offset.Y -
+            // Offset.Z)`, and `Offset` is the walk interpolation — the same term
+            // that makes the body glide between tiles. `scene.lights` carries a
+            // tile, refreshed on the 150ms poll, so using it made the glow jump
+            // tile to tile and trail the character it belongs to. `st.rx/ry/rz`
+            // is exactly what the body sprite is drawn from (`drawMobs`), so the
+            // light now moves with the person carrying it rather than after them.
+            wx = isoX(st.rx, st.ry);
+            wy = isoY(st.rx, st.ry, st.rz ?? st.z) - 3;
           }
         }
         const sx = (ox + wx * camZoom) * cssX;
