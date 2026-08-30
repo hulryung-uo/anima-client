@@ -56,15 +56,20 @@ test("an effect lights the ground only when its art says it emits light", async 
   ctx.run(`scene = { light: 30, weather: 0xFF, weatherN: 0, lights: [
     { x: 5, y: 5, z: 0, r: 3, id: 7, c: 0 } ] };`);
   // /iteminfo/<graphic> is the server's tiledata: `lt` is the light flag, `lid`
-  // the shape. Graphic 14000 emits; 99 does not.
-  ctx.setFetch((u) => (u === "iteminfo/14000" ? { anim: 0, lt: 1, lid: 2 } : { anim: 0, lt: 0, lid: 0 }));
+  // the shape. Both graphics here are real and were measured against the shard's
+  // own tiledata rather than invented: 0x3709 (flamestrike) answers lt=1,
+  // lid=30, and 0x376A answers lt=0. Worth having in the fixture because this
+  // file used to say the flag existed only in theory — a sweep of the effect
+  // ranges found 80 light-flagged graphics on this data, so "no effect art
+  // carries it" was simply wrong.
+  ctx.setFetch((u) => (u === "iteminfo/14089" ? { anim: 0, lt: 1, lid: 30 } : { anim: 0, lt: 0, lid: 0 }));
   ctx.run(`
     fxEffects.length = 0;
-    fxEffects.push({ src: 5, kind: 0, born: 0, fm: 80, frames: [14000], hue: 0,
+    fxEffects.push({ src: 5, kind: 0, born: 0, fm: 80, frames: [0x3709], hue: 0,
                      sprite: { x: 100, y: 300, visible: true, destroyed: false } });
-    fxEffects.push({ src: 0, kind: 0, born: 0, fm: 80, frames: [14000], hue: 0,
+    fxEffects.push({ src: 0, kind: 0, born: 0, fm: 80, frames: [0x3709], hue: 0,
                      sprite: { x: 200, y: 300, visible: true, destroyed: false } });
-    fxEffects.push({ src: 7, kind: 0, born: 0, fm: 80, frames: [99], hue: 0,
+    fxEffects.push({ src: 7, kind: 0, born: 0, fm: 80, frames: [0x376A], hue: 0,
                      sprite: { x: 300, y: 300, visible: true, destroyed: false } });
   `);
   eq(frame(ctx, 1100).length, 1, "only the ground light before /iteminfo lands — no guess");
@@ -74,10 +79,10 @@ test("an effect lights the ground only when its art says it emits light", async 
   const fx = drawn[1];
   deepEq([fx[1], fx[2]], [100 - 50, 300 - 22 - 50],
          "…at the effect's own live position, tile-centred, mask-centred");
-  eq(fx[0].__id, 1, "…using the SOURCE mobile's shape 1, not the art's own");
+  eq(fx[0].__id, 1, "…using the SOURCE mobile's shape 1, not the art's own lid 30");
   // The other two: ClassicUO only lights an effect that has a Source, and only
   // when the art carries the light flag.
-  eq(ctx.fetchLog.filter((u) => u === "iteminfo/14000").length, 1, "one /iteminfo per graphic, cached after");
+  eq(ctx.fetchLog.filter((u) => u === "iteminfo/14089").length, 1, "one /iteminfo per graphic, cached after");
 });
 
 test("at noon the veil eases away and the whole pass stops drawing", () => {
@@ -101,10 +106,10 @@ test("at noon the veil eases away and the whole pass stops drawing", () => {
 test("an effect lights ground that has no light of its own", async () => {
   const ctx = nightCtx();
   ctx.run(`scene = { light: 30, weather: 0xFF, weatherN: 0, lights: [] };`);
-  ctx.setFetch((u) => (u === "iteminfo/14000" ? { anim: 0, lt: 1, lid: 2 } : { anim: 0, lt: 0, lid: 0 }));
+  ctx.setFetch((u) => (u === "iteminfo/14089" ? { anim: 0, lt: 1, lid: 30 } : { anim: 0, lt: 0, lid: 0 }));
   ctx.run(`
     fxEffects.length = 0;
-    fxEffects.push({ src: 5, kind: 0, born: 0, fm: 80, frames: [14000], hue: 0,
+    fxEffects.push({ src: 5, kind: 0, born: 0, fm: 80, frames: [0x3709], hue: 0,
                      sprite: { x: 100, y: 300, visible: true, destroyed: false } });
   `);
   frame(ctx, 1100);              // first pass only asks /iteminfo

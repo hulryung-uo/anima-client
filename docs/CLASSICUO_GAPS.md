@@ -2340,3 +2340,30 @@ real container render would have exercised nothing and passed. `dataset` is
 attribute-backed now. And an `<img>` had no intrinsic size, so nothing that
 reads one could be tested at all; `el.natural` and `el.alpha` are the test's to
 set, and `getImageData` returns the last-drawn image's mask.
+
+
+## Correction: effect art on this data DOES carry the light flag
+
+This doc has said, more than once, that the effect-light path could not be
+checked because no effect graphic here carries `TileFlag.LightSource`. That was
+never measured — it was assumed from a couple of spot checks. Sweeping the
+effect ranges through the play server's own `/iteminfo/<graphic>` route (the
+same tiledata the renderer asks) finds **80 light-flagged effect graphics**:
+24 in the explosion/fire block `0x36B0..0x3720`, 51 across the field spells
+`0x3914..0x3999`, and 5 on the moongate/portal art. `0x3709` (flamestrike)
+answers `lt=1, lid=30`; `0x376A`, which a dragon emits constantly, answers
+`lt=0`. `web/test/lights.test.js` now uses those two real graphics instead of
+invented ids, so the fixture states a fact about this data rather than a
+hypothetical.
+
+What still has not been done is watching one light the ground on a live shard,
+and the reason is worth writing down so the next attempt does not repeat it.
+Casting cannot be driven from the GM account here: `tspell` produces no server
+response and no journal line even with a filled spellbook in the pack, so no
+spell effect can be triggered on demand. Injecting a correctly shaped effect
+record straight into `ingestEffects` does reach `fxEffects` with the right
+graphic and a visible sprite, but the sprite is never positioned — `drawEffects`
+does not run for it — so there is nothing on screen to measure the veil under.
+The light pass itself is covered head-lessly, which is where the timing and the
+`/iteminfo` gating are actually pinned; the live check would only add "and it
+looks right".
