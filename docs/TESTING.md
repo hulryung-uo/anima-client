@@ -21,6 +21,14 @@ walking, spawn instead of hunting, `[set` a skill instead of training it.
 
 Two client entry points, same renderer underneath (`web/` + `anima_net::play_server`):
 
+- **`scripts/devbrowser.sh`** — opens a CDP-driven Chrome at the play server
+  **without stealing focus**. Use this rather than launching Chrome yourself:
+  a verification session relaunches the browser whenever it loses the page
+  target, and each bare launch takes the keyboard from whoever is at the
+  machine. `--headless` for no window at all (WebGL still renders, through
+  SwiftShader). CDP's own reload/input/screenshot calls never raise the window;
+  `Page.bringToFront` does, so it is not used.
+
 - **`cargo run -p anima-desktop`** — the real desktop app (Tauri). This is
   what a human plays on; it runs `play_server` in-process on the first free
   port in `8190..=8199`, remembered across launches so the renderer's

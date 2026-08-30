@@ -56,6 +56,25 @@ of what was done, not a description of what is left.**
 `../classicuo` (C# handlers/formats) + ServUO/ModernUO = **cross-check**. Port
 handler-by-handler, validate against captures (strangler migration).
 
+## Live verification (browser)
+Checking the renderer against a running shard needs a real browser, and it stays
+open across many checks. **Launch it with `scripts/devbrowser.sh`, never by
+running the Chrome binary or a bare `open`** — those raise the window and take
+the keyboard from whoever is using the machine, repeatedly, since a session
+relaunches whenever the page target is lost. The script uses macOS's `open -g`
+and puts the frontmost app back if it moved anyway (measured: `-g` alone let
+focus go 2 times in 4). `--headless` is there too and renders WebGL fine, but
+the window is worth having open to look at — it is only the focus that is
+unwelcome.
+
+Everything CDP does afterwards is synthetic and does not raise the window:
+`Page.reload`, `Input.dispatchMouseEvent`/`dispatchKeyEvent`,
+`Page.captureScreenshot`. **`Page.bringToFront` does. Do not call it.**
+
+The gate never opens a window: its desktop step is `cargo check -p
+anima-desktop`, which only type-checks. `cargo run -p anima-desktop` is the one
+that opens a native window, and nothing automated runs it.
+
 ## Build / test
 ```bash
 cargo build             # workspace
