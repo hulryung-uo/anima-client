@@ -102,3 +102,11 @@ cannot flake in CI; the whole suite is ~0.2s. Both steps above stop at "it
 parses": a typo like `registerDialogs({` for `registerDialog({` passes them and
 kills the client, and only this step catches it — with the file and the line.
 **Read `web/test/README.md` before adding a test there.**
+
+## Feature announcements
+
+For completed, user-visible features, add a short player-facing note under
+`docs/updates/` with a stable slug and actual gameplay screenshots. Follow
+[`docs/FORUM_UPDATES.md`](docs/FORUM_UPDATES.md). Pushing a note to `main`
+automatically publishes or updates its UO Tavern thread; preview the payload
+before pushing. Internal refactors do not need announcement posts.

@@ -1,0 +1,10 @@
+{
+  "kind": "release",
+  "tag": "v0.6.0",
+  "title": "Anima v0.6.0 — bring a torch, chop a tree, find your party",
+  "content": "Britannia has a proper night again. Anima v0.6.0 brings darkness, carried lights, harvesting fixes, and more ways to keep your party and your interface in view.\n\n## Bring a torch\n\nTorches and street lamps light the ground, carried lights follow your character, and walls can block their glow. Dusk, night, and dungeon darkness now render correctly.\n\n## Work with the world\n\nTrees and cave floors can be targeted for harvesting. The release fixes how static targets and terrain data reach the server.\n\n## Keep your party in sight\n\nParty and guild positions appear on the map, including members beyond your immediate view.\n\n## Make the interface yours\n\nBuild macro sequences with delays and target waits, bind actions to the mouse or wheel, keep name plates visible, and pin health bars. Right-click window closing, context menus, Alt-click follow, and corpse auto-opening make everyday play easier.\n\nThe screenshots below were captured in Anima on a live ServUO shard.\n\n**Available for Apple Silicon Macs and Windows x64.** Bring your own Ultima Online game files and shard account. Read the complete release notes for validation details and known limits.",
+  "images": [
+    { "url": "https://www.uotavern.com/client/assets/britain-at-night.png", "alt": "Anima at night: a carried torch and street lamps light the surrounding world" },
+    { "url": "https://www.uotavern.com/client/assets/britain-moongate.png", "alt": "Britain moongate in Anima, with the world map and player interface visible" }
+  ]
+}

@@ -1,0 +1,57 @@
+name: Publish client updates to UO Tavern
+on:
+  release:
+    types: [published, edited]
+  push:
+    branches: [main]
+    paths: ['docs/updates/*.json']
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: What to publish
+        type: choice
+        options: [release, feature]
+        default: release
+        required: true
+      release_tag:
+        description: Published release tag (for release mode)
+        type: string
+      note_path:
+        description: Feature JSON file under docs/updates/ (for feature mode)
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: uotavern-client-updates
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'hulryung-uo/anima-client' && (github.event_name != 'release' || (!github.event.release.draft && !github.event.release.prerelease))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || 'main' }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Publish without creating duplicate threads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UOTAVERN_PUBLISH_TOKEN: ${{ secrets.UOTAVERN_PUBLISH_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          MODE: ${{ inputs.mode }}
+          NOTE_PATH: ${{ inputs.note_path }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          set -eu
+          if [ "$EVENT_NAME" = "push" ]; then
+            python scripts/publish-forum-update.py --changed-before "$BEFORE" --changed-after "$AFTER" --publish
+          elif [ "$EVENT_NAME" = "release" ] || [ "$MODE" = "release" ]; then
+            python scripts/publish-forum-update.py --release "$RELEASE_TAG" --publish
+          else
+            python scripts/publish-forum-update.py --note "$NOTE_PATH" --publish
+          fi
