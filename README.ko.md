@@ -2,7 +2,7 @@
 
 **Anima(아니마)**는 Rust로 처음부터 만든 오픈소스 **울티마 온라인(Ultima Online, UO) 클라이언트**입니다. 사람이 직접 플레이하는 데스크톱 앱과 AI 플레이어가 같은 게임 코어를 사용합니다.
 
-**[최신 버전 다운로드](https://github.com/hulryung-uo/anima-client/releases/latest)** · [소개 사이트](https://anima-uo-client.ygqlncmpegijwthk.chatgpt.site/ko/) · [English](README.md) · [설치 안내](docs/GETTING_STARTED.md) · [버그 제보](https://github.com/hulryung-uo/anima-client/issues)
+**[최신 버전 다운로드](https://github.com/hulryung-uo/anima-client/releases/latest)** · [소개 사이트](https://www.uotavern.com/client/ko/) · [English](README.md) · [설치 안내](docs/GETTING_STARTED.md) · [버그 제보](https://github.com/hulryung-uo/anima-client/issues)
 
 ## 다운로드와 시작하기
 

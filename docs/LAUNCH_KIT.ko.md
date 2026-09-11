@@ -5,9 +5,9 @@
 
 ## 소개할 때 사용할 링크
 
-- 영문 소개: https://anima-uo-client.ygqlncmpegijwthk.chatgpt.site/
-- 한국어 소개: https://anima-uo-client.ygqlncmpegijwthk.chatgpt.site/ko/
-- 사이트맵: https://anima-uo-client.ygqlncmpegijwthk.chatgpt.site/sitemap.xml
+- 영문 소개: https://www.uotavern.com/client/
+- 한국어 소개: https://www.uotavern.com/client/ko/
+- 사이트맵: https://www.uotavern.com/client/sitemap.xml
 - 제품 저장소: https://github.com/hulryung-uo/anima-client
 - 다운로드: https://github.com/hulryung-uo/anima-client/releases/latest
 - 한국어 시작 안내: https://github.com/hulryung-uo/anima-client/blob/main/README.ko.md

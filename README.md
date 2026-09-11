@@ -6,7 +6,7 @@ The browser renderer, Tauri desktop app, and AI agents share one protocol and
 world-state implementation.
 
 **[Download the latest release](https://github.com/hulryung-uo/anima-client/releases/latest)**
-· [Website](https://anima-uo-client.ygqlncmpegijwthk.chatgpt.site/)
+· [Website](https://www.uotavern.com/client/)
 · [Installation guide](docs/GETTING_STARTED.md)
 · [한국어 소개](README.ko.md)
 · [Contribute](CONTRIBUTING.md)
