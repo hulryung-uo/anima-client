@@ -36,7 +36,8 @@
 
 - [아키텍처와 개발 안내](docs/DESIGN.md)
 - [JSON 인터페이스](crates/anima-contract-json)
-- [Python LLM 에이전트](https://github.com/hulryung-uo/anima-agent)
+- [Anima2 소개](https://www.uotavern.com/anima/) — 빠른 판단·스킬 루프와 선택형 LLM을 결합한 Python AI 플레이어
+- [Anima2 저장소와 실행 안내](https://github.com/hulryung-uo/anima2)
 - [검증 내역과 호환성 기록](docs/CLASSICUO_GAPS.md)
 
 브라우저 모드는 개발자용 설정이 필요합니다. 서버와 연결하는 릴레이와 게임 데이터 제공 프로세스가 필요하며, 공개 체험 서버는 제공하지 않습니다. 자동 플레이 허용 여부는 접속할 서버의 규칙을 확인하세요.

@@ -61,9 +61,9 @@ protocol.
 | Repo | What it is |
 |---|---|
 | **[`anima-client`](https://github.com/hulryung-uo/anima-client)** (here) | The **body**. Headless Rust core (`anima-core`) that logs in, keeps a live `World`, paths with A\*, and reads UO's own `.mul`/`.uop` files — plus the renderers on top: a browser client, a Tauri desktop app, and a human-playable `play` server. |
-| **[`anima`](https://github.com/hulryung-uo/anima)** | **Anima Foundry** — an AI that *develops* AI players: it mutates their code, evaluates every variant against a live server, and keeps the best of each behavioural kind. Evolution, not just automation. |
-| **[`anima2`](https://github.com/hulryung-uo/anima2)** | A rule-based **brain** on this body. Reads a structured world, decides, emits actions — and never parses a packet or touches a socket. |
-| **[`anima-agent`](https://github.com/hulryung-uo/anima-agent)** | The **LLM-first brain**, successor to `anima2`. Same contract, different way of deciding. |
+| **[`anima`](https://github.com/hulryung-uo/anima)** | The original **Anima / Foundry** work — an AI that *develops* AI players: it mutates their code, evaluates every variant against a live server, and keeps the best of each behavioural kind. Evolution, not just automation. |
+| **[`anima2`](https://github.com/hulryung-uo/anima2)** | The next-generation Python **brain**: a fast reflex/planning/skill loop with optional slower LLM goals, conversation, and reflection. Reads observations and emits actions without parsing packets. [Project overview](https://www.uotavern.com/anima/). |
+| **[`anima-agent`](https://github.com/hulryung-uo/anima-agent)** | A separate **LLM-first Python brain** experiment on the same contract. |
 
 The split is the whole design. A brain receives an `Observation` and returns an
 `Action` (`anima-contract-json`); it never sees a byte of the wire. That is what
