@@ -1,0 +1,37 @@
+name: Bug or shard compatibility report
+description: Report a reproducible installation, gameplay, or compatibility problem.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: "Thanks for trying Anima. Do not include passwords, tokens, or private account details."
+  - type: input
+    id: version
+    attributes:
+      label: Anima version
+      placeholder: "v0.6.0 or commit SHA"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Operating system and architecture
+      placeholder: "macOS / Apple Silicon, Windows / x64, or browser and version"
+    validations:
+      required: true
+  - type: input
+    id: shard
+    attributes:
+      label: Server software and custom assets
+      description: "For example, ServUO and its version if known. Private server addresses are not needed."
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: "Include what you expected and what actually happened."
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots or sanitized logs

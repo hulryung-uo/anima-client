@@ -1,8 +1,36 @@
-# anima-client
+# Anima — Ultima Online client for macOS and Windows
 
-A **new, from-scratch Ultima Online client**, built AI-native and cross-platform
-(Windows + macOS). The **body** of the Anima family: a headless Rust core that
-speaks UO, plus renderers on top of it.
+An **open-source Ultima Online (UO) client**, written from scratch in Rust.
+Play on macOS or Windows, or build an AI player on the same headless game core.
+The browser renderer, Tauri desktop app, and AI agents share one protocol and
+world-state implementation.
+
+**[Download the latest release](https://github.com/hulryung-uo/anima-client/releases/latest)**
+· [Website](https://anima-uo-client.ygqlncmpegijwthk.chatgpt.site/)
+· [Installation guide](docs/GETTING_STARTED.md)
+· [한국어 소개](README.ko.md)
+· [Contribute](CONTRIBUTING.md)
+
+| Download v0.6.0 | Platform |
+|---|---|
+| [macOS disk image](https://github.com/hulryung-uo/anima-client/releases/download/v0.6.0/Anima_0.6.0_aarch64.dmg) | Apple Silicon (M-series); signed and notarized |
+| [Windows installer](https://github.com/hulryung-uo/anima-client/releases/download/v0.6.0/Anima_0.6.0_x64-setup.exe) | Windows x64 |
+
+Bring your own Ultima Online data files and a server account. Anima is a client,
+not a shard or a game-data download. Live validation is against **ServUO**;
+compatibility with every shard is not guaranteed. Intel Mac users need a source
+build. See the [setup guide](docs/GETTING_STARTED.md) for requirements.
+
+## Why try Anima?
+
+- **Play UO on a Mac or Windows PC:** isometric terrain, animated characters,
+  paperdolls, containers, spellbooks, vendors, audio, macros, and a world map.
+- **Build AI players without parsing packets:** the headless Rust core exposes
+  structured `Observation` / `Action` messages through a versioned JSON contract.
+- **Explore a native + WebAssembly architecture:** one core powers the desktop
+  app, the PixiJS browser renderer, and external agents, including Python brains.
+- **Inspect and change the code:** MIT / Apache-2.0 licensed, with documented
+  [compatibility work and verification limits](docs/CLASSICUO_GAPS.md).
 
 ![The Britain moongate: the blue portal inside its ring of standing stones, with
 the world map and HUD alongside](docs/img/screenshot.png)
@@ -19,7 +47,7 @@ torch light it](docs/img/night.png)
 hand-drawn light shapes rather than circles, and a torch that lights from the
 hand that carries it — with a wall able to block the glow behind it.*
 
-> **New here? Read [`docs/DESIGN.md`](docs/DESIGN.md)** — the full design & handoff
+> **Working on the code? Read [`docs/DESIGN.md`](docs/DESIGN.md)** — the full design & handoff
 > doc (decision history, architecture, roadmap, protocol notes, references). This
 > project is resumable from that doc alone.
 
@@ -50,8 +78,7 @@ all drive the same character through the same core.
 
 ## Thesis
 
-Existing clients (ClassicUO) are *human-first*, with automation bolted on. This
-project is **core-first**: a headless game core (`anima-core`) is the primary
+This project is **core-first**: a headless game core (`anima-core`) is the primary
 artifact, and the human-facing renderer is just *one* front-end among several.
 The same core powers AI agents, a browser client, and a desktop app.
 
