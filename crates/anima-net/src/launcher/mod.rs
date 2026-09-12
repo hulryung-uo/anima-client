@@ -1,6 +1,8 @@
 //! Saved server/account profiles. Only non-secret metadata reaches disk or HTTP.
 //! The desktop injects its OS password vault; library/browser users need none.
+mod passwords;
 mod probe;
+use passwords::PasswordChanges;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
@@ -8,6 +10,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const MAX_PROFILE_BYTES: usize = 1024 * 1024;
 
 pub trait PasswordVault: Send + Sync {
     fn get(&self, key: &str) -> Result<Option<String>, String>;
@@ -111,6 +115,13 @@ impl LauncherStore {
         write: bool,
         f: impl FnOnce(&mut Profiles) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.access_with_passwords(write, |data, _| f(data))
+    }
+    fn access_with_passwords<T>(
+        &self,
+        write: bool,
+        f: impl FnOnce(&mut Profiles, &mut PasswordChanges) -> Result<T, String>,
+    ) -> Result<T, String> {
         let mut memory = self
             .memory
             .lock()
@@ -124,7 +135,9 @@ impl LauncherStore {
             lock_file = Some(lock);
             match File::open(path) {
                 Ok(file) => {
-                    if file.metadata().map_err(|_| "Cannot read profiles.")?.len() > 1024 * 1024 {
+                    if file.metadata().map_err(|_| "Cannot read profiles.")?.len()
+                        > MAX_PROFILE_BYTES as u64
+                    {
                         return Err("Profile file is too large; it has been left unchanged.".into());
                     }
                     let data: Profiles = serde_json::from_reader(file).map_err(|_| {
@@ -141,20 +154,27 @@ impl LauncherStore {
         } else {
             memory.clone()
         };
-        let result = f(&mut data)?;
+        let mut changes = PasswordChanges::default();
+        let result = f(&mut data, &mut changes)?;
         if write {
-            if let Some(path) = &self.path {
-                let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-                let mut file = private_file(&tmp, true)?;
-                let bytes =
-                    serde_json::to_vec_pretty(&data).map_err(|_| "Cannot encode profiles.")?;
-                file.write_all(&bytes)
-                    .and_then(|_| file.sync_all())
-                    .map_err(|_| "Could not save profiles. Please retry.")?;
-                drop(file);
-                fs::rename(&tmp, path)
-                    .map_err(|_| "Could not replace the profile file. Please retry.")?;
+            let bytes = serde_json::to_vec_pretty(&data).map_err(|_| "Cannot encode profiles.")?;
+            if bytes.len() > MAX_PROFILE_BYTES {
+                return Err("Profile storage is full. Remove unused profiles or shorten server notes before saving.".into());
             }
+            // Encoding, size checks and disk writes can fail without touching
+            // passwords. Only the final atomic rename follows vault changes.
+            let staged = self
+                .path
+                .as_ref()
+                .map(|path| StagedProfiles::new(path, &bytes))
+                .transpose()?;
+            let applied = changes.apply(self.vault.as_deref())?;
+            if let Some(staged) = staged {
+                if let Err(error) = staged.commit() {
+                    return Err(applied.fail(error));
+                }
+            }
+            applied.commit();
             *memory = data;
         }
         drop(lock_file);
@@ -174,7 +194,7 @@ impl LauncherStore {
             self.refresh(required(body, "id", 64)?)?;
             return self.snapshot();
         }
-        self.access(true, |data| {
+        self.access_with_passwords(true, |data, changes| {
             match op {
                 "save_server" => {
                     let id = identifier(body, "id")?.to_string();
@@ -200,7 +220,7 @@ impl LauncherStore {
                             server.cache = old.cache.clone();
                         } else {
                             for account in data.accounts.iter_mut().filter(|a| a.server_id == id) {
-                                self.forget(old, account)?;
+                                self.forget(old, account, changes)?;
                                 account.characters.clear();
                                 account.last_used = None;
                             }
@@ -251,7 +271,12 @@ impl LauncherStore {
                         return Err("You can save up to 500 accounts.".into());
                     }
                     let same_account = old.is_some_and(|a| {
-                        a.server_id == account.server_id && a.username == account.username
+                        data.servers
+                            .iter()
+                            .find(|s| s.id == a.server_id)
+                            .is_some_and(|old_server| {
+                                credential_key(old_server, a) == credential_key(server, &account)
+                            })
                     });
                     // Validate before changing the vault, so an invalid rename
                     // cannot remove the existing account's password.
@@ -266,37 +291,31 @@ impl LauncherStore {
                         }
                     }
                     if let Some(old) = old {
-                        if old.server_id == account.server_id && old.username == account.username {
+                        if same_account {
                             account.characters = old.characters.clone();
                             account.last_used = old.last_used;
                             account.remember_password = old.remember_password;
                         }
                     }
                     if remember {
-                        let vault = self
-                            .vault
-                            .as_ref()
-                            .ok_or("Password saving is available in the desktop app.")?;
                         if !password.is_empty() {
-                            vault.set(&credential_key(server, &account), password)?;
+                            changes
+                                .set(credential_key(server, &account), Some(password.to_string()));
                         } else if !account.remember_password {
                             return Err("Enter the password you want to save.".into());
                         }
                         account.remember_password = true;
                     } else {
-                        self.forget(server, &mut account)?;
+                        self.forget(server, &mut account, changes)?;
                     }
-                    // A failed save for a renamed account must leave the old
-                    // credential usable. Remove it only after the new one exists.
+                    // Equivalent server profiles share the same bound key.
+                    // Removing that key would also erase the new credential.
                     if !same_account {
                         if let Some(old) = old {
                             if let Some(old_server) =
                                 data.servers.iter().find(|s| s.id == old.server_id)
                             {
-                                if let Err(error) = self.forget(old_server, &mut old.clone()) {
-                                    let _ = self.forget(server, &mut account);
-                                    return Err(error);
-                                }
+                                self.forget(old_server, &mut old.clone(), changes)?;
                             }
                         }
                     }
@@ -312,7 +331,7 @@ impl LauncherStore {
                         if let Some(server) =
                             data.servers.iter().find(|s| s.id == account.server_id)
                         {
-                            self.forget(server, &mut account.clone())?;
+                            self.forget(server, &mut account.clone(), changes)?;
                         }
                     }
                     data.accounts.retain(|a| a.id != id);
@@ -321,7 +340,7 @@ impl LauncherStore {
                     let id = identifier(body, "id")?;
                     if let Some(server) = data.servers.iter().find(|s| s.id == id) {
                         for account in data.accounts.iter().filter(|a| a.server_id == id) {
-                            self.forget(server, &mut account.clone())?;
+                            self.forget(server, &mut account.clone(), changes)?;
                         }
                     }
                     data.accounts.retain(|a| a.server_id != id);
@@ -333,12 +352,17 @@ impl LauncherStore {
         })?;
         self.snapshot()
     }
-    fn forget(&self, server: &ServerProfile, account: &mut AccountProfile) -> Result<(), String> {
+    fn forget(
+        &self,
+        server: &ServerProfile,
+        account: &mut AccountProfile,
+        changes: &mut PasswordChanges,
+    ) -> Result<(), String> {
         if account.remember_password {
             self.vault
                 .as_ref()
-                .ok_or("Open the desktop app to remove this saved password.")?
-                .delete(&credential_key(server, account))?;
+                .ok_or("Open the desktop app to remove this saved password.")?;
+            changes.set(credential_key(server, account), None);
         }
         account.remember_password = false;
         Ok(())
@@ -441,6 +465,33 @@ impl LauncherStore {
             }
             Ok(())
         })
+    }
+}
+struct StagedProfiles {
+    temporary: PathBuf,
+    destination: PathBuf,
+}
+impl StagedProfiles {
+    fn new(path: &Path, bytes: &[u8]) -> Result<Self, String> {
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+        let mut file = private_file(&temporary, true)?;
+        let staged = Self {
+            temporary,
+            destination: path.to_path_buf(),
+        };
+        let result = file.write_all(bytes).and_then(|_| file.sync_all());
+        drop(file);
+        result.map_err(|_| "Could not save profiles. Please retry.")?;
+        Ok(staged)
+    }
+    fn commit(&self) -> Result<(), String> {
+        fs::rename(&self.temporary, &self.destination)
+            .map_err(|_| "Could not replace the profile file. Please retry.".into())
+    }
+}
+impl Drop for StagedProfiles {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.temporary);
     }
 }
 fn private_file(path: &Path, truncate: bool) -> Result<File, String> {

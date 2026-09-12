@@ -56,6 +56,14 @@ an account or server also removes its saved passwords. Changing a host, port or
 shard clears saved passwords and cached character names so an old credential
 cannot silently follow an edited destination. Vault failures are shown on screen.
 
+Profile saves prepare and sync the replacement file before changing passwords.
+If a password operation or the final file replacement fails, Anima attempts to
+restore every affected password and leaves the original profile file in place.
+If the vault also refuses recovery, the error asks you to unlock it and save
+the affected passwords again. Temporary profile files contain no passwords and
+are removed after a failed save. Saves also enforce the same 1 MB limit as reads,
+so an oversized cache cannot make the next launch's profile file unreadable.
+
 Server/account metadata lives in `launcher.json` in Tauri's app-config directory,
 separate from the desktop configuration. Writes lock and reread the file before
 atomic replacement so multiple windows cannot overwrite unrelated profiles.
@@ -102,6 +110,20 @@ for two servers and three accounts: saving, switching, reload restoration, notes
 status caching, failed-login recovery, and narrow-window layout (580px / 390px).
 The real ServUO instance was offline; no live character login was claimed.
 Windows vault behavior requires a Windows runtime check.
+
+Password persistence regressions additionally cover failed file staging, failed
+final replacement, partially failed multi-account deletion, failed rollback, and
+moving an account between two saved servers with the same endpoint. An isolated
+macOS Keychain integration test verifies actual profile save, reuse after restart,
+replacement, preservation after a file-write failure and deletion. All test
+credentials and profile files are removed afterward. Run it explicitly with
+`cargo test -p anima-desktop native_profile_password_lifecycle -- --ignored`;
+normal CI does not access the runner's OS vault. The launcher fixture suite also
+runs on both macOS and Windows CI.
+
+The rollback handles reported operation failures while the client is running;
+the filesystem and OS vault do not offer a shared transaction across a sudden
+process termination. No plaintext password journal is written to disk.
 
 Connection recovery was additionally checked with isolated loopback protocol
 fixtures: cancellation during DNS/authentication, partial-packet timeout, both UO

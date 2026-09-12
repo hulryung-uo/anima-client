@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 struct Vault {
     secrets: Mutex<HashMap<String, String>>,
     fail: AtomicBool,
+    fail_delete: Mutex<Option<String>>,
+    remove_staging_on_set: Mutex<Option<PathBuf>>,
 }
 impl PasswordVault for Vault {
     fn get(&self, key: &str) -> Result<Option<String>, String> {
@@ -19,9 +21,15 @@ impl PasswordVault for Vault {
             .lock()
             .unwrap()
             .insert(key.into(), value.into());
+        if let Some(path) = self.remove_staging_on_set.lock().unwrap().take() {
+            fs::remove_file(path).unwrap();
+        }
         Ok(())
     }
     fn delete(&self, key: &str) -> Result<(), String> {
+        if self.fail_delete.lock().unwrap().as_deref() == Some(key) {
+            return Err("vault deletion failed".into());
+        }
         self.secrets.lock().unwrap().remove(key);
         Ok(())
     }
@@ -215,4 +223,176 @@ fn unsupported_password_storage_and_invalid_fields_are_explicit() {
     assert!(store.command(&plain).is_ok());
     plain["id"] = json!("duplicate");
     assert!(store.command(&plain).is_err());
+}
+
+#[test]
+fn moving_account_between_equivalent_servers_keeps_its_credential() {
+    let folder = Folder::new();
+    let vault = Arc::new(Vault::default());
+    let store = LauncherStore::open(folder.file(), Some(vault)).unwrap();
+    store.command(&server("one", "localhost")).unwrap();
+    store.command(&server("two", "localhost")).unwrap();
+    store.command(&account("a", "one", "original")).unwrap();
+    store.command(&account("a", "two", "replacement")).unwrap();
+    assert_eq!(
+        store.resolve_login("a", "").unwrap().password,
+        "replacement"
+    );
+    store.command(&account("a", "one", "")).unwrap();
+    assert_eq!(
+        store.resolve_login("a", "").unwrap().password,
+        "replacement"
+    );
+}
+
+#[test]
+fn profile_write_failure_preserves_passwords_and_profile_file() {
+    let folder = Folder::new();
+    let vault = Arc::new(Vault::default());
+    let store = LauncherStore::open(folder.file(), Some(vault.clone())).unwrap();
+    store.command(&server("one", "localhost")).unwrap();
+    store.command(&account("a", "one", "original")).unwrap();
+    let before = fs::read(folder.file()).unwrap();
+    // Deterministically prevent staging a file, without chmod/root assumptions.
+    let staging = folder
+        .file()
+        .with_extension(format!("{}.tmp", std::process::id()));
+    fs::create_dir(&staging).unwrap();
+    let mut rename = account("a", "one", "replacement");
+    rename["username"] = json!("renamed");
+    for operation in [
+        account("a", "one", "replacement"),
+        rename,
+        server("one", "changed.test"),
+        json!({"op":"delete_server","id":"one"}),
+    ] {
+        assert!(store.command(&operation).is_err());
+        assert_eq!(fs::read(folder.file()).unwrap(), before);
+        assert_eq!(store.resolve_login("a", "").unwrap().password, "original");
+        assert_eq!(vault.secrets.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn failed_multi_account_delete_restores_passwords_already_removed() {
+    let folder = Folder::new();
+    let vault = Arc::new(Vault::default());
+    let store = LauncherStore::open(folder.file(), Some(vault.clone())).unwrap();
+    store.command(&server("one", "localhost")).unwrap();
+    store.command(&account("a", "one", "first-secret")).unwrap();
+    let mut second = account("b", "one", "second-secret");
+    second["username"] = json!("crafter");
+    store.command(&second).unwrap();
+    *vault.fail_delete.lock().unwrap() = Some(
+        vault
+            .secrets
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, password)| *password == "second-secret")
+            .unwrap()
+            .0
+            .clone(),
+    );
+    let before = fs::read(folder.file()).unwrap();
+    assert!(store
+        .command(&json!({"op":"delete_server","id":"one"}))
+        .is_err());
+    assert_eq!(fs::read(folder.file()).unwrap(), before);
+    assert_eq!(
+        store.resolve_login("a", "").unwrap().password,
+        "first-secret"
+    );
+    assert_eq!(
+        store.resolve_login("b", "").unwrap().password,
+        "second-secret"
+    );
+}
+
+#[test]
+fn failed_final_file_replace_undoes_a_password_change() {
+    let folder = Folder::new();
+    let vault = Arc::new(Vault::default());
+    let store = LauncherStore::open(folder.file(), Some(vault.clone())).unwrap();
+    store.command(&server("one", "localhost")).unwrap();
+    store.command(&account("a", "one", "original")).unwrap();
+    let before = fs::read(folder.file()).unwrap();
+    let staging = folder
+        .file()
+        .with_extension(format!("{}.tmp", std::process::id()));
+    *vault.remove_staging_on_set.lock().unwrap() = Some(staging.clone());
+    let error = store
+        .command(&account("a", "one", "replacement"))
+        .unwrap_err();
+    assert!(error.contains("replace the profile file"));
+    assert_eq!(fs::read(folder.file()).unwrap(), before);
+    assert_eq!(store.resolve_login("a", "").unwrap().password, "original");
+    assert!(!staging.exists());
+}
+
+#[test]
+fn failed_password_rollback_reports_how_to_recover() {
+    let folder = Folder::new();
+    let vault = Arc::new(Vault::default());
+    let store = LauncherStore::open(folder.file(), Some(vault.clone())).unwrap();
+    store.command(&server("one", "localhost")).unwrap();
+    store.command(&account("a", "one", "first-secret")).unwrap();
+    let mut second = account("b", "one", "second-secret");
+    second["username"] = json!("crafter");
+    store.command(&second).unwrap();
+    *vault.fail_delete.lock().unwrap() = Some(
+        vault
+            .secrets
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, password)| *password == "second-secret")
+            .unwrap()
+            .0
+            .clone(),
+    );
+    vault.fail.store(true, Ordering::Relaxed);
+    let before = fs::read(folder.file()).unwrap();
+    let error = store
+        .command(&json!({"op":"delete_server","id":"one"}))
+        .unwrap_err();
+    assert!(error.contains("Some saved passwords could not be restored"));
+    assert!(error.contains("enter and save"));
+    assert!(!error.contains("first-secret") && !error.contains("second-secret"));
+    assert_eq!(fs::read(folder.file()).unwrap(), before);
+    assert!(store.resolve_login("a", "").is_err());
+    assert_eq!(
+        store.resolve_login("b", "").unwrap().password,
+        "second-secret"
+    );
+}
+
+#[test]
+fn oversized_character_cache_cannot_make_saved_profiles_unreadable() {
+    let folder = Folder::new();
+    let store = LauncherStore::open(folder.file(), None).unwrap();
+    store.command(&server("one", "localhost")).unwrap();
+    let mut plain = account("a", "one", "");
+    plain["remember_password"] = json!(false);
+    store.command(&plain).unwrap();
+    let before = fs::read(folder.file()).unwrap();
+    let error = store
+        .cache_characters(
+            "a",
+            "localhost",
+            2594,
+            0,
+            "player",
+            vec![CachedCharacter {
+                index: 0,
+                name: "x".repeat(MAX_PROFILE_BYTES),
+            }],
+        )
+        .unwrap_err();
+    assert!(error.contains("Profile storage is full"));
+    assert_eq!(fs::read(folder.file()).unwrap(), before);
+    assert!(LauncherStore::open(folder.file(), None)
+        .unwrap()
+        .resolve_login("a", "")
+        .is_ok());
 }

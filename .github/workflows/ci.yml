@@ -64,3 +64,5 @@ jobs:
         run: cargo clippy -p anima-desktop --all-targets -- -D warnings
       - name: Test desktop configuration and setup
         run: cargo test -p anima-desktop
+      - name: Test saved servers and password recovery
+        run: cargo test -p anima-net launcher::
