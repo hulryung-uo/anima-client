@@ -59,10 +59,13 @@ run node scripts/check-web-globals.mjs
 # data files. `node --check` and the globals check above both stop at "it parses";
 # this is the first step that can tell you the client still works.
 run node web/test/run.js
+run node --check crates/anima-desktop/frontend-dist/setup.js
 
 if [ "${1-}" != "--skip-desktop" ]; then
     # CI runs this as a separate macOS/Windows job; it is the slow one (Tauri).
     run cargo check -p anima-desktop
+    run cargo clippy -p anima-desktop --all-targets -- -D warnings
+    run cargo test -p anima-desktop
 fi
 
 echo "all quality gates passed (rust $active)"

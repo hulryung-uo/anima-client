@@ -14,11 +14,18 @@ no `web/` directory to ship and no npm/bundler step.
 cargo run -p anima-desktop
 ```
 
-First run: resolves the UO client data directory (`.mul`/`.uop` files) from
-a persisted pick (Tauri app-config dir) or `$HOME/dev/uo/uo-resource`; if
-neither looks valid (no `anim.mul`/`tiledata.mul`), a native folder picker
-asks for it. Cancelling isn't fatal — the play server logs assets as "not
-loaded" and still runs (in case you just want to poke at the login screen).
+First run opens a local game-file setup screen. It checks an automatically
+detected installation or a folder selected through the native picker or path
+field. Required map, tile, art, animation and interface files must pass before
+**Open Anima** saves the location and opens login. Cancelling the picker keeps
+the current selection. Subsequent launches reuse a valid saved folder.
+
+Use **Anima settings → Game files…** (`⌘,` / `Ctrl+,`) to change the folder.
+Saving during play takes effect on the next launch; **Restart Anima** explicitly
+disconnects the session and reopens the app. Malformed app settings are preserved
+until the player chooses recovery, which first creates an exact backup. See
+[Game files and first launch](../../docs/GAME_FILES.md) for compatibility,
+recovery and verification details.
 
 Once bound, a window opens showing the server/account login page. There are
 no baked-in credentials (unlike `play`'s CLI-arg auto-login) — this is the
@@ -49,10 +56,11 @@ copy of the app, or an unrelated process) the shell logs that and falls back
 to the next free one — that session gets its own store, and the original
 settings come back as soon as the original port is free again.
 
-The one case that can still split a store is two copies started together on
-the *first* run after upgrading, when neither has a remembered port yet: both
-claim one, and the write is re-checked but not locked, so the loser serves
-from its own port and logs that it left the winner's claim alone.
+Port claims and game-folder changes lock a shared sidecar, reread the latest
+configuration and replace it atomically. Two copies started together preserve
+the first saved origin; the other session still has a separate temporary origin.
+Unknown settings fields survive ordinary updates. A failed write is shown in
+the setup screen instead of silently claiming that settings were saved.
 
 ## Bundling an installable app (.app / .dmg / .exe)
 

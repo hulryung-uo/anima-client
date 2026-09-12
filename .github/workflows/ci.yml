@@ -32,6 +32,8 @@ jobs:
         run: cargo check -p anima-wasm --target wasm32-unknown-unknown
       - name: Check web JavaScript syntax
         run: find web -name "*.js" -not -path "web/vendor/*" -print0 | xargs -0 -n1 node --check
+      - name: Check desktop setup JavaScript
+        run: node --check crates/anima-desktop/frontend-dist/setup.js
       # The step above compiles each file ALONE. These are classic scripts
       # sharing one global scope, so two files declaring the same top-level
       # `const` is a SyntaxError that kills the later file — and only shows up
@@ -58,3 +60,7 @@ jobs:
         run: rustup show active-toolchain
       - name: Check desktop shell
         run: cargo check -p anima-desktop
+      - name: Lint desktop shell and tests
+        run: cargo clippy -p anima-desktop --all-targets -- -D warnings
+      - name: Test desktop configuration and setup
+        run: cargo test -p anima-desktop

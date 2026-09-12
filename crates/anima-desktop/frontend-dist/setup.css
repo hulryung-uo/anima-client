@@ -1,0 +1,48 @@
+:root { color-scheme: dark; font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #dae2eb; background: #10161e; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 870px; margin: auto; padding: 28px 34px 22px; }
+header { display: flex; align-items: center; gap: 18px; margin-bottom: 25px; }
+.brand { font: 600 18px Georgia, serif; letter-spacing: .18em; color: #e4d5b8; }
+.eyebrow { font-size: 9px; letter-spacing: .14em; color: #a59b8c; }
+.intro { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; margin-bottom: 22px; }
+h1 { margin: 0 0 7px; font-size: 29px; line-height: 1.2; letter-spacing: -.035em; font-weight: 550; color: #f0e9dd; }
+h2 { margin: 0; font-size: 13px; font-weight: 600; color: #e6ded1; }
+p { margin: 6px 0; }
+.muted { font-size: 11px; color: #a3afbc; }
+.badge { flex-shrink: 0; padding: 5px 10px; border: 1px solid #635949; border-radius: 30px; font-size: 10px; color: #d7bf95; white-space: nowrap; }
+.badge.ready { border-color: #406755; color: #a5d5b9; }
+.folder-card { background: #18212c; border: 1px solid #304050; border-radius: 10px; padding: 18px; margin-bottom: 20px; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+label { display: block; color: #aab8c6; font-size: 11px; margin-bottom: 7px; }
+.folder-row { display: flex; gap: 8px; }
+input { flex: 1; min-width: 0; border: 1px solid #3c4b5c; border-radius: 5px; background: #10161f; color: #e3eaf2; font: 12px ui-monospace, Menlo, Consolas, monospace; padding: 10px; }
+button { border: 1px solid #405264; border-radius: 6px; background: #263546; color: #d5e5f6; font: inherit; font-size: 11px; padding: 9px 13px; cursor: pointer; white-space: nowrap; }
+button:hover:not(:disabled) { background: #334a61; border-color: #8caccc; }
+button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid #a5c8ec; outline-offset: 3px; }
+button:disabled { opacity: .4; cursor: default; }
+.subtle { background: transparent; padding: 4px 0; border: 0; color: #b6cce1; }
+.check-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 6px; }
+.check-row p { max-width: 75%; }
+.checks { border-top: 1px solid #2a3744; }
+.file-check { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: start; gap: 10px; padding: 11px 0; border-bottom: 1px solid #27333f; }
+.file-check .icon { margin-top: 1px; color: #d4a381; text-align: center; }
+.file-check.ready .icon { color: #99cbae; }
+.file-check h3 { margin: 0 0 2px; font-size: 12px; font-weight: 500; }
+.file-check p { margin: 0; color: #9eacba; font-size: 10px; overflow-wrap: anywhere; }
+.file-check .label { color: #aa9480; font-size: 10px; }
+.file-check.ready .label { color: #88b49b; }
+.warning { border: 1px solid #80573f; background: #33271f; padding: 15px; border-radius: 8px; margin: 0 0 18px; }
+.warning p { font-size: 11px; overflow-wrap: anywhere; }
+.warning button { margin-top: 8px; background: #513d2c; border-color: #a57a50; }
+.storage { color: #96a7b6; font-size: 10px; margin-top: 18px; }
+summary { cursor: pointer; }
+.path { overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
+#feedback { min-height: 16px; color: #e0bf8d; font-size: 12px; overflow-wrap: anywhere; margin-top: 15px; }
+footer { position: sticky; bottom: 0; border-top: 1px solid #334252; background: #17212df5; padding: 14px 34px; display: flex; gap: 15px; align-items: center; justify-content: space-between; backdrop-filter: blur(8px); }
+footer p { max-width: 340px; margin: 0; }
+.footer-actions { display: flex; gap: 8px; }
+.primary { color: #18212b; background: #d8c7a5; border-color: #e9d9b6; font-weight: 650; min-width: 120px; }
+.primary:hover:not(:disabled) { background: #f0debb; border-color: #f0debb; }
+[hidden] { display: none !important; }
+@media (max-width: 640px) { main { padding: 20px; } h1 { font-size: 24px; } .intro { flex-wrap: wrap; } footer { padding: 12px 20px; flex-wrap: wrap; } .footer-actions { width: 100%; justify-content: flex-end; } }

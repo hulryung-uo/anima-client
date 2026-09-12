@@ -11,6 +11,7 @@
 //! in each bin.
 
 use std::path::{Path, PathBuf};
+pub mod check;
 
 /// True if `dir` looks like a UO client-data directory. `tiledata.mul` and
 /// `anim.mul` ship in every classic client (legacy + UOP); the art files cover

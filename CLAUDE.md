@@ -71,9 +71,9 @@ Everything CDP does afterwards is synthetic and does not raise the window:
 `Page.reload`, `Input.dispatchMouseEvent`/`dispatchKeyEvent`,
 `Page.captureScreenshot`. **`Page.bringToFront` does. Do not call it.**
 
-The gate never opens a window: its desktop step is `cargo check -p
-anima-desktop`, which only type-checks. `cargo run -p anima-desktop` is the one
-that opens a native window, and nothing automated runs it.
+The gate never opens a window: its desktop steps check, lint and run headless
+configuration tests. `cargo run -p anima-desktop` opens a native window;
+the gate does not run it.
 
 ## Build / test
 ```bash

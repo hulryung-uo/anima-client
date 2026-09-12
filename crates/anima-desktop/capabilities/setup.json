@@ -1,0 +1,17 @@
+{
+  "identifier": "setup",
+  "description": "Local desktop game-file setup only; the remote game page has no native commands.",
+  "windows": [
+    "setup"
+  ],
+  "permissions": [
+    "allow-setup-status",
+    "allow-setup-check",
+    "allow-setup-choose",
+    "allow-setup-detect",
+    "allow-setup-recover",
+    "allow-setup-apply",
+    "allow-setup-close",
+    "allow-setup-restart"
+  ]
+}

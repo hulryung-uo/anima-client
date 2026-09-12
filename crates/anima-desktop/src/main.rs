@@ -5,33 +5,22 @@
 //! already talks same-origin (relative `fetch`/`EventSource`) to whatever
 //! host served the page.
 //!
-//! No bundler / npm step: the "frontend" is the play server's embedded
-//! `web/` copy, so `frontendDist` in `tauri.conf.json` just points at an
-//! empty placeholder directory that's never actually served.
+//! No bundler / npm step. `frontend-dist` is a local setup window with a
+//! file checklist; the game renderer stays in the play server's embedded web/.
 
+mod config;
 mod credentials;
+mod setup;
 use anima_net::launcher::LauncherStore;
 use std::net::{Ipv4Addr, TcpListener};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anima_net::play_server::{self, PlayConfig};
-use anima_net::uo_dir;
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use config::DesktopConfig;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-
-/// Persisted at `<app_config_dir>/config.json` so a manually-picked data dir
-/// (see [`resolve_data_dir`]) and the webview's origin (see
-/// [`choose_http_port`]) survive across runs.
-#[derive(Serialize, Deserialize)]
-struct DesktopConfig {
-    data_dir: PathBuf,
-    /// The loopback port last served to the webview. `serde(default)` keeps
-    /// config.json files written before this field existed loadable.
-    #[serde(default)]
-    http_port: Option<u16>,
-}
 
 /// Ports tried, in order, when nothing usable is remembered. Deliberately a
 /// fixed low range rather than an OS-assigned one: the webview's origin —
@@ -73,299 +62,230 @@ fn port_is_free(port: u16) -> bool {
     TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
 }
 
-/// Cheap sanity check that `dir` looks like an unpacked UO client install
-/// (not necessarily complete — `anima-assets` opens each file independently
-/// and logs "not loaded" for anything missing). Shares the validation the
-/// `play` bin uses ([`anima_net::uo_dir::looks_like_uo_data`]).
-fn looks_like_uo_data(dir: &Path) -> bool {
-    uo_dir::looks_like_uo_data(dir)
-}
-
-/// Matches the `play` bin's CLI default (`$HOME/dev/uo/uo-resource`) so a
-/// dev machine already set up for `cargo run -p anima-net --bin play` needs
-/// no extra configuration for the desktop shell either.
-fn default_data_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(format!("{home}/dev/uo/uo-resource"))
-}
-
-fn config_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path()
-        .app_config_dir()
-        .ok()
-        .map(|d| d.join("config.json"))
-}
-
-fn load_config(app: &AppHandle) -> Option<DesktopConfig> {
-    let text = std::fs::read_to_string(config_path(app)?).ok()?;
-    serde_json::from_str::<DesktopConfig>(&text).ok()
-}
-
-fn save_config(app: &AppHandle, cfg: &DesktopConfig) {
-    let Some(path) = config_path(app) else { return };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(cfg) {
-        let _ = std::fs::write(path, json);
-    }
-}
-
-/// Read-modify-write so the other fields survive: blindly rewriting the file
-/// with only `data_dir` would drop the remembered port, moving the webview's
-/// origin and wiping every stored preference.
-fn persist_data_dir(app: &AppHandle, dir: &Path) {
-    let mut cfg = load_config(app).unwrap_or(DesktopConfig {
-        data_dir: dir.to_path_buf(),
-        http_port: None,
-    });
-    cfg.data_dir = dir.to_path_buf();
-    save_config(app, &cfg);
-}
-
-fn persist_http_port(app: &AppHandle, data_dir: &Path, port: u16) {
-    let mut cfg = load_config(app).unwrap_or(DesktopConfig {
-        data_dir: data_dir.to_path_buf(),
-        http_port: None,
-    });
-    // Re-read decides, not the value we loaded at startup: on the very first run
-    // after upgrade two copies both start with no remembered port, and whichever
-    // finishes second would otherwise clobber the first one's claim — stranding
-    // every preference the user had just set under an origin nothing loads again.
-    // Re-reading here narrows that to the window between this load and the write;
-    // it is not atomic, but the alternative is a lock file for a case that needs
-    // two copies started within the same second of a first launch.
-    if let Some(claimed) = cfg.http_port {
-        if claimed != port {
-            eprintln!(
-                "anima-desktop: another copy already claimed port {claimed}; leaving it \
-                 and serving this session from {port} (its preferences are separate)"
-            );
-            return;
-        }
-    }
-    cfg.http_port = Some(port);
-    save_config(app, &cfg);
-}
-
-/// Resolve the UO client data directory: a previously-persisted pick, else
-/// the dev-default path, validated by [`looks_like_uo_data`]. If invalid,
-/// show the native folder picker and persist a valid pick. A cancelled
-/// picker is not fatal — the play server already degrades gracefully with
-/// assets logged as "not loaded" (`anima_net::play_server::bind`).
-///
-/// Must run off the main thread: `blocking_pick_folder` docs are explicit
-/// that it deadlocks if called from it (the caller is our own spawned
-/// thread — see `main`).
-fn resolve_data_dir(app: &AppHandle) -> PathBuf {
-    let candidate = load_config(app)
-        .map(|c| c.data_dir)
-        .unwrap_or_else(default_data_dir);
-    if looks_like_uo_data(&candidate) {
-        return candidate;
-    }
-    // Before bothering the user with a folder picker, search the known install
-    // locations (dev path, /Applications, a configured ClassicUO, …). Persist a
-    // hit so the picker never appears again on this machine.
-    if let Some(found) = uo_dir::detect_uo_dir() {
-        println!(
-            "anima-desktop: auto-detected UO data at {}",
-            found.display()
-        );
-        persist_data_dir(app, &found);
-        return found;
-    }
-    println!(
-        "anima-desktop: no UO client data at {} and none auto-detected; asking the user",
-        candidate.display()
-    );
-    let picked = app
-        .dialog()
-        .file()
-        .set_title(
-            "Locate your Ultima Online client files (folder containing anim.mul / tiledata.mul)",
-        )
-        .blocking_pick_folder()
-        .and_then(|f| f.into_path().ok());
-    match picked {
-        Some(dir) => {
-            if !looks_like_uo_data(&dir) {
-                eprintln!(
-                    "anima-desktop: {} doesn't look like a UO data dir either; using it anyway",
-                    dir.display()
-                );
-            }
-            persist_data_dir(app, &dir);
-            dir
-        }
-        None => {
-            eprintln!(
-                "anima-desktop: folder picker cancelled; continuing with {} (assets will show as not loaded)",
-                candidate.display()
-            );
-            candidate
-        }
-    }
-}
-
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            setup::setup_status,
+            setup::setup_check,
+            setup::setup_choose,
+            setup::setup_detect,
+            setup::setup_recover,
+            setup::setup_apply,
+            setup::setup_close,
+            setup::setup_restart,
+        ])
+        .menu(|app| {
+            use tauri::menu::{Menu, MenuItem, Submenu};
+            let menu = Menu::default(app)?;
+            let files =
+                MenuItem::with_id(app, "game-files", "Game files…", true, Some("CmdOrCtrl+,"))?;
+            menu.append(&Submenu::with_items(
+                app,
+                "Anima settings",
+                true,
+                &[&files],
+            )?)?;
+            Ok(menu)
+        })
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "game-files" {
+                let _ = setup::open(app);
+            }
+        })
         .setup(|app| {
             let app_handle = app.handle().clone();
-            // Everything below is blocking (folder picker, TCP+HTTP bind, the
-            // game loop) and must not run on the main thread, or it'd freeze
-            // the (not-yet-created) window and deadlock the folder picker.
-            std::thread::spawn(move || {
-                let data_dir = resolve_data_dir(&app_handle);
-                let launcher = app_handle
-                    .path()
-                    .app_config_dir()
-                    .map_err(|_| "Cannot locate the Anima profile folder.".to_string())
-                    .and_then(|dir| {
-                        LauncherStore::open(dir.join("launcher.json"), credentials::native_vault())
-                    });
-                let launcher = match launcher {
-                    Ok(store) => Arc::new(store),
-                    Err(error) => {
-                        fatal(&app_handle, &error);
-                        return;
-                    }
-                };
-
-                // Standalone default: the served login page collects
-                // server/account (no baked-in credentials); web_dir None = the
-                // copy embedded in anima-net at compile time (no `web/`
-                // directory exists outside the repo).
-                let make_cfg = |http_port: u16| PlayConfig {
-                    host: String::new(),
-                    port: 0,
-                    user: String::new(),
-                    pass: String::new(),
-                    shard: 0, // the login page carries its own shard choice
-                    http_port,
-                    web_dir: None,
-                    data_dir: data_dir.clone(),
-                    login_page: true,
-                    // Loopback only, unconditionally — unlike the `play` bin's
-                    // `ANIMA_BIND` escape hatch (see `anima_net::play_server::PlayConfig`),
-                    // the desktop shell must never honor an env var that could
-                    // expose this process to the network.
-                    bind_addr: "127.0.0.1".to_string(),
-                    // The desktop shell drives its own session — full input.
-                    read_only: false,
-                };
-
-                // Serve from the same port as last run whenever we can: the
-                // renderer's preferences live in localStorage, which is keyed
-                // by origin (port included). Scanning a small fixed range keeps
-                // the original "multiple copies never collide" property — a
-                // second copy just lands on the next port (with its own store)
-                // instead of failing to start.
-                let remembered = load_config(&app_handle).and_then(|c| c.http_port);
-                let chosen = choose_http_port(remembered, port_is_free);
-                if let Some(want) = usable_remembered(remembered) {
-                    if chosen != Some(want) {
-                        eprintln!(
-                            "anima-desktop: port {want} is in use (another copy of Anima?); \
-                             falling back to {} — settings saved under the old port stay there \
-                             and come back once {want} is free again",
-                            chosen.map_or("an OS-assigned port".to_string(), |p| p.to_string())
-                        );
-                    }
-                } else if chosen.is_none() {
-                    eprintln!(
-                        "anima-desktop: every port in {}..={} is in use; using an OS-assigned one \
-                         — settings will not persist past this run",
-                        PORT_RANGE.start(),
-                        PORT_RANGE.end()
-                    );
-                }
-
-                // `port_is_free` closed its probe listener before we got here, so
-                // another process can still win the race; `play_server::bind` only
-                // fails on the HTTP bind, so retry once with an OS-assigned port
-                // rather than refusing to start over a lost race.
-                let server = match chosen {
-                    Some(p) => play_server::bind_with_launcher(make_cfg(p), launcher.clone())
-                        .or_else(|e| {
-                            eprintln!(
-                                "anima-desktop: port {p} was taken after all ({e}); \
-                             retrying with an OS-assigned port"
-                            );
-                            play_server::bind_with_launcher(make_cfg(0), launcher.clone())
-                        }),
-                    None => play_server::bind_with_launcher(make_cfg(0), launcher.clone()),
-                };
-                let server = match server {
-                    Ok(s) => s,
-                    Err(e) => {
-                        // No window exists yet here — without this dialog the app
-                        // would keep running as an invisible dock zombie (FIX 1b):
-                        // stderr goes nowhere a Finder user will ever see it.
-                        eprintln!("anima-desktop: play server failed to bind: {e}");
-                        fatal(&app_handle, &format!("Anima couldn't start: {e}"));
-                        return;
-                    }
-                };
-                // The port actually bound, which is what the webview loads and
-                // what localStorage is keyed by (`chosen` may have lost the race).
-                let port = server.port();
-                println!("anima-desktop: play server bound on 127.0.0.1:{port}");
-                // Claim an origin only if we don't have one yet: overwriting a
-                // remembered port with a fallback would hand the user's stored
-                // preferences to whichever copy launched second.
-                if usable_remembered(remembered).is_none() && PORT_RANGE.contains(&port) {
-                    persist_http_port(&app_handle, &data_dir, port);
-                }
-
-                let handle_for_window = app_handle.clone();
-                if let Err(e) = app_handle.run_on_main_thread(move || {
-                    let url = format!("http://127.0.0.1:{port}/");
-                    let build = WebviewWindowBuilder::new(
-                        &handle_for_window,
-                        "main",
-                        WebviewUrl::External(
-                            url.parse()
-                                .expect("http://127.0.0.1:<port>/ is a valid URL"),
-                        ),
-                    )
-                    .title("Anima")
-                    .inner_size(1280.0, 800.0);
-                    if let Err(e) = build.build() {
-                        eprintln!("anima-desktop: failed to open window: {e}");
-                    }
-                }) {
-                    eprintln!("anima-desktop: run_on_main_thread failed: {e}");
-                }
-
-                // Blocks for the app's lifetime (login + game loop). There's no
-                // graceful shutdown plumbing for tiny_http today (intentionally
-                // deferred, see crates/anima-desktop/README.md), so the only way
-                // out of this call is the game connection ending — a clean
-                // `Ok(())` (ServUO closed the socket) or an `Err` (read/write
-                // failure). Either way the window is left showing a frozen last
-                // scene with nothing driving it (FIX 1a): surface that natively
-                // instead of leaving a silent zombie window.
-                let result = server.run();
-                let msg = match &result {
-                    Ok(()) => "Connection to the game server ended.".to_string(),
-                    Err(e) => format!("Connection to the game server ended: {e}"),
-                };
-                eprintln!("anima-desktop: play server exited: {msg}");
-                fatal(&app_handle, &msg);
-            });
+            // Isolated desktop QA can use its own config/profile directory.
+            // This never changes the renderer's loopback-only network binding.
+            let folder = match std::env::var_os("ANIMA_DESKTOP_CONFIG_DIR") {
+                Some(path) => PathBuf::from(path),
+                None => app.path().app_config_dir()?,
+            };
+            app.manage(Arc::new(setup::SetupState::new(folder.join("config.json"))));
+            setup::open(&app_handle)?;
+            std::thread::spawn(move || setup::initialize(app_handle));
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
+fn launch(app_handle: AppHandle, data_dir: PathBuf) {
+    std::thread::spawn(move || {
+        let state = app_handle.state::<Arc<setup::SetupState>>().inner().clone();
+        let launcher = state
+            .config
+            .path
+            .parent()
+            .ok_or_else(|| "Cannot locate the Anima profile folder.".to_string())
+            .and_then(|dir| {
+                LauncherStore::open(dir.join("launcher.json"), credentials::native_vault())
+            });
+        let launcher = match launcher {
+            Ok(store) => Arc::new(store),
+            Err(error) => {
+                setup::failed(&app_handle, error);
+                return;
+            }
+        };
+
+        // Standalone default: the served login page collects
+        // server/account (no baked-in credentials); web_dir None = the
+        // copy embedded in anima-net at compile time (no `web/`
+        // directory exists outside the repo).
+        let make_cfg = |http_port: u16| PlayConfig {
+            host: String::new(),
+            port: 0,
+            user: String::new(),
+            pass: String::new(),
+            shard: 0, // the login page carries its own shard choice
+            http_port,
+            web_dir: None,
+            data_dir: data_dir.clone(),
+            login_page: true,
+            // Loopback only, unconditionally — unlike the `play` bin's
+            // `ANIMA_BIND` escape hatch (see `anima_net::play_server::PlayConfig`),
+            // the desktop shell must never honor an env var that could
+            // expose this process to the network.
+            bind_addr: "127.0.0.1".to_string(),
+            // The desktop shell drives its own session — full input.
+            read_only: false,
+        };
+
+        // Serve from the same port as last run whenever we can: the
+        // renderer's preferences live in localStorage, which is keyed
+        // by origin (port included). Scanning a small fixed range keeps
+        // the original "multiple copies never collide" property — a
+        // second copy just lands on the next port (with its own store)
+        // instead of failing to start.
+        let remembered = match state.config.load() {
+            Ok(cfg) => cfg.and_then(|c| c.http_port),
+            Err(error) => {
+                setup::failed(&app_handle, error);
+                return;
+            }
+        };
+        let chosen = choose_http_port(remembered, port_is_free);
+        if let Some(want) = usable_remembered(remembered) {
+            if chosen != Some(want) {
+                eprintln!(
+                    "anima-desktop: port {want} is in use (another copy of Anima?); \
+                             falling back to {} — settings saved under the old port stay there \
+                             and come back once {want} is free again",
+                    chosen.map_or("an OS-assigned port".to_string(), |p| p.to_string())
+                );
+            }
+        } else if chosen.is_none() {
+            eprintln!(
+                "anima-desktop: every port in {}..={} is in use; using an OS-assigned one \
+                         — settings will not persist past this run",
+                PORT_RANGE.start(),
+                PORT_RANGE.end()
+            );
+        }
+
+        // `port_is_free` closed its probe listener before we got here, so
+        // another process can still win the race; `play_server::bind` only
+        // fails on the HTTP bind, so retry once with an OS-assigned port
+        // rather than refusing to start over a lost race.
+        let server = match chosen {
+            Some(p) => {
+                play_server::bind_with_launcher(make_cfg(p), launcher.clone()).or_else(|e| {
+                    eprintln!(
+                        "anima-desktop: port {p} was taken after all ({e}); \
+                             retrying with an OS-assigned port"
+                    );
+                    play_server::bind_with_launcher(make_cfg(0), launcher.clone())
+                })
+            }
+            None => play_server::bind_with_launcher(make_cfg(0), launcher.clone()),
+        };
+        let server = match server {
+            Ok(s) => s,
+            Err(e) => {
+                // No window exists yet here — without this dialog the app
+                // would keep running as an invisible dock zombie (FIX 1b):
+                // stderr goes nowhere a Finder user will ever see it.
+                eprintln!("anima-desktop: play server failed to bind: {e}");
+                setup::failed(&app_handle, format!("Anima couldn't start: {e}"));
+                return;
+            }
+        };
+        // The port actually bound, which is what the webview loads and
+        // what localStorage is keyed by (`chosen` may have lost the race).
+        let port = server.port();
+        println!("anima-desktop: play server bound on 127.0.0.1:{port}");
+        // Claim an origin only if we don't have one yet: overwriting a
+        // remembered port with a fallback would hand the user's stored
+        // preferences to whichever copy launched second.
+        if usable_remembered(remembered).is_none() && PORT_RANGE.contains(&port) {
+            if let Err(error) = state.config.claim_port(port) {
+                // The port is already bound. Surface persistence failure
+                // and continue this run without falsely claiming a save.
+                state.view.lock().unwrap().notice = error;
+            }
+        }
+
+        let handle_for_window = app_handle.clone();
+        let window_data_dir = data_dir.clone();
+        if let Err(e) = app_handle.run_on_main_thread(move || {
+            let url = format!("http://127.0.0.1:{port}/");
+            let build = WebviewWindowBuilder::new(
+                &handle_for_window,
+                "main",
+                WebviewUrl::External(
+                    url.parse()
+                        .expect("http://127.0.0.1:<port>/ is a valid URL"),
+                ),
+            )
+            .title("Anima")
+            .inner_size(1280.0, 800.0);
+            match build.build() {
+                Ok(_) => {
+                    setup::running(&handle_for_window, &window_data_dir);
+                    if let Some(window) = handle_for_window.get_webview_window("setup") {
+                        // Keep a persistence warning visible until acknowledged.
+                        let state = handle_for_window.state::<Arc<setup::SetupState>>();
+                        if state.snapshot().notice.is_empty() {
+                            let _ = window.close();
+                        }
+                    }
+                }
+                Err(e) => {
+                    let handle = handle_for_window.clone();
+                    std::thread::spawn(move || {
+                        fatal(&handle, &format!("Anima couldn't open its window: {e}"))
+                    });
+                }
+            }
+        }) {
+            eprintln!("anima-desktop: run_on_main_thread failed: {e}");
+            fatal(&app_handle, &format!("Anima couldn't open its window: {e}"));
+            return;
+        }
+
+        // Blocks for the app's lifetime (login + game loop). There's no
+        // graceful shutdown plumbing for tiny_http today (intentionally
+        // deferred, see crates/anima-desktop/README.md), so the only way
+        // out of this call is the game connection ending — a clean
+        // `Ok(())` (ServUO closed the socket) or an `Err` (read/write
+        // failure). Either way the window is left showing a frozen last
+        // scene with nothing driving it (FIX 1a): surface that natively
+        // instead of leaving a silent zombie window.
+        let result = server.run();
+        let msg = match &result {
+            Ok(()) => "Connection to the game server ended.".to_string(),
+            Err(e) => format!("Connection to the game server ended: {e}"),
+        };
+        eprintln!("anima-desktop: play server exited: {msg}");
+        fatal(&app_handle, &msg);
+    });
+}
+
 /// Show a native blocking error dialog, then terminate the app. Must be
 /// called off the main thread — `blocking_show` docs are explicit that it
-/// deadlocks there, exactly like `blocking_pick_folder` (see
-/// `resolve_data_dir`) — which both callers here already satisfy (the
-/// background thread spawned in `main`). `AppHandle::exit` triggers a clean
+/// deadlocks there, exactly like `blocking_pick_folder`. Callers dispatch to
+/// a background thread. `AppHandle::exit` triggers a clean
 /// `RunEvent::ExitRequested`/`Exit` and falls back to `std::process::exit`
 /// itself if that fails, so there's no zombie process left behind either way.
 fn fatal(app: &AppHandle, message: &str) {

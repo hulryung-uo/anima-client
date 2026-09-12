@@ -1,8 +1,11 @@
 <!doctype html>
-<!--
-  Never actually served. `frontendDist` must point at something that exists
-  (tauri codegen panics otherwise); the webview navigates straight to the
-  in-process play server's own URL (http://127.0.0.1:<port>/), which serves
-  the real renderer from `web/` (embedded — see anima_net::play_server).
--->
-<html><body></body></html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Anima — Game files</title><link rel="stylesheet" href="setup.css"><script defer src="setup.js"></script></head>
+<body><main>
+<header><span class="brand">ANIMA</span><span class="eyebrow">ULTIMA ONLINE · DESKTOP</span></header>
+<div class="intro"><div><h1 id="title">Your journey starts here.</h1><p class="muted">Connect Anima to your existing Ultima Online client files.</p></div><span id="badge" class="badge">Checking…</span></div>
+<section id="storage-error" class="warning" hidden aria-labelledby="storage-title"><h2 id="storage-title">App settings need attention</h2><p id="storage-message"></p><p class="muted">Recovery backs up the original app settings before resetting the game-file location. Saved servers, accounts and passwords are kept.</p><button id="recover" type="button">Back up and reset app settings</button></section>
+<section class="folder-card" aria-labelledby="folder-title"><div class="section-heading"><h2 id="folder-title">Game folder</h2><button id="detect" type="button" class="subtle">Find automatically</button></div>
+<form id="folder-form"><label for="folder">Folder containing your .mul and .uop files</label><div class="folder-row"><input id="folder" spellcheck="false" autocomplete="off" placeholder="Choose your Ultima Online folder"><button id="browse" type="button">Choose folder…</button></div><div class="check-row"><p class="muted">Use your shard's recommended client files. No game files are downloaded or changed.</p><button id="check" type="submit" class="subtle">Check folder</button></div></form></section>
+<section aria-labelledby="check-title"><div class="section-heading"><h2 id="check-title">Installation check</h2><span class="muted">Required files + optional extras</span></div><div id="checks" class="checks"><p class="muted">Looking for your installation…</p></div><p id="compatibility" class="muted" hidden>This build reads UOP world maps. A folder with only legacy map0.mul cannot load its terrain.</p></section>
+<details class="storage"><summary>App settings location</summary><p id="config-path" class="path"></p><p id="active-path" class="muted"></p></details><p id="feedback" role="status" aria-live="polite"></p>
+</main><footer><p id="next-step" class="muted">Your saved folder will be used on future launches.</p><div class="footer-actions"><button id="close" type="button" hidden>Back to Anima</button><button id="restart" type="button" hidden>Restart Anima</button><button id="apply" type="button" class="primary" disabled>Open Anima →</button></div></footer></body></html>
