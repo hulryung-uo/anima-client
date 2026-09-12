@@ -7,7 +7,7 @@ separate; see [Game files](GAME_FILES.md) and [Login profiles](LOGIN_PROFILES.md
 
 ## Persistence and recovery
 
-Options, macros, map markers, quick buttons, counters and HUD preferences are
+Options, macros, map markers, quick buttons, counters, window geometry and HUD preferences are
 stored in one versioned `anima.preferences.v1` browser-storage record. It belongs
 to this browser/webview origin, including its port. Different native windows on
 different ports therefore retain separate renderer preferences.
@@ -17,6 +17,16 @@ save migrates all recognized groups into the new record; the legacy values stay
 untouched. Normal option changes preserve unknown fields and merge changed
 options with the latest saved object. The account library and OS credential
 vault are outside this record and outside settings exports.
+
+The source now also validates and backs up `anima.winGeom`, which older builds
+kept outside the envelope. A valid legacy position/size is adopted even if other
+settings were migrated earlier. That adoption is recorded with the next save;
+an explicit restore that omits geometry resets it to defaults without reviving
+the untouched legacy value. Invalid geometry uses safe defaults and retains its
+original for recovery. Each window type keeps its position and size; ordinary
+saves reread the latest geometry so moving one window preserves other windows'
+newer positions. These defaults belong to the renderer origin and are not yet
+separate character-specific layouts.
 
 Invalid types, out-of-range options and malformed arrays use safe defaults or
 retain valid entries. A macro with an invalid step is skipped as a whole, so
@@ -53,12 +63,17 @@ unlimited history. Keep exported backups for longer-term recovery.
 
 ## Verification status — 2026-09-13
 
-Implemented, with the complete quality gate passing: 655 main Rust tests,
-14 desktop tests, 267 web tests / 1,301 assertions, lint, native compilation
-and WASM compilation. New tests cover storage denial, quota failure, validation,
+Implemented, with the complete local quality gate passing, including lint,
+native compilation, WASM compilation and 283 web tests. Tests cover storage denial, quota failure, validation,
 legacy migration, original-data retention, previous-copy restore, stale review,
 late file reads, live-session guards, explicit download links and native download
 origin/path restrictions.
+
+Window-geometry regressions reproduce the earlier `null`-geometry failure that
+prevented dialogs from opening, and verify position/size export and restore,
+late adoption into an existing settings record, omitted-group defaults,
+concurrent-window merges, failed saves and offscreen position clamping. These
+are headless renderer tests; actual native resizing/layout checks remain open.
 
 Chrome showed a real renderer boot with deliberately invalid legacy options,
 the warning/recovery dialog, and a successful recovery/reload to login. The
@@ -75,4 +90,5 @@ through a usable native window or authorized browser file access before announci
 this entire feature as complete. Windows interactive checks also remain.
 
 This source change is not included in the published v0.6.0 installers. The
+geometry improvements are also newer than the tagged v0.7.0 draft installers. The
 [readiness audit](CLIENT_READINESS.md) tracks the broader outstanding work.

@@ -269,12 +269,36 @@ function syncDialogs(scene) {
 // by class means "the next container opens where I put the last one", which is
 // what a person actually wants and what ClassicUO's per-type defaults do.
 const WIN_GEOM_KEY = "anima.winGeom";
-let winGeom = {};
-try { winGeom = JSON.parse(localStorage.getItem(WIN_GEOM_KEY) || "{}"); } catch (e) {}
+function normalizeWindowGeometry(value) {
+  if (!prefObject(value) || Object.keys(value).length > 512) return null;
+  const result = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (!/^[#.][a-z0-9_-]{1,128}$/i.test(key) || !prefObject(entry)) continue;
+    const geometry = { ...entry };
+    for (const [first, second, min, max] of [["left", "top", -100000, 100000], ["w", "h", 1, 16384]]) {
+      if (Object.hasOwn(entry, first) || Object.hasOwn(entry, second)) {
+        if (!prefNumber(entry[first], min, max) || !prefNumber(entry[second], min, max)) {
+          delete geometry[first]; delete geometry[second];
+        }
+      }
+    }
+    result[key] = geometry;
+  }
+  return result;
+}
+preferenceStorage.json(WIN_GEOM_KEY, normalizeWindowGeometry, { adoptLegacy: true });
+function readWindowGeometry() { return JSON.parse(preferenceStorage.getItem(WIN_GEOM_KEY) || "{}"); }
+let winGeom = readWindowGeometry();
 function saveWinGeom(key, g) {
   if (!key) return;
-  winGeom[key] = Object.assign(winGeom[key] || {}, g);
-  try { localStorage.setItem(WIN_GEOM_KEY, JSON.stringify(winGeom)); } catch (e) {}
+  // Another tab can move a different window while this one is open. Read the
+  // latest group and change only this window's position/size fields.
+  const latest = readWindowGeometry();
+  const next = { ...latest, [key]: { ...latest[key], ...g } };
+  const checked = normalizeWindowGeometry(next);
+  if (!checked || JSON.stringify(checked) !== JSON.stringify(next)) return;
+  winGeom = next;
+  preferenceStorage.setItem(WIN_GEOM_KEY, JSON.stringify(winGeom));
 }
 // A window's identity for the geometry store: its element id when it has one
 // (the static panels), otherwise its own class (the dynamic windows). Never the
@@ -301,6 +325,7 @@ function saveWinPos(el) {
   if (p) saveWinGeom(winKey(el), { left: Math.round(p.x), top: Math.round(p.y) });
 }
 function restoreWinPos(el) {
+  winGeom = readWindowGeometry();
   const g = winGeom[winKey(el)];
   if (!g || g.left == null) return;
   el.style.left = g.left + "px";
@@ -372,7 +397,7 @@ function makeWindowFrame({
     // One key per window for both halves of its geometry — `winKey`, the same
     // one `makeDraggable` persists the position under.
     const key = winKey(el);
-    const saved = key ? winGeom[key] : null;
+    const saved = key ? readWindowGeometry()[key] : null;
     if (saved && saved.w) { body.style.width = saved.w + "px"; body.style.height = saved.h + "px"; }
     // The resize drag is the browser's own, so there is no event of ours to
     // hang this on — the same reason the journal watches itself this way.

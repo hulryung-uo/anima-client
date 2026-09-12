@@ -2,16 +2,19 @@
 // One envelope makes a restore atomic; legacy per-key values remain untouched.
 const preferenceStorage = (() => {
   const KEY = "anima.preferences.v1", LIMIT = 1024 * 1024;
-  const rules = new Map(), pending = new Map();
+  const rules = new Map(), pending = new Map(), laterLegacy = new Set();
   let error = "", listener = () => {}, lastKnown = null;
   const object = v => !!v && typeof v === "object" && !Array.isArray(v);
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-  function register(key, normalize) { rules.set(key, normalize); }
-  function json(key, normalize) {
+  function register(key, normalize, options = {}) {
+    rules.set(key, normalize);
+    if (options.adoptLegacy) laterLegacy.add(key);
+  }
+  function json(key, normalize, options) {
     register(key, raw => {
       const value = JSON.parse(raw), next = normalize(value);
       return { raw: next == null ? null : JSON.stringify(next), invalid: next == null || !same(value, next) };
-    });
+    }, options);
   }
   function read() {
     try {
@@ -28,7 +31,18 @@ const preferenceStorage = (() => {
       try {
         const doc = JSON.parse(raw);
         if (!object(doc) || doc.version !== 1 || !object(doc.values)) throw new Error();
-        lastKnown = { doc, source: { envelope: raw } }; return lastKnown;
+        // Some groups were introduced after the envelope shipped. Adopt their
+        // still-separate legacy value once, but never resurrect a group omitted
+        // from a later explicit restore. The marker commits with the values.
+        const legacy = {};
+        for (const key of laterLegacy) {
+          if (Array.isArray(doc.migratedKeys) && doc.migratedKeys.includes(key)) continue;
+          if (!Object.hasOwn(doc.values, key)) {
+            const value = localStorage.getItem(key);
+            if (value !== null) { doc.values[key] = value; legacy[key] = value; }
+          }
+        }
+        lastKnown = { doc, source: { envelope: raw, ...(Object.keys(legacy).length ? { legacy } : {}) } }; return lastKnown;
       } catch (_) {
         return { fatal: "Saved settings are damaged or from an unsupported version.", source: { envelope: raw } };
       }
@@ -62,7 +76,8 @@ const preferenceStorage = (() => {
     return checked(key, read().doc?.values[key]).raw;
   }
   function write(doc) {
-    const text = JSON.stringify(doc);
+    const migratedKeys = [...new Set([...(Array.isArray(doc.migratedKeys) ? doc.migratedKeys : []), ...laterLegacy])];
+    const text = JSON.stringify({ ...doc, migratedKeys });
     if (text.length > LIMIT * 4) throw new Error("Settings and their recovery copy exceed the size limit.");
     localStorage.setItem(KEY, text);
   }

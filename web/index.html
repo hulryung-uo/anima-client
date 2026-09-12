@@ -1783,6 +1783,8 @@
       </section><p id="pref-session-note" class="pref-muted"></p><p id="pref-message" role="status" aria-live="polite"></p><a id="pref-download" class="pref-button" hidden download>Save backup file</a>
     </dialog>
     <script src="vendor/pixi.min.js"></script>
+    <!-- Preferences also validate and back up shared dialog geometry. -->
+    <script src="storage.js"></script>
     <!-- Dialog window lifecycle (registerDialog/syncDialogs). Must load before
          js/*, which declares its dialog families at evaluation time. -->
     <script src="dialogs.js"></script>
@@ -1792,7 +1794,6 @@
          BELOW IS LOAD-BEARING — it is the original file's top-to-bottom order,
          and top-level statements still run in it. Adding a file means adding a
          tag here; renaming one without renaming the tag silently loses it. -->
-    <script src="storage.js"></script>
     <script src="js/00-state.js"></script>
     <script src="js/01-audio.js"></script>
     <script src="js/02-textures.js"></script>

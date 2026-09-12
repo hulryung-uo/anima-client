@@ -432,7 +432,7 @@ function newContext(opts = {}) {
           throw new Error(`web/test: ${n} is not loaded by web/index.html (it lists ${scripts.join(", ")})`);
         }
       }
-      if (want.has("js/00-state.js")) want.add("storage.js");
+      if (want.has("js/00-state.js") || want.has("dialogs.js")) want.add("storage.js");
       for (const rel of scripts) if (want.has(rel) && !loaded.includes(rel)) runFile(rel);
       return ctx;
     },
