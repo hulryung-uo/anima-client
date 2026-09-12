@@ -55,7 +55,7 @@ notes at `docs/releases/<tag>.md`, beginning with `# Anima <tag>`.
    manifests, mounts/copies the macOS app, and silently installs/uninstalls the
    Windows app in a disposable runner folder without launching its UI. It can
    also be rerun with **Actions → Installer checks → Run workflow**, using the
-  same tag. These checks do not prove interactive behavior.
+   same tag. These checks do not prove interactive behavior.
 8. Download and test the actual installers before publishing the draft. Complete
    the applicable [client-readiness checks](CLIENT_READINESS.md).
 
@@ -78,7 +78,10 @@ checksum. A checksum confirms the bytes, not runtime compatibility.
 
 An existing public release is rejected by the draft tooling. Corrections need a
 new version. Retries may replace assets on an existing draft, with both platform
-manifests checked again. Drafts are not announced by the UO Tavern publisher.
+manifests checked again. The check searches every page of GitHub's release list;
+the tag lookup endpoint only returns published releases. A failed listing stops
+the operation instead of treating the draft as absent. Drafts are not announced
+by the UO Tavern publisher.
 Stable public releases are announced after publication; see
 [forum updates](FORUM_UPDATES.md).
 

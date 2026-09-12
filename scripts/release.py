@@ -89,13 +89,25 @@ def verify_installers(data, directory):
 
 
 def release_state(repository, tag):
-    result = subprocess.run(["gh", "api", f"repos/{repository}/releases/tags/{tag}"],
+    # The tag endpoint only finds published releases. Include every page of
+    # the release list so an existing draft is edited, never recreated.
+    result = subprocess.run(["gh", "api", f"repos/{repository}/releases?per_page=100",
+                             "--paginate", "--slurp"],
                             capture_output=True, text=True)
     if result.returncode:
-        if "(HTTP 404)" in result.stderr:
-            return None
         raise ValueError("Could not check the existing release; no release changes were made.")
-    release = json.loads(result.stdout)
+    pages = json.loads(result.stdout)
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        raise ValueError("Unexpected release listing; no release changes were made.")
+    releases = [item for page in pages for item in page]
+    if any(not isinstance(item, dict) or not isinstance(item.get("tag_name"), str) for item in releases):
+        raise ValueError("Unexpected release listing; no release changes were made.")
+    matches = [item for item in releases if item["tag_name"] == tag]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("Multiple releases match this tag; no release changes were made.")
+    release = matches[0]
     if release.get("draft") is not True:
         raise ValueError("This release is already public. Create a new version instead of replacing its files.")
     return release

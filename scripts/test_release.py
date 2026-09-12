@@ -115,20 +115,49 @@ class ReleaseTests(unittest.TestCase):
             release.verify_build("example/repo", "../123", "a" * 40)
 
     def test_existing_public_release_is_never_replaced(self):
-        result = subprocess.CompletedProcess([], 0, '{"draft":false}', "")
+        result = subprocess.CompletedProcess([], 0, '[[{"tag_name":"v0.7.0","draft":false}]]', "")
         with patch.object(release.subprocess, "run", return_value=result):
             with self.assertRaises(ValueError):
                 release.release_state("example/repo", "v0.7.0")
 
-    def test_only_a_404_means_the_release_does_not_exist(self):
-        for stderr, missing in (("gh: Not Found (HTTP 404)", True), ("gh: Bad credentials (HTTP 401)", False)):
-            result = subprocess.CompletedProcess([], 1, "", stderr)
+    def test_existing_draft_is_found_on_a_later_page(self):
+        draft = {"id": 123, "tag_name": "v0.7.0", "draft": True}
+        pages = [[{"tag_name": "v0.8.0", "draft": False}], [draft]]
+        result = subprocess.CompletedProcess([], 0, json.dumps(pages), "")
+        with patch.object(release.subprocess, "run", return_value=result) as run:
+            self.assertEqual(release.release_state("example/repo", "v0.7.0"), draft)
+        command = run.call_args.args[0]
+        self.assertIn("--paginate", command)
+        self.assertIn("--slurp", command)
+        self.assertIn("repos/example/repo/releases?per_page=100", command)
+
+    def test_only_a_successful_complete_listing_can_establish_missing_release(self):
+        result = subprocess.CompletedProcess([], 0, '[[{"tag_name":"v0.6.0","draft":false}],[]]', "")
+        with patch.object(release.subprocess, "run", return_value=result):
+            self.assertIsNone(release.release_state("example/repo", "v0.7.0"))
+        for status in (401, 403, 404):
+            result = subprocess.CompletedProcess([], 1, "", f"gh: Request failed (HTTP {status})")
             with patch.object(release.subprocess, "run", return_value=result):
-                if missing:
-                    self.assertIsNone(release.release_state("example/repo", "v0.7.0"))
-                else:
-                    with self.assertRaises(ValueError):
-                        release.release_state("example/repo", "v0.7.0")
+                with self.assertRaises(ValueError):
+                    release.release_state("example/repo", "v0.7.0")
+
+    def test_malformed_or_ambiguous_listing_cannot_create_a_release(self):
+        draft = {"tag_name": "v0.7.0", "draft": True}
+        for listing in ({}, [None], [[None]], [[{}]], [[draft], [draft]]):
+            result = subprocess.CompletedProcess([], 0, json.dumps(listing), "")
+            with patch.object(release.subprocess, "run", return_value=result):
+                with self.assertRaises(ValueError):
+                    release.release_state("example/repo", "v0.7.0")
+
+    def test_retry_edits_the_existing_draft(self):
+        self.installers()
+        self.data["notes"] = "docs/releases/v0.7.0.md"
+        with patch.object(release, "ROOT", self.root), patch.object(release, "release_state", return_value={"draft": True}), patch.object(release.subprocess, "run") as run:
+            release.prepare_draft(self.data, self.dist, "example/repo")
+        edit, upload = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(edit[:4], ["gh", "release", "edit", "v0.7.0"])
+        self.assertIn("--draft", edit)
+        self.assertEqual(upload[:4], ["gh", "release", "upload", "v0.7.0"])
 
     def test_incomplete_signing_never_silently_downgrades(self):
         env, output = self.root / "env", self.root / "output"
