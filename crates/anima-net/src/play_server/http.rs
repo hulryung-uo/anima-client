@@ -10,6 +10,7 @@ pub(super) const MAX_POST_BODY_BYTES: usize = 16 * 1024;
 
 /// Startup args for [`spawn_http`] (grouped to dodge the arg-count lint).
 pub(super) struct SpawnHttp {
+    pub(super) launcher: Arc<LauncherStore>,
     pub(super) web_dir: Option<PathBuf>,
     pub(super) scene: Arc<Mutex<String>>,
     pub(super) tx: mpsc::Sender<Option<Action>>,
@@ -47,6 +48,7 @@ pub(super) struct SpawnHttp {
 /// Spawn the worker-thread pool serving `server` (already bound by [`bind`]).
 pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
     let SpawnHttp {
+        launcher,
         web_dir,
         scene,
         tx,
@@ -85,6 +87,7 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
     // frequent /scene.json polls (tiny_http's Server is shareable across threads).
     for _ in 0..6 {
         let server = server.clone();
+        let launcher = launcher.clone();
         let web_dir = web_dir.clone();
         let scene = scene.clone();
         let tx = tx.clone();
@@ -120,6 +123,7 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
         thread::spawn(move || {
             while let Ok(req) = server.recv() {
                 handle_request(Ctx {
+                    launcher: &launcher,
                     req,
                     web_dir: &web_dir,
                     scene: &scene,
@@ -162,6 +166,7 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
 
 /// Everything a request handler needs (groups args to dodge the arg-count lint).
 pub(super) struct Ctx<'a> {
+    pub(super) launcher: &'a Arc<LauncherStore>,
     pub(super) req: tiny_http::Request,
     pub(super) web_dir: &'a Option<PathBuf>,
     pub(super) scene: &'a Arc<Mutex<String>>,
@@ -201,6 +206,7 @@ pub(super) struct Ctx<'a> {
 pub(super) fn handle_request(ctx: Ctx) {
     REQ_COUNT.fetch_add(1, Ordering::Relaxed);
     let Ctx {
+        launcher,
         mut req,
         web_dir,
         scene,
@@ -255,6 +261,42 @@ pub(super) fn handle_request(ctx: Ctx) {
         return;
     }
 
+    if url == "/launcher" {
+        if read_only || !launcher_request_allowed(&req) {
+            let _ = req.respond(
+                Response::from_string("Open profiles from the local Anima login screen.")
+                    .with_status_code(403),
+            );
+            return;
+        }
+        let result = if is_post {
+            match read_request_body(&mut req) {
+                Ok(body) => serde_json::from_str::<serde_json::Value>(&body)
+                    .map_err(|_| "Invalid profile request.".to_string())
+                    .and_then(|body| launcher.command(&body)),
+                Err((status, message)) => {
+                    let _ = req.respond(Response::from_string(message).with_status_code(status));
+                    return;
+                }
+            }
+        } else if *req.method() == Method::Get {
+            launcher.snapshot()
+        } else {
+            Err("Unsupported profile request.".into())
+        };
+        let (body, status) = match result {
+            Ok(data) => (data, 200),
+            Err(error) => (serde_json::json!({"error": error}), 400),
+        };
+        let _ = req.respond(
+            Response::from_string(body.to_string())
+                .with_status_code(status)
+                .with_header(ctype("application/json"))
+                .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap()),
+        );
+        return;
+    }
+
     if is_post && url == "/log" {
         // Diagnostic trace from the browser: print verbatim so client + server
         // events interleave in one log (only when ANIMA_DEBUG is set).
@@ -301,6 +343,41 @@ pub(super) fn handle_request(ctx: Ctx) {
                 let _ = req.respond(Response::from_string(message).with_status_code(status));
                 return;
             }
+        };
+        // Saved secrets never go back to the page. Resolve the bound endpoint
+        // and account inside the native process, ignoring caller-supplied hosts.
+        let body = if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(id) = value.get("account_id").filter(|v| !v.is_null()) {
+                if !launcher_request_allowed(&req) {
+                    let _ = req.respond(
+                        Response::from_string("Saved accounts require the local login screen.")
+                            .with_status_code(403),
+                    );
+                    return;
+                }
+                let result = id
+                    .as_str()
+                    .ok_or_else(|| "Invalid saved account.".to_string())
+                    .and_then(|id| {
+                        launcher.resolve_login(id, value["password"].as_str().unwrap_or(""))
+                    });
+                match result {
+                    Ok(saved) => {
+                        value["host"] = serde_json::json!(saved.host);
+                        value["port"] = serde_json::json!(saved.port);
+                        value["shard"] = serde_json::json!(saved.shard);
+                        value["username"] = serde_json::json!(saved.username);
+                        value["password"] = serde_json::json!(saved.password);
+                    }
+                    Err(error) => {
+                        let _ = req.respond(Response::from_string(error).with_status_code(400));
+                        return;
+                    }
+                }
+            }
+            value.to_string()
+        } else {
+            body
         };
         match parse_login_attempt(&body) {
             Ok(attempt) => {
@@ -823,6 +900,8 @@ pub(super) fn content_type(path: &str) -> &'static str {
         "text/html; charset=utf-8"
     } else if path.ends_with(".js") {
         "text/javascript"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
     } else if path.ends_with(".json") {
         "application/json"
     } else {
@@ -830,9 +909,49 @@ pub(super) fn content_type(path: &str) -> &'static str {
     }
 }
 
+// Literal loopback Host prevents DNS rebinding; a custom header prevents simple
+// cross-origin requests. Password-backed profiles are never exposed to LAN peers.
+fn launcher_request_allowed(req: &tiny_http::Request) -> bool {
+    req.remote_addr()
+        .is_some_and(|address| address.ip().is_loopback())
+        && header_value(req, "X-Anima-Launcher") == Some("1")
+        && local_launcher_host(header_value(req, "Host"))
+        && origin_allowed(header_value(req, "Origin"), header_value(req, "Host"))
+}
+fn local_launcher_host(host: Option<&str>) -> bool {
+    host.and_then(|h| h.rsplit_once(':')).is_some_and(|(h, p)| {
+        matches!(h, "127.0.0.1" | "localhost" | "[::1]") && p.parse::<u16>().is_ok_and(|p| p != 0)
+    })
+}
+
 #[cfg(test)]
 mod csrf_tests {
-    use super::{origin_allowed, parse_terrain_query};
+    use super::{content_type, local_launcher_host, origin_allowed, parse_terrain_query};
+
+    #[test]
+    fn launcher_styles_have_a_browser_accepted_mime_type() {
+        assert_eq!(content_type("launcher.css"), "text/css; charset=utf-8");
+    }
+
+    #[test]
+    fn launcher_host_rejects_rebinding_and_non_loopback_names() {
+        for host in ["127.0.0.1:8090", "localhost:8090", "[::1]:8090"] {
+            assert!(local_launcher_host(Some(host)));
+        }
+        for host in [
+            "evil.example:8090",
+            "127.0.0.1.evil.example:8090",
+            "192.168.1.1:8090",
+            "localhost",
+            "localhost:0",
+            "localhost:65536",
+            "localhost:abc",
+            "user@localhost:8090",
+        ] {
+            assert!(!local_launcher_host(Some(host)));
+        }
+        assert!(!local_launcher_host(None));
+    }
 
     #[test]
     fn no_origin_header_is_allowed() {

@@ -1,0 +1,55 @@
+/* The account library surrounds the existing character picker/creation wizard. */
+#login { padding: 24px; }
+#login .launcher-shell { width: min(1120px, 100%); max-height: calc(100dvh - 48px); display: grid; grid-template-columns: 210px minmax(320px, 1fr) 270px; overflow: auto; border: 1px solid #303e4c; border-radius: 14px; background: #10161e; box-shadow: 0 25px 100px #0009; }
+#login .login-box { width: auto; max-height: none; overflow: visible; border: 0; border-radius: 0; box-shadow: none; padding: 22px 26px; gap: 8px; background: #151d27; }
+#login .login-title { text-align: left; font-size: 20px; letter-spacing: -.03em; color: #e3edf6; margin-bottom: 6px; }
+.launcher-library, .launcher-details { padding: 26px 20px; min-width: 0; }
+.launcher-library { border-right: 1px solid #26333e; display: flex; flex-direction: column; align-items: stretch; }
+.launcher-details { border-left: 1px solid #26333e; background: linear-gradient(150deg, #1c2730, #10161e 60%); }
+.launcher-eyebrow { font: 9px/1.5 ui-monospace, monospace; color: #b9a17a; letter-spacing: .13em; margin-bottom: 14px; }
+.launcher-library h1 { font-size: 23px; font-weight: 500; letter-spacing: -.07em; margin: 0 0 8px; color: #e9e1d4; }
+.launcher-details h2 { font-size: 21px; font-weight: 500; overflow-wrap: anywhere; margin: 0 0 8px; color: #e9e1d4; }
+.launcher-muted { font: 11px/1.55 system-ui, sans-serif; color: #96a5b5; margin: 4px 0 8px; overflow-wrap: anywhere; }
+.launcher-button { font-family: inherit; font-size: 11px; line-height: 1.4; padding: 8px 10px; background: #1b2a36; color: #c6d9e9; border: 1px solid #36495a; border-radius: 6px; cursor: pointer; }
+.launcher-button:hover:not(:disabled) { background: #293e4e; border-color: #8ab4f8; }
+.launcher-button:disabled { opacity: .45; cursor: default; }
+.launcher-button:focus-visible, .launcher-server:focus-visible { outline: 2px solid #8ab4f8; outline-offset: 3px; }
+.launcher-server-list { display: flex; flex-direction: column; gap: 8px; margin: 22px 0 14px; }
+.launcher-server { text-align: left; color: #c3d0dc; background: #17212b; padding: 13px 12px; border: 1px solid #263846; border-radius: 7px; cursor: pointer; overflow-wrap: anywhere; }
+.launcher-server[aria-pressed="true"] { background: #253747; border-color: #7198b9; box-shadow: inset 3px 0 #b9a17a; }
+.launcher-server strong { display: block; font: 600 12px/1.4 system-ui, sans-serif; }
+.launcher-server small { display: block; margin-top: 5px; color: #9cabb8; font-size: 10px; }
+#lg-storage-note { margin-top: 18px; }
+.launcher-section-title { color: #b9a17a; font: 10px/1.4 system-ui, sans-serif; letter-spacing: .1em; text-transform: uppercase; margin: 4px 0 3px; }
+.launcher-address { display: grid; grid-template-columns: minmax(0, 1fr) 78px; gap: 10px; }
+#login input, #login select, #login textarea { min-width: 0; width: 100%; font-family: inherit; }
+#login textarea { background: #101721; border: 1px solid #2a3a4a; border-radius: 5px; color: #e6eaf0; padding: 7px 9px; resize: vertical; }
+.launcher-advanced summary { color: #96a5b5; font-size: 10px; cursor: pointer; padding: 3px 0; }
+.launcher-advanced[open] { display: block; padding: 8px 0; }
+.launcher-advanced label { margin-top: 8px; }
+.launcher-actions { display: flex; gap: 8px; }
+.launcher-danger { margin-left: auto; color: #c19da0; border-color: transparent; background: transparent; }
+.launcher-account-heading { margin-top: 8px; padding-top: 10px; border-top: 1px solid #2b3948; }
+.launcher-account-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+#login .launcher-check { flex-direction: row; align-items: center; gap: 8px; color: #b9c9d8; }
+#login .launcher-check input { width: auto; margin: 0; accent-color: #8ab4f8; }
+.launcher-feedback { color: #d9b985; font-size: 11px; min-height: 14px; margin: 0; overflow-wrap: anywhere; }
+.launcher-status { display: inline-block; border: 1px solid #48535f; border-radius: 20px; padding: 4px 9px; font-size: 10px; color: #c2cbd4; margin: 15px 0 5px; }
+.launcher-status[data-state="reachable"] { border-color: #437761; color: #94c7ad; }
+.launcher-status[data-state="unreachable"] { border-color: #765454; color: #d3a5a5; }
+.launcher-stats { margin: 12px 0 18px; }
+.launcher-stats div { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid #273641; font-size: 11px; }
+.launcher-stats dt { color: #97a8b8; }
+.launcher-stats dd { margin: 0; color: #e0e7ed; }
+.launcher-notes { white-space: pre-wrap; overflow-wrap: anywhere; color: #acbac6; font: 12px/1.6 system-ui, sans-serif; margin: 22px 0; }
+.launcher-characters { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
+.launcher-characters div { background: #1d2a35; padding: 9px; border-radius: 5px; font-size: 12px; overflow-wrap: anywhere; }
+#lg-refresh-server { width: 100%; }
+#login .launcher-shell.character-stage { max-width: 660px; grid-template-columns: minmax(0, 1fr); }
+.launcher-shell.character-stage .launcher-library, .launcher-shell.character-stage .launcher-details { display: none; }
+@media (max-width: 950px) { #login .launcher-shell { grid-template-columns: 170px minmax(290px, 1fr); } .launcher-details { grid-column: 1 / -1; border-left: 0; border-top: 1px solid #26333e; } }
+@media (max-width: 600px) { #login { padding: 10px; } #login .launcher-shell { max-height: calc(100dvh - 20px); grid-template-columns: minmax(0, 1fr); } .launcher-library { border-right: 0; border-bottom: 1px solid #26333e; padding: 20px; } .launcher-server-list { margin: 10px 0; flex-direction: row; overflow-x: auto; } .launcher-server { min-width: 145px; } #lg-storage-note { margin: 8px 0 0; } #login .login-box { padding: 20px; } }
+
+#lg-account-fields { gap: 8px; }
+.launcher-account-identity { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+@media (max-width: 600px) { .launcher-account-identity { grid-template-columns: minmax(0, 1fr); } }

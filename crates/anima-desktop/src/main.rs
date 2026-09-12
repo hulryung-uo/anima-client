@@ -9,8 +9,11 @@
 //! `web/` copy, so `frontendDist` in `tauri.conf.json` just points at an
 //! empty placeholder directory that's never actually served.
 
+mod credentials;
+use anima_net::launcher::LauncherStore;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anima_net::play_server::{self, PlayConfig};
 use anima_net::uo_dir;
@@ -215,6 +218,20 @@ fn main() {
             // the (not-yet-created) window and deadlock the folder picker.
             std::thread::spawn(move || {
                 let data_dir = resolve_data_dir(&app_handle);
+                let launcher = app_handle
+                    .path()
+                    .app_config_dir()
+                    .map_err(|_| "Cannot locate the Anima profile folder.".to_string())
+                    .and_then(|dir| {
+                        LauncherStore::open(dir.join("launcher.json"), credentials::native_vault())
+                    });
+                let launcher = match launcher {
+                    Ok(store) => Arc::new(store),
+                    Err(error) => {
+                        fatal(&app_handle, &error);
+                        return;
+                    }
+                };
 
                 // Standalone default: the served login page collects
                 // server/account (no baked-in credentials); web_dir None = the
@@ -270,14 +287,15 @@ fn main() {
                 // fails on the HTTP bind, so retry once with an OS-assigned port
                 // rather than refusing to start over a lost race.
                 let server = match chosen {
-                    Some(p) => play_server::bind(make_cfg(p)).or_else(|e| {
-                        eprintln!(
-                            "anima-desktop: port {p} was taken after all ({e}); \
+                    Some(p) => play_server::bind_with_launcher(make_cfg(p), launcher.clone())
+                        .or_else(|e| {
+                            eprintln!(
+                                "anima-desktop: port {p} was taken after all ({e}); \
                              retrying with an OS-assigned port"
-                        );
-                        play_server::bind(make_cfg(0))
-                    }),
-                    None => play_server::bind(make_cfg(0)),
+                            );
+                            play_server::bind_with_launcher(make_cfg(0), launcher.clone())
+                        }),
+                    None => play_server::bind_with_launcher(make_cfg(0), launcher.clone()),
                 };
                 let server = match server {
                     Ok(s) => s,

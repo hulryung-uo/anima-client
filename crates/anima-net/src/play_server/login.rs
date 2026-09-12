@@ -8,6 +8,7 @@ use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LoginAttempt {
+    pub(super) account_id: Option<String>,
     pub(super) host: String,
     pub(super) port: u16,
     pub(super) username: String,
@@ -76,6 +77,7 @@ pub(super) fn parse_login_attempt(body: &str) -> Result<LoginAttempt, &'static s
             return Err("server and account are required");
         }
         return Ok(LoginAttempt {
+            account_id: None,
             host,
             port,
             username,
@@ -133,6 +135,10 @@ pub(super) fn parse_login_attempt(body: &str) -> Result<LoginAttempt, &'static s
     };
 
     Ok(LoginAttempt {
+        account_id: value
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
         host,
         port,
         username,

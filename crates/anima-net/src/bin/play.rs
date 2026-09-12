@@ -22,8 +22,10 @@
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
+use anima_net::launcher::LauncherStore;
 use anima_net::play_server::{self, PlayConfig};
 use anima_net::uo_dir;
+use std::sync::Arc;
 
 fn main() {
     let mut a = std::env::args().skip(1);
@@ -78,7 +80,21 @@ fn main() {
         read_only: false,
     };
 
-    let server = match play_server::bind(cfg) {
+    let profile_path = std::env::var_os("ANIMA_PROFILE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/anima-client")))
+        .map(|dir| dir.join("launcher.json"));
+    let launcher = match profile_path {
+        Some(path) => match LauncherStore::open(path, None) {
+            Ok(store) => store,
+            Err(error) => {
+                eprintln!("play: {error}");
+                std::process::exit(2);
+            }
+        },
+        None => LauncherStore::memory(),
+    };
+    let server = match play_server::bind_with_launcher(cfg, Arc::new(launcher)) {
         Ok(s) => s,
         // bind() already printed the reason ("play: http server failed: ...").
         Err(_) => std::process::exit(1),

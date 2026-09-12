@@ -625,6 +625,8 @@ const FACET_NAMES = ["Felucca", "Trammel", "Ilshenar", "Malas", "Tokuno", "Ter M
 
 function wireLogin() {
   if (loginWired) return; loginWired = true;
+  if (typeof initLauncher === "function") initLauncher();
+  let loginSubmissionPending = false;
   const go = document.getElementById("lg-go");
   const backButton = document.getElementById("lg-back");
   const deleteButton = document.getElementById("lg-delete");
@@ -1179,38 +1181,32 @@ function wireLogin() {
   }
 
   const submit = async () => {
-    const host = (document.getElementById("lg-host").value || "127.0.0.1").trim();
-    const port = Number(document.getElementById("lg-port").value || 2594);
-    const username = (document.getElementById("lg-user").value || "").trim();
-    const password = document.getElementById("lg-pass").value || "";
+    if (loginSubmissionPending || (typeof launcherBusy === "function" && launcherBusy())) return;
     const msg = document.getElementById("lg-msg");
-    if (!username) { msg.textContent = "Enter an account name."; return; }
-
     if (characterStage && selectedSlot === null) { msg.textContent = "Select a character."; return; }
-    msg.textContent = characterStage ? "Entering world…" : "Connecting…";
-    go.disabled = true;
-    backButton.disabled = true;
-    if (WASM_MODE) {
-      if (characterStage) wasmPlaySlot(selectedSlot);
-      else wasmSubmitLogin();
-      return;
-    }
+    loginSubmissionPending = true;
+    go.disabled = true; backButton.disabled = true;
     try {
+      const credentials = characterStage ? null : typeof launcherPrepareLogin === "function" && document.getElementById("lg-server-list")
+        ? await launcherPrepareLogin()
+        : { host: (document.getElementById("lg-host").value || "127.0.0.1").trim(), port: Number(document.getElementById("lg-port").value || 2594), username: (document.getElementById("lg-user").value || "").trim(), password: document.getElementById("lg-pass").value || "" };
+      if (credentials && !credentials.username) throw new Error("Enter an account name.");
+      msg.textContent = characterStage ? "Entering world…" : "Connecting…";
+      if (WASM_MODE) {
+        if (characterStage) wasmPlaySlot(selectedSlot);
+        else await wasmSubmitLogin();
+        return;
+      }
       const endpoint = characterStage ? "character" : "login";
-      const body = characterStage
-        ? { slot: selectedSlot }
-        : { host, port, username, password, interactive: true, character_slot: null, create: null };
+      const body = characterStage ? { slot: selectedSlot } : { ...credentials, interactive: true, character_slot: null, create: null };
       const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        method: "POST", headers: { "Content-Type": "application/json", "X-Anima-Launcher": "1" }, body: JSON.stringify(body),
       });
       if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
     } catch (error) {
       msg.textContent = "Login request failed: " + error.message;
-      go.disabled = false;
-      backButton.disabled = false;
-    }
+      go.disabled = false; backButton.disabled = false;
+    } finally { loginSubmissionPending = false; }
   };
   go.addEventListener("click", submit);
   backButton.addEventListener("click", async () => {
@@ -1279,6 +1275,7 @@ function wireLogin() {
   for (const input of document.querySelectorAll("#login input, #login select"))
     input.addEventListener("keydown", (e) => {
       if (e.code !== "Enter") return;
+      e.preventDefault();
       // While the wizard is open, Enter advances it instead of submitting the
       // outer form (which no longer has a `create` path of its own).
       if (characterStage && createToggle.checked) { e.preventDefault(); wizNextBtn.click(); }
@@ -1336,6 +1333,7 @@ function isTypingTarget(el) {
 }
 function showLogin(auth, msg, slots, capacity, cities, error) {
   wireLogin();
+  if (typeof launcherOnAuth === "function") launcherOnAuth(auth, slots);
   const el = document.getElementById("login");
   if (el) el.classList.add("on");
   const m = document.getElementById("lg-msg");

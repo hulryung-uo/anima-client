@@ -1,0 +1,12 @@
+{
+  "kind": "feature",
+  "slug": "server-account-library",
+  "title": "Your worlds, ready to return to — Anima's new server and account library",
+  "content": "Switch between an adventurer, a crafter and a second shard without typing every connection detail again. The new login screen keeps your saved worlds on the left and a notebook for the selected server on the right.\n\n## Keep each world together\n\nSave multiple servers with a name, host, port and personal notes. Each server has its own account list and labels. Connecting remembers the server and account, and reopening the same window restores your last selection. After authentication, Anima caches character names for your next visit; the existing character picker still loads the current server list before you enter the world.\n\n## Remember passwords when you choose\n\nThe desktop app can save passwords in macOS Keychain or Windows Credential Manager. Passwords are optional and are not written to profile JSON or browser storage. Uncheck the option and save to forget one. Editing a server's destination clears its saved passwords and character cache.\n\n## A server notebook beside your login\n\nCheck TCP reachability without sending account credentials. Compatible RunUO/ServUO servers may also report their name, client count and uptime. Check times remain visible, and older details remain cached if a later query cannot refresh them.\n\n**Available in the source build now; the published v0.6.0 installers do not include this feature.** Build the desktop app with `cargo run -p anima-desktop`. The screenshot is a real capture of the shared login UI using disposable local profiles in the native development server; its password checkbox is disabled because OS-vault access is enabled only in the desktop app. The local shard was offline during this capture.\n\nBrowser tests and the full quality gate passed, and an isolated macOS Keychain save/read/delete check passed. Windows vault behavior and live-shard login for this change still need runtime validation. [Setup and usage](https://github.com/hulryung-uo/anima-client/blob/main/docs/LOGIN_PROFILES.md).\n\nWhich details would help you choose a world before logging in?",
+  "images": [
+    {
+      "path": "docs/updates/images/server-account-library.png",
+      "alt": "Actual Anima login UI: two saved local servers, separate account profiles, a server note and a cached offline check"
+    }
+  ]
+}

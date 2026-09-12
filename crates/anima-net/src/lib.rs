@@ -16,6 +16,7 @@ use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::time::{Duration, Instant};
 
 pub mod json;
+pub mod launcher;
 pub mod play_server;
 pub mod regions;
 pub mod scene;

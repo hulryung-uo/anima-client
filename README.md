@@ -176,6 +176,12 @@ cargo run -p anima-net --bin scene -- 127.0.0.1 2594 <user> <pass> web/scene.jso
 ( cd web && python3 -m http.server 8011 )   # → http://127.0.0.1:8011/
 ```
 
+The source build also has a **server and account library**: save several worlds,
+keep separate account lists for each, remember passwords in the desktop OS vault,
+and view cached server details beside the login form. See
+[Server and account library](docs/LOGIN_PROFILES.md) for setup and runtime limits.
+This is newer than the published v0.6.0 installers.
+
 Browser login is a two-step flow: after account authentication, it shows the
 character names and slots reported by the server. Choose one of those characters
 to enter the world, or enable **Create a new character** and choose the name,

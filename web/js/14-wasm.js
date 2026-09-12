@@ -602,6 +602,8 @@ function wasmDeleteSlot(slot) {
 function wasmPrepareLoginUi() {
   const title = document.querySelector(".login-title");
   if (title) title.textContent = "anima-wasm";
+  const shardNote = document.getElementById("lg-shard-note");
+  if (shardNote) shardNote.textContent = "Browser mode currently selects shard 0. Use the native client for another shard index.";
   const row = document.getElementById("lg-relay-row");
   if (row) row.style.display = "";
   const relay = document.getElementById("lg-relay");

@@ -3,7 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>anima-client — Phase 2 renderer</title>
+    <title>Anima — Ultima Online</title>
+    <link rel="stylesheet" href="launcher.css">
     <style>
       :root { color-scheme: dark; }
       * { box-sizing: border-box; }
@@ -1313,14 +1314,53 @@
   </head>
   <body>
     <div id="login">
+      <div class="launcher-shell" id="lg-shell">
+      <aside class="launcher-library" id="lg-library" aria-label="Saved servers">
+        <div class="launcher-eyebrow">ANIMA · ULTIMA ONLINE</div>
+        <h1>Your worlds</h1>
+        <p class="launcher-muted">Pick a server. Continue your story.</p>
+        <div id="lg-server-list" class="launcher-server-list"></div>
+        <button type="button" id="lg-new-server" class="launcher-button">＋ Add server</button>
+        <p id="lg-storage-note" class="launcher-muted"></p>
+        <button type="button" id="lg-retry-profiles" class="launcher-button" hidden>Retry loading profiles</button>
+      </aside>
       <div class="login-box">
         <div class="login-title">anima-client</div>
         <div id="lg-account-fields">
-          <label>Server <input id="lg-host" value="127.0.0.1" spellcheck="false" autocomplete="off"></label>
-          <label>Port <input id="lg-port" value="2594" spellcheck="false" autocomplete="off"></label>
-          <label>Account <input id="lg-user" spellcheck="false" autocomplete="username"></label>
-          <label>Password <input id="lg-pass" type="password" autocomplete="current-password"></label>
-          <label id="lg-relay-row" style="display:none">Relay <input id="lg-relay" value="ws://127.0.0.1:2595/relay?target=1" spellcheck="false" autocomplete="off"></label>
+          <div class="launcher-section-title">Server</div>
+          <label>Server name <input id="lg-server-name" placeholder="My Britannia" maxlength="80" autocomplete="off"></label>
+          <div class="launcher-address">
+            <label>Host <input id="lg-host" value="127.0.0.1" spellcheck="false" autocomplete="off" maxlength="253"></label>
+            <label>Port <input id="lg-port" value="2594" type="number" min="1" max="65535" autocomplete="off"></label>
+          </div>
+          <details class="launcher-advanced"><summary>Server notes &amp; advanced</summary>
+            <label>Shard index <input id="lg-shard" value="0" type="number" min="0" max="65535"></label>
+            <p id="lg-shard-note" class="launcher-muted">Leave at 0 for a single-shard server.</p>
+            <label>Notes <textarea id="lg-server-notes" maxlength="2000" rows="2" placeholder="Rules, website, or a reminder for next time"></textarea></label>
+          </details>
+          <div class="launcher-actions">
+            <button type="button" id="lg-save-server" class="launcher-button">Save server</button>
+            <button type="button" id="lg-remove-server" class="launcher-button launcher-danger">Remove</button>
+          </div>
+          <div class="launcher-section-title launcher-account-heading">Account</div>
+          <div class="launcher-account-picker">
+            <label>Saved accounts <select id="lg-account-list"><option value="">New account</option></select></label>
+            <button type="button" id="lg-new-account" class="launcher-button">＋ New</button>
+          </div>
+          <div class="launcher-account-identity">
+          <label>Account label <input id="lg-account-label" maxlength="80" placeholder="Main, crafter, adventurer…" autocomplete="off"></label>
+          <label>Username <input id="lg-user" spellcheck="false" autocomplete="username" maxlength="30"></label>
+          </div>
+          <label>Password <input id="lg-pass" type="password" autocomplete="current-password" maxlength="30"></label>
+          <label class="launcher-check"><input id="lg-save-password" type="checkbox" disabled> Save password on this device</label>
+          <p id="lg-password-note" class="launcher-muted">Passwords are never saved in browser storage.</p>
+          <div class="launcher-actions">
+            <button type="button" id="lg-save-account" class="launcher-button">Save account</button>
+            <button type="button" id="lg-remove-account" class="launcher-button launcher-danger">Remove</button>
+          </div>
+          <label id="lg-relay-row" style="display:none">Relay <input id="lg-relay" value="ws://127.0.0.1:2595/relay?target=1" spellcheck="false" autocomplete="off"><small>The relay selects the destination; Host and Port are a reference in browser mode.</small></label>
+          <p class="launcher-muted">Connecting remembers this server and account. Password saving is optional.</p>
+          <p id="lg-profile-msg" class="launcher-feedback" role="status" aria-live="polite"></p>
         </div>
         <div id="lg-account-summary" style="display:none"></div>
         <!-- Existing characters as a clickable list (click = select, double-click
@@ -1432,7 +1472,21 @@
           <button id="lg-go" type="button">Connect</button>
           <button id="lg-delete" type="button">Delete</button>
         </div>
-        <div id="lg-msg"></div>
+        <div id="lg-msg" role="status" aria-live="polite"></div>
+      </div>
+      <aside class="launcher-details" id="lg-details" aria-label="Server information">
+        <div class="launcher-eyebrow">SERVER NOTEBOOK</div>
+        <h2 id="lg-info-name">A world awaits</h2>
+        <p id="lg-info-address" class="launcher-muted">Save a server to keep its details here.</p>
+        <div id="lg-info-status" class="launcher-status">Not checked</div>
+        <dl id="lg-info-stats" class="launcher-stats"></dl>
+        <button type="button" id="lg-refresh-server" class="launcher-button">Check server</button>
+        <p id="lg-info-time" class="launcher-muted">Status is checked without logging in.</p>
+        <p id="lg-info-notes" class="launcher-notes"></p>
+        <div class="launcher-section-title">Last seen characters</div>
+        <div id="lg-cached-characters" class="launcher-characters"></div>
+        <p id="lg-character-time" class="launcher-muted">Choose a saved account to see its last authenticated character list.</p>
+      </aside>
       </div>
     </div>
     <div id="map">
@@ -1701,6 +1755,7 @@
     <script src="js/01-audio.js"></script>
     <script src="js/02-textures.js"></script>
     <script src="js/03-world.js"></script>
+    <script src="js/04-launcher.js"></script>
     <script src="js/04-boot.js"></script>
     <script src="js/05-poll.js"></script>
     <script src="js/06-movement.js"></script>

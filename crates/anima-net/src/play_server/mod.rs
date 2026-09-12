@@ -41,6 +41,7 @@ use anima_core::Action;
 use include_dir::{include_dir, Dir};
 use tiny_http::{Header, Method, Response, Server};
 
+use crate::launcher::{CachedCharacter, LauncherStore};
 use crate::regions::GuardRect;
 use crate::scene::{
     build_scene, calculate_new_z, can_step_to, can_walk, decide_blocked_step, door_blocking_at,
@@ -160,6 +161,7 @@ impl TerrainState {
 /// threads) are already listening; [`run`](PlayServer::run) does the
 /// (blocking) game-server login + loop.
 pub struct PlayServer {
+    launcher: Arc<LauncherStore>,
     cfg: PlayConfig,
     port: u16,
     map: Option<MapData>,
@@ -196,6 +198,11 @@ pub struct PlayServer {
 /// connect loop, and the game loop itself, only run once [`PlayServer::run`]
 /// is called.
 pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
+    bind_with_launcher(cfg, Arc::new(LauncherStore::memory()))
+}
+
+/// Use an explicitly chosen profile store (desktop vaults remain optional).
+pub fn bind_with_launcher(cfg: PlayConfig, launcher: Arc<LauncherStore>) -> io::Result<PlayServer> {
     let data_dir = cfg.data_dir.clone();
     let mut map = MapData::open(&data_dir).ok();
     // Multi (house/boat) component reader — `multi.idx`/`multi.mul`. Same
@@ -419,6 +426,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     spawn_http(
         server,
         SpawnHttp {
+            launcher: launcher.clone(),
             web_dir: cfg.web_dir.clone(),
             scene: scene.clone(),
             tx,
@@ -452,6 +460,7 @@ pub fn bind(cfg: PlayConfig) -> io::Result<PlayServer> {
     );
 
     Ok(PlayServer {
+        launcher,
         cfg,
         port,
         map: map.take(),
@@ -678,6 +687,7 @@ impl PlayServer {
     /// Blocks until the game connection closes.
     pub fn run(self) -> io::Result<()> {
         let PlayServer {
+            launcher,
             cfg,
             port,
             mut map,
@@ -718,7 +728,10 @@ impl PlayServer {
                 interactive,
                 create,
                 shard,
+                account_id,
             } = attempt;
+            let cache_host = host.clone();
+            let cache_user = username.clone();
             let mut c = LoginConfig {
                 username,
                 password,
@@ -749,6 +762,26 @@ impl PlayServer {
                     // fixed id — CreateCharacter 0xF8 must echo it back
                     // verbatim, so the browser needs the real list rather than
                     // a hardcoded guess (shards/expansions order it differently).
+                    if let Some(id) = &account_id {
+                        let cached = list
+                            .slots
+                            .iter()
+                            .map(|s| CachedCharacter {
+                                index: s.index,
+                                name: s.name.clone(),
+                            })
+                            .collect();
+                        if let Err(error) = launcher.cache_characters(
+                            id,
+                            &cache_host,
+                            port,
+                            shard,
+                            &cache_user,
+                            cached,
+                        ) {
+                            eprintln!("play: could not cache character names: {error}");
+                        }
+                    }
                     let cities: Vec<serde_json::Value> = list
                         .cities
                         .iter()
@@ -840,6 +873,7 @@ impl PlayServer {
                     interactive: false,
                     create: None,
                     shard: cfg.shard,
+                    account_id: None,
                 }) {
                     Ok(s) => s,
                     Err(e) => {

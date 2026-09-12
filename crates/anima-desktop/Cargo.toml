@@ -20,3 +20,5 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# OS credential storage stays in the desktop shell, outside the protocol core.
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native"] }

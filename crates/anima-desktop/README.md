@@ -25,6 +25,16 @@ no baked-in credentials (unlike `play`'s CLI-arg auto-login) — this is the
 standalone default, matching the login page mode of the `play` bin
 (`ANIMA_LOGIN=1 cargo run -p anima-net --bin play`).
 
+## Saved servers and accounts
+
+The login screen saves multiple servers and accounts in a separate `launcher.json`
+in the app-config directory. macOS Keychain / Windows Credential Manager holds
+optional passwords; no password is written into the profile file or browser
+storage. The library is shared across windows regardless of their HTTP port.
+See [Server and account library](../../docs/LOGIN_PROFILES.md) for usage and cache
+behavior. The `keyring` dependency belongs to this shell; the protocol core has
+no OS credential-store dependency.
+
 ## Stable port
 
 The renderer keeps its preferences (options, macros, markers, HUD layout) in
