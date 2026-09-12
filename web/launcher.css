@@ -20,6 +20,14 @@
 .launcher-server strong { display: block; font: 600 12px/1.4 system-ui, sans-serif; }
 .launcher-server small { display: block; margin-top: 5px; color: #9cabb8; font-size: 10px; }
 #lg-storage-note { margin-top: 18px; }
+.launcher-backups { margin-top: 16px; padding-top: 12px; border-top: 1px solid #26333e; }
+.launcher-backups summary { font-size: 11px; line-height: 1.5; cursor: pointer; color: #c6d9e9; }
+.launcher-backups summary:focus-visible { outline: 2px solid #8ab4f8; outline-offset: 3px; }
+.launcher-backups button { margin: 5px 0; }
+.launcher-backups label, #lg-worlds-download:not([hidden]) { display: block; margin-top: 12px; }
+.launcher-backups input { font-size: 10px; margin-bottom: 8px; }
+#lg-worlds-list { padding-left: 16px; max-height: 180px; overflow-y: auto; }
+.launcher-backups [hidden] { display: none; }
 .launcher-section-title { color: #b9a17a; font: 10px/1.4 system-ui, sans-serif; letter-spacing: .1em; text-transform: uppercase; margin: 4px 0 3px; }
 .launcher-address { display: grid; grid-template-columns: minmax(0, 1fr) 78px; gap: 10px; }
 #login input, #login select, #login textarea { min-width: 0; width: 100%; font-family: inherit; }

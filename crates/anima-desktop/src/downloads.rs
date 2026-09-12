@@ -1,4 +1,4 @@
-//! Only the renderer's local settings exports may use the native downloader.
+//! Only the renderer's local settings/profile exports may use the native downloader.
 use std::path::Path;
 use tauri::Url;
 
@@ -18,7 +18,7 @@ pub fn settings_file(destination: &Path, downloads: &Path) -> bool {
     let Some(stem) = name.strip_suffix(".json") else {
         return false;
     };
-    ["anima-settings", "anima-settings-recovery"]
+    ["anima-settings", "anima-settings-recovery", "anima-worlds"]
         .iter()
         .any(|base| {
             stem == *base
@@ -53,6 +53,8 @@ mod tests {
             "anima-settings (2).json",
             "anima-settings-recovery.json",
             "anima-settings-recovery (3).json",
+            "anima-worlds.json",
+            "anima-worlds (2).json",
         ] {
             assert!(settings_file(&folder.join(name), folder));
         }

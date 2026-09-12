@@ -302,7 +302,7 @@ pub(super) fn handle_request(ctx: Ctx) {
             return;
         }
         let result = if is_post {
-            match read_request_body(&mut req) {
+            match read_request_body_limited(&mut req, 1024 * 1024 + 1024) {
                 Ok(body) => serde_json::from_str::<serde_json::Value>(&body)
                     .map_err(|_| "Invalid profile request.".to_string())
                     .and_then(|body| launcher.command(&body)),
@@ -318,7 +318,10 @@ pub(super) fn handle_request(ctx: Ctx) {
         };
         let (body, status) = match result {
             Ok(data) => (data, 200),
-            Err(error) => (serde_json::json!({"error": error}), 400),
+            Err(error) => (
+                serde_json::json!({"error": error, "recoverable": launcher.can_recover()}),
+                400,
+            ),
         };
         let _ = req.respond(
             Response::from_string(body.to_string())
@@ -766,13 +769,16 @@ pub(super) fn handle_request(ctx: Ctx) {
 pub(super) fn read_request_body(
     req: &mut tiny_http::Request,
 ) -> Result<String, (u16, &'static str)> {
-    if req
-        .body_length()
-        .is_some_and(|length| length > MAX_POST_BODY_BYTES)
-    {
+    read_request_body_limited(req, MAX_POST_BODY_BYTES)
+}
+fn read_request_body_limited(
+    req: &mut tiny_http::Request,
+    limit: usize,
+) -> Result<String, (u16, &'static str)> {
+    if req.body_length().is_some_and(|length| length > limit) {
         return Err((413, "request body too large"));
     }
-    match read_text_limited(req.as_reader(), MAX_POST_BODY_BYTES) {
+    match read_text_limited(req.as_reader(), limit) {
         Ok(Some(body)) => Ok(body),
         Ok(None) => Err((413, "request body too large")),
         Err(_) => Err((400, "invalid request body")),

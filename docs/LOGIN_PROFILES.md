@@ -72,6 +72,52 @@ contains usernames, notes and character names, so keep backups private. Password
 are not included in a profile backup and must be saved again on another device.
 This protects passwords at rest; it does not change UO's existing network protocol.
 
+## Worlds backups and profile recovery (unreleased source)
+
+These additions are newer than the tagged v0.7.0 installers. Build the current
+source to test them. The login library's **Worlds & accounts backup** section
+provides **Export worlds**, a file picker with a preview, and **Add from backup**.
+The JSON contains server names, host/port/shard, notes and account labels/usernames.
+It excludes passwords, vault identifiers and cached server/character information.
+Keep the backup private: usernames and private shard addresses are still included.
+
+Import adds missing entries without replacing existing ones. A server matches
+when its name, host, port and shard match; browser mode additionally compares the
+relay URL. Named groups sharing an address therefore survive a round trip.
+Accounts match by username within that server. Existing notes, labels, cached
+details and saved passwords remain intact. Repeating an import adds no duplicates.
+New accounts get fresh identifiers and require their passwords to be entered
+again, even on a device where older vault entries still exist. A browser backup
+can include a relay; native TCP ignores it, and a native backup imported into the
+browser uses the default relay until you edit it. Import never logs in or probes a
+server. The maximum is 100 servers, 500 accounts and a 1 MB backup file.
+
+A malformed, structurally invalid or unsupported-version `launcher.json` now
+leaves the login/recovery screen available. Ordinary saves still reject it.
+**Keep original & recover profiles** asks before resetting the library; it writes
+and syncs an exact, private `launcher.recovered-*.json` copy beside the original
+before replacing the active file. The screen reports the copy's location. If
+staging or copying fails, the active file stays untouched. A file that another
+window has already repaired is not reset. Files larger than 1 MB are left
+untouched and need to be moved to a safe backup location before retrying.
+
+Recovery preserves OS-vault entries because corrupt metadata cannot reliably
+identify which credentials belong to which profile. Browser recovery keeps the
+exact original in a separate `anima.launcher.browser.v1.recovered-*` storage key;
+storage/quota errors stop recovery before the active record changes. A worlds
+backup restores account metadata afterward; it is not an export of the original
+damaged bytes or a transfer of passwords. **Settings & backups** remains usable
+when account profiles cannot load, so renderer preferences can also be repaired.
+
+The new fixture tests cover portable round trips, named aliases, repeated imports,
+existing credentials, concurrent-window updates, invalid/failed imports and exact
+recovery copies. Actual loopback HTTP checks verified startup with corrupt
+profiles, recovery, an import/export larger than the old 16 KB request limit,
+repeat imports, cross-origin/header rejection and body limits. No game server was
+contacted. Chrome displayed the recovery controls, but automation stalled while
+handling its confirmation dialog; the UI test file remained unchanged. Actual
+file-picker import, completed download and native UI recovery remain unverified.
+
 ## Server notebook
 
 **Check server** makes an account-free TCP connection and caches reachability and

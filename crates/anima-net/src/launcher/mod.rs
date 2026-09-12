@@ -1,12 +1,13 @@
 //! Saved server/account profiles. Only non-secret metadata reaches disk or HTTP.
 //! The desktop injects its OS password vault; library/browser users need none.
+mod backup;
 mod passwords;
 mod probe;
 use passwords::PasswordChanges;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -99,14 +100,19 @@ impl LauncherStore {
         }
     }
     pub fn open(path: PathBuf, vault: Option<Arc<dyn PasswordVault>>) -> Result<Self, String> {
-        let store = Self {
+        let store = Self::recoverable(path, vault);
+        store.access(false, |_| Ok(()))?;
+        Ok(store)
+    }
+    /// Keep the login/recovery UI available even when an existing file cannot
+    /// be decoded. Every actual read and write still validates the file.
+    pub fn recoverable(path: PathBuf, vault: Option<Arc<dyn PasswordVault>>) -> Self {
+        Self {
             path: Some(path),
             memory: Mutex::new(Profiles::default()),
             vault,
             probing: Mutex::new(()),
-        };
-        store.access(false, |_| Ok(()))?;
-        Ok(store)
+        }
     }
     /// Lock/re-read on every operation, so two Anima windows cannot overwrite
     /// one another's accounts. The replacement file is written atomically.
@@ -134,20 +140,7 @@ impl LauncherStore {
             lock.lock().map_err(|_| "Cannot lock the profile file.")?;
             lock_file = Some(lock);
             match File::open(path) {
-                Ok(file) => {
-                    if file.metadata().map_err(|_| "Cannot read profiles.")?.len()
-                        > MAX_PROFILE_BYTES as u64
-                    {
-                        return Err("Profile file is too large; it has been left unchanged.".into());
-                    }
-                    let data: Profiles = serde_json::from_reader(file).map_err(|_| {
-                        "Cannot read profiles; the existing file has been left unchanged."
-                    })?;
-                    if data.version != 1 {
-                        return Err("This profile file needs a newer Anima client.".into());
-                    }
-                    data
-                }
+                Ok(file) => decode_profiles(&profile_bytes(file)?)?,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Profiles::default(),
                 Err(_) => return Err("Cannot read the profile file.".into()),
             }
@@ -190,6 +183,12 @@ impl LauncherStore {
     }
     pub fn command(&self, body: &Value) -> Result<Value, String> {
         let op = body["op"].as_str().ok_or("Choose a profile action.")?;
+        match op {
+            "export" => return self.export_backup(),
+            "import" => return self.import_backup(&body["backup"]),
+            "recover" => return self.recover_profiles(),
+            _ => {}
+        }
         if op == "refresh" {
             self.refresh(required(body, "id", 64)?)?;
             return self.snapshot();
@@ -566,6 +565,26 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn profile_bytes(file: File) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    file.take(MAX_PROFILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Cannot read profiles.")?;
+    if bytes.len() > MAX_PROFILE_BYTES {
+        return Err("Profile file exceeds 1 MB; it has been left unchanged. Move it to a safe backup location before retrying.".into());
+    }
+    Ok(bytes)
+}
+fn decode_profiles(bytes: &[u8]) -> Result<Profiles, String> {
+    let data: Profiles = serde_json::from_slice(bytes)
+        .map_err(|_| "Cannot read profiles; the existing file has been left unchanged.")?;
+    if data.version != 1 {
+        return Err("This profile file needs a newer Anima client.".into());
+    }
+    backup::validate_profiles(&data)?;
+    Ok(data)
 }
 
 #[cfg(test)]

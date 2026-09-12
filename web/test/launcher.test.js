@@ -92,3 +92,122 @@ test("browser profile serialization excludes a supplied password", () => {
   ok(!ctx.localStorage.getItem("anima.launcher.browser.v1").includes("never-persist"));
   eq(ctx.run("launcherData.accounts.length"), 1);
 });
+
+test("worlds backup preview is read-only and import preserves the active saved account", async () => {
+  const { ctx, el, calls, state } = await setup();
+  ctx.run('launcherPreviewWorlds(JSON.stringify(launcherBackupFrom(launcherData)), "travel.json")');
+  includes(el("lg-worlds-summary").textContent, "2 servers · 2 accounts");
+  ok(!el("lg-worlds-preview").hidden); eq(calls.length, 1, "preview sends no profile command");
+  const commands = [];
+  el("lg-pass").value = "unsaved-password";
+  ctx.setFetch((url, init) => {
+    commands.push(JSON.parse(init.body));
+    return { ok: true, json: async () => ({ ...clone(state), imported: { servers: 0, accounts: 0 } }) };
+  });
+  await ctx.run("launcherImportWorlds()");
+  eq(commands[0].op, "import");
+  ok(!JSON.stringify(commands[0]).includes("remember_password"));
+  eq(el("lg-user").value, "player"); ok(el("lg-save-password").checked);
+  eq(el("lg-pass").value, "unsaved-password", "import keeps the login form draft");
+  includes(el("lg-worlds-message").textContent, "Added 0 servers and 0 accounts");
+  ok(el("lg-worlds-preview").hidden);
+});
+test("malformed, future and password-bearing backups cannot be applied", async () => {
+  const { ctx, el, calls } = await setup();
+  const valid = ctx.run("launcherBackupFrom(launcherData)");
+  for (const text of ["{broken", JSON.stringify({ ...valid, version: 99 }), JSON.stringify({ ...valid, password: "nope" }), JSON.stringify({ ...valid, servers: [{ ...valid.servers[0], accounts: [{ label: "bad", username: "a", password: "nope" }] }] })]) {
+    ctx.set("fixtureBackupText", text); ctx.run('launcherPreviewWorlds(fixtureBackupText, "broken.json")');
+    ok(el("lg-import-worlds").disabled); ok(el("lg-worlds-preview").hidden);
+    await ctx.run("launcherImportWorlds()");
+  }
+  eq(calls.length, 1, "invalid backups never reach a write endpoint");
+});
+test("worlds export uses its own download and ignores unrelated download results", async () => {
+  const { ctx, el } = await setup();
+  const exported = ctx.run("launcherBackupFrom(launcherData)");
+  const commands = [];
+  ctx.setFetch((url, init) => { commands.push(JSON.parse(init.body)); return { ok: true, json: async () => clone(exported) }; });
+  el("lg-pass").value = "unsaved-secret";
+  await ctx.run("launcherExportWorlds()");
+  deepEq(commands, [{ op: "export" }]);
+  const link = el("lg-worlds-download");
+  ok(!link.hidden); eq(link.download, "anima-worlds.json"); ok(link.href.startsWith("blob:"));
+  const message = el("lg-worlds-message").textContent;
+  ctx.run('launcherDownloadResult(true, "blob:another-export")'); eq(el("lg-worlds-message").textContent, message);
+  ctx.run("launcherDownloadResult(false, launcherDownloadUrl)"); includes(el("lg-worlds-message").textContent, "could not be saved");
+  ctx.run("URL.revokeObjectURL(launcherDownloadUrl)");
+});
+test("unreadable profiles expose recovery while allowing renderer settings repair", async () => {
+  const { ctx, el, state } = await setup(); let requests = 0;
+  ctx.setFetch(() => { requests++; return { ok: false, json: async () => ({ error: "Unreadable profiles", recoverable: true }) }; });
+  ctx.run("launcherLoadProfiles()"); await ctx.run("launcherInitPromise");
+  ok(!ctx.run("launcherReady")); ok(el("lg-export-worlds").disabled); ok(!el("lg-recover-worlds").hidden); ok(!el("lg-recover-worlds").disabled);
+  ok(!el("lg-settings-data").disabled); ok(el("lg-backup-tools").open);
+  ctx.answer.confirm = false; await ctx.run("launcherRecoverWorlds()"); eq(requests, 1, "cancel never writes");
+  const commands = []; ctx.answer.confirm = true;
+  ctx.setFetch((url, init) => {
+    if (init.body) commands.push(JSON.parse(init.body));
+    return { ok: true, json: async () => ({ ...clone(state), recovery_copy: "/isolated/launcher.recovered.json" }) };
+  });
+  await ctx.run("launcherRecoverWorlds()");
+  deepEq(commands, [{ op: "recover" }]); ok(ctx.run("launcherReady"));
+  ok(el("lg-recover-worlds").hidden); includes(el("lg-worlds-message").textContent, "/isolated/launcher.recovered.json");
+});
+test("browser backup merge preserves named aliases, newer profiles and failed writes", async () => {
+  const { ctx } = await setup();
+  const data = profiles(); data.version = 1;
+  ctx.localStorage.setItem("anima.launcher.browser.v1", JSON.stringify(data));
+  const backup = ctx.run("launcherBackupFrom(launcherData)");
+  backup.servers[0].notes = "old notes";
+  backup.servers[0].accounts.push({ username: "second-player", label: "Second" });
+  backup.servers.push({ ...clone(backup.servers[0]), name: "Same address, different group" });
+  ctx.set("fixtureWorldsBackup", backup);
+  const merged = ctx.run("launcherMergeBrowser(fixtureWorldsBackup)");
+  eq(merged.servers.length, 3); eq(merged.servers[0].notes, "Friends");
+  eq(merged.accounts.filter(a => a.username === "second-player").length, 2);
+  eq(merged.accounts.filter(a => a.username === "second-player")[0].remember_password, false);
+  const before = ctx.localStorage.getItem("anima.launcher.browser.v1");
+  ctx.localStorage.setItem = () => { throw new Error("Quota exceeded"); };
+  let failed = false; try { ctx.run("launcherMergeBrowser(fixtureWorldsBackup)"); } catch (_) { failed = true; }
+  ok(failed); eq(ctx.localStorage.getItem("anima.launcher.browser.v1"), before);
+});
+
+test("browser recovery keeps exact originals and stops if the recovery copy cannot be saved", async () => {
+  const ctx = newContext({ href: "http://127.0.0.1:8090/?wasm=1" }); ctx.mountPage(); ctx.load("00-state.js", "04-launcher.js");
+  const key = "anima.launcher.browser.v1", original = "{original broken JSON\n";
+  ctx.localStorage.setItem(key, original);
+  ctx.run("initLauncher()"); await ctx.run("launcherInitPromise");
+  ok(ctx.run("launcherRecoverable")); ok(!ctx.run("launcherReady"));
+  const save = ctx.localStorage.setItem;
+  ctx.localStorage.setItem = () => { throw new Error("Quota exceeded"); };
+  await ctx.run("launcherRecoverWorlds()");
+  eq(ctx.localStorage.getItem(key), original); ok(!ctx.run("launcherReady"));
+  ctx.localStorage.setItem = save;
+  await ctx.run("launcherRecoverWorlds()");
+  ok(ctx.run("launcherReady"));
+  const copy = Array.from({ length: ctx.localStorage.length }, (_, i) => ctx.localStorage.key(i)).find(k => k.startsWith(key + ".recovered-"));
+  ok(copy); eq(ctx.localStorage.getItem(copy), original);
+  deepEq(JSON.parse(ctx.localStorage.getItem(key)), { version: 1, servers: [], accounts: [] });
+});
+
+test("a cancelled asynchronous file read cannot reopen an import preview", async () => {
+  const { ctx, el } = await setup();
+  let complete;
+  const text = new Promise(resolve => { complete = resolve; });
+  el("lg-worlds-file").files = [{ name: "slow.json", size: 200, text: () => text }];
+  ctx.fire(el("lg-worlds-file"), "change");
+  ok(!el("lg-cancel-worlds").hidden, "cancel stays available while the file is being read");
+  ctx.fire(el("lg-cancel-worlds"), "click");
+  complete(JSON.stringify(ctx.run("launcherBackupFrom(launcherData)"))); await ctx.flush();
+  ok(el("lg-worlds-preview").hidden); eq(ctx.run("launcherWorldsPreview"), null);
+});
+
+test("browser corruption after login initialization makes recovery available without overwriting it", async () => {
+  const ctx = newContext({ href: "http://127.0.0.1:8090/?wasm=1" }); ctx.mountPage(); ctx.load("00-state.js", "04-launcher.js");
+  ctx.run("initLauncher()"); await ctx.run("launcherInitPromise"); ok(ctx.run("launcherReady"));
+  ctx.localStorage.setItem("anima.launcher.browser.v1", "broken by another window");
+  await ctx.run("launcherExportWorlds()");
+  ok(!ctx.run("launcherReady")); ok(ctx.run("launcherRecoverable"));
+  ok(!ctx.document.getElementById("lg-recover-worlds").disabled);
+  eq(ctx.localStorage.getItem("anima.launcher.browser.v1"), "broken by another window");
+});

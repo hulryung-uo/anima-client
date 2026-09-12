@@ -2,7 +2,8 @@
 let preferencePreview = null, preferenceFileGeneration = 0;
 let preferenceDownloadUrl = null;
 function preferenceMessage(text) { document.getElementById("pref-message").textContent = text; }
-function preferenceDownloadResult(success) {
+function preferenceDownloadResult(success, source) {
+  if (source && source !== preferenceDownloadUrl) return;
   preferenceMessage(success ? "Backup saved in your Downloads folder." : "The backup could not be saved. Check your Downloads folder and try the Save link again.");
 }
 function preferenceInGame() { return !!scene?.player; }

@@ -6,6 +6,8 @@ let launcherServerId = "", launcherAccountId = "";
 let launcherReady = false, launcherWorking = false, launcherConnecting = false;
 let launcherInitPromise = null, launcherAuthKey = "";
 let launcherSelection = { server: "", accounts: {} };
+let launcherRecoverable = false, launcherWorldsPreview = null, launcherFileGeneration = 0, launcherDownloadUrl = null;
+const LAUNCHER_BACKUP_LIMIT = 1024 * 1024;
 const launcherEl = id => document.getElementById(id);
 const launcherText = (id, text) => { const el = launcherEl(id); if (el) el.textContent = text; };
 const launcherUid = () => typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "p-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
@@ -19,19 +21,31 @@ function launcherRememberSelection() {
   launcherSelection.accounts[launcherServerId] = launcherAccountId;
   try { localStorage.setItem(LAUNCHER_SELECTION_KEY, JSON.stringify(launcherSelection)); } catch (_) {}
 }
-async function launcherRequest(body) {
+function launcherUnavailable(error) {
+  if (error.recoverable) { launcherRecoverable = true; launcherReady = false; launcherEl("lg-backup-tools").open = true; }
+  return error;
+}
+async function launcherRawRequest(body) {
   const res = await fetch("launcher", {
     method: body ? "POST" : "GET", headers: { "X-Anima-Launcher": "1", ...(body ? { "Content-Type": "application/json" } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Profile storage is unavailable. Reopen Anima and try again.");
+  if (!res.ok) {
+    const error = new Error(data.error || "Profile storage is unavailable. Reopen Anima and try again.");
+    error.recoverable = data.recoverable === true;
+    throw launcherUnavailable(error);
+  }
+  return data;
+}
+async function launcherRequest(body) {
+  const data = await launcherRawRequest(body);
   if (!Array.isArray(data.servers) || !Array.isArray(data.accounts)) throw new Error("Invalid profile response.");
   return data;
 }
 function launcherBrowserCommand(body) {
   // WASM has no OS vault. Whitelist all persisted fields, even if callers pass a password.
-  const next = JSON.parse(JSON.stringify(launcherData));
+  const next = launcherCurrentBrowser();
   if (body.op === "save_server") {
     const old = next.servers.find(s => s.id === body.id);
     const server = { id: body.id, name: body.name, host: body.host, port: body.port, shard: body.shard, notes: body.notes, relay: body.relay, cache: null };
@@ -47,7 +61,8 @@ function launcherBrowserCommand(body) {
     if (old) next.accounts[next.accounts.indexOf(old)] = account; else next.accounts.push(account);
   } else if (body.op === "delete_account") next.accounts = next.accounts.filter(a => a.id !== body.id);
   else if (body.op === "delete_server") { next.servers = next.servers.filter(s => s.id !== body.id); next.accounts = next.accounts.filter(a => a.server_id !== body.id); }
-  localStorage.setItem(LAUNCHER_BROWSER_KEY, JSON.stringify({ version: 1, servers: next.servers, accounts: next.accounts }));
+  else throw new Error("Unknown profile action.");
+  launcherWriteBrowser(next);
   return next;
 }
 async function launcherCommand(body) {
@@ -66,6 +81,7 @@ function launcherSetBusy(value) {
   if (WASM_MODE) launcherEl("lg-shard").disabled = true;
   const retry = launcherEl("lg-retry-profiles");
   if (retry) { retry.hidden = launcherReady; retry.disabled = value; }
+  launcherBackupState();
 }
 function launcherPasswordHint() {
   const checkbox = launcherEl("lg-save-password"), input = launcherEl("lg-pass");
@@ -241,22 +257,223 @@ function initLauncher() {
     await launcherCommand({ op: "refresh", id: launcherServerId }); launcherRenderLibrary(); launcherRenderInfo();
   }, "Server check cached."));
   launcherEl("lg-retry-profiles")?.addEventListener("click", launcherLoadProfiles);
+  launcherWireBackups();
   launcherLoadProfiles();
 }
 function launcherLoadProfiles() {
+  launcherReady = false; launcherRecoverable = false;
   launcherSetBusy(true);
   launcherInitPromise = (async () => {
     try {
       try { const selected = JSON.parse(localStorage.getItem(LAUNCHER_SELECTION_KEY) || "null"); if (selected && typeof selected.accounts === "object" && selected.accounts) launcherSelection = selected; } catch (_) {}
       if (WASM_MODE) {
-        const stored = JSON.parse(localStorage.getItem(LAUNCHER_BROWSER_KEY) || '{"version":1,"servers":[],"accounts":[]}');
-        if (stored.version !== 1 || !Array.isArray(stored.servers) || !Array.isArray(stored.accounts)) throw new Error("Saved browser profiles could not be loaded.");
-        launcherData = { servers: stored.servers, accounts: stored.accounts, persistent: true, passwords: false };
+        launcherData = launcherReadBrowser(localStorage.getItem(LAUNCHER_BROWSER_KEY) || '{"version":1,"servers":[],"accounts":[]}');
       } else launcherData = await launcherRequest();
       launcherReady = true;
       launcherSelectServer(launcherData.servers.some(s => s.id === launcherSelection.server) ? launcherSelection.server : launcherData.servers[0]?.id || "");
       launcherText("lg-storage-note", WASM_MODE ? "Profiles stay in this browser. Passwords are not stored." : launcherData.persistent ? "Saved on this device, shared by your Anima windows." : "Profiles last for this session only.");
-    } catch (e) { launcherText("lg-profile-msg", e.message); launcherText("lg-storage-note", "Profiles could not be loaded. Existing files have not been changed."); }
+    } catch (e) {
+      launcherRecoverable = e.recoverable === true;
+      launcherText("lg-profile-msg", e.message); launcherText("lg-storage-note", "Profiles could not be loaded. Existing files have not been changed.");
+      if (launcherRecoverable) launcherEl("lg-backup-tools").open = true;
+    }
     finally { launcherSetBusy(false); }
   })();
+}
+
+function launcherValidateBackup(value) {
+  const fields = (v, allowed) => {
+    if (!v || typeof v !== "object" || Array.isArray(v) || Object.keys(v).some(k => !allowed.includes(k))) throw new Error("Invalid worlds backup. Password fields and unsupported fields are not accepted.");
+  };
+  const text = (v, max, empty = false) => {
+    if (typeof v !== "string" || (!empty && !v.trim()) || new TextEncoder().encode(v).length > max) throw new Error("A backup field is empty or too long.");
+    return v;
+  };
+  fields(value, ["format", "version", "servers"]);
+  if (value.format !== "anima-worlds" || value.version !== 1 || !Array.isArray(value.servers) || value.servers.length > 100) throw new Error("Choose a supported Anima worlds backup with up to 100 servers.");
+  let accounts = 0;
+  for (const s of value.servers) {
+    fields(s, ["name", "host", "port", "shard", "notes", "relay", "accounts"]);
+    text(s.name, 80); text(s.host, 253); text(s.notes, 2000, true);
+    if (!/^[a-z0-9.:-]+$/i.test(s.host) || !Number.isInteger(s.port) || s.port < 1 || s.port > 65535 || !Number.isInteger(s.shard) || s.shard < 0 || s.shard > 65535) throw new Error("A backup server has an invalid host, port or shard.");
+    if (s.relay != null) {
+      text(s.relay, 2048); const relay = new URL(s.relay);
+      if (!["ws:", "wss:"].includes(relay.protocol) || relay.username || relay.password) throw new Error("A relay must use ws:// or wss:// without credentials.");
+    }
+    if (!Array.isArray(s.accounts)) throw new Error("A backup server has an invalid account list.");
+    accounts += s.accounts.length;
+    for (const a of s.accounts) {
+      fields(a, ["label", "username"]); text(a.label, 80); text(a.username, 30);
+      if (/[^\x20-\x7e]/.test(a.username)) throw new Error("UO usernames must use printable ASCII.");
+    }
+  }
+  if (accounts > 500) throw new Error("A backup can contain up to 500 accounts.");
+  if (new TextEncoder().encode(JSON.stringify(value)).length > LAUNCHER_BACKUP_LIMIT) throw new Error("Choose a worlds backup smaller than 1 MB.");
+  return value;
+}
+function launcherBackupFrom(data) {
+  return launcherValidateBackup({ format: "anima-worlds", version: 1, servers: data.servers.map(s => ({
+    name: s.name, host: s.host, port: s.port, shard: s.shard, notes: s.notes || "",
+    ...(s.relay ? { relay: s.relay } : {}),
+    accounts: data.accounts.filter(a => a.server_id === s.id).map(a => ({ label: a.label, username: a.username })),
+  })) });
+}
+function launcherReadBrowser(raw) {
+  try {
+    if (new TextEncoder().encode(raw).length > LAUNCHER_BACKUP_LIMIT) throw new Error();
+    const data = JSON.parse(raw);
+    if (data.version !== 1 || !Array.isArray(data.servers) || !Array.isArray(data.accounts)) throw new Error();
+    const ids = list => list.map(v => { if (!v || !/^[a-z0-9_-]{1,64}$/i.test(v.id)) throw new Error(); return v.id; });
+    const servers = ids(data.servers), accounts = ids(data.accounts);
+    if (new Set(servers).size !== servers.length || new Set(accounts).size !== accounts.length) throw new Error();
+    const names = new Set();
+    for (const a of data.accounts) {
+      const key = JSON.stringify([a.server_id, a.username]);
+      if (!servers.includes(a.server_id) || names.has(key) || !Array.isArray(a.characters || [])) throw new Error();
+      names.add(key);
+    }
+    launcherBackupFrom(data);
+    return { servers: data.servers, accounts: data.accounts.map(a => ({ ...a, remember_password: false })), persistent: true, passwords: false };
+  } catch (_) {
+    const error = new Error("Saved browser profiles could not be loaded. Keep the original and recover profiles, or retry after restoring a compatible file.");
+    error.recoverable = true; throw error;
+  }
+}
+function launcherWriteBrowser(data) {
+  const raw = JSON.stringify({ version: 1, servers: data.servers, accounts: data.accounts });
+  try { launcherReadBrowser(raw); }
+  catch (_) { throw new Error("Profiles exceed the storage limits or contain invalid data. Your saved profiles have not changed."); }
+  localStorage.setItem(LAUNCHER_BROWSER_KEY, raw);
+}
+function launcherCurrentBrowser() {
+  try { return launcherReadBrowser(localStorage.getItem(LAUNCHER_BROWSER_KEY) || '{"version":1,"servers":[],"accounts":[]}'); }
+  catch (error) { throw launcherUnavailable(error); }
+}
+function launcherMergeBrowser(backup) {
+  launcherValidateBackup(backup);
+  const data = launcherCurrentBrowser();
+  const before = [data.servers.length, data.accounts.length];
+  for (const world of backup.servers) {
+    const host = world.host.toLowerCase(), relay = world.relay || "ws://127.0.0.1:2595/relay?target=1";
+    let server = data.servers.find(s => s.name === world.name.trim() && s.host.toLowerCase() === host && s.port === world.port && s.shard === world.shard && (s.relay || "ws://127.0.0.1:2595/relay?target=1") === relay);
+    if (!server) {
+      server = { id: launcherUid(), name: world.name.trim(), host, port: world.port, shard: world.shard, notes: world.notes, relay, cache: null };
+      data.servers.push(server);
+    }
+    for (const entry of world.accounts) {
+      const username = entry.username.trim();
+      if (!data.accounts.some(a => a.server_id === server.id && a.username === username)) data.accounts.push({ id: launcherUid(), server_id: server.id, label: entry.label.trim(), username, remember_password: false, characters: [], last_used: null });
+    }
+  }
+  launcherWriteBrowser(data);
+  data.imported = { servers: data.servers.length - before[0], accounts: data.accounts.length - before[1] };
+  return data;
+}
+function launcherBackupState() {
+  const busy = launcherBusy();
+  const recover = launcherEl("lg-recover-worlds");
+  if (!recover) return;
+  recover.hidden = !launcherRecoverable; recover.disabled = busy;
+  launcherEl("lg-worlds-file").disabled = busy || !launcherReady;
+  launcherEl("lg-import-worlds").disabled = busy || !launcherReady || !launcherWorldsPreview;
+  launcherEl("lg-cancel-worlds").disabled = busy;
+  launcherEl("lg-settings-data").disabled = busy;
+}
+function launcherWorldsMessage(message) { launcherText("lg-worlds-message", message); }
+function launcherDownloadResult(success, source) {
+  if (source !== launcherDownloadUrl) return;
+  launcherWorldsMessage(success ? "Worlds backup saved in your Downloads folder." : "The backup could not be saved. Check your Downloads folder and use the Save link to retry.");
+}
+async function launcherExportWorlds() {
+  if (!launcherReady || launcherBusy()) return;
+  launcherSetBusy(true);
+  try {
+    const backup = WASM_MODE ? launcherBackupFrom(launcherCurrentBrowser()) : await launcherRawRequest({ op: "export" });
+    launcherValidateBackup(backup);
+    if (launcherDownloadUrl) URL.revokeObjectURL(launcherDownloadUrl);
+    launcherDownloadUrl = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2) + "\n"], { type: "application/json" }));
+    const link = launcherEl("lg-worlds-download");
+    link.href = launcherDownloadUrl; link.download = "anima-worlds.json"; link.hidden = false; link.textContent = "Save anima-worlds.json";
+    launcherWorldsMessage("Backup prepared. It contains server details and usernames; keep the file private. Passwords are excluded.");
+    link.click();
+  } catch (error) { launcherWorldsMessage(error.message || "The backup could not be prepared."); }
+  finally { launcherSetBusy(false); }
+}
+function launcherPreviewWorlds(text, name) {
+  launcherWorldsPreview = null; launcherEl("lg-worlds-preview").hidden = true;
+  try {
+    if (new TextEncoder().encode(text).length > LAUNCHER_BACKUP_LIMIT) throw new Error("Choose a worlds backup smaller than 1 MB.");
+    const backup = launcherValidateBackup(JSON.parse(text));
+    launcherWorldsPreview = backup;
+    const count = backup.servers.reduce((n, s) => n + s.accounts.length, 0);
+    launcherText("lg-worlds-summary", `${name} · ${backup.servers.length} servers · ${count} accounts`);
+    const list = launcherEl("lg-worlds-list"); list.replaceChildren();
+    for (const server of backup.servers) {
+      const row = document.createElement("li"); row.textContent = `${server.name} · ${server.host}:${server.port} · ${server.accounts.length} accounts`; list.append(row);
+    }
+    launcherEl("lg-worlds-preview").hidden = false;
+    launcherWorldsMessage(WASM_MODE ? "Review the servers before adding them. Native backups use the default relay; check its address before connecting." : "Review the servers before adding them. Importing does not connect to any server.");
+  } catch (error) { launcherWorldsMessage(error instanceof SyntaxError ? "This file is not valid JSON. Your profiles have not changed." : error.message); }
+  launcherEl("lg-cancel-worlds").hidden = !launcherWorldsPreview;
+  launcherBackupState();
+}
+async function launcherImportWorlds() {
+  if (!launcherReady || launcherBusy() || !launcherWorldsPreview) return;
+  launcherSetBusy(true);
+  try {
+    const backup = launcherWorldsPreview;
+    launcherData = WASM_MODE ? launcherMergeBrowser(backup) : await launcherRequest({ op: "import", backup });
+    launcherWorldsPreview = null; launcherEl("lg-worlds-preview").hidden = true;
+    launcherEl("lg-cancel-worlds").hidden = true;
+    if (launcherServer()) {
+      launcherRenderLibrary(); launcherRenderAccounts(); launcherRenderInfo(); launcherPasswordHint();
+    } else launcherSelectServer(launcherData.servers[0]?.id || "");
+    const added = launcherData.imported;
+    launcherWorldsMessage(`Added ${added.servers} servers and ${added.accounts} accounts. Existing profiles and passwords were kept.`);
+  } catch (error) { launcherWorldsMessage(error.message || "Could not import this backup. Your profiles have not changed."); }
+  finally { launcherSetBusy(false); }
+}
+async function launcherRecoverWorlds() {
+  if (!launcherRecoverable || launcherBusy()) return;
+  if (!confirm("Keep an exact copy of the unreadable profiles and start an empty library? You can then add profiles or import a worlds backup. Existing passwords stay in the OS vault.")) return;
+  launcherSetBusy(true);
+  try {
+    let copy;
+    if (WASM_MODE) {
+      const raw = localStorage.getItem(LAUNCHER_BROWSER_KEY);
+      if (raw === null) throw new Error("Profiles changed. Retry loading them first.");
+      try { launcherReadBrowser(raw); throw new Error("Profiles are readable now. Retry loading them first."); }
+      catch (error) { if (!error.recoverable) throw error; }
+      copy = LAUNCHER_BROWSER_KEY + ".recovered-" + launcherUid();
+      localStorage.setItem(copy, raw);
+      if (localStorage.getItem(copy) !== raw) throw new Error("Could not verify the recovery copy. Profiles have not changed.");
+      launcherWriteBrowser({ servers: [], accounts: [] });
+    } else {
+      const data = await launcherRequest({ op: "recover" }); copy = data.recovery_copy;
+    }
+    launcherLoadProfiles(); await launcherInitPromise;
+    launcherWorldsMessage(`Original profiles kept at ${copy}. Add your servers or import a worlds backup.`);
+  } catch (error) { launcherWorldsMessage(error.message || "Recovery failed. Your original profiles have not changed."); }
+  finally { launcherSetBusy(false); }
+}
+function launcherWireBackups() {
+  launcherEl("lg-export-worlds").addEventListener("click", launcherExportWorlds);
+  launcherEl("lg-import-worlds").addEventListener("click", launcherImportWorlds);
+  launcherEl("lg-recover-worlds").addEventListener("click", launcherRecoverWorlds);
+  launcherEl("lg-cancel-worlds").addEventListener("click", () => {
+    launcherFileGeneration++; launcherWorldsPreview = null; launcherEl("lg-worlds-preview").hidden = true; launcherEl("lg-cancel-worlds").hidden = true; launcherWorldsMessage("Import cancelled. Profiles have not changed."); launcherBackupState();
+  });
+  launcherEl("lg-worlds-file").addEventListener("change", async event => {
+    const generation = ++launcherFileGeneration, file = event.target.files?.[0];
+    launcherWorldsPreview = null; launcherEl("lg-worlds-preview").hidden = true; launcherBackupState();
+    launcherEl("lg-cancel-worlds").hidden = true;
+    if (!file || launcherBusy() || !launcherReady) return;
+    launcherEl("lg-cancel-worlds").hidden = false; launcherWorldsMessage("Reading " + file.name + "…");
+    try {
+      if (file.size > LAUNCHER_BACKUP_LIMIT) throw new Error("Choose a worlds backup smaller than 1 MB.");
+      const text = await file.text();
+      if (generation === launcherFileGeneration) launcherPreviewWorlds(text, file.name);
+    } catch (error) { if (generation === launcherFileGeneration) launcherWorldsMessage(error.message || "The selected file could not be read."); }
+    finally { if (generation === launcherFileGeneration) { event.target.value = ""; launcherEl("lg-cancel-worlds").hidden = !launcherWorldsPreview; } }
+  });
 }

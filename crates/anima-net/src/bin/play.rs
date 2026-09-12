@@ -85,13 +85,7 @@ fn main() {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/anima-client")))
         .map(|dir| dir.join("launcher.json"));
     let launcher = match profile_path {
-        Some(path) => match LauncherStore::open(path, None) {
-            Ok(store) => store,
-            Err(error) => {
-                eprintln!("play: {error}");
-                std::process::exit(2);
-            }
-        },
+        Some(path) => LauncherStore::recoverable(path, None),
         None => LauncherStore::memory(),
     };
     let server = match play_server::bind_with_launcher(cfg, Arc::new(launcher)) {

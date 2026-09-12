@@ -1332,6 +1332,23 @@
         <button type="button" id="lg-new-server" class="launcher-button">＋ Add server</button>
         <p id="lg-storage-note" class="launcher-muted"></p>
         <button id="lg-settings-data" class="launcher-secondary" type="button">Settings & backups</button>
+        <details class="launcher-backups" id="lg-backup-tools">
+          <summary>Worlds &amp; accounts backup</summary>
+          <p class="launcher-muted">Keep your servers, notes and account names. Passwords and cached status are excluded.</p>
+          <button type="button" id="lg-export-worlds" class="launcher-button">Export worlds</button>
+          <a id="lg-worlds-download" class="launcher-muted" hidden>Save backup</a>
+          <label class="launcher-muted" for="lg-worlds-file">Import a worlds backup</label>
+          <input id="lg-worlds-file" type="file" accept=".json,application/json">
+          <div id="lg-worlds-preview" hidden>
+            <p id="lg-worlds-summary" class="launcher-muted"></p>
+            <ul id="lg-worlds-list" class="launcher-muted"></ul>
+            <p class="launcher-muted">Adds missing servers and accounts. Existing names, notes and saved passwords stay as they are. Imported accounts need their passwords entered again.</p>
+            <button id="lg-import-worlds" type="button" class="launcher-button">Add from backup</button>
+          </div>
+          <button id="lg-cancel-worlds" type="button" class="launcher-button" hidden>Cancel import</button>
+          <button id="lg-recover-worlds" type="button" class="launcher-button" hidden>Keep original &amp; recover profiles</button>
+          <p id="lg-worlds-message" class="launcher-feedback" role="status" aria-live="polite"></p>
+        </details>
         <button type="button" id="lg-retry-profiles" class="launcher-button" hidden>Retry loading profiles</button>
       </aside>
       <div class="login-box">

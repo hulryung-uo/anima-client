@@ -119,8 +119,8 @@ fn launch(app_handle: AppHandle, data_dir: PathBuf) {
             .path
             .parent()
             .ok_or_else(|| "Cannot locate the Anima profile folder.".to_string())
-            .and_then(|dir| {
-                LauncherStore::open(dir.join("launcher.json"), credentials::native_vault())
+            .map(|dir| {
+                LauncherStore::recoverable(dir.join("launcher.json"), credentials::native_vault())
             });
         let launcher = match launcher {
             Ok(store) => Arc::new(store),
@@ -254,8 +254,9 @@ fn launch(app_handle: AppHandle, data_dir: PathBuf) {
                     }
                     DownloadEvent::Finished { url, success, .. } => {
                         if downloads::from_renderer(&url, &current, port) {
+                            let source = serde_json::to_string(url.as_str()).unwrap_or_default();
                             let _ = webview.eval(format!(
-                                "if(typeof preferenceDownloadResult==='function')preferenceDownloadResult({success})"
+                                "if(typeof preferenceDownloadResult==='function')preferenceDownloadResult({success},{source});if(typeof launcherDownloadResult==='function')launcherDownloadResult({success},{source})"
                             ));
                         }
                         true
