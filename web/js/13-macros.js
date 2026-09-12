@@ -185,11 +185,35 @@ const MACRO_VERBS = [
 ];
 const MACRO_VERB = new Map(MACRO_VERBS.map((v) => [v.t, v]));
 
+function validSavedMacroAction(a) {
+  if (!prefObject(a) || !prefText(a.t, 64)) return false;
+  switch (a.t) {
+    case "say": return prefText(a.text, 128);
+    case "emote": return prefText(a.text, 32);
+    case "send": return prefText(a.cmd, 128);
+    case "cast": case "skill": case "ability": case "virtue": return prefInteger(a.id);
+    case "war": return ["toggle", 0, 1].includes(a.on);
+    case "open": return Object.hasOwn(OPEN_FNS, a.win);
+    case "statlock": return prefInteger(a.stat, 0, 2) && prefInteger(a.lock, 0, 2);
+    case "delay": return prefInteger(a.ms, 0, 2147483647);
+    default: return true; // unknown future verbs remain stored and are skipped
+  }
+}
+preferenceStorage.json(MACRO_KEY, v => prefArray(v, m => {
+  if (!prefObject(m) || (!prefText(m.id, 128) && !prefInteger(m.id, 0, Number.MAX_SAFE_INTEGER))) return false;
+  const triggers = [prefText(m.key, 64) && !!m.key, [1, 3, 4].includes(m.button), ["up", "down"].includes(m.wheel)];
+  if (triggers.filter(Boolean).length !== 1 || ["ctrl", "alt", "shift"].some(k => m[k] !== undefined && typeof m[k] !== "boolean")) return false;
+  if (Object.hasOwn(m, "actions") && !Array.isArray(m.actions)) return false;
+  if (Object.hasOwn(m, "action") && !validSavedMacroAction(m.action)) return false;
+  const actions = macroActions(m);
+  return actions.length <= 256 && actions.every(validSavedMacroAction);
+}, 256));
+
 function loadMacros() {
-  try { const raw = localStorage.getItem(MACRO_KEY); if (raw) { const a = JSON.parse(raw); if (Array.isArray(a)) macros = a; } } catch {}
+  try { const raw = preferenceStorage.getItem(MACRO_KEY); if (raw) { const a = JSON.parse(raw); if (Array.isArray(a)) macros = a; } } catch {}
 }
 function saveMacros() {
-  try { localStorage.setItem(MACRO_KEY, JSON.stringify(macros)); } catch {}
+  try { preferenceStorage.setItem(MACRO_KEY, JSON.stringify(macros)); } catch {}
 }
 // A macro saved before sequences existed stored its single step as `action`.
 // Read both shapes rather than migrating on load, so an old blob keeps its key
@@ -451,10 +475,10 @@ function armSpellChord() { spellChord = { circle: null, t: performance.now() }; 
 
 // ---- fixed HUD panel drag persistence (localStorage) ----
 function loadPanelPos(key) {
-  try { const p = JSON.parse(localStorage.getItem(key)); if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) return p; } catch (e) {}
+  try { const p = JSON.parse(preferenceStorage.getItem(key)); if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) return p; } catch (e) {}
   return null;
 }
-function savePanelPos(key, x, y) { try { localStorage.setItem(key, JSON.stringify({ x, y })); } catch (e) {} }
+function savePanelPos(key, x, y) { try { preferenceStorage.setItem(key, JSON.stringify({ x, y })); } catch (e) {} }
 // Clamp a saved/target position into the current viewport (matches makeDraggable's clamp).
 function clampPanel(x, y) {
   return { x: Math.max(0, Math.min(window.innerWidth - 40, x)), y: Math.max(0, Math.min(window.innerHeight - 24, y)) };
@@ -872,6 +896,7 @@ function setupInput() {
     markDirty();
   });
   optBody.addEventListener("click", (e) => {
+    if (e.target.closest(".opt-settings-data")) { openPreferencePanel(); return; }
     if (e.target.closest(".opt-journal")) { toggleJournal(); return; }
     if (e.target.closest(".opt-infobar")) { toggleInfoBar(); return; }
     if (e.target.closest(".opt-counterbar")) { toggleCounterBar(); return; }
@@ -895,11 +920,11 @@ function setupInput() {
   document.getElementById("st-close").addEventListener("click", closeStatus);
   makeDraggable(stEl, stTitle);
   try {
-    const sp = JSON.parse(localStorage.getItem("anima.statusPos") || "null");
-    if (sp && sp.left) { stEl.style.left = sp.left; stEl.style.top = sp.top; stEl.style.right = "auto"; }
+    const sp = JSON.parse(preferenceStorage.getItem("anima.statusPos") || "null");
+    if (sp && sp.left) { const p = clampPanel(parseFloat(sp.left), parseFloat(sp.top)); stEl.style.left = p.x + "px"; stEl.style.top = p.y + "px"; stEl.style.right = "auto"; }
   } catch (_) { /* ignore bad/missing saved position */ }
   stTitle.addEventListener("mouseup", () => {
-    if (stEl.style.left) localStorage.setItem("anima.statusPos", JSON.stringify({ left: stEl.style.left, top: stEl.style.top }));
+    if (stEl.style.left) preferenceStorage.setItem("anima.statusPos", JSON.stringify({ left: stEl.style.left, top: stEl.style.top }));
   });
   // Clicking the HUD name "pulls out" the movable status bar.
   const pn = document.getElementById("pname");
@@ -1194,4 +1219,3 @@ function sendInput(cmd) {
 // ---- movement diagnostic trace (POSTs to /log; server prints with ANIMA_DEBUG) ----
 let TRACE = false;
 function trace(m) { if (TRACE) fetch("/log", { method: "POST", body: Math.round(performance.now()) + " " + m }).catch(() => {}); }
-

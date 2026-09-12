@@ -369,7 +369,7 @@ function newContext(opts = {}) {
     IntersectionObserver: function (cb) { return { __cb: cb, observe() {}, unobserve() {}, disconnect() {} }; },
     Event: DomEvent, CustomEvent: DomEvent, KeyboardEvent: DomEvent, MouseEvent: DomEvent,
     PointerEvent: DomEvent, WheelEvent: DomEvent,
-    URL, URLSearchParams, TextDecoder, TextEncoder, AbortController, Headers: class Headers {},
+    URL, URLSearchParams, Blob, TextDecoder, TextEncoder, AbortController, Headers: class Headers {},
     atob: (s) => Buffer.from(s, "base64").toString("binary"),
     btoa: (s) => Buffer.from(s, "binary").toString("base64"),
     structuredClone,
@@ -415,7 +415,7 @@ function newContext(opts = {}) {
     loaded.push(rel);
   }
 
-  const known = (rel) => (rel.includes("/") || rel === "dialogs.js" ? rel : `js/${rel}`);
+  const known = (rel) => (rel.includes("/") || ["dialogs.js", "storage.js"].includes(rel) ? rel : `js/${rel}`);
 
   const ctx = {
     sandbox, PIXI, document: doc, window: sandbox, clock, drawCalls, ctx2d,
@@ -432,6 +432,7 @@ function newContext(opts = {}) {
           throw new Error(`web/test: ${n} is not loaded by web/index.html (it lists ${scripts.join(", ")})`);
         }
       }
+      if (want.has("js/00-state.js")) want.add("storage.js");
       for (const rel of scripts) if (want.has(rel) && !loaded.includes(rel)) runFile(rel);
       return ctx;
     },

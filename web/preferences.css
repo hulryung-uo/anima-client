@@ -1,0 +1,27 @@
+#preference-warning { position: fixed; bottom: 14px; left: 14px; max-width: min(520px, calc(100vw - 28px)); z-index: 200000;
+  padding: 12px 14px; border: 1px solid #a68050; border-radius: 8px; background: #32281ff5; color: #e8d5b8; font: 12px/1.5 system-ui, sans-serif; box-shadow: 0 10px 40px #0006; }
+#preference-warning button { margin-top: 8px; display: block; }
+#preference-panel { width: min(640px, calc(100vw - 28px)); max-height: calc(100dvh - 40px); box-sizing: border-box; overflow-y: auto;
+  background: #131d28; color: #dce5ee; border: 1px solid #425368; border-radius: 14px; padding: 26px; box-shadow: 0 30px 100px #000a; font: 13px/1.6 system-ui, sans-serif; }
+#preference-panel::backdrop { background: #050a12c9; backdrop-filter: blur(3px); }
+.pref-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+.pref-heading h2 { margin: 0; font-size: 26px; color: #efe4d0; line-height: 1.2; letter-spacing: -.03em; }
+.pref-heading .pref-eyebrow { margin: 0 0 9px; color: #acb9c8; font-size: 10px; letter-spacing: .17em; }
+#preference-panel h3 { font-size: 14px; margin: 0 0 6px; color: #e8e3d9; }
+#preference-panel p { margin: 8px 0; }
+#preference-panel .pref-muted, .opt-data-help { color: #a7b5c5; font-size: 12px; }
+.pref-status { padding: 11px 13px; background: #0e1721; border: 1px solid #344353; border-radius: 7px; }
+.pref-card { margin-top: 16px; padding: 16px; border: 1px solid #344454; border-radius: 9px; background: #1a2633; }
+.pref-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.pref-button, #preference-warning button { display: inline-block; border: 1px solid #52647a; border-radius: 6px; padding: 8px 12px; color: #dce8f7; background: #2b3e52; font: inherit; font-size: 12px; cursor: pointer; }
+.pref-button:hover:not(:disabled) { background: #3c526b; }
+.pref-primary { background: #d9c5a0; border-color: #eedabd; color: #14202d; font-weight: 600; }
+.pref-button:disabled { opacity: .45; cursor: default; }
+.pref-button:focus-visible, #pref-file:focus-visible { outline: 2px solid #acc9ff; outline-offset: 3px; }
+#pref-file { max-width: 100%; font: inherit; font-size: 12px; }
+#pref-file::file-selector-button { margin-right: 10px; padding: 8px 12px; border: 1px solid #52647a; border-radius: 6px; background: #2b3e52; color: #dce8f7; font: inherit; cursor: pointer; }
+#pref-preview { margin-top: 14px; border-top: 1px solid #43556a; padding-top: 10px; }
+#pref-file-name { overflow-wrap: anywhere; color: #e0cba8; }
+#pref-message { min-height: 21px; color: #dfc49b; overflow-wrap: anywhere; }
+#preference-panel [hidden], #preference-warning[hidden] { display: none !important; }
+#lg-settings-data { margin-top: 12px; width: 100%; background: transparent; text-align: left; color: #aebfd2; }

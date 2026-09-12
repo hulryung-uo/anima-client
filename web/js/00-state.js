@@ -303,8 +303,13 @@ const SETTINGS_DEFAULTS = {
   dragSelectHostile: false,    // DragSelectHostileOnly (skips ally/innocent/invulnerable)
 };
 let settings = Object.assign({}, SETTINGS_DEFAULTS);
-try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}")); } catch (e) {}
-function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {} }
+let savedSettingsView = null;
+function saveSettings() {
+  const previous = JSON.parse(preferenceStorage.getItem(SETTINGS_KEY) || "{}");
+  const changes = Object.fromEntries(Object.entries(settings).filter(([k, value]) => value !== savedSettingsView?.[k]));
+  const saved = preferenceStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...previous, ...changes }));
+  savedSettingsView = { ...settings }; return saved;
+}
 
 // ---- the options schema -----------------------------------------------------
 // One table describes every option: what it is, where it lives, and what has to
@@ -321,6 +326,7 @@ const OPTION_CATEGORIES = [
   { key: "gameplay", label: "Gameplay" },
   { key: "windows", label: "Windows" },
   { key: "session", label: "Session" },
+  { key: "data", label: "Settings data" },
 ];
 let optCat = "audio";
 // `onChange` is ALWAYS an arrow wrapper, never a bare function reference: this
@@ -386,6 +392,27 @@ const OPTIONS = [
   { kind: "button", cat: "windows", label: "Network", cls: "opt-netstats" },
   { kind: "button", cat: "windows", label: "Inspector", cls: "opt-inspector" },
 ];
+preferenceStorage.json(SETTINGS_KEY, value => {
+  if (!prefObject(value)) return null;
+  const clean = { ...value };
+  for (const key of ["__proto__", "constructor", "prototype"]) delete clean[key];
+  for (const option of OPTIONS) {
+    const key = option.key;
+    if (!key || !Object.hasOwn(clean, key)) continue;
+    const v = clean[key];
+    const valid = option.kind === "checkbox" ? typeof v === "boolean"
+      : option.kind === "range" ? prefNumber(v, 0, 1)
+      : option.kind === "intRange" ? prefInteger(v, option.min, option.max)
+      : option.kind === "select" && option.opts.some(([choice]) => choice === v);
+    if (!valid) delete clean[key];
+  }
+  return clean;
+});
+{
+  const saved = JSON.parse(preferenceStorage.getItem(SETTINGS_KEY) || "{}");
+  for (const key of Object.keys(SETTINGS_DEFAULTS)) if (Object.hasOwn(saved, key)) settings[key] = saved[key];
+  savedSettingsView = { ...settings };
+}
 // Build the Options panel from the OPTIONS schema: a category rail on the left,
 // and only the ACTIVE category's rows in the body. Only-active-in-DOM keeps the
 // panel short and keeps tab order equal to what you can see.
@@ -434,6 +461,7 @@ function renderOptions() {
     html += `<button type="button" class="dlg-btn opt-logout"${logoutPending ? " disabled" : ""}>`
       + (logoutPending ? "LOGGING OUT…" : "LOG OUT") + "</button>";
   }
+  if (optCat === "data") html = '<p class="opt-data-help">Keep a copy of your options, macros, map markers and layout.</p><button type="button" class="dlg-btn opt-settings-data">Backups & recovery</button>';
   body.innerHTML = html;
 }
 // Show/hide the Options panel (force=true open, false close, omitted = toggle).
@@ -443,4 +471,3 @@ function toggleOptions(force) {
   const on = force != null ? force : !el.classList.contains("on");
   if (on) { renderOptions(); el.classList.add("on"); } else el.classList.remove("on");
 }
-

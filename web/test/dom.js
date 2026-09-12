@@ -220,6 +220,8 @@ class Element {
   select() {}
   scrollIntoView() {}
   click() { this.dispatchEvent(new DomEvent("click", { bubbles: true })); }
+  showModal() { this.open = true; this.setAttribute("open", ""); }
+  close() { this.open = false; this.removeAttribute("open"); this.dispatchEvent(new DomEvent("close")); }
   // <canvas>: the client only ever asks for a 2d context, and the harness owns
   // what that context records — see harness.js.
   getContext(kind) { return this.ownerDocument.__context2d(this, kind); }

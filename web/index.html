@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Anima — Ultima Online</title>
     <link rel="stylesheet" href="launcher.css">
+    <link rel="stylesheet" href="preferences.css">
     <style>
       :root { color-scheme: dark; }
       * { box-sizing: border-box; }
@@ -1330,6 +1331,7 @@
         <div id="lg-server-list" class="launcher-server-list"></div>
         <button type="button" id="lg-new-server" class="launcher-button">＋ Add server</button>
         <p id="lg-storage-note" class="launcher-muted"></p>
+        <button id="lg-settings-data" class="launcher-secondary" type="button">Settings & backups</button>
         <button type="button" id="lg-retry-profiles" class="launcher-button" hidden>Retry loading profiles</button>
       </aside>
       <div class="login-box">
@@ -1752,6 +1754,17 @@
         </div>
       </div>
     </div>
+    <aside id="preference-warning" hidden role="status"><span id="preference-warning-text"></span><button id="preference-warning-open" type="button">Settings & recovery</button></aside>
+    <dialog id="preference-panel" aria-labelledby="pref-title">
+      <div class="pref-heading"><div><p class="pref-eyebrow">ANIMA · ON THIS DEVICE</p><h2 id="pref-title">Your settings, kept.</h2></div><button id="pref-close" type="button" class="pref-button" aria-label="Close settings data">Close</button></div>
+      <p class="pref-muted">Options, macros, map markers and your screen layout. Server profiles, account names and passwords are managed separately.</p>
+      <p id="pref-status" class="pref-status" role="status"></p>
+      <div class="pref-actions"><button id="pref-retry" type="button" class="pref-button" hidden>Retry saving</button><button id="pref-recover" type="button" class="pref-button" hidden>Keep original & recover</button></div>
+      <section class="pref-card"><h3>Take a copy with you</h3><p class="pref-muted">Download your settings to keep a backup or move them to another Anima window or device.</p><button id="pref-export" type="button" class="pref-button">Export settings</button><div class="pref-actions"><button id="pref-original" type="button" class="pref-button" hidden>Download recovery copy</button><button id="pref-previous" type="button" class="pref-button" hidden>Review previous settings</button></div></section>
+      <section class="pref-card"><h3>Restore a backup</h3><p class="pref-muted">Choose an Anima settings JSON file to review before applying it. Macros are restored as bindings; importing never runs them.</p><label for="pref-file">Settings backup (up to 4 MB)</label><p><input id="pref-file" type="file" accept=".json,application/json"></p>
+        <div id="pref-preview" hidden><strong id="pref-file-name"></strong><p id="pref-summary"></p><button id="pref-apply" type="button" class="pref-button pref-primary" disabled>Apply backup & reload</button></div>
+      </section><p id="pref-session-note" class="pref-muted"></p><p id="pref-message" role="status" aria-live="polite"></p><a id="pref-download" class="pref-button" hidden download>Save backup file</a>
+    </dialog>
     <script src="vendor/pixi.min.js"></script>
     <!-- Dialog window lifecycle (registerDialog/syncDialogs). Must load before
          js/*, which declares its dialog families at evaluation time. -->
@@ -1762,6 +1775,7 @@
          BELOW IS LOAD-BEARING — it is the original file's top-to-bottom order,
          and top-level statements still run in it. Adding a file means adding a
          tag here; renaming one without renaming the tag silently loses it. -->
+    <script src="storage.js"></script>
     <script src="js/00-state.js"></script>
     <script src="js/01-audio.js"></script>
     <script src="js/02-textures.js"></script>
@@ -1778,6 +1792,7 @@
     <script src="js/11-dragdrop.js"></script>
     <script src="js/12-input.js"></script>
     <script src="js/13-macros.js"></script>
+    <script src="preferences-ui.js"></script>
     <script src="js/14-wasm.js"></script>
   </body>
 </html>

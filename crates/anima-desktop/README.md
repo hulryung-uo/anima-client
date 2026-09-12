@@ -42,6 +42,14 @@ See [Server and account library](../../docs/LOGIN_PROFILES.md) for usage and cac
 behavior. The `keyring` dependency belongs to this shell; the protocol core has
 no OS credential-store dependency.
 
+## Renderer settings
+
+**Settings & backups** at login exposes renderer preference recovery and transfer.
+Values are validated before use; older preferences migrate into one storage record
+on the first successful save. Downloads are limited to the active renderer's
+settings JSON exports. See [Client settings](../../docs/CLIENT_SETTINGS.md) for
+usage, the storage scope and outstanding file-transfer runtime verification.
+
 ## Stable port
 
 The renderer keeps its preferences (options, macros, markers, HUD layout) in

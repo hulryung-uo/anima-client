@@ -312,7 +312,7 @@ function refreshAbilities(force) {
 // keeps a second, hand-written copy for this gump (`GetItemsList`, a 400-line
 // switch); one table that both halves read cannot drift against itself.
 const ABILITY_ICON0 = 0x5200;                // icon gump for ability id 1
-let cbkOn = localStorage.getItem("anima.combatBookOn") === "1";
+let cbkOn = preferenceStorage.getItem("anima.combatBookOn") === "1";
 let cbkSel = 0;                              // expanded ability id, 0 = none
 let cbkText = null;                          // /abilities.json once it lands
 let cbkAsked = false;
@@ -342,7 +342,7 @@ function loadAbilityText() {
 function toggleCombatBook() {
   cbkOn = !cbkOn;
   document.getElementById("combatbook").classList.toggle("on", cbkOn);
-  localStorage.setItem("anima.combatBookOn", cbkOn ? "1" : "0");
+  preferenceStorage.setItem("anima.combatBookOn", cbkOn ? "1" : "0");
   if (cbkOn) { loadAbilityText(); renderCombatBook(true); }
 }
 function abilityName(id) {
@@ -453,11 +453,11 @@ function playerRace() {
   if (race) lastRace = race;
   return lastRace;
 }
-let rcbOn = localStorage.getItem("anima.racialBookOn") === "1";
+let rcbOn = preferenceStorage.getItem("anima.racialBookOn") === "1";
 function toggleRacialBook() {
   rcbOn = !rcbOn;
   document.getElementById("racialbook").classList.toggle("on", rcbOn);
-  localStorage.setItem("anima.racialBookOn", rcbOn ? "1" : "0");
+  preferenceStorage.setItem("anima.racialBookOn", rcbOn ? "1" : "0");
   if (rcbOn) { loadAbilityText(); renderRacialBook(true); }
 }
 function renderRacialBook(force) {
@@ -915,20 +915,20 @@ function applyHudVisibility() {
   const hud = document.getElementById("hud"); if (hud) hud.style.display = hudHidden ? "none" : "";
 }
 function loadHudVisibility() {
-  hudHidden = localStorage.getItem("anima.hudHidden") === "1";
-  journalHidden = localStorage.getItem("anima.journalHidden") === "1";
+  hudHidden = preferenceStorage.getItem("anima.hudHidden") === "1";
+  journalHidden = preferenceStorage.getItem("anima.journalHidden") === "1";
   applyHudVisibility();
   applyJournalVisibility();
 }
 function toggleHud() {
   hudHidden = !hudHidden;
-  localStorage.setItem("anima.hudHidden", hudHidden ? "1" : "0");
+  preferenceStorage.setItem("anima.hudHidden", hudHidden ? "1" : "0");
   applyHudVisibility();
   setStatus(hudHidden ? "status panel hidden (U)" : "status panel shown");
 }
 function toggleJournal() {
   journalHidden = !journalHidden;
-  localStorage.setItem("anima.journalHidden", journalHidden ? "1" : "0");
+  preferenceStorage.setItem("anima.journalHidden", journalHidden ? "1" : "0");
   applyJournalVisibility();
   if (!journalHidden && journalWin) bringToFront(journalWin);
   setStatus(journalHidden ? "journal hidden (J)" : "journal shown");
@@ -1121,7 +1121,7 @@ function saveSkillButtons() {
   document.querySelectorAll(".skill-gump").forEach((el) => {
     arr.push({ id: +el.dataset.id | 0, x: parseInt(el.style.left, 10) || 0, y: parseInt(el.style.top, 10) || 0 });
   });
-  try { localStorage.setItem(SKILLBTN_KEY, JSON.stringify(arr)); } catch (e) {}
+  try { preferenceStorage.setItem(SKILLBTN_KEY, JSON.stringify(arr)); } catch (e) {}
 }
 function makeSkillButton(id, x, y) {
   id = id | 0;
@@ -1169,8 +1169,8 @@ function requestAllNames() {
 }
 function loadSkillButtons() {
   let arr = [];
-  try { arr = JSON.parse(localStorage.getItem(SKILLBTN_KEY) || "[]"); } catch (e) { arr = []; }
-  for (const b of arr) makeSkillButton(b.id, b.x, b.y);
+  try { arr = JSON.parse(preferenceStorage.getItem(SKILLBTN_KEY) || "[]"); } catch (e) { arr = []; }
+  for (const b of arr) { const p = clampPanel(b.x, b.y); makeSkillButton(b.id, p.x, p.y); }
 }
 
 // --- spell quick-cast buttons: drag a spell icon out of the spellbook onto the
@@ -1185,7 +1185,7 @@ function saveSpellButtons() {
     arr.push({ id: +el.dataset.id | 0, icon: +el.dataset.icon | 0, name: el.dataset.name || "",
       x: parseInt(el.style.left, 10) || 0, y: parseInt(el.style.top, 10) || 0 });
   });
-  try { localStorage.setItem(SPELLBTN_KEY, JSON.stringify(arr)); } catch (e) {}
+  try { preferenceStorage.setItem(SPELLBTN_KEY, JSON.stringify(arr)); } catch (e) {}
 }
 function makeSpellButton(id, icon, name, x, y) {
   const el = document.createElement("div");
@@ -1221,8 +1221,8 @@ function makeSpellButton(id, icon, name, x, y) {
 }
 function loadSpellButtons() {
   let arr = [];
-  try { arr = JSON.parse(localStorage.getItem(SPELLBTN_KEY) || "[]"); } catch (e) { arr = []; }
-  for (const b of arr) makeSpellButton(b.id, b.icon, b.name, b.x, b.y);
+  try { arr = JSON.parse(preferenceStorage.getItem(SPELLBTN_KEY) || "[]"); } catch (e) { arr = []; }
+  for (const b of arr) { const p = clampPanel(b.x, b.y); makeSpellButton(b.id, b.icon, b.name, p.x, p.y); }
 }
 // Wire the HTML5 drag-out: dragging a `.sp-icon` from the book drops a button on the
 // screen. Registered once (idempotent via a flag).
@@ -1270,7 +1270,7 @@ function closeParty() {
 // current value — ClassicUO tracks it client-side too — so this is our own copy
 // of what we last sent, persisted so it survives a reload the way the toggle in
 // ClassicUO's PartyGump does.
-let partyLootMe = localStorage.getItem("anima.partyLoot") === "1";
+let partyLootMe = preferenceStorage.getItem("anima.partyLoot") === "1";
 
 // Is this member close enough that the server is still pushing their vitals?
 //
@@ -1434,7 +1434,7 @@ function wireParty() {
   document.getElementById("pt-leave").addEventListener("click", () => sendInput("partyleave"));
   document.getElementById("pt-loot").addEventListener("change", (e) => {
     partyLootMe = !!e.target.checked;
-    localStorage.setItem("anima.partyLoot", partyLootMe ? "1" : "0");
+    preferenceStorage.setItem("anima.partyLoot", partyLootMe ? "1" : "0");
     sendInput("partyloot:" + (partyLootMe ? 1 : 0));
   });
   // Per-member verbs, delegated so they survive the list's innerHTML rebuild.
@@ -1750,4 +1750,3 @@ registerDialog({
   update: renderMapWindow,
   reopen: (win) => bringToFront(win.el),
 });
-

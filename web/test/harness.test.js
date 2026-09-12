@@ -35,7 +35,7 @@ test("index.html is the source of truth for which files load", () => {
 test("load() uses the page's order, not the caller's", () => {
   const ctx = newContext();
   ctx.load("06-movement.js", "00-state.js");
-  deepEq(ctx.loaded, ["js/00-state.js", "js/06-movement.js"], "sorted back into index.html order");
+  deepEq(ctx.loaded, ["storage.js", "js/00-state.js", "js/06-movement.js"], "sorted back into index.html order");
 });
 
 test("the clock is the test's, not the machine's", () => {

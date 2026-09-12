@@ -277,8 +277,8 @@ const PLACES = [
 ];
 // User-placed markers, persisted in localStorage.
 let wmMarkers = [];
-try { wmMarkers = JSON.parse(localStorage.getItem("anima.markers") || "[]"); } catch (e) { wmMarkers = []; }
-const saveMarkers = () => { try { localStorage.setItem("anima.markers", JSON.stringify(wmMarkers)); } catch (e) {} };
+try { wmMarkers = JSON.parse(preferenceStorage.getItem("anima.markers") || "[]"); } catch (e) { wmMarkers = []; }
+const saveMarkers = () => { try { preferenceStorage.setItem("anima.markers", JSON.stringify(wmMarkers)); } catch (e) {} };
 
 // ---- world-map points of interest (towns, banks, shops, dungeons, …) ----
 // Server endpoint /pois.json → [{x,y,cat,name}, …]; fetched once, cached here.
@@ -298,9 +298,9 @@ const POI_GROUP_ORDER = ["Travel", "Services", "Shops", "Guilds", "Places", "Oth
 // A sensible default-on set so the map isn't cluttered on first open.
 const POI_DEFAULTS = ["moongate", "bank", "town", "shrine", "dungeon", "healer", "inn"];
 let wmPoiCats = null;       // Set of enabled categories, persisted to localStorage
-try { const s = JSON.parse(localStorage.getItem("anima.poiCats")); if (Array.isArray(s)) wmPoiCats = new Set(s); } catch (e) {}
+try { const s = JSON.parse(preferenceStorage.getItem("anima.poiCats")); if (Array.isArray(s)) wmPoiCats = new Set(s); } catch (e) {}
 if (!wmPoiCats) wmPoiCats = new Set(POI_DEFAULTS);
-const savePoiCats = () => { try { localStorage.setItem("anima.poiCats", JSON.stringify([...wmPoiCats])); } catch (e) {} };
+const savePoiCats = () => { try { preferenceStorage.setItem("anima.poiCats", JSON.stringify([...wmPoiCats])); } catch (e) {} };
 let wmPoiExpanded = new Set();   // which filter groups are expanded in the panel
 // Distinct, readable colors for common categories; everything else gets a stable
 // hash-based hue so each category is still visually separable.
@@ -404,8 +404,15 @@ const WM_OPTS_DEFAULTS = {
   coords: true,        // ClassicUO ShowYourCoordinates / ShowMouseCoordinates
 };
 let wmOpts = Object.assign({}, WM_OPTS_DEFAULTS);
-try { Object.assign(wmOpts, JSON.parse(localStorage.getItem(WM_OPTS_KEY) || "{}")); } catch (e) {}
-function saveWmOpts() { try { localStorage.setItem(WM_OPTS_KEY, JSON.stringify(wmOpts)); } catch (e) {} }
+preferenceStorage.json(WM_OPTS_KEY, v => prefObject(v) ? Object.fromEntries(Object.entries(v).filter(([k, value]) => !["__proto__", "constructor", "prototype"].includes(k) && (!Object.hasOwn(WM_OPTS_DEFAULTS, k) || typeof value === "boolean"))) : null);
+{
+  const saved = JSON.parse(preferenceStorage.getItem(WM_OPTS_KEY) || "{}");
+  for (const key of Object.keys(WM_OPTS_DEFAULTS)) if (Object.hasOwn(saved, key)) wmOpts[key] = saved[key];
+}
+function saveWmOpts() {
+  const previous = JSON.parse(preferenceStorage.getItem(WM_OPTS_KEY) || "{}");
+  preferenceStorage.setItem(WM_OPTS_KEY, JSON.stringify({ ...previous, ...wmOpts }));
+}
 // ClassicUO `FreeView` (WorldMapGump.cs:148): the view stops following the
 // player and stays where it was put. `null` = pinned to the player, which is
 // the only thing this map could do before — dragging it just slid the offset
@@ -889,15 +896,15 @@ const pct = (v) => `${v | 0}%`;
 // 5 enemy, 6 murderer, 7 invulnerable.
 const NOTO_NAMES = { 1: "innocent", 2: "friend", 3: "grey", 4: "criminal", 5: "enemy", 6: "murderer", 7: "invul" };
 const INFOBAR_DEFAULT = ["hp", "mana", "stam", "weight", "gold"];
-let infoBarOn = localStorage.getItem("anima.infoBarOn") === "1";
+let infoBarOn = preferenceStorage.getItem("anima.infoBarOn") === "1";
 let infoBarFields = INFOBAR_DEFAULT.slice();
 try {
-  const saved = JSON.parse(localStorage.getItem("anima.infoBarFields") || "null");
+  const saved = JSON.parse(preferenceStorage.getItem("anima.infoBarFields") || "null");
   if (Array.isArray(saved)) infoBarFields = saved;
 } catch (e) {}
 function saveInfoBar() {
-  localStorage.setItem("anima.infoBarOn", infoBarOn ? "1" : "0");
-  localStorage.setItem("anima.infoBarFields", JSON.stringify(infoBarFields));
+  preferenceStorage.setItem("anima.infoBarOn", infoBarOn ? "1" : "0");
+  preferenceStorage.setItem("anima.infoBarFields", JSON.stringify(infoBarFields));
 }
 function toggleInfoBar() {
   infoBarOn = !infoBarOn;
@@ -981,23 +988,23 @@ function refreshInfoBar(s, force) {
 const CB_LAYER_MIN = 1, CB_LAYER_MAX = 0x17;
 const CB_FLASH_MS = 5000;      // ClassicUO HIGHLIGHT_AMOUNT_CHANGED_DURATION
 const CB_EMPTY_SLOTS = 5;      // a fresh bar has somewhere to drag onto
-let counterBarOn = localStorage.getItem("anima.counterBarOn") === "1";
+let counterBarOn = preferenceStorage.getItem("anima.counterBarOn") === "1";
 let counterSlots = null;       // [{ g, hue: number|null, cmp }] — hue null = any hue
 try {
-  const saved = JSON.parse(localStorage.getItem("anima.counterSlots") || "null");
+  const saved = JSON.parse(preferenceStorage.getItem("anima.counterSlots") || "null");
   if (Array.isArray(saved)) counterSlots = saved;
 } catch (e) {}
 if (!counterSlots) counterSlots = Array.from({ length: CB_EMPTY_SLOTS }, () => ({ g: 0, hue: null, cmp: 0 }));
 let cbSel = -1;                // slot the options strip is editing; -1 = none
 // ClassicUO's `CounterBarHighlightOnAmount` / `CounterBarHighlightAmount`, and
 // its defaults (off, 5).
-let cbWarnOn = localStorage.getItem("anima.cbWarnOn") === "1";
-let cbWarnAt = parseInt(localStorage.getItem("anima.cbWarnAt") || "5", 10) || 5;
+let cbWarnOn = preferenceStorage.getItem("anima.cbWarnOn") === "1";
+let cbWarnAt = parseInt(preferenceStorage.getItem("anima.cbWarnAt") || "5", 10) || 5;
 function saveCounterBar() {
-  localStorage.setItem("anima.counterBarOn", counterBarOn ? "1" : "0");
-  localStorage.setItem("anima.counterSlots", JSON.stringify(counterSlots));
-  localStorage.setItem("anima.cbWarnOn", cbWarnOn ? "1" : "0");
-  localStorage.setItem("anima.cbWarnAt", String(cbWarnAt));
+  preferenceStorage.setItem("anima.counterBarOn", counterBarOn ? "1" : "0");
+  preferenceStorage.setItem("anima.counterSlots", JSON.stringify(counterSlots));
+  preferenceStorage.setItem("anima.cbWarnOn", cbWarnOn ? "1" : "0");
+  preferenceStorage.setItem("anima.cbWarnAt", String(cbWarnAt));
 }
 // contItems is a flat list of "item X is inside container Y"; index it by
 // container once per pass rather than re-scanning it per slot.
@@ -1235,13 +1242,13 @@ function refreshCounterBar(force) {
 // 200, orange under 300, red beyond.
 const NET_PING_COLORS = [[150, "#46a758"], [200, "#e3c34d"], [300, "#e08a5a"]];
 const NET_BAD_COLOR = "#e5484d";
-let netStatsOn = localStorage.getItem("anima.netStatsOn") === "1";
+let netStatsOn = preferenceStorage.getItem("anima.netStatsOn") === "1";
 let netPrev = null;      // counters as of the last rate tick
 let netRate = { in: 0, out: 0 };
 function toggleNetStats() {
   netStatsOn = !netStatsOn;
   document.getElementById("netstats").classList.toggle("on", netStatsOn);
-  localStorage.setItem("anima.netStatsOn", netStatsOn ? "1" : "0");
+  preferenceStorage.setItem("anima.netStatsOn", netStatsOn ? "1" : "0");
   netPrev = null; netRate = { in: 0, out: 0 };   // a fresh window starts fresh
   if (netStatsOn) refreshNetStats();
 }
@@ -1308,13 +1315,13 @@ function refreshNetStats() {
 // anything nobody hardcoded, and the interesting question here is usually
 // "what did the server actually send", not "what did someone remember to
 // print". The table is the readable view; the JSON is the complete one.
-let inspectOn = localStorage.getItem("anima.inspectOn") === "1";
+let inspectOn = preferenceStorage.getItem("anima.inspectOn") === "1";
 let inspectPick = false;
 let inspectData = null;   // { kind, title, rows: [[k, v], …], raw }
 function toggleInspector() {
   inspectOn = !inspectOn;
   document.getElementById("inspector").classList.toggle("on", inspectOn);
-  localStorage.setItem("anima.inspectOn", inspectOn ? "1" : "0");
+  preferenceStorage.setItem("anima.inspectOn", inspectOn ? "1" : "0");
   if (!inspectOn) armInspect(false);
   renderInspector();
 }

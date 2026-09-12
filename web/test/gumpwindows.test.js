@@ -319,7 +319,12 @@ test("'party can loot my corpse' is our own copy of a value the server never rep
   box.checked = true;
   ctx.fire(box, "change", { bubbles: true });
   deepEq(ctx.sent, ["partyloot:1"], "0xBF/0x06/0x06");
-  eq(ctx.localStorage.getItem("anima.partyLoot"), "1", "…and remembered across a reload");
+  const reopened = newContext();
+  for (let i = 0; i < ctx.localStorage.length; i++) {
+    const key = ctx.localStorage.key(i); reopened.localStorage.setItem(key, ctx.localStorage.getItem(key));
+  }
+  reopened.loadAll();
+  eq(reopened.run("partyLootMe"), true, "…and remembered across a reload");
 });
 
 test("the loot row is hidden while you are in no party", () => {

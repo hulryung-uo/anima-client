@@ -1097,7 +1097,7 @@ const JRNL_TABS = [
   { key: "guild", label: "Guild" },
   { key: "system", label: "System" },
 ];
-let journalTab = localStorage.getItem("anima.journalTab") || "all";
+let journalTab = preferenceStorage.getItem("anima.journalTab") || "all";
 // Which tab a line belongs to — a port of ClassicUO's `TextType` decision
 // (`PacketHandlers.cs`, the 0x1C/0xAE handlers), NOT a filter on the message
 // type alone.
@@ -1149,7 +1149,7 @@ function buildJournalTabs() {
     b.dataset.key = t.key;
     b.addEventListener("click", () => {
       journalTab = t.key;
-      localStorage.setItem("anima.journalTab", journalTab);
+      preferenceStorage.setItem("anima.journalTab", journalTab);
       for (const x of bar.children) x.classList.toggle("sel", x.dataset.key === journalTab);
       const j = document.getElementById("journal");
       if (j) j._sig = null;              // force a rebuild under the new filter
@@ -1200,14 +1200,14 @@ function ignoreLabel(name) {
 }
 let ignoredNames = new Map();      // lowercased name → the name as it was added
 try {
-  const saved = JSON.parse(localStorage.getItem("anima.ignoreList") || "[]");
+  const saved = JSON.parse(preferenceStorage.getItem("anima.ignoreList") || "[]");
   if (Array.isArray(saved)) for (const n of saved) ignoredNames.set(ignoreKey(n), ignoreLabel(n));
 } catch (e) {}
 // Bumped on every change so the journal's render signature notices — otherwise
 // ignoring someone would only take effect on their next line.
 let ignoreSeq = 0;
 function saveIgnoreList() {
-  localStorage.setItem("anima.ignoreList", JSON.stringify([...ignoredNames.values()]));
+  preferenceStorage.setItem("anima.ignoreList", JSON.stringify([...ignoredNames.values()]));
   ignoreSeq++;
   renderIgnoreList();
   invalidateJournal();
@@ -1252,11 +1252,11 @@ function unignoreName(name) {
   ignoredNames.delete(ignoreKey(name));
   saveIgnoreList();
 }
-let ignoreListOn = localStorage.getItem("anima.ignoreListOn") === "1";
+let ignoreListOn = preferenceStorage.getItem("anima.ignoreListOn") === "1";
 function toggleIgnoreList() {
   ignoreListOn = !ignoreListOn;
   document.getElementById("ignorelist").classList.toggle("on", ignoreListOn);
-  localStorage.setItem("anima.ignoreListOn", ignoreListOn ? "1" : "0");
+  preferenceStorage.setItem("anima.ignoreListOn", ignoreListOn ? "1" : "0");
   if (ignoreListOn) renderIgnoreList(); else armIgnorePick(false);
 }
 // The pick mode ClassicUO reaches through its own target cursor

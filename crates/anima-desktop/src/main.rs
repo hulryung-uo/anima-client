@@ -10,6 +10,7 @@
 
 mod config;
 mod credentials;
+mod downloads;
 mod setup;
 use anima_net::launcher::LauncherStore;
 use std::net::{Ipv4Addr, TcpListener};
@@ -230,6 +231,7 @@ fn launch(app_handle: AppHandle, data_dir: PathBuf) {
         let window_data_dir = data_dir.clone();
         if let Err(e) = app_handle.run_on_main_thread(move || {
             let url = format!("http://127.0.0.1:{port}/");
+            let downloads_dir = handle_for_window.path().download_dir().ok();
             let build = WebviewWindowBuilder::new(
                 &handle_for_window,
                 "main",
@@ -238,6 +240,29 @@ fn launch(app_handle: AppHandle, data_dir: PathBuf) {
                         .expect("http://127.0.0.1:<port>/ is a valid URL"),
                 ),
             )
+            .on_download(move |webview, event| {
+                use tauri::webview::DownloadEvent;
+                let Ok(current) = webview.url() else {
+                    return false;
+                };
+                match event {
+                    DownloadEvent::Requested { url, destination } => {
+                        downloads::from_renderer(&url, &current, port)
+                            && downloads_dir
+                                .as_ref()
+                                .is_some_and(|dir| downloads::settings_file(destination, dir))
+                    }
+                    DownloadEvent::Finished { url, success, .. } => {
+                        if downloads::from_renderer(&url, &current, port) {
+                            let _ = webview.eval(format!(
+                                "if(typeof preferenceDownloadResult==='function')preferenceDownloadResult({success})"
+                            ));
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            })
             .title("Anima")
             .inner_size(1280.0, 800.0);
             match build.build() {
