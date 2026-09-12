@@ -244,6 +244,30 @@ pub(super) fn parse_skill_choices(
     Ok(skills)
 }
 
+pub(super) struct PromptDecision {
+    pub(super) choice_id: String,
+    pub(super) decision: CharacterDecision,
+}
+impl PromptDecision {
+    pub(super) fn for_prompt(self, id: &str) -> Option<CharacterDecision> {
+        (self.choice_id == id).then_some(self.decision)
+    }
+}
+
+pub(super) fn parse_prompt_decision(body: &str) -> Result<PromptDecision, &'static str> {
+    let value: serde_json::Value =
+        serde_json::from_str(body.trim()).map_err(|_| "invalid character-choice JSON")?;
+    let choice_id = value["choice_id"]
+        .as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 128)
+        .ok_or("Refresh the character list before choosing.")?
+        .to_owned();
+    Ok(PromptDecision {
+        choice_id,
+        decision: parse_character_choice(body)?,
+    })
+}
+
 pub(super) fn parse_character_choice(body: &str) -> Result<CharacterDecision, &'static str> {
     let value: serde_json::Value =
         serde_json::from_str(body.trim()).map_err(|_| "invalid character-choice JSON")?;

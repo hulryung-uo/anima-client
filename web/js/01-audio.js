@@ -122,15 +122,12 @@ function connectSoundStream() {
   const es = new EventSource("sounds");
   es.onmessage = (e) => {
     let ev; try { ev = JSON.parse(e.data); } catch (_) { return; }
+    // SSE can get ahead of polling across a reconnect. A sound from another
+    // connection must neither play nor advance this world's sequence cursor.
+    if (!ev || !scene?.sessionId || ev.sessionId !== scene.sessionId || !seqPrimed || sceneReloading) return;
     const seq = ev.seq | 0;
     if (seq <= lastSoundSeq) return;
     lastSoundSeq = seq;
-    // SSE connects before the first poll resolves, so on a page reload it can
-    // race `primeSeqRings` — a stale backlog sound could otherwise slip through
-    // here before priming bumps `lastSoundSeq` past it. Bumping the seq above
-    // (so poll's own replay-skip stays correct either way) without playing yet
-    // covers that window; once primed, everything past the baseline plays live.
-    if (!seqPrimed) return;
     if (audioMuted || !settings.sfx) return;
     playSfx(ev.id | 0, ev.x | 0, ev.y | 0);
   };
@@ -209,4 +206,3 @@ const depthZ = (x, y, pz, bias) => (x + y) * 8192 + ((pz | 0) + 130) * 16 + bias
 // inside the 8192 tile stride, so it can never reorder across tiles.
 const MOB_DEPTH_BIAS = 800;
 const mobDepthZ = (x, y, z) => depthZ(x, y, z + 1, 8) + MOB_DEPTH_BIAS;
-

@@ -14,9 +14,9 @@ pub(super) struct SpawnHttp {
     pub(super) active_login: ActiveLogin,
     pub(super) web_dir: Option<PathBuf>,
     pub(super) scene: Arc<Mutex<String>>,
-    pub(super) tx: mpsc::Sender<Option<Action>>,
+    pub(super) tx: InputSender,
     pub(super) login: mpsc::Sender<(LoginAttempt, LoginControl)>,
-    pub(super) character: mpsc::Sender<CharacterDecision>,
+    pub(super) character: mpsc::Sender<PromptDecision>,
     pub(super) art: Option<Arc<Mutex<Art>>>,
     pub(super) anim: Option<Arc<Anim>>,
     pub(super) gumps: Option<Arc<Gumps>>,
@@ -175,9 +175,9 @@ pub(super) struct Ctx<'a> {
     pub(super) req: tiny_http::Request,
     pub(super) web_dir: &'a Option<PathBuf>,
     pub(super) scene: &'a Arc<Mutex<String>>,
-    pub(super) tx: &'a mpsc::Sender<Option<Action>>,
+    pub(super) tx: &'a InputSender,
     pub(super) login: &'a mpsc::Sender<(LoginAttempt, LoginControl)>,
-    pub(super) character: &'a mpsc::Sender<CharacterDecision>,
+    pub(super) character: &'a mpsc::Sender<PromptDecision>,
     pub(super) art: &'a Option<Arc<Mutex<Art>>>,
     pub(super) anim: &'a Option<Arc<Anim>>,
     pub(super) gumps: &'a Option<Arc<Gumps>>,
@@ -277,12 +277,12 @@ pub(super) fn handle_request(ctx: Ctx) {
         let id = read_request_body(&mut req)
             .ok()
             .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
-            .and_then(|value| value["attempt_id"].as_u64());
+            .and_then(|value| value["attempt_id"].as_str().map(str::to_owned));
         let cancelled = active_login
             .lock()
             .unwrap()
             .as_ref()
-            .is_some_and(|control| Some(control.id()) == id && control.cancel());
+            .is_some_and(|control| Some(control.id()) == id.as_deref() && control.cancel());
         let status = if cancelled { 200 } else { 409 };
         let message = if cancelled {
             "Cancelling connection…"
@@ -361,14 +361,29 @@ pub(super) fn handle_request(ctx: Ctx) {
                 return;
             }
         };
-        if body.trim() == "stop" {
-            let _ = tx.send(None); // key released → stop pacing now
-        } else if let Some(action) = parse_house_design_command(&body) {
-            let _ = tx.send(Some(action));
-        } else if let Some(action) = parse_command(&body) {
-            let _ = tx.send(Some(action));
-        }
-        let _ = req.respond(Response::from_string("ok"));
+        let action = if body.trim() == "stop" {
+            None
+        } else {
+            match parse_house_design_command(&body).or_else(|| parse_command(&body)) {
+                Some(action) => Some(action),
+                None => {
+                    let _ = req.respond(
+                        Response::from_string("Invalid input command.").with_status_code(400),
+                    );
+                    return;
+                }
+            }
+        };
+        let id = req
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv("X-Anima-Session"))
+            .map(|h| h.value.as_str());
+        let response = match tx.send(id, action) {
+            Ok(()) => Response::from_string("ok"),
+            Err(message) => Response::from_string(message).with_status_code(409),
+        };
+        let _ = req.respond(response);
     } else if is_post && url == "/login" {
         // The browser sends JSON so an optional character-creation request can
         // accompany the credentials. Colon-separated legacy requests remain valid.
@@ -459,9 +474,9 @@ pub(super) fn handle_request(ctx: Ctx) {
                 return;
             }
         };
-        match parse_character_choice(&body) {
+        match parse_prompt_decision(&body) {
             Ok(decision) => {
-                let progress = match &decision {
+                let progress = match &decision.decision {
                     CharacterDecision::Choose(CharacterChoice::Play(_)) => "Entering world…",
                     CharacterDecision::Choose(CharacterChoice::Create(_)) => "Creating character…",
                     CharacterDecision::Choose(CharacterChoice::Delete(_)) => "Deleting character…",
@@ -470,8 +485,10 @@ pub(super) fn handle_request(ctx: Ctx) {
                 let mut current_scene = scene.lock().unwrap();
                 let awaiting_choice = serde_json::from_str::<serde_json::Value>(&current_scene)
                     .ok()
-                    .and_then(|value| value.get("auth")?.as_str().map(str::to_owned))
-                    .is_some_and(|auth| auth == "characters");
+                    .is_some_and(|value| {
+                        value["auth"] == "characters"
+                            && value["choice_id"].as_str() == Some(&decision.choice_id)
+                    });
                 if !awaiting_choice {
                     drop(current_scene);
                     let _ = req.respond(

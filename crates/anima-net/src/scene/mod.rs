@@ -578,8 +578,9 @@ pub fn build_scene(
     };
     mark("small_parts", &mut t);
     let no_draw_roofs_u8 = u8::from(no_draw_roofs);
+    let session_id = serde_json::to_string(s.id()).unwrap();
     format!(
-        "{{\"player\":{player},\
+        "{{\"sessionId\":{session_id},\"player\":{player},\
          \"map\":{{\"cx\":{px},\"cy\":{py},\"radius\":{LAND_RADIUS},\"viewRange\":{RADIUS},\"tiles\":[{tiles}],\"maxZ\":{max_z},\"maxGroundZ\":{max_ground_z},\"noDrawRoofs\":{no_draw_roofs_u8},\"dbg\":{dbg}}},\
          \"statics\":[{statics}],\"mobiles\":{mobiles},\"items\":{items},\"contItems\":{cont_items},\
          \"target\":{target},\"shop\":{shop},\"journal\":{journal},\"sounds\":{sounds},\"anims\":{anims},\"tanims\":{tanims},\"damage\":{damage},\"effects\":{effects},\"dragAnims\":{drag_anims},\"music\":{music},\

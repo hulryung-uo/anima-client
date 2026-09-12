@@ -19,6 +19,15 @@
 // genuinely new event (seq beyond this baseline) still fires immediately.
 let seqPrimed = false;
 let wasInWorld = false;
+let sceneSessionId = null, sceneReloading = false;
+function reloadForSessionChange() {
+  if (sceneReloading) return;
+  sceneReloading = true;
+  // Block old input before clearing latches (which can themselves send stop).
+  if (typeof setSceneTransport === "function") setSceneTransport(false);
+  if (typeof updateMusic === "function") updateMusic(null);
+  window.location.reload();
+}
 function maxSeq(arr) {
   let m = 0;
   if (arr) for (const ev of arr) { const sq = ev.seq | 0; if (sq > m) m = sq; }
@@ -49,20 +58,20 @@ function primeSeqRings(s) {
 
 let scenePollPending = false, scenePollFailures = 0, scenePollRetryAt = 0;
 async function poll(force = false) {
-  if (scenePollPending || (!force && performance.now() < scenePollRetryAt)) return;
+  if (sceneReloading || scenePollPending || (!force && performance.now() < scenePollRetryAt)) return;
   scenePollPending = true;
   let received = false, timer = null;
   const controller = new AbortController();
   const t0 = performance.now();
   try {
+    let nextScene;
     if (WASM_MODE) {
-      const next = await wasmPollScene();
-      if (!next) return;
-      scene = next;
+      nextScene = await wasmPollScene();
+      if (!nextScene) return;
     } else {
       // Keep body decoding inside the deadline too. A timed-out response can
       // resolve later, but must never commit its stale scene.
-      scene = await Promise.race([
+      nextScene = await Promise.race([
         (async () => {
           const r = await fetch("scene.json?" + Date.now(), { signal: controller.signal, cache: "no-store" });
           if (!r.ok) throw new Error(r.status);
@@ -74,18 +83,26 @@ async function poll(force = false) {
       ]);
     }
     received = true; scenePollFailures = 0; scenePollRetryAt = 0;
+    // A native connection belongs to the backend, not the page. Polling may
+    // miss the whole login phase, and two servers can reuse player serials.
+    // Do not assign the new world to old dialogs/targeting/event cursors, even
+    // while a reload is pending. WASM owns its socket on this page instead.
+    if (wasInWorld && (nextScene.auth || (!WASM_MODE && (nextScene.sessionId || null) !== sceneSessionId))) {
+      reloadForSessionChange();
+      return;
+    }
+    scene = nextScene;
     if (typeof setSceneTransport === "function") setSceneTransport(true);
     // Not in world yet (login-page mode): show the login form instead of rendering.
     if (scene && scene.auth) {
-      // A completed/lost game session owns a large amount of DOM and seq-gated
-      // renderer state. Reload once on the world→login transition so none of it
-      // leaks into the next character; the new page sees auth immediately and
-      // therefore does not loop.
-      if (wasInWorld) { window.location.reload(); return; }
       showLogin(scene.auth, scene.msg, scene.slots, scene.capacity, scene.cities, scene.error, scene);
       return;
     }
+    // Auto-login briefly serves {} before a connection exists. It must not
+    // prime cursors or turn a following login/error scene into a reload loop.
+    if (!scene.player) return;
     wasInWorld = true;
+    sceneSessionId = scene.sessionId || null;
     hideLogin();
     if (!seqPrimed) { primeSeqRings(scene); seqPrimed = true; }
     ingestBoatMoves(scene);
@@ -1221,4 +1238,3 @@ function tileDoor(x, y) {
   const t = m.tiles[row * span + col];
   return t && t.dr !== undefined ? (t.dr >>> 0) : null;
 }
-

@@ -77,8 +77,7 @@ fn cancellation_before_dial_opens_no_connection() {
     assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
 }
 
-#[test]
-fn two_phase_login_excludes_human_character_choice_from_the_response_deadline() {
+fn successful_login_server() -> (Endpoint, std::thread::JoinHandle<()>) {
     // Canonical Huffman encodings of 0xA9 (one "Fixture" character, no cities)
     // and 0x1B (serial 42, body 400, position 1000/2000). These exercise the real
     // login machine/stream decoder, not a mocked "login succeeded" callback.
@@ -115,7 +114,15 @@ fn two_phase_login_excludes_human_character_choice_from_the_response_deadline() 
         game.read_exact(&mut play).unwrap();
         assert_eq!(play[0], 0x5D);
         game.write_all(CONFIRM).unwrap();
+        // Keep the transport alive for Session's initial stats/view requests.
+        let _ = game.read_to_end(&mut Vec::new());
     });
+    (Endpoint::new("127.0.0.1", port), server)
+}
+
+#[test]
+fn two_phase_login_excludes_human_character_choice_from_the_response_deadline() {
+    let (endpoint, server) = successful_login_server();
     let control = LoginControl::default();
     let cfg = LoginConfig {
         defer_character_choice: true,
@@ -127,7 +134,7 @@ fn two_phase_login_excludes_human_character_choice_from_the_response_deadline() 
         Ok(CharacterChoice::Play(0))
     };
     let result = login(
-        &Endpoint::new("127.0.0.1", port),
+        &endpoint,
         cfg,
         Some(&mut choose),
         &control,
@@ -136,4 +143,35 @@ fn two_phase_login_excludes_human_character_choice_from_the_response_deadline() 
     control.release();
     assert_eq!(result.unwrap().0.serial, 42);
     server.join().unwrap();
+}
+
+#[test]
+fn scenes_keep_connection_identity_but_reconnects_with_the_same_serial_do_not() {
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let (endpoint, server) = successful_login_server();
+        let mut session = Session::connect_and_login(&endpoint, LoginConfig::default()).unwrap();
+        let id = session.id().to_owned();
+        assert!(!id.is_empty());
+        for _ in 0..2 {
+            let json = crate::scene::build_scene(
+                &mut session,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+            );
+            let scene: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(scene["sessionId"], id);
+            assert_eq!(scene["player"]["serial"], 42);
+        }
+        ids.push(id);
+        drop(session);
+        server.join().unwrap();
+    }
+    assert_ne!(ids[0], ids[1]);
 }

@@ -43,6 +43,16 @@ has stopped. A lost game-server session returns to sign-in; it does not silently
 authenticate again. Browser WASM mode also cancels and times out login attempts,
 and discards callbacks from replaced WebSocket connections.
 
+In current source (newer than v0.7.0), native windows also detect a changed game
+connection when polling misses the intervening sign-in screen. They clear input
+and reload once before displaying the new world, even if the new server reuses
+the same character number. Input already in flight cannot apply to the new
+connection. Character selection, creation, deletion and Back are bound to the
+particular list that was displayed; another account or a refreshed list resets
+the selection and unfinished creation form. Late replies cannot change that new
+form. This is covered by headless renderer and loopback protocol/HTTP fixtures;
+current-build live-shard re-entry and interactive desktop checks remain.
+
 ## Optional passwords
 
 In the macOS and Windows desktop app, check **Save password on this device**.

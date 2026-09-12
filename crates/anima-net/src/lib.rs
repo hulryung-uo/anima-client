@@ -542,6 +542,7 @@ fn correlate_logout_ack(
 /// A live connection to a UO server: the game-phase socket plus the world state
 /// it feeds.
 pub struct Session {
+    id: String,
     stream: TcpStream,
     decoder: StreamDecoder,
     walker: Walker,
@@ -642,6 +643,12 @@ impl NetStats {
 }
 
 impl Session {
+    /// Stable for this connection; a reconnect gets a new ID even if the server
+    /// assigns the same player serial. Renderers use it to discard old UI work.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
     /// Connect, run the full two-phase login handshake, enter the world, and
     /// return a session whose [`World`] is seeded with the login result.
     pub fn connect_and_login(
@@ -706,6 +713,7 @@ impl Session {
         world.enter_world(&result);
         stream.set_read_timeout(Some(PUMP_READ_TIMEOUT)).ok();
         let mut session = Session {
+            id: connection::fresh_context_id(),
             stream,
             decoder,
             walker: Walker::new(),

@@ -4,7 +4,22 @@ use std::io;
 use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Correlates UI work with one connection or prompt, including after a process
+/// restart. This is an identity, not a credential or an authorization secret.
+pub(crate) fn fresh_context_id() -> String {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!(
+        "{:x}-{time:x}-{:x}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 const DIAL_TIMEOUT: Duration = Duration::from_secs(8);
 const WAIT_SLICE: Duration = Duration::from_millis(50);
@@ -32,7 +47,7 @@ impl LoginPhase {
     }
 }
 struct Inner {
-    id: u64,
+    id: String,
     // 0: active, 1: cancelled, 2: committed to a live session.
     state: AtomicU8,
     phase: AtomicU8,
@@ -44,9 +59,8 @@ struct Inner {
 pub struct LoginControl(Arc<Inner>);
 impl Default for LoginControl {
     fn default() -> Self {
-        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Self(Arc::new(Inner {
-            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            id: fresh_context_id(),
             state: AtomicU8::new(0),
             phase: AtomicU8::new(LoginPhase::Resolving as u8),
             socket: Mutex::new(None),
@@ -54,8 +68,8 @@ impl Default for LoginControl {
     }
 }
 impl LoginControl {
-    pub fn id(&self) -> u64 {
-        self.0.id
+    pub fn id(&self) -> &str {
+        &self.0.id
     }
     pub fn is_cancelled(&self) -> bool {
         self.0.state.load(Ordering::Acquire) == 1

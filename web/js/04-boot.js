@@ -574,6 +574,7 @@ function drawQuestArrow(ctx, x, y, ang, now) {
 let loginWired = false;
 let characterStage = false;
 let characterListKey = "";
+let characterChoiceId = null;
 // ---- character-creation wizard state (step 3 skills / step 4 appearance) ----
 // Step 3's 4 skill rows live directly in the DOM (read via `readSkillRows()`
 // inside wireLogin); `wizAppearance` holds the raw hue/style ids exactly as the
@@ -629,6 +630,7 @@ function wireLogin() {
   if (typeof initLauncher === "function") initLauncher();
   if (typeof wireConnectionControls === "function") wireConnectionControls();
   let loginSubmissionPending = false;
+  let loginSubmissionGeneration = 0;
   const go = document.getElementById("lg-go");
   const backButton = document.getElementById("lg-back");
   const deleteButton = document.getElementById("lg-delete");
@@ -642,6 +644,7 @@ function wireLogin() {
   let charSlots = [];
   let selectedSlot = null;
   const renderCharList = () => {
+    const choiceId = characterChoiceId;
     charListEl.replaceChildren(...charSlots.map((slot) => {
       const row = document.createElement("div");
       row.className = "char-slot-row" + (slot.index === selectedSlot ? " sel" : "");
@@ -652,11 +655,15 @@ function wireLogin() {
       slotn.textContent = `slot ${slot.index + 1}`;
       row.append(name, slotn);
       row.addEventListener("click", () => {
+        if (!characterStage || choiceId !== characterChoiceId) return;
         selectedSlot = slot.index;
         for (const el of charListEl.children) el.classList.toggle("sel", el === row);
         updateCreation();
       });
-      row.addEventListener("dblclick", () => { selectedSlot = slot.index; submit(); });
+      row.addEventListener("dblclick", () => {
+        if (!characterStage || choiceId !== characterChoiceId) return;
+        selectedSlot = slot.index; submit();
+      });
       return row;
     }));
   };
@@ -1132,6 +1139,7 @@ function wireLogin() {
   // POST the finished `create` object (see docs/DESIGN.md character-creation
   // contract) and surface any server rejection in #lg-msg, same as `submit()`.
   const postCharacterCreate = async (create) => {
+    const choiceId = characterChoiceId;
     const msg = document.getElementById("lg-msg");
     msg.textContent = "Creating character…";
     go.disabled = true; backButton.disabled = true;
@@ -1149,10 +1157,11 @@ function wireLogin() {
       const response = await fetch("character", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ create }),
+        body: JSON.stringify({ choice_id: choiceId, create }),
       });
       if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
     } catch (error) {
+      if (choiceId !== characterChoiceId) return;
       msg.textContent = "Character creation failed: " + error.message;
       go.disabled = false; backButton.disabled = false;
       wizNextBtn.disabled = false; wizBackBtn.disabled = false;
@@ -1186,33 +1195,42 @@ function wireLogin() {
     if (loginSubmissionPending || (typeof launcherBusy === "function" && launcherBusy())) return;
     const msg = document.getElementById("lg-msg");
     if (characterStage && selectedSlot === null) { msg.textContent = "Select a character."; return; }
+    const choosing = characterStage, choiceId = characterChoiceId, slot = selectedSlot;
+    const submission = ++loginSubmissionGeneration;
     loginSubmissionPending = true;
     go.disabled = true; backButton.disabled = true;
     try {
-      const credentials = characterStage ? null : typeof launcherPrepareLogin === "function" && document.getElementById("lg-server-list")
+      const credentials = choosing ? null : typeof launcherPrepareLogin === "function" && document.getElementById("lg-server-list")
         ? await launcherPrepareLogin()
         : { host: (document.getElementById("lg-host").value || "127.0.0.1").trim(), port: Number(document.getElementById("lg-port").value || 2594), username: (document.getElementById("lg-user").value || "").trim(), password: document.getElementById("lg-pass").value || "" };
       if (credentials && !credentials.username) throw new Error("Enter an account name.");
-      msg.textContent = characterStage ? "Entering world…" : "Connecting…";
+      // Preparing a saved account may await native storage while another tab
+      // advances login. Never repurpose that request into a character action.
+      if (submission !== loginSubmissionGeneration || choosing !== characterStage || choiceId !== characterChoiceId) return;
+      msg.textContent = choosing ? "Entering world…" : "Connecting…";
       if (WASM_MODE) {
-        if (characterStage) wasmPlaySlot(selectedSlot);
+        if (choosing) wasmPlaySlot(slot);
         else await wasmSubmitLogin();
         return;
       }
-      const endpoint = characterStage ? "character" : "login";
-      const body = characterStage ? { slot: selectedSlot } : { ...credentials, interactive: true, character_slot: null, create: null };
+      const endpoint = choosing ? "character" : "login";
+      const body = choosing ? { choice_id: choiceId, slot } : { ...credentials, interactive: true, character_slot: null, create: null };
       const response = await fetch(endpoint, {
         method: "POST", headers: { "Content-Type": "application/json", "X-Anima-Launcher": "1" }, body: JSON.stringify(body),
       });
       if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
     } catch (error) {
+      if (submission !== loginSubmissionGeneration || choiceId !== characterChoiceId || choosing !== characterStage) return;
       msg.textContent = "Login request failed: " + error.message;
       go.disabled = false; backButton.disabled = false;
-    } finally { loginSubmissionPending = false; }
+    } finally {
+      if (submission === loginSubmissionGeneration) loginSubmissionPending = false;
+    }
   };
   go.addEventListener("click", submit);
   backButton.addEventListener("click", async () => {
     if (!characterStage) return;
+    const choiceId = characterChoiceId;
     const msg = document.getElementById("lg-msg");
     msg.textContent = "Returning to account login…";
     go.disabled = true;
@@ -1231,10 +1249,11 @@ function wireLogin() {
       const response = await fetch("character", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cancel: true }),
+        body: JSON.stringify({ choice_id: choiceId, cancel: true }),
       });
       if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
     } catch (error) {
+      if (choiceId !== characterChoiceId) return;
       msg.textContent = "Cancel request failed: " + error.message;
       go.disabled = false;
       backButton.disabled = false;
@@ -1244,8 +1263,10 @@ function wireLogin() {
   deleteButton.addEventListener("click", async () => {
     const slot = charSlots.find((s) => s.index === selectedSlot);
     if (!characterStage || !slot) return;
+    const choiceId = characterChoiceId;
     const name = slot.name;
     if (!window.confirm(`Permanently delete ${name}? This cannot be undone.`)) return;
+    if (!characterStage || choiceId !== characterChoiceId) return;
     const msg = document.getElementById("lg-msg");
     msg.textContent = `Deleting ${name}…`;
     go.disabled = true;
@@ -1264,10 +1285,11 @@ function wireLogin() {
       const response = await fetch("character", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ delete_slot: slot.index }),
+        body: JSON.stringify({ choice_id: choiceId, delete_slot: slot.index }),
       });
       if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
     } catch (error) {
+      if (choiceId !== characterChoiceId) return;
       msg.textContent = "Delete request failed: " + error.message;
       go.disabled = false;
       backButton.disabled = false;
@@ -1284,7 +1306,13 @@ function wireLogin() {
       else submit();
     });
 
-  window.updateCharacterLoginStage = (active, slots = [], capacity = 0, cities = []) => {
+  window.updateCharacterLoginStage = (active, slots = [], capacity = 0, cities = [], choiceId = null) => {
+    const changedPrompt = characterChoiceId !== choiceId;
+    if (changedPrompt || characterStage !== active) {
+      loginSubmissionGeneration++;
+      loginSubmissionPending = false;
+    }
+    characterChoiceId = active ? choiceId : null;
     characterStage = active;
     // The server/account you already logged into is no longer relevant once
     // you're picking/creating a character — hide those fields (rather than
@@ -1308,10 +1336,16 @@ function wireLogin() {
       updateCreation(); // also hides #lg-slot-row (characterStage is false)
       return;
     }
-    const key = JSON.stringify([slots, capacity, cities]);
+    const key = JSON.stringify([choiceId, slots, capacity, cities]);
     if (key !== characterListKey) {
       characterListKey = key;
       charSlots = slots;
+      if (changedPrompt) {
+        selectedSlot = null;
+        createPanelWasOn = false;
+        wizNextBtn.disabled = false; wizBackBtn.disabled = false;
+        resetWizard();
+      }
       // Keep the selection if that slot still exists; else default to the first.
       if (!charSlots.some((s) => s.index === selectedSlot)) {
         selectedSlot = charSlots.length ? charSlots[0].index : null;
@@ -1342,7 +1376,7 @@ function showLogin(auth, msg, slots, capacity, cities, error, connection) {
   const m = document.getElementById("lg-msg");
   const go = document.getElementById("lg-go");
   if (auth === "characters") {
-    window.updateCharacterLoginStage(true, slots || [], capacity || 0, cities || []);
+    window.updateCharacterLoginStage(true, slots || [], capacity || 0, cities || [], connection?.choice_id ?? null);
     // `error` is set only when the server just rejected a delete (e.g.
     // ServUO's 7-day too-young-to-delete window) — the session stayed up and
     // re-showed this same list, so surface the reason here instead of the
@@ -1366,4 +1400,3 @@ function hideLogin() {
   const el = document.getElementById("login");
   if (el && el.classList.contains("on")) el.classList.remove("on");
 }
-

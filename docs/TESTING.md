@@ -94,8 +94,16 @@ ANIMA_DEBUG=1 ./target/debug/play 127.0.0.1 2594 <gm-account> <pass> 8788
 
   ```bash
   scripts/gm.sh 8788 'go 1416 1500'          # -> say:[go 1416 1500
-  curl -sS --data-binary 'walk:0:1' http://127.0.0.1:8788/input   # walk north, running
+  scripts/gm.sh 8788 --walk 0:1             # walk north, running
   ```
+
+  The wrapper reads the current `scene.json` and sends its `sessionId` in
+  `X-Anima-Session`. Direct `/input` callers must do the same. Missing or ended
+  session IDs return HTTP 409; do not automatically replay a command against a
+  replacement session. `/character` JSON similarly needs the current prompt's
+  `choice_id`, even for Back/cancel. Use `session-transition.test.js` and the
+  native `play_server::session_tests` loopback fixture to check these races
+  without opening a real shard connection.
 
 - **`scripts/drive.py`** against an actual Chrome tab showing the page, for
   anything that needs to be *seen* (screenshots) or read from live JS state

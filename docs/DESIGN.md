@@ -29,7 +29,16 @@ fight, loot, trade, shop, cast, read books/spellbooks, work gumps (multi-page,
 stack-split, paperdoll), party, chat, hear sound/music. `anima-net`'s `play` bin
 holds a live Session, serves `web/` + `/scene.json` over HTTP (tiny_http, plus an SSE
 sound stream on its own thread so it can't starve the worker pool), and accepts
-`POST /input` executed on the live session. Run: `cargo run -p anima-net --bin play
+`POST /input` executed on the matching live session. Native scenes carry an
+opaque `sessionId`; `/input` requires it in `X-Anima-Session` and checks it again
+when draining queued commands. A changed ID reloads the native renderer before
+the new world is assigned, even if polling missed the login screen. Sound SSE
+events carry the same ID. Interactive `/character` JSON requires `choice_id`
+from that specific character-list scene; each prompt gets a new ID and stale
+queued decisions are discarded. Login cancellation's `attempt_id` is also an
+opaque string, distinct across attempts and process restarts. These identifiers
+correlate requests; existing origin/loopback checks still control access.
+Run: `cargo run -p anima-net --bin play
 -- 127.0.0.1 2594 <u> <p>` then open `http://127.0.0.1:8090/` (all args are optional
 — omitted ones fall back to the baked-in defaults `127.0.0.1:2594`
 `animaplay`/`animaplay` and auto-login proceeds immediately; set `ANIMA_LOGIN=1` to

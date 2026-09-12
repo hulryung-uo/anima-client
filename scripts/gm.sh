@@ -25,7 +25,7 @@
 # server drops you with "play: connection closed" (NOT a client/teleport bug; see
 # docs/TESTING.md §8). Keep >= ~0.8s between invocations in loops.
 #
-# Requires: curl. POSIX sh (works with bash/dash/zsh's sh mode).
+# Requires: curl, python3. POSIX sh (works with bash/dash/zsh's sh mode).
 
 set -eu
 
@@ -68,7 +68,17 @@ esac
 # want it as the raw POST body instead (that's what /input expects), so we
 # just let curl send it verbatim with --data-binary. Spaces and everything
 # else survive as-is over HTTP POST bodies — no encoding needed here.
-resp=$(curl -sS --data-binary "$body" "http://127.0.0.1:${port}/input")
+# Bind to the world observed now. A reconnect between these requests fails
+# with 409; do not retry a GM command against a different character/server.
+session_id=$(curl -fsS "http://127.0.0.1:${port}/scene.json" | python3 -c '
+import json, sys
+scene = json.load(sys.stdin)
+value = scene.get("sessionId")
+if not scene.get("player") or not isinstance(value, str) or not value:
+    sys.exit("No active game session.")
+print(value)
+')
+resp=$(curl -fsS -H "X-Anima-Session: $session_id" --data-binary "$body" "http://127.0.0.1:${port}/input")
 
 echo "-> $body"
 echo "<- ${resp:-<empty response>}"

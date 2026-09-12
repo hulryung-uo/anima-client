@@ -1212,9 +1212,20 @@ function pushChatHistory(mode, text) {
   chatHistoryIdx = chatHistory.length;
 }
 function sendInput(cmd) {
+  if (typeof sceneReloading !== "undefined" && sceneReloading) return;
   if (typeof sceneTransportAvailable !== "undefined" && !sceneTransportAvailable) return;
   if (WASM_MODE) wasmSendInput(cmd);
-  else fetch("/input", { method: "POST", body: cmd }).catch(() => {});
+  else {
+    const sessionId = scene?.sessionId || "";
+    fetch("/input", { method: "POST", headers: { "X-Anima-Session": sessionId }, body: cmd }).then(response => {
+      // The backend also validates this ID when draining its queue. Never
+      // replay a rejected command against the replacement connection.
+      if (response.status === 409 && !sceneReloading && (scene?.sessionId || "") === sessionId) {
+        setSceneTransport(false);
+        poll(true);
+      }
+    }).catch(() => {});
+  }
 }
 // ---- movement diagnostic trace (POSTs to /log; server prints with ANIMA_DEBUG) ----
 let TRACE = false;

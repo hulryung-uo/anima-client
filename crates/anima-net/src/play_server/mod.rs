@@ -59,11 +59,15 @@ mod assets;
 mod autowalk;
 mod commands;
 mod http;
+mod input;
 mod login;
+#[cfg(test)]
+mod session_tests;
 use assets::*;
 use autowalk::*;
 use commands::*;
 use http::*;
+use input::*;
 use login::*;
 
 /// Bundled copy of `web/` (renderer + PixiJS vendor lib), embedded at compile
@@ -178,9 +182,10 @@ pub struct PlayServer {
     animdata: Option<AnimData>,
     tiledata: Option<Arc<TileData>>,
     scene: Arc<Mutex<String>>,
-    rx: mpsc::Receiver<Option<Action>>,
+    input: InputSender,
+    rx: mpsc::Receiver<SessionInput>,
     login_rx: mpsc::Receiver<(LoginAttempt, LoginControl)>,
-    character_rx: mpsc::Receiver<CharacterDecision>,
+    character_rx: mpsc::Receiver<PromptDecision>,
     sse_hub: SseHub,
     /// Current session facet (`World::map_index`), kept in step with the game
     /// loop so the `/regions.json` HTTP thread can filter guard-zone rects to
@@ -353,7 +358,7 @@ pub fn bind_with_launcher(cfg: PlayConfig, launcher: Arc<LauncherStore>) -> io::
     // explicit stop clears `desired` immediately so the server doesn't keep pacing
     // for the desired_until window and overshoot past where the player stopped
     // (which made the prediction snap forward → "jump" on stop).
-    let (tx, rx) = mpsc::channel::<Option<Action>>();
+    let (tx, rx) = InputSender::channel();
 
     // Connected sound-SSE clients; the game loop pushes sound frames to these.
     let sse_hub: SseHub = Arc::new(Mutex::new(Vec::new()));
@@ -392,7 +397,7 @@ pub fn bind_with_launcher(cfg: PlayConfig, launcher: Arc<LauncherStore>) -> io::
     // Login credentials submitted by the web login page (host, port, user, pass).
     let active_login: ActiveLogin = Arc::new(Mutex::new(None));
     let (login_tx, login_rx) = mpsc::channel::<(LoginAttempt, LoginControl)>();
-    let (character_tx, character_rx) = mpsc::channel::<CharacterDecision>();
+    let (character_tx, character_rx) = mpsc::channel::<PromptDecision>();
 
     // Asset-only mode (`read_only` + no game loop): HTTP serves `/terrain.json`
     // from these files so `/?wasm=1` can draw the isometric world without a
@@ -438,7 +443,7 @@ pub fn bind_with_launcher(cfg: PlayConfig, launcher: Arc<LauncherStore>) -> io::
             active_login: active_login.clone(),
             web_dir: cfg.web_dir.clone(),
             scene: scene.clone(),
-            tx,
+            tx: tx.clone(),
             login: login_tx,
             character: character_tx,
             art: art.clone(),
@@ -481,6 +486,7 @@ pub fn bind_with_launcher(cfg: PlayConfig, launcher: Arc<LauncherStore>) -> io::
         animdata,
         tiledata,
         scene,
+        input: tx,
         rx,
         login_rx,
         character_rx,
@@ -709,6 +715,7 @@ impl PlayServer {
             animdata,
             tiledata,
             scene,
+            input,
             rx,
             login_rx,
             character_rx,
@@ -834,8 +841,10 @@ impl PlayServer {
                                 value
                             })
                             .collect();
+                        let choice_id = crate::connection::fresh_context_id();
                         let mut scene_value = serde_json::json!({
                             "auth": "characters",
+                            "choice_id": choice_id,
                             "slots": slots,
                             "capacity": list.slot_count.max(1),
                             "cities": cities,
@@ -866,10 +875,13 @@ impl PlayServer {
                         loop {
                             control.check()?;
                             match character_rx.recv_timeout(Duration::from_millis(100)) {
-                                Ok(CharacterDecision::Choose(choice)) => break Ok(choice),
-                                Ok(CharacterDecision::Cancel) => {
-                                    break Err(DriverError::CharacterChoiceCancelled)
-                                }
+                                Ok(decision) => match decision.for_prompt(&choice_id) {
+                                    Some(CharacterDecision::Choose(choice)) => break Ok(choice),
+                                    Some(CharacterDecision::Cancel) => {
+                                        break Err(DriverError::CharacterChoiceCancelled)
+                                    }
+                                    None => continue,
+                                },
                                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                                 Err(error) => break Err(DriverError::Io(io::Error::other(error))),
                             }
@@ -944,6 +956,7 @@ impl PlayServer {
                     }
                 }
             };
+            let active_input = input.activate(session.id());
             if let Some(ref table) = speech {
                 session.set_speech(table.clone());
             }
@@ -1015,6 +1028,9 @@ impl PlayServer {
                 // `None` (old stop signal) is now a no-op. We still resolve CanWalk so a
                 // blocked diagonal slides along the wall, matching the browser's prediction.
                 while let Ok(msg) = rx.try_recv() {
+                    let Some(msg) = msg.for_session(session.id()) else {
+                        continue;
+                    };
                     match msg {
                         None => {}
                         Some(Action::Walk { dir, run }) => {
@@ -1480,7 +1496,7 @@ impl PlayServer {
                                 sse_broadcast(
                                     &sse_hub,
                                     format!(
-                                    "data: {{\"seq\":{seq},\"id\":{id},\"x\":{x},\"y\":{y}}}\n\n"
+                                    "data: {{\"sessionId\":{},\"seq\":{seq},\"id\":{id},\"x\":{x},\"y\":{y}}}\n\n", serde_json::to_string(session.id()).unwrap()
                                 )
                                     .as_bytes(),
                                 );
@@ -1546,6 +1562,7 @@ impl PlayServer {
                     last_reqs = reqs;
                 }
             }
+            drop(active_input);
             if !cfg.login_page {
                 break 'connections;
             }
