@@ -446,17 +446,30 @@ impl LazyUopReader {
     /// it — an entry with any other flag just logs and returns `None` instead
     /// of silently misdecoding.
     pub fn by_hash(&self, hash: u64) -> Option<Vec<u8>> {
+        self.by_hash_bounded(hash, usize::MAX)
+    }
+
+    /// Read at most `max_bytes` of compressed and decoded entry data. The
+    /// declared length alone is insufficient: malformed zlib can expand past it.
+    pub fn by_hash_bounded(&self, hash: u64, max_bytes: usize) -> Option<Vec<u8>> {
         let e = self.entries.get(&hash)?;
+        if e.compressed_size > max_bytes || e.decompressed_size > max_bytes {
+            return None;
+        }
         let mut f = self.file.lock().ok()?;
         f.seek(SeekFrom::Start(e.offset as u64)).ok()?;
         let mut raw = vec![0u8; e.compressed_size];
         f.read_exact(&mut raw).ok()?;
+        drop(f); // other readers can seek while this entry decompresses
         match e.compression {
             0 => Some(raw),
             1 => {
                 let mut out = Vec::with_capacity(e.decompressed_size);
-                ZlibDecoder::new(&raw[..]).read_to_end(&mut out).ok()?;
-                Some(out)
+                ZlibDecoder::new(&raw[..])
+                    .take((max_bytes as u64).saturating_add(1))
+                    .read_to_end(&mut out)
+                    .ok()?;
+                (out.len() <= max_bytes).then_some(out)
             }
             other => {
                 eprintln!(
@@ -470,7 +483,7 @@ impl LazyUopReader {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Build a minimal one-entry UOP file: magic/header, a single directory
@@ -478,7 +491,7 @@ mod tests {
     /// after the table. Compression flag `0` (None) — exercises the same
     /// table layout [`LazyUopReader`] and [`UopReader`] both parse, without
     /// needing a real zlib stream.
-    fn build_single_entry_uop(path: &str, payload: &[u8]) -> Vec<u8> {
+    pub(crate) fn build_single_entry_uop(path: &str, payload: &[u8]) -> Vec<u8> {
         let mut buf = vec![0u8; 20]; // magic(4) + version(4) + timestamp(4) + next_block(8)
         buf[0..4].copy_from_slice(&0x0050_594Du32.to_le_bytes());
         buf[12..20].copy_from_slice(&20i64.to_le_bytes()); // first (only) block starts right after
@@ -581,8 +594,37 @@ mod tests {
         let hash = uop_hash(path);
         assert_eq!(eager.by_hash(hash).as_deref(), Some(payload.as_slice()));
         assert_eq!(lazy.by_hash(hash).as_deref(), Some(payload.as_slice()));
+        assert_eq!(
+            lazy.by_hash_bounded(hash, payload.len()).as_deref(),
+            Some(payload.as_slice())
+        );
+        assert!(lazy.by_hash_bounded(hash, payload.len() - 1).is_none());
 
         std::fs::remove_file(&file_path).ok();
+    }
+
+    #[test]
+    fn bounded_lazy_reads_check_actual_zlib_expansion_not_just_declared_size() {
+        use std::io::Write;
+        let path = "build/test/bounded.bin";
+        let decoded = vec![7; 4096];
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&decoded).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut data = build_single_entry_uop(path, &compressed);
+        // Single record starts at 32: declare an undersized decoded length.
+        data[48..52].copy_from_slice(&1u32.to_le_bytes());
+        data[64..66].copy_from_slice(&1i16.to_le_bytes());
+        let file_path =
+            std::env::temp_dir().join(format!("anima_uop_bounded_{}.uop", std::process::id()));
+        std::fs::write(&file_path, data).unwrap();
+        let lazy = LazyUopReader::open(&file_path).unwrap();
+        let hash = uop_hash(path);
+        assert!(lazy.by_hash_bounded(hash, 1024).is_none());
+        assert_eq!(lazy.by_hash_bounded(hash, decoded.len()), Some(decoded));
+        drop(lazy);
+        std::fs::remove_file(file_path).unwrap();
     }
 
     #[test]

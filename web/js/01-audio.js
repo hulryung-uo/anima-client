@@ -11,11 +11,15 @@ bgMusic.volume = settings.musicVol;
 
 // SFX use the Web Audio API instead of a fresh `new Audio(url)` per hit. The old
 // path re-fetched AND re-decoded the WAV every single time before it could start —
-// the main cause of "late" sound. Here each id is decoded ONCE into an AudioBuffer,
-// cached, and replayed through a throwaway BufferSource → near-zero latency on any
-// repeat (and the network/decode only ever happens on a sound's very first play).
+// the main cause of "late" sound. Decoded buffers are reused while in a bounded
+// LRU cache; active sources retain their own buffers even after cache eviction.
 let audioCtx = null, sfxGain = null;
-const sfxBuffers = new Map();    // id -> AudioBuffer (ready) | Promise (in-flight)
+const sfxBuffers = new Map();    // id -> ready AudioBuffer, oldest use first
+const SFX_CACHE_BYTES = 128 * 1024 * 1024, SFX_CACHE_ENTRIES = 512;
+const SFX_MAX_WAV_BYTES = 32 * 1024 * 1024; // stock beatFast.wav is ~21 MB
+const SFX_MAX_LOADS = 4, SFX_LOAD_TIMEOUT_MS = 5000, SFX_PLAY_DEADLINE_MS = 1000;
+let sfxBufferBytes = 0;
+const sfxPending = new Map(), sfxLoads = new Set(), sfxFailures = new Map();
 const activeSfx = new Set();     // live BufferSource nodes (concurrency cap + mute-stop)
 let sfxPlaybackGeneration = 0;
 function stopSoundEffects() {
@@ -49,20 +53,97 @@ function unlockAudio() {
 }
 window.addEventListener("pointerdown", unlockAudio);
 window.addEventListener("keydown", unlockAudio);
-// Fetch + decode a sound id once; cache the AudioBuffer. Returns Promise<AudioBuffer|null>.
+function cachedSfx(id) {
+  const buffer = sfxBuffers.get(id);
+  if (buffer) { sfxBuffers.delete(id); sfxBuffers.set(id, buffer); }
+  return buffer;
+}
+function sfxBytes(buffer) { return buffer.length * buffer.numberOfChannels * 4; }
+function cacheSfx(id, buffer) {
+  const bytes = sfxBytes(buffer);
+  if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > SFX_CACHE_BYTES) return;
+  const old = sfxBuffers.get(id);
+  if (old) { sfxBufferBytes -= sfxBytes(old); sfxBuffers.delete(id); }
+  while (sfxBuffers.size >= SFX_CACHE_ENTRIES || sfxBufferBytes + bytes > SFX_CACHE_BYTES) {
+    const oldest = sfxBuffers.keys().next().value;
+    sfxBufferBytes -= sfxBytes(sfxBuffers.get(oldest)); sfxBuffers.delete(oldest);
+  }
+  sfxBuffers.set(id, buffer); sfxBufferBytes += bytes;
+}
+// Bound the body before handing it to Web Audio, including servers without a
+// Content-Length. The arrayBuffer fallback is for engines without body streams.
+async function readSoundBytes(response) {
+  const declared = Number(response.headers?.get("Content-Length"));
+  if (Number.isFinite(declared) && declared > SFX_MAX_WAV_BYTES) throw new Error("Sound is too large");
+  if (!response.body?.getReader) {
+    const data = await response.arrayBuffer();
+    if (data.byteLength > SFX_MAX_WAV_BYTES) throw new Error("Sound is too large");
+    return data;
+  }
+  const reader = response.body.getReader(), chunks = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > SFX_MAX_WAV_BYTES) {
+        await reader.cancel(); throw new Error("Sound is too large");
+      }
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  const data = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.byteLength; }
+  return data.buffer;
+}
+// Coalesce one ID, cap physical fetch/decode work, and settle callers by a
+// deadline. Web Audio decode cannot be aborted: timed-out decoders keep their
+// work slot until they actually finish, so repeated timeouts cannot pile up.
 function loadSfx(id) {
-  const c = sfxBuffers.get(id);
-  if (c instanceof AudioBuffer) return Promise.resolve(c);
-  if (c) return c;                       // decode already in flight
+  if (!Number.isInteger(id) || id < 0 || id > 0xffff) return Promise.resolve(null);
+  const c = cachedSfx(id);
+  if (c) return Promise.resolve(c);
+  const pending = sfxPending.get(id);
+  if (pending) return pending.promise;
+  const now = performance.now();
+  if ((sfxFailures.get(id) || 0) > now || sfxLoads.size >= SFX_MAX_LOADS) return Promise.resolve(null);
+  sfxFailures.delete(id);
   const ctx = ensureAudioCtx();
   if (!ctx) return Promise.resolve(null);
-  const p = fetch("sound/" + id + ".wav")
-    .then((r) => r.arrayBuffer())
-    .then((buf) => ctx.decodeAudioData(buf))
-    .then((b) => { sfxBuffers.set(id, b); return b; })
-    .catch(() => { sfxBuffers.delete(id); return null; });
-  sfxBuffers.set(id, p);
-  return p;
+  const controller = new AbortController();
+  const request = { done: false, deadline: now + SFX_LOAD_TIMEOUT_MS, promise: null };
+  let resolve, timer, retryMs = 1000;
+  request.promise = new Promise(done => { resolve = done; });
+  sfxPending.set(id, request); sfxLoads.add(request);
+  const finish = (buffer) => {
+    if (request.done) return;
+    request.done = true; clearTimeout(timer);
+    if (sfxPending.get(id) === request) sfxPending.delete(id);
+    if (buffer) cacheSfx(id, buffer);
+    else {
+      controller.abort();
+      sfxFailures.delete(id); sfxFailures.set(id, performance.now() + retryMs);
+      while (sfxFailures.size > 128) sfxFailures.delete(sfxFailures.keys().next().value);
+    }
+    resolve(buffer);
+  };
+  const expired = () => request.done || performance.now() >= request.deadline;
+  timer = setTimeout(() => finish(null), SFX_LOAD_TIMEOUT_MS);
+  (async () => {
+    try {
+      const response = await fetch("sound/" + id + ".wav", { signal: controller.signal });
+      if (expired()) { finish(null); return; }
+      if (!response.ok) { retryMs = response.status === 404 ? 60000 : 1000; finish(null); return; }
+      const data = await readSoundBytes(response);
+      if (expired()) { finish(null); return; }
+      const buffer = await ctx.decodeAudioData(data);
+      finish(expired() ? null : buffer);
+    } catch (_) { finish(null); }
+    finally { sfxLoads.delete(request); }
+  })();
+  return request.promise;
 }
 // Max tile distance a sound carries; at/over this it's silent (ClassicUO-like).
 const SFX_MAX_DIST = 22;
@@ -100,15 +181,18 @@ function playBuffer(b, x, y) {
   try { src.start(); } catch (_) { activeSfx.delete(src); }
 }
 function playSfx(id, x, y) {
-  if (!soundPlaybackAllowed()) return;
+  if (!soundPlaybackAllowed() || activeSfx.size >= MAX_CONCURRENT_SFX) return;
+  const player = scene?.player;
+  if (player && (x || y) && Math.max(Math.abs(x - player.x), Math.abs(y - player.y)) >= SFX_MAX_DIST) return;
   const ctx = ensureAudioCtx();
   if (!ctx) return;
   if (ctx.state === "suspended") ctx.resume().catch(() => {});
-  const c = sfxBuffers.get(id);
+  const c = cachedSfx(id);
   if (c instanceof AudioBuffer) { playBuffer(c, x, y); return; }  // cached → instant
-  const generation = sfxPlaybackGeneration, sessionId = scene?.sessionId;
+  const generation = sfxPlaybackGeneration, sessionId = scene?.sessionId, requestedAt = performance.now();
   loadSfx(id).then((b) => {
-    if (b && generation === sfxPlaybackGeneration && sessionId === scene?.sessionId) playBuffer(b, x, y);
+    if (b && generation === sfxPlaybackGeneration && sessionId === scene?.sessionId &&
+        performance.now() - requestedAt <= SFX_PLAY_DEADLINE_MS) playBuffer(b, x, y);
   }); // a first decode may finish after mute, disconnect or a new game session
 }
 // Apply the current audio settings to the live audio nodes/elements.

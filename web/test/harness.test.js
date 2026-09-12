@@ -4,6 +4,19 @@
 const { newContext, pageScripts } = require("./harness.js");
 const { test, ok, eq, ne, deepEq, includes, throws, between } = require("./run.js");
 
+test("binary response fixtures preserve headers, body streams and delayed reads", async () => {
+  const ctx = newContext(); let finish;
+  const stream = { getReader() {} }, bytes = new ArrayBuffer(5);
+  ctx.setFetch(() => ({ ok: true, headers: { get: () => "5" }, body: stream,
+    arrayBuffer: () => new Promise(resolve => { finish = resolve; }),
+    text: async () => "binary fixture",
+  }));
+  const response = await ctx.run('fetch("fixture.wav")');
+  eq(response.headers.get("Content-Length"), "5"); eq(response.body, stream);
+  const reading = response.arrayBuffer(); finish(bytes); eq(await reading, bytes);
+  eq(await response.text(), "binary fixture");
+});
+
 test("every script index.html loads, runs", () => {
   const ctx = newContext();
   ctx.loadAll();

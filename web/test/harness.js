@@ -554,9 +554,9 @@ function wrapResponse(r) {
   if (r && typeof r === "object" && ("status" in r || "body" in r || "ok" in r)) {
     const body = r.body === undefined ? null : r.body;
     const ok = r.ok !== undefined ? r.ok : (r.status || 200) < 400;
-    return { ok, status: r.status || (ok ? 200 : 404), headers: { get: () => null },
-             json: async () => body, text: async () => (typeof body === "string" ? body : JSON.stringify(body)),
-             arrayBuffer: async () => new ArrayBuffer(0) };
+    return { ...r, ok, status: r.status || (ok ? 200 : 404), headers: r.headers || { get: () => null },
+             json: async () => body, text: r.text || (async () => (typeof body === "string" ? body : JSON.stringify(body))),
+             arrayBuffer: r.arrayBuffer || (async () => new ArrayBuffer(0)) };
   }
   return { ok: true, status: 200, headers: { get: () => null },
            json: async () => r, text: async () => (typeof r === "string" ? r : JSON.stringify(r)),

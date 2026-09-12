@@ -3,7 +3,7 @@ const { test, ok, eq } = require("./run.js");
 
 function audioFixture() {
   const ctx = newContext(); ctx.mountPage(); ctx.loadAll();
-  class BufferFixture {}
+  class BufferFixture { constructor() { this.length = 22050; this.numberOfChannels = 1; } }
   ctx.set("AudioBuffer", BufferFixture);
   const decodes = [], sources = [];
   ctx.set("audioCtx", {

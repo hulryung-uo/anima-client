@@ -76,8 +76,10 @@ jobs:
         run: cargo clippy -p anima-desktop --all-targets -- -D warnings
       - name: Test desktop configuration and setup
         run: cargo test -p anima-desktop
-      - name: Test saved servers and password recovery
-        run: 'cargo test -p anima-net launcher::'
+      - name: Test native asset readers
+        run: cargo test -p anima-assets --lib
+      - name: Test native connections and saved servers
+        run: cargo test -p anima-net --lib
       - name: Test Windows Credential Manager with a disposable profile
         if: runner.os == 'Windows'
         run: cargo test -p anima-desktop native_profile_password_lifecycle -- --ignored

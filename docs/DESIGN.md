@@ -489,6 +489,9 @@ reaches the shard; `Action::WalkTo` is still a no-op in WASM (no in-process `Map
   `play` server pushes each sound over an SSE stream (`GET /sounds`, on its own
   thread so it can't starve the HTTP worker pool) the instant it fires, plus
   music (0x6D) and positional (x,y) panning in the browser.
+  Sound entries are read lazily with bounded WAV/decoded caches and bounded
+  loading work; see [AUDIO_PERFORMANCE.md](AUDIO_PERFORMANCE.md) for limits,
+  overload behavior and the measured sound-reader memory reduction.
 - ✅ **AI contract completeness**: `Observation` audited field-by-field (buffs,
   shop, popup, book, party, quest arrow, weather/season/light, war, combat
   attribution, corpse links, OPL, map_index, …); `anima-net::json` mirrors the
