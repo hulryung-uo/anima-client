@@ -158,6 +158,8 @@ jobs:
   install:
     name: Check the assembled installers
     needs: [prepare, draft]
+    permissions:
+      contents: write # Needed only by the called workflow's draft-download job.
     uses: ./.github/workflows/installer-check.yml
     with:
       tag: ${{ needs.prepare.outputs.tag }}

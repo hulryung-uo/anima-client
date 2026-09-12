@@ -54,6 +54,8 @@ jobs:
 
   install:
     needs: assemble
+    permissions:
+      contents: write # Installer processes themselves receive read-only access.
     uses: ./.github/workflows/installer-check.yml
     with:
       tag: ${{ inputs.tag }}
