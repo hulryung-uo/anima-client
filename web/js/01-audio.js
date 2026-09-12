@@ -17,6 +17,19 @@ bgMusic.volume = settings.musicVol;
 let audioCtx = null, sfxGain = null;
 const sfxBuffers = new Map();    // id -> AudioBuffer (ready) | Promise (in-flight)
 const activeSfx = new Set();     // live BufferSource nodes (concurrency cap + mute-stop)
+let sfxPlaybackGeneration = 0;
+function stopSoundEffects() {
+  // Invalidate delayed fetch/decode callbacks too. Unmuting or reconnecting
+  // must not replay effects requested before this stop.
+  sfxPlaybackGeneration++;
+  for (const src of activeSfx) { try { src.stop(); } catch (_) {} }
+  activeSfx.clear();
+}
+function soundPlaybackAllowed() {
+  return !audioMuted && settings.sfx &&
+    !(typeof sceneReloading !== "undefined" && sceneReloading) &&
+    !(typeof sceneTransportAvailable !== "undefined" && !sceneTransportAvailable);
+}
 function ensureAudioCtx() {
   if (audioCtx) return audioCtx;
   try {
@@ -57,7 +70,7 @@ const SFX_PAN_RANGE = 16;   // iso screen-x spread that maps to a hard L/R pan
 // Play a decoded buffer, attenuated + panned by the sound's world position (x,y).
 // A sound at (0,0) or with no player is treated as non-positional (center, full).
 function playBuffer(b, x, y) {
-  if (!audioCtx || !b || activeSfx.size >= MAX_CONCURRENT_SFX) return;
+  if (!soundPlaybackAllowed() || !audioCtx || !b || activeSfx.size >= MAX_CONCURRENT_SFX) return;
   const p = scene && scene.player;
   let vol = 1, pan = 0;
   const positional = !!(p && (x || y));
@@ -87,17 +100,22 @@ function playBuffer(b, x, y) {
   try { src.start(); } catch (_) { activeSfx.delete(src); }
 }
 function playSfx(id, x, y) {
+  if (!soundPlaybackAllowed()) return;
   const ctx = ensureAudioCtx();
   if (!ctx) return;
   if (ctx.state === "suspended") ctx.resume().catch(() => {});
   const c = sfxBuffers.get(id);
   if (c instanceof AudioBuffer) { playBuffer(c, x, y); return; }  // cached → instant
-  loadSfx(id).then((b) => { if (b) playBuffer(b, x, y); });        // first time → decode then play
+  const generation = sfxPlaybackGeneration, sessionId = scene?.sessionId;
+  loadSfx(id).then((b) => {
+    if (b && generation === sfxPlaybackGeneration && sessionId === scene?.sessionId) playBuffer(b, x, y);
+  }); // a first decode may finish after mute, disconnect or a new game session
 }
 // Apply the current audio settings to the live audio nodes/elements.
 function applyAudioSettings() {
   bgMusic.volume = settings.musicVol;
   if (sfxGain) sfxGain.gain.value = settings.sfxVol;
+  if (audioMuted || !settings.sfx) stopSoundEffects();
   if (audioMuted || !settings.music) { bgMusic.pause(); }
   else if (curMusicId != null) { bgMusic.play().catch(() => {}); }
 }
@@ -150,10 +168,6 @@ function updateMusic(s) {
 
 function toggleMute() {
   audioMuted = !audioMuted;
-  if (audioMuted) {
-    for (const src of activeSfx) { try { src.stop(); } catch (_) {} }
-    activeSfx.clear();
-  }
   applyAudioSettings();   // pause/resume music respecting both mute + settings.music
   const btn = document.getElementById("mutebtn");
   if (btn) btn.textContent = audioMuted ? "muted" : "sound";

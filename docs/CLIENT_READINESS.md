@@ -14,7 +14,7 @@ suite or an exhausted historical gaps list does not establish product readiness.
 | Core gameplay | Live movement/pathing, combat/casting/targeting, inventory/trade/vendor, chat/party, character creation/deletion | Historical ServUO evidence in TESTING/DESIGN/CLASSICUO_GAPS; current-build end-to-end audit still required. |
 | Interface and accessibility | Usable default layout, keyboard/focus, resizing/scaling, readable feedback, no debug-only dead ends | Login library was visually verified at desktop/narrow widths; wider UI audit remains. |
 | Settings and state | Reliable persistence, recovery from corrupt data, useful backup/restore, isolation across characters/windows | Desktop configuration recovery is verified. Renderer preferences validate values, preserve originals and migrate into one atomic record; window geometry now joins that record and its backups, including adoption after older migrations. Headless geometry tests cover malformed values, restore/defaults and concurrent-window saves; Chrome preference recovery/reload previously passed. Worlds backups/profile recovery are implemented separately; Chrome showed the controls but confirmation handling stalled and the UI fixture remained intact. Actual file export/import, native profile recovery and real window resizing remain unverified; see CLIENT_SETTINGS.md and LOGIN_PROFILES.md. Character-specific layouts and the broader session/window-isolation audit remain. |
-| Reliability and performance | No stale callbacks, clear disconnect/crash behavior, bounded resources, responsive long sessions | Connection races, login deadlines, preference boot failures and lost passwords on reported save errors repaired. Profile reads are bounded; corrupt profiles now leave the recovery screen available. 2026-09-13 local full gate passed with session isolation, profile and geometry regressions (23 launcher tests, 296 web tests / 1486 assertions), in addition to the earlier native profile/vault integration evidence. Long-session, asset-cache and process-crash audits remain. |
+| Reliability and performance | No stale callbacks, clear disconnect/crash behavior, bounded resources, responsive long sessions | Connection races, login deadlines, preference boot failures and lost passwords on reported save errors repaired. Profile reads are bounded; corrupt profiles now leave the recovery screen available. 2026-09-13 local full gate passed with session isolation, profile and geometry regressions (23 launcher tests, 301 web tests / 1503 assertions), in addition to the earlier native profile/vault integration evidence. Long-session, asset-cache and process-crash audits remain. |
 | Delivery | Versioned Mac/Windows installers containing current features, install/run checks, honest release notes and download links | v0.7.0 draft contains both verified installers and SHA-256 manifests. macOS signature/notarization, DMG mount/app-copy and Windows silent install/uninstall passed; installer run 34712709301. The actual Mac process responds in login state, but graphical startup was not observable. The newer worlds backups, profile recovery, preference geometry and session-isolation additions are source-only and need a subsequent build. Interactive app checks and publication remain; public v0.6.0 predates these features. See releases/v0.7.0-verification.md. |
 
 ## Verification rules
@@ -50,6 +50,23 @@ suite or an exhausted historical gaps list does not establish product readiness.
   `/tmp/anima-session-isolation-gate.log`. Web: 296 tests / 1486 assertions;
   Python tooling: 23 tests; desktop: 14 passed, 2 real-vault tests intentionally
   excluded from this ordinary gate. The prior geometry commit 4896eb0 passed all
-  three platform/quality jobs in CI run 34714202675; CI for this repair is pending.
+  three platform/quality jobs in CI run 34714202675. Repair commit 33968c5 is in CI run 34714856910; its Linux quality job passed and its platform jobs are pending.
 - Interactive native re-entry and real-shard character operations remain open.
   No new release or feature announcement is justified by fixture evidence alone.
+
+## Delayed sound cancellation — 2026-09-13
+
+A headless deferred-decode probe reproduced a sound starting after mute was
+already enabled (`/tmp/anima-pending-sound-probe.json`). Stopping effects now
+invalidates pending playback callbacks as well as stopping active sources.
+Mute, disabling effects, client transport loss and world reload all use that
+path. Re-enabling sound does not revive an old request; a fresh request can still
+reuse the decoded asset. Pending playback also checks the observed session ID.
+
+Five regressions exercise these races through real audio functions with fixture
+Web Audio nodes and controlled decode promises. `scripts/check.sh` completed
+with actual exit 0 again: 301 web tests / 1503 assertions, 23 Python tooling
+tests, native/WASM checks, and 14 desktop tests (2 real-vault tests excluded as
+usual). Full log: `/tmp/anima-audio-cancellation-gate.log`. This verifies state
+and callback behavior; listening in the current native apps remains open.
+Decoded sound-cache limits are still part of the long-session audit.

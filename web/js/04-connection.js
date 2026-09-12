@@ -31,6 +31,7 @@ function setSceneTransport(available) {
   if (!available) {
     if (typeof stopMacro === "function") stopMacro();
     if (typeof stopFollowing === "function") stopFollowing();
+    if (typeof stopSoundEffects === "function") stopSoundEffects();
   }
 }
 function updateLoginConnection(auth, details) {
