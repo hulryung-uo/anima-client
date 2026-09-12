@@ -154,3 +154,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ANIMA_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: python3 scripts/release.py draft --tag "$ANIMA_RELEASE_TAG" --directory release-dist
+
+  install:
+    name: Check the assembled installers
+    needs: [prepare, draft]
+    uses: ./.github/workflows/installer-check.yml
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}

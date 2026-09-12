@@ -51,7 +51,12 @@ notes at `docs/releases/<tag>.md`, beginning with `# Anima <tag>`.
 6. Hash the final installers after signing/notarization and collect one build
    manifest per platform. Both platform artifacts must be present and match
    their source commit, filename, size and SHA-256 before a draft is assembled.
-7. Download and test the actual installers before publishing the draft. Complete
+7. The installer-check workflow downloads the actual draft assets, checks both
+   manifests, mounts/copies the macOS app, and silently installs/uninstalls the
+   Windows app in a disposable runner folder without launching its UI. It can
+   also be rerun with **Actions → Installer checks → Run workflow**, using the
+   same tag. These checks do not prove interactive behavior.
+8. Download and test the actual installers before publishing the draft. Complete
    the applicable [client-readiness checks](CLIENT_READINESS.md).
 
 The draft contains both installers, `SHA256SUMS.txt`, `macos-build.json` and

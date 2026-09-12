@@ -1,0 +1,103 @@
+name: Installer checks
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release draft or public version to verify
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: Installer files (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      ANIMA_RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+      - name: Download the actual release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$ANIMA_RELEASE_TAG" --dir installer-input --pattern '*.dmg' --pattern '*-setup.exe' --pattern '*-build.json' --pattern SHA256SUMS.txt
+      - name: Verify both installers against the tagged source and manifests
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          import release
+          data = release.checked_metadata(os.environ['ANIMA_RELEASE_TAG'])
+          release.verify_installers(data, Path('installer-input'))
+          print('Both downloaded installers match the tagged commit and SHA-256 manifests.')
+          PY
+      - name: Mount and copy the macOS application
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -eu
+          set -- installer-input/*.dmg
+          test "$#" -eq 1 && test -f "$1"
+          anima_mount="$RUNNER_TEMP/anima-installer-mount"
+          anima_app="$RUNNER_TEMP/anima-installer-copy/Anima.app"
+          mkdir -p "$anima_mount" "$(dirname "$anima_app")"
+          hdiutil verify "$1"
+          hdiutil attach "$1" -readonly -nobrowse -noautoopen -mountpoint "$anima_mount"
+          trap 'hdiutil detach "$anima_mount" >/dev/null' EXIT
+          ditto "$anima_mount/Anima.app" "$anima_app"
+          codesign --verify --deep --strict "$anima_app"
+          test "$(lipo -archs "$anima_app/Contents/MacOS/anima-desktop")" = arm64
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$anima_app/Contents/Info.plist")" = "${ANIMA_RELEASE_TAG#v}"
+          if python3 -c 'import json,sys; sys.exit(json.load(open("installer-input/macos-build.json"))["signing"] != "notarized")'; then
+            xcrun stapler validate "$anima_app"
+            spctl -a -vvv -t execute "$anima_app"
+          fi
+          echo 'DMG mount, application copy, version and signature checks passed. App UI was not launched.'
+      - name: Install and uninstall on Windows without launching the app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = @(Get-ChildItem 'installer-input/*-setup.exe')
+          if ($installer.Count -ne 1) { throw 'Expected one Windows installer.' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'Anima-install-verification'
+          $appExe = Join-Path $installDir 'anima-desktop.exe'
+          $uninstaller = Join-Path $installDir 'uninstall.exe'
+          if (Test-Path $installDir) { throw 'The isolated installation directory already exists.' }
+          try {
+            # NSIS /S is silent. Omitting /R prevents launching the app.
+            $process = Start-Process -FilePath $installer[0].FullName -ArgumentList "/S /D=$installDir" -Wait -PassThru
+            if ($process.ExitCode -ne 0) { throw "Installer exit code: $($process.ExitCode)" }
+            if (!(Test-Path $appExe) -or !(Test-Path $uninstaller)) { throw 'Installed files are incomplete.' }
+            $version = $env:ANIMA_RELEASE_TAG.Substring(1)
+            $installedVersion = (Get-Item $appExe).VersionInfo.ProductVersion
+            if (@($version, "$version.0") -notcontains $installedVersion) { throw "Unexpected installed version: $installedVersion" }
+            Write-Output "Installed Anima $installedVersion successfully."
+          } finally {
+            if (Test-Path $uninstaller) {
+              $process = Start-Process -FilePath $uninstaller -ArgumentList "/S _?=$installDir" -Wait -PassThru
+              if ($process.ExitCode -ne 0) { throw "Uninstaller exit code: $($process.ExitCode)" }
+            }
+            $appRemains = Test-Path $appExe
+            if (Test-Path $installDir) { Remove-Item $installDir -Recurse -Force }
+            if ($appRemains) { throw 'The uninstaller left the application binary behind.' }
+          }
+          Write-Output 'Installation and uninstallation passed. App UI and gameplay were not exercised.'
