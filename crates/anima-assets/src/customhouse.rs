@@ -886,9 +886,12 @@ v\t6\t1\t1\t1\t1\t1\t1\t1\t1\t1\t1\t1\t0\t0\t0\t\r\n";
     #[test]
     fn open_is_soft_on_missing_files() {
         let dir = std::env::temp_dir().join(format!(
-            "anima-customhouse-test-empty-{}-{:?}",
+            "anima-customhouse-test-empty-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&dir).expect("create empty test dir");
         let catalog = CustomHouseCatalog::open(&dir).expect("missing files are not an error");
@@ -906,9 +909,12 @@ v\t6\t1\t1\t1\t1\t1\t1\t1\t1\t1\t1\t1\t0\t0\t0\t\r\n";
     #[test]
     fn open_reads_whichever_files_are_present() {
         let dir = std::env::temp_dir().join(format!(
-            "anima-customhouse-test-partial-{}-{:?}",
+            "anima-customhouse-test-partial-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&dir).expect("create test dir");
         std::fs::write(dir.join("floors.txt"), FLOORS_FIXTURE).expect("write floors.txt");

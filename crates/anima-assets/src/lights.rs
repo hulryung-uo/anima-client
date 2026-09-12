@@ -339,15 +339,20 @@ mod tests {
     fn ids_past_the_table_are_refused_without_touching_the_file() {
         // The id bound comes before any file access, which is what keeps a
         // bogus tiledata layer byte from seeking into light.mul. Proved by
-        // asking a Lights whose files do not exist: it never gets that far.
+        // asking a Lights with an empty backing file: it never gets that far.
+        let path =
+            std::env::temp_dir().join(format!("anima-lights-empty-{}.mul", std::process::id()));
+        std::fs::write(&path, []).unwrap();
         let lights = Lights {
             idx: Vec::new(),
-            mul: Mutex::new(File::open("/dev/null").unwrap()),
+            mul: Mutex::new(File::open(&path).unwrap()),
         };
         assert!(lights.light(MAX_LIGHTS).is_none());
         assert!(lights.light(u32::MAX).is_none());
         // And an in-range id with no index behind it is simply absent.
         assert!(lights.light(0).is_none());
+        drop(lights);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
