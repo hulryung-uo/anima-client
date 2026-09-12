@@ -68,7 +68,7 @@ the draft's release assets remain attached afterward. Download verification:
 shasum -a 256 -c SHA256SUMS.txt
 ```
 
-GitHub requires push access to see a draft. Installer verification therefore
+[GitHub requires push access to see a draft](https://docs.github.com/en/rest/releases/releases#list-releases). Installer verification therefore
 uses a dedicated download job with `contents: write`; the separate jobs that
 mount or execute the installers retain `contents: read` and no persisted Git
 credential. No additional personal access token is needed.
