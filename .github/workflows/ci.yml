@@ -65,4 +65,4 @@ jobs:
       - name: Test desktop configuration and setup
         run: cargo test -p anima-desktop
       - name: Test saved servers and password recovery
-        run: cargo test -p anima-net launcher::
+        run: 'cargo test -p anima-net launcher::'
