@@ -111,6 +111,7 @@ function keyboardWantsRun() {
 
 // What the player wants to do this frame (single source for prediction + send).
 function activeMove() {
+  if (typeof sceneTransportAvailable !== "undefined" && !sceneTransportAvailable) return null;
   if (chatting || wmOn) return null;   // don't walk while typing or with the world map open
   if (rightDown) { const m = mouseMove(); if (m) { standUp(); return m; } }
   if (held.size) { standUp(); return { dir: [...held].pop(), run: keyboardWantsRun() }; }

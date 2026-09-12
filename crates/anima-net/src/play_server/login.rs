@@ -334,6 +334,21 @@ pub(super) fn cliloc_markup_to_plain_text(markup: &str) -> String {
         .to_string()
 }
 
+/// Actionable player-facing errors; technical detail remains in the native log.
+pub(super) fn friendly_login_error(error: &DriverError) -> String {
+    match error {
+        DriverError::LoginTimeout => "The server took too long to respond. Check its status and try again.".into(),
+        DriverError::Io(error) => match error.kind() {
+            io::ErrorKind::ConnectionRefused => "The server refused the connection. Check the host and port, or try again when it is online.".into(),
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => "The server took too long to respond. Check your connection and try again.".into(),
+            _ => "Could not reach the server. Check its address and your network connection, then try again.".into(),
+        },
+        DriverError::ConnectionClosed => "The server closed the connection before login finished. Try again or check the server's status.".into(),
+        DriverError::Framing(_) => "The server sent a response this client could not read. Check that this is a compatible UO server.".into(),
+        _ => error.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod login_request_tests {
     use super::{

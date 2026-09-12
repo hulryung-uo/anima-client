@@ -53,3 +53,11 @@
 #lg-account-fields { gap: 8px; }
 .launcher-account-identity { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
 @media (max-width: 600px) { .launcher-account-identity { grid-template-columns: minmax(0, 1fr); } }
+
+#client-connection:not([hidden]) { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px; background: #05070abb; }
+.connection-notice { width: min(430px, 100%); padding: 26px; border: 1px solid #796a50; border-radius: 12px; background: #151d27; box-shadow: 0 20px 80px #0009; font: 13px/1.6 system-ui, sans-serif; }
+.connection-notice h2 { margin: 0; font-size: 20px; color: #e9e1d4; }
+.connection-notice .launcher-muted { margin-top: 14px; }
+#lg-cancel-connection[hidden] { display: none; }
+#login .login-footer { position: sticky; bottom: 0; z-index: 2; padding: 12px 0 16px; background: #151d27; box-shadow: 0 -8px 12px #151d27; }
+#login #lg-msg { line-height: 1.5; overflow-wrap: anywhere; }

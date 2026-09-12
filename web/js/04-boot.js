@@ -53,6 +53,7 @@ async function main() {
   guardLineLayer = new PIXI.Graphics();
   app.stage.addChild(itemLayer, world, guardLineLayer, entLayer, mobs, barLayer, overLayer);
 
+  if (typeof wireConnectionControls === "function") wireConnectionControls();
   poll();
   setInterval(poll, 150);
   if (!WASM_MODE) connectSoundStream(); // SSE: play sounds the instant they fire (no poll wait)
@@ -626,6 +627,7 @@ const FACET_NAMES = ["Felucca", "Trammel", "Ilshenar", "Malas", "Tokuno", "Ter M
 function wireLogin() {
   if (loginWired) return; loginWired = true;
   if (typeof initLauncher === "function") initLauncher();
+  if (typeof wireConnectionControls === "function") wireConnectionControls();
   let loginSubmissionPending = false;
   const go = document.getElementById("lg-go");
   const backButton = document.getElementById("lg-back");
@@ -1331,9 +1333,10 @@ function isTypingTarget(el) {
   const t = el.tagName;
   return t === "INPUT" || t === "TEXTAREA" || t === "SELECT" || el.isContentEditable;
 }
-function showLogin(auth, msg, slots, capacity, cities, error) {
+function showLogin(auth, msg, slots, capacity, cities, error, connection) {
   wireLogin();
   if (typeof launcherOnAuth === "function") launcherOnAuth(auth, slots);
+  if (typeof updateLoginConnection === "function") updateLoginConnection(auth, connection);
   const el = document.getElementById("login");
   if (el) el.classList.add("on");
   const m = document.getElementById("lg-msg");

@@ -21,6 +21,28 @@ character. The last selected server and account are restored for this window's
 origin. Account/server data is shared across native windows and survives a port
 change; window selection follows the existing per-origin preference storage.
 
+## Connection progress and recovery
+
+The login screen reports address lookup, TCP connection, authentication and
+character-response progress. **Cancel connection** abandons that attempt and
+returns to your saved profiles. Cancelled attempts cannot affect a newer login.
+Progress and action buttons remain visible while the login form scrolls.
+
+Native address lookup and dialing have an 8-second caller deadline, with a
+separate bounded advertised game-server dial. Each server-response phase has a
+20-second deadline, even if the server sends only part of a packet. Choosing a
+character is not timed out while you decide; its response deadline starts again
+when you submit. OS DNS resolution may finish in the background after cancellation;
+that worker receives only the destination, never account credentials.
+
+If the page loses contact with the native client, a **Client connection
+interrupted** notice pauses input and macros. Scene requests retry automatically
+with backoff; **Retry now** checks immediately. Recovery restores keyboard focus,
+without replaying held keys or restarting a macro. Reopen Anima if its process
+has stopped. A lost game-server session returns to sign-in; it does not silently
+authenticate again. Browser WASM mode also cancels and times out login attempts,
+and discards callbacks from replaced WebSocket connections.
+
 ## Optional passwords
 
 In the macOS and Windows desktop app, check **Save password on this device**.
@@ -80,3 +102,13 @@ for two servers and three accounts: saving, switching, reload restoration, notes
 status caching, failed-login recovery, and narrow-window layout (580px / 390px).
 The real ServUO instance was offline; no live character login was claimed.
 Windows vault behavior requires a Windows runtime check.
+
+Connection recovery was additionally checked with isolated loopback protocol
+fixtures: cancellation during DNS/authentication, partial-packet timeout, both UO
+login phases, and human character-choice time excluded from the deadline.
+HTTP checks confirmed an old cancellation ID cannot stop a newer attempt.
+Chrome checks covered cancellation/retry, a 580px-wide window, and stopping and
+restarting only the disposable native client: the interruption notice appeared,
+background keyboard access was disabled, and recovery restored the selected
+profile and focused field. These are fixture/UI checks, not live-shard gameplay
+or Windows runtime validation.

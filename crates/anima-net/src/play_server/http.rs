@@ -11,10 +11,11 @@ pub(super) const MAX_POST_BODY_BYTES: usize = 16 * 1024;
 /// Startup args for [`spawn_http`] (grouped to dodge the arg-count lint).
 pub(super) struct SpawnHttp {
     pub(super) launcher: Arc<LauncherStore>,
+    pub(super) active_login: ActiveLogin,
     pub(super) web_dir: Option<PathBuf>,
     pub(super) scene: Arc<Mutex<String>>,
     pub(super) tx: mpsc::Sender<Option<Action>>,
-    pub(super) login: mpsc::Sender<LoginAttempt>,
+    pub(super) login: mpsc::Sender<(LoginAttempt, LoginControl)>,
     pub(super) character: mpsc::Sender<CharacterDecision>,
     pub(super) art: Option<Arc<Mutex<Art>>>,
     pub(super) anim: Option<Arc<Anim>>,
@@ -49,6 +50,7 @@ pub(super) struct SpawnHttp {
 pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
     let SpawnHttp {
         launcher,
+        active_login,
         web_dir,
         scene,
         tx,
@@ -88,6 +90,7 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
     for _ in 0..6 {
         let server = server.clone();
         let launcher = launcher.clone();
+        let active_login = active_login.clone();
         let web_dir = web_dir.clone();
         let scene = scene.clone();
         let tx = tx.clone();
@@ -124,6 +127,7 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
             while let Ok(req) = server.recv() {
                 handle_request(Ctx {
                     launcher: &launcher,
+                    active_login: &active_login,
                     req,
                     web_dir: &web_dir,
                     scene: &scene,
@@ -167,11 +171,12 @@ pub(super) fn spawn_http(server: Arc<Server>, args: SpawnHttp) {
 /// Everything a request handler needs (groups args to dodge the arg-count lint).
 pub(super) struct Ctx<'a> {
     pub(super) launcher: &'a Arc<LauncherStore>,
+    pub(super) active_login: &'a ActiveLogin,
     pub(super) req: tiny_http::Request,
     pub(super) web_dir: &'a Option<PathBuf>,
     pub(super) scene: &'a Arc<Mutex<String>>,
     pub(super) tx: &'a mpsc::Sender<Option<Action>>,
-    pub(super) login: &'a mpsc::Sender<LoginAttempt>,
+    pub(super) login: &'a mpsc::Sender<(LoginAttempt, LoginControl)>,
     pub(super) character: &'a mpsc::Sender<CharacterDecision>,
     pub(super) art: &'a Option<Arc<Mutex<Art>>>,
     pub(super) anim: &'a Option<Arc<Anim>>,
@@ -207,6 +212,7 @@ pub(super) fn handle_request(ctx: Ctx) {
     REQ_COUNT.fetch_add(1, Ordering::Relaxed);
     let Ctx {
         launcher,
+        active_login,
         mut req,
         web_dir,
         scene,
@@ -258,6 +264,32 @@ pub(super) fn handle_request(ctx: Ctx) {
     if is_post && !origin_allowed(header_value(&req, "Origin"), header_value(&req, "Host")) {
         let _ = req
             .respond(Response::from_string("cross-origin request rejected").with_status_code(403));
+        return;
+    }
+
+    if is_post && url == "/login/cancel" {
+        if read_only || !launcher_request_allowed(&req) {
+            let _ = req.respond(
+                Response::from_string("Use the local login screen.").with_status_code(403),
+            );
+            return;
+        }
+        let id = read_request_body(&mut req)
+            .ok()
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+            .and_then(|value| value["attempt_id"].as_u64());
+        let cancelled = active_login
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|control| Some(control.id()) == id && control.cancel());
+        let status = if cancelled { 200 } else { 409 };
+        let message = if cancelled {
+            "Cancelling connection…"
+        } else {
+            "This connection attempt has already ended."
+        };
+        let _ = req.respond(Response::from_string(message).with_status_code(status));
         return;
     }
 
@@ -395,10 +427,13 @@ pub(super) fn handle_request(ctx: Ctx) {
                     "msg": "Connecting…",
                 })
                 .to_string();
+                let control = LoginControl::default();
+                *active_login.lock().unwrap() = Some(control.clone());
                 drop(current_scene);
-                if login.send(attempt).is_ok() {
+                if login.send((attempt, control)).is_ok() {
                     let _ = req.respond(Response::from_string("ok"));
                 } else {
+                    *active_login.lock().unwrap() = None;
                     *scene.lock().unwrap() = serde_json::json!({
                         "auth": "error",
                         "msg": "login service is unavailable",
@@ -467,8 +502,19 @@ pub(super) fn handle_request(ctx: Ctx) {
     } else if url == "/scene.json" {
         // Somebody is looking — let a session owner skip building frames nobody wants.
         watch.store(now_millis(), Ordering::Relaxed);
-        let body = scene.lock().unwrap().clone();
+        let mut body = scene.lock().unwrap().clone();
+        if let Some(control) = active_login.lock().unwrap().as_ref() {
+            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&body) {
+                if value["auth"] == "connecting" {
+                    value["attempt_id"] = serde_json::json!(control.id());
+                    value["cancellable"] = serde_json::json!(control.is_active());
+                    value["msg"] = serde_json::json!(control.message());
+                    body = value.to_string();
+                }
+            }
+        }
         let mut r = Response::from_string(body);
+        r.add_header(Header::from_bytes("Cache-Control", "no-store").unwrap());
         r.add_header(ctype("application/json"));
         let _ = req.respond(r);
     } else if url == "/terrain.json" {

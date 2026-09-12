@@ -15,12 +15,17 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::time::{Duration, Instant};
 
+pub mod connection;
+#[cfg(test)]
+mod connection_tests;
 pub mod json;
 pub mod launcher;
 pub mod play_server;
 pub mod regions;
 pub mod scene;
 pub mod uo_dir;
+
+use connection::{LoginControl, LoginPhase};
 
 use anima_assets::{Cliloc, MapData, Speeches};
 use anima_core::agent::{survey_terrain, Action, HouseDesignAction, Observation};
@@ -158,6 +163,10 @@ pub enum DriverError {
     CharacterChoiceRequired,
     /// The interactive chooser intentionally abandoned this game-server login.
     CharacterChoiceCancelled,
+    /// The caller cancelled this connection attempt.
+    LoginCancelled,
+    /// A transport or handshake phase exceeded its bounded wait.
+    LoginTimeout,
 }
 
 impl std::fmt::Display for DriverError {
@@ -169,6 +178,8 @@ impl std::fmt::Display for DriverError {
             DriverError::ConnectionClosed => write!(f, "connection closed by server"),
             DriverError::CharacterChoiceRequired => write!(f, "character choice required"),
             DriverError::CharacterChoiceCancelled => write!(f, "character choice cancelled"),
+            DriverError::LoginCancelled => write!(f, "connection cancelled"),
+            DriverError::LoginTimeout => write!(f, "server response timed out"),
         }
     }
 }
@@ -637,7 +648,7 @@ impl Session {
         endpoint: &Endpoint,
         cfg: LoginConfig,
     ) -> Result<Session, DriverError> {
-        Self::connect_and_login_inner(endpoint, cfg, None)
+        Self::connect_and_login_controlled(endpoint, cfg, &LoginControl::default(), None)
     }
 
     /// Connect and pause after account authentication so a caller can display
@@ -655,15 +666,42 @@ impl Session {
         F: FnMut(CharacterPrompt) -> Result<CharacterChoice, DriverError>,
     {
         cfg.defer_character_choice = true;
-        Self::connect_and_login_inner(endpoint, cfg, Some(&mut chooser))
+        Self::connect_and_login_controlled(
+            endpoint,
+            cfg,
+            &LoginControl::default(),
+            Some(&mut chooser),
+        )
+    }
+
+    /// Connect with a caller-owned cancellation handle. A cancelled attempt
+    /// closes its transport; a committed live session is no longer cancellable.
+    pub fn connect_and_login_controlled(
+        endpoint: &Endpoint,
+        mut cfg: LoginConfig,
+        control: &LoginControl,
+        chooser: Option<&mut dyn FnMut(CharacterPrompt) -> Result<CharacterChoice, DriverError>>,
+    ) -> Result<Session, DriverError> {
+        if chooser.is_some() {
+            cfg.defer_character_choice = true;
+        }
+        let result = Self::connect_and_login_inner(endpoint, cfg, chooser, control);
+        control.release();
+        control.check()?;
+        if result.is_ok() {
+            control.finish()?;
+        }
+        result
     }
 
     fn connect_and_login_inner(
         endpoint: &Endpoint,
         cfg: LoginConfig,
         chooser: Option<&mut dyn FnMut(CharacterPrompt) -> Result<CharacterChoice, DriverError>>,
+        control: &LoginControl,
     ) -> Result<Session, DriverError> {
-        let (result, stream, decoder) = login(endpoint, cfg, chooser)?;
+        let (result, stream, decoder) =
+            login(endpoint, cfg, chooser, control, CONNECT_READ_TIMEOUT)?;
         let mut world = World::new();
         world.enter_world(&result);
         stream.set_read_timeout(Some(PUMP_READ_TIMEOUT)).ok();
@@ -1824,17 +1862,26 @@ fn login(
     endpoint: &Endpoint,
     cfg: LoginConfig,
     mut chooser: Option<&mut dyn FnMut(CharacterPrompt) -> Result<CharacterChoice, DriverError>>,
+    control: &LoginControl,
+    response_timeout: Duration,
 ) -> Result<(LoginResult, TcpStream, StreamDecoder), DriverError> {
     let (mut machine, initial) = LoginMachine::start(cfg);
 
-    let mut stream = connect(endpoint)?;
+    let mut stream = connect(endpoint, control)?;
+    control.check()?;
+    control.set_phase(LoginPhase::Authenticating);
     stream.write_all(&initial)?;
+    let mut deadline = Instant::now() + response_timeout;
 
     let mut decoder = StreamDecoder::new();
     let mut buf = [0u8; 8192];
 
     loop {
         loop {
+            control.check()?;
+            if Instant::now() >= deadline {
+                return Err(DriverError::LoginTimeout);
+            }
             let frame = match decoder.pop() {
                 Ok(Some(f)) => f,
                 Ok(None) => break,
@@ -1844,16 +1891,23 @@ fn login(
                 match directive {
                     LoginDirective::Send(bytes) => stream.write_all(&bytes)?,
                     LoginDirective::ReconnectToGameServer { address, then } => {
-                        stream = connect_game_server(endpoint, address)?;
+                        control.set_phase(LoginPhase::GameServer);
+                        stream = connect_game_server(endpoint, address, control)?;
+                        control.set_phase(LoginPhase::Authenticating);
+                        deadline = Instant::now() + response_timeout;
                         decoder.switch_to_game();
                         stream.write_all(&then)?;
                     }
                     LoginDirective::ChooseCharacter(prompt) => {
+                        control.set_phase(LoginPhase::Characters);
                         let choice = chooser
                             .as_deref_mut()
                             .ok_or(DriverError::CharacterChoiceRequired)?(
                             prompt
                         )?;
+                        control.check()?;
+                        control.set_phase(LoginPhase::CharacterAction);
+                        deadline = Instant::now() + response_timeout;
                         for followup in machine
                             .choose_character(choice)
                             .map_err(DriverError::Login)?
@@ -1873,7 +1927,22 @@ fn login(
             }
         }
 
-        let n = stream.read(&mut buf)?;
+        control.check()?;
+        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(DriverError::LoginTimeout);
+        };
+        stream.set_read_timeout(Some(left.min(Duration::from_millis(200))))?;
+        let n = match stream.read(&mut buf) {
+            Ok(n) => n,
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                continue
+            }
+            Err(error) => {
+                control.check()?;
+                return Err(error.into());
+            }
+        };
+        control.check()?;
         if n == 0 {
             return Err(DriverError::ConnectionClosed);
         }
@@ -1905,11 +1974,8 @@ impl<T: Terrain> Terrain for Avoiding<'_, T> {
     }
 }
 
-fn connect(e: &Endpoint) -> Result<TcpStream, DriverError> {
-    let stream = TcpStream::connect((e.host.as_str(), e.port))?;
-    stream.set_nodelay(true).ok();
-    stream.set_read_timeout(Some(CONNECT_READ_TIMEOUT)).ok();
-    Ok(stream)
+fn connect(e: &Endpoint, control: &LoginControl) -> Result<TcpStream, DriverError> {
+    connection::dial(e, control)
 }
 
 /// Open the phase-2 (game-server) connection.
@@ -1931,11 +1997,12 @@ fn connect(e: &Endpoint) -> Result<TcpStream, DriverError> {
 fn connect_game_server(
     login: &Endpoint,
     advertised: GameServerAddress,
+    control: &LoginControl,
 ) -> Result<TcpStream, DriverError> {
     let same_as_login = advertised.host() == login.host && advertised.port == login.port;
     if !login.ignore_relay_ip && advertised.is_routable() && !same_as_login {
         let addr = SocketAddrV4::new(Ipv4Addr::from(advertised.ip), advertised.port);
-        match TcpStream::connect_timeout(&addr.into(), RELAY_CONNECT_TIMEOUT) {
+        match connection::dial_address(addr.into(), RELAY_CONNECT_TIMEOUT, control) {
             Ok(stream) => {
                 stream.set_nodelay(true).ok();
                 stream.set_read_timeout(Some(CONNECT_READ_TIMEOUT)).ok();
@@ -1951,7 +2018,8 @@ fn connect_game_server(
             Err(_) => {}
         }
     }
-    connect(login)
+    control.check()?;
+    connect(login, control)
 }
 
 #[cfg(test)]

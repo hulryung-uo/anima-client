@@ -1,0 +1,16 @@
+{
+  "kind": "feature",
+  "slug": "connection-recovery",
+  "title": "A clearer way back to Britannia — connection progress, cancel and recovery",
+  "content": "Waiting at login should never leave you wondering what Anima is doing. The login screen now shows connection progress and lets you cancel an attempt without losing your saved worlds or accounts.\n\n## Stay in control of sign-in\n\nSee address lookup, connection and authentication progress. **Cancel connection** takes you back to your profiles so you can choose another world or try again. Progress and action buttons stay visible when the form scrolls. Server waits have deadlines, while the character picker gives you time to decide. A delayed cancellation from an earlier attempt cannot interrupt a newer one.\n\n## Recover when the connection drops\n\nIf the page loses contact with the native client, Anima shows a clear interruption notice, pauses controls and macros, and retries automatically. **Retry now** checks immediately. When the connection returns, your selected profile and keyboard focus are preserved; held movement keys and stopped macros are not replayed. If the client process has stopped, reopen Anima. A lost game-server session returns to sign-in rather than silently logging in again.\n\nBrowser WASM mode also gains login cancellation and timeouts, and ignores events from old relay sockets after a new connection starts.\n\n**Available in the source build; the published v0.6.0 installers do not include this update.** The images are actual captures of the shared login screen with a disposable local test account: a protocol fixture deliberately withholding its login response, and the native test client deliberately stopped to exercise recovery. No real account passwords were used.\n\nThe full quality gate passed, including 654 Rust tests, 249 web tests and desktop/WASM compilation. Isolated protocol tests cover both UO login phases, cancellation and partial-packet timeouts. Chrome checks cover cancel/retry, narrow-window layout and native-client interruption/recovery. Live-shard gameplay and Windows runtime validation remain part of the broader client audit. [Connection guide](https://github.com/hulryung-uo/anima-client/blob/main/docs/LOGIN_PROFILES.md).",
+  "images": [
+    {
+      "path": "docs/updates/images/connection-recovery.png",
+      "alt": "Actual Anima login screen showing authentication progress and Cancel connection for a disposable local fixture"
+    },
+    {
+      "path": "docs/updates/images/connection-interrupted.png",
+      "alt": "Actual Anima interruption notice with Retry now after the disposable native client was stopped"
+    }
+  ]
+}

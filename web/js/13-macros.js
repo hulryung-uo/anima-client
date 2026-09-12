@@ -259,6 +259,7 @@ function stopMacro() {
   if (macroTimer) { clearTimeout(macroTimer); macroTimer = 0; }
 }
 function runMacro(m) {
+  if (typeof sceneTransportAvailable !== "undefined" && !sceneTransportAvailable) return;
   const actions = macroActions(m);
   stopMacro();
   if (!actions.length) return;
@@ -1186,6 +1187,7 @@ function pushChatHistory(mode, text) {
   chatHistoryIdx = chatHistory.length;
 }
 function sendInput(cmd) {
+  if (typeof sceneTransportAvailable !== "undefined" && !sceneTransportAvailable) return;
   if (WASM_MODE) wasmSendInput(cmd);
   else fetch("/input", { method: "POST", body: cmd }).catch(() => {});
 }

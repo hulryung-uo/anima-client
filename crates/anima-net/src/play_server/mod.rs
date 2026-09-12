@@ -47,7 +47,9 @@ use crate::scene::{
     build_scene, calculate_new_z, can_step_to, can_walk, decide_blocked_step, door_blocking_at,
     render_worldmap, BlockedStepAction, DoorUseAttempt, MapTerrain, StepDeny, WORLDMAP_STEP,
 };
-use crate::{DriverError, Endpoint, Session};
+use crate::{connection::LoginControl, DriverError, Endpoint, Session};
+
+type ActiveLogin = Arc<Mutex<Option<LoginControl>>>;
 
 // The pieces this module coordinates, grouped by what they do. `mod.rs` keeps
 // the server itself — `bind`, the [`PlayServer`] game loop, and the shared
@@ -162,6 +164,7 @@ impl TerrainState {
 /// (blocking) game-server login + loop.
 pub struct PlayServer {
     launcher: Arc<LauncherStore>,
+    active_login: ActiveLogin,
     cfg: PlayConfig,
     port: u16,
     map: Option<MapData>,
@@ -176,7 +179,7 @@ pub struct PlayServer {
     tiledata: Option<Arc<TileData>>,
     scene: Arc<Mutex<String>>,
     rx: mpsc::Receiver<Option<Action>>,
-    login_rx: mpsc::Receiver<LoginAttempt>,
+    login_rx: mpsc::Receiver<(LoginAttempt, LoginControl)>,
     character_rx: mpsc::Receiver<CharacterDecision>,
     sse_hub: SseHub,
     /// Current session facet (`World::map_index`), kept in step with the game
@@ -338,7 +341,11 @@ pub fn bind_with_launcher(cfg: PlayConfig, launcher: Arc<LauncherStore>) -> io::
     }
 
     // Shared scene JSON (HTTP thread reads, game loop writes) + input channel.
-    let scene = Arc::new(Mutex::new(String::from("{}")));
+    let scene = Arc::new(Mutex::new(String::from(if cfg.login_page {
+        r#"{"auth":"login"}"#
+    } else {
+        "{}"
+    })));
     // Last `/scene.json` fetch, epoch-millis. Only consulted by spectators (see
     // `Monitor::watching`); the human `play` path builds every frame as before.
     let watch = Arc::new(AtomicU64::new(0));
@@ -383,7 +390,8 @@ pub fn bind_with_launcher(cfg: PlayConfig, launcher: Arc<LauncherStore>) -> io::
     // `/regions.json` HTTP thread can filter to the facet the player is on.
     let facet: Arc<AtomicU8> = Arc::new(AtomicU8::new(0));
     // Login credentials submitted by the web login page (host, port, user, pass).
-    let (login_tx, login_rx) = mpsc::channel::<LoginAttempt>();
+    let active_login: ActiveLogin = Arc::new(Mutex::new(None));
+    let (login_tx, login_rx) = mpsc::channel::<(LoginAttempt, LoginControl)>();
     let (character_tx, character_rx) = mpsc::channel::<CharacterDecision>();
 
     // Asset-only mode (`read_only` + no game loop): HTTP serves `/terrain.json`
@@ -427,6 +435,7 @@ pub fn bind_with_launcher(cfg: PlayConfig, launcher: Arc<LauncherStore>) -> io::
         server,
         SpawnHttp {
             launcher: launcher.clone(),
+            active_login: active_login.clone(),
             web_dir: cfg.web_dir.clone(),
             scene: scene.clone(),
             tx,
@@ -461,6 +470,7 @@ pub fn bind_with_launcher(cfg: PlayConfig, launcher: Arc<LauncherStore>) -> io::
 
     Ok(PlayServer {
         launcher,
+        active_login,
         cfg,
         port,
         map: map.take(),
@@ -688,6 +698,7 @@ impl PlayServer {
     pub fn run(self) -> io::Result<()> {
         let PlayServer {
             launcher,
+            active_login,
             cfg,
             port,
             mut map,
@@ -718,7 +729,9 @@ impl PlayServer {
         // Connect to the game server. With login_page we serve the web login page
         // and wait for the browser to POST a server + account; otherwise we auto-login
         // with the configured host/port/user/pass (backward compatible with scripts/agents).
-        let connect = |attempt: LoginAttempt| {
+        let connect = |attempt: LoginAttempt, control: &LoginControl| {
+            while character_rx.try_recv().is_ok() {}
+            control.check()?;
             let LoginAttempt {
                 host,
                 port,
@@ -748,114 +761,123 @@ impl PlayServer {
             }
             let endpoint = Endpoint::new(host, port);
             if interactive {
-                Session::connect_and_login_with_character_chooser(&endpoint, c, |prompt| {
-                    let CharacterPrompt {
-                        list,
-                        delete_rejected,
-                    } = prompt;
-                    let slots: Vec<serde_json::Value> = list
-                        .slots
-                        .iter()
-                        .map(|slot| serde_json::json!({"index": slot.index, "name": slot.name}))
-                        .collect();
-                    // `city.index` is a position in THIS server's list, not a
-                    // fixed id — CreateCharacter 0xF8 must echo it back
-                    // verbatim, so the browser needs the real list rather than
-                    // a hardcoded guess (shards/expansions order it differently).
-                    if let Some(id) = &account_id {
-                        let cached = list
+                Session::connect_and_login_controlled(
+                    &endpoint,
+                    c,
+                    control,
+                    Some(&mut |prompt| {
+                        let CharacterPrompt {
+                            list,
+                            delete_rejected,
+                        } = prompt;
+                        let slots: Vec<serde_json::Value> = list
                             .slots
                             .iter()
-                            .map(|s| CachedCharacter {
-                                index: s.index,
-                                name: s.name.clone(),
+                            .map(|slot| serde_json::json!({"index": slot.index, "name": slot.name}))
+                            .collect();
+                        // `city.index` is a position in THIS server's list, not a
+                        // fixed id — CreateCharacter 0xF8 must echo it back
+                        // verbatim, so the browser needs the real list rather than
+                        // a hardcoded guess (shards/expansions order it differently).
+                        if let Some(id) = &account_id {
+                            let cached = list
+                                .slots
+                                .iter()
+                                .map(|s| CachedCharacter {
+                                    index: s.index,
+                                    name: s.name.clone(),
+                                })
+                                .collect();
+                            if let Err(error) = launcher.cache_characters(
+                                id,
+                                &cache_host,
+                                port,
+                                shard,
+                                &cache_user,
+                                cached,
+                            ) {
+                                eprintln!("play: could not cache character names: {error}");
+                            }
+                        }
+                        let cities: Vec<serde_json::Value> = list
+                            .cities
+                            .iter()
+                            .map(|city| {
+                                let mut value = serde_json::json!({
+                                    "index": city.index,
+                                    "name": city.name,
+                                    "building": city.building,
+                                });
+                                // Legacy (63-byte) records carry no `location` at
+                                // all — omit x/y/z/map/desc rather than send zeros
+                                // that would look like a real Felucca (0,0,0).
+                                if let Some(location) = &city.location {
+                                    value["x"] = serde_json::json!(location.x);
+                                    value["y"] = serde_json::json!(location.y);
+                                    value["z"] = serde_json::json!(location.z);
+                                    value["map"] = serde_json::json!(location.map);
+                                    // `desc` is the same city blurb the real UO
+                                    // client shows at character creation — resolve
+                                    // the cliloc and strip its markup to plain
+                                    // text; omit it entirely if we can't produce
+                                    // anything useful.
+                                    let desc = (location.description != 0)
+                                        .then_some(cliloc.as_deref())
+                                        .flatten()
+                                        .and_then(|c| c.get(location.description))
+                                        .map(cliloc_markup_to_plain_text)
+                                        .filter(|text| !text.is_empty());
+                                    if let Some(desc) = desc {
+                                        value["desc"] = serde_json::json!(desc);
+                                    }
+                                }
+                                value
                             })
                             .collect();
-                        if let Err(error) = launcher.cache_characters(
-                            id,
-                            &cache_host,
-                            port,
-                            shard,
-                            &cache_user,
-                            cached,
-                        ) {
-                            eprintln!("play: could not cache character names: {error}");
+                        let mut scene_value = serde_json::json!({
+                            "auth": "characters",
+                            "slots": slots,
+                            "capacity": list.slot_count.max(1),
+                            "cities": cities,
+                        });
+                        // Set only when this prompt is a re-prompt after a
+                        // rejected delete, so the browser can show the reason
+                        // (e.g. ServUO's 7-day delete delay) without the JSON
+                        // shape changing for the common "no error" case.
+                        if let Some(rejection) = &delete_rejected {
+                            scene_value["error"] = serde_json::json!(rejection.text);
                         }
-                    }
-                    let cities: Vec<serde_json::Value> = list
-                        .cities
-                        .iter()
-                        .map(|city| {
-                            let mut value = serde_json::json!({
-                                "index": city.index,
-                                "name": city.name,
-                                "building": city.building,
-                            });
-                            // Legacy (63-byte) records carry no `location` at
-                            // all — omit x/y/z/map/desc rather than send zeros
-                            // that would look like a real Felucca (0,0,0).
-                            if let Some(location) = &city.location {
-                                value["x"] = serde_json::json!(location.x);
-                                value["y"] = serde_json::json!(location.y);
-                                value["z"] = serde_json::json!(location.z);
-                                value["map"] = serde_json::json!(location.map);
-                                // `desc` is the same city blurb the real UO
-                                // client shows at character creation — resolve
-                                // the cliloc and strip its markup to plain
-                                // text; omit it entirely if we can't produce
-                                // anything useful.
-                                let desc = (location.description != 0)
-                                    .then_some(cliloc.as_deref())
-                                    .flatten()
-                                    .and_then(|c| c.get(location.description))
-                                    .map(cliloc_markup_to_plain_text)
-                                    .filter(|text| !text.is_empty());
-                                if let Some(desc) = desc {
-                                    value["desc"] = serde_json::json!(desc);
-                                }
-                            }
-                            value
-                        })
-                        .collect();
-                    let mut scene_value = serde_json::json!({
-                        "auth": "characters",
-                        "slots": slots,
-                        "capacity": list.slot_count.max(1),
-                        "cities": cities,
-                    });
-                    // Set only when this prompt is a re-prompt after a
-                    // rejected delete, so the browser can show the reason
-                    // (e.g. ServUO's 7-day delete delay) without the JSON
-                    // shape changing for the common "no error" case.
-                    if let Some(rejection) = &delete_rejected {
-                        scene_value["error"] = serde_json::json!(rejection.text);
-                    }
-                    *scene.lock().unwrap() = scene_value.to_string();
-                    eprintln!(
+                        *scene.lock().unwrap() = scene_value.to_string();
+                        eprintln!(
                         "play: character list ready ({} occupied / {} slots, {} starting cities)",
                         list.slots.len(),
                         list.slot_count,
                         list.cities.len()
                     );
-                    if let Some(rejection) = &delete_rejected {
-                        // Recoverable, not a login failure: the delete simply
-                        // didn't go through (ClassicUO parity) — the session
-                        // stays up and the driver just re-shows the list above.
-                        eprintln!(
+                        if let Some(rejection) = &delete_rejected {
+                            // Recoverable, not a login failure: the delete simply
+                            // didn't go through (ClassicUO parity) — the session
+                            // stays up and the driver just re-shows the list above.
+                            eprintln!(
                             "play: character delete rejected (reason {}): {} -- staying on character selection",
                             rejection.reason, rejection.text
                         );
-                    }
-                    match character_rx
-                        .recv()
-                        .map_err(|error| DriverError::Io(io::Error::other(error)))?
-                    {
-                        CharacterDecision::Choose(choice) => Ok(choice),
-                        CharacterDecision::Cancel => Err(DriverError::CharacterChoiceCancelled),
-                    }
-                })
+                        }
+                        loop {
+                            control.check()?;
+                            match character_rx.recv_timeout(Duration::from_millis(100)) {
+                                Ok(CharacterDecision::Choose(choice)) => break Ok(choice),
+                                Ok(CharacterDecision::Cancel) => {
+                                    break Err(DriverError::CharacterChoiceCancelled)
+                                }
+                                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                                Err(error) => break Err(DriverError::Io(io::Error::other(error))),
+                            }
+                        }
+                    }),
+                )
             } else {
-                Session::connect_and_login(&endpoint, c)
+                Session::connect_and_login_controlled(&endpoint, c, control, None)
             }
         };
         'connections: loop {
@@ -864,17 +886,20 @@ impl PlayServer {
                     "play: connecting to {}:{} as {} ...",
                     cfg.host, cfg.port, cfg.user
                 );
-                match connect(LoginAttempt {
-                    host: cfg.host.clone(),
-                    port: cfg.port,
-                    username: cfg.user.clone(),
-                    password: cfg.pass.clone(),
-                    character_slot: None,
-                    interactive: false,
-                    create: None,
-                    shard: cfg.shard,
-                    account_id: None,
-                }) {
+                match connect(
+                    LoginAttempt {
+                        host: cfg.host.clone(),
+                        port: cfg.port,
+                        username: cfg.user.clone(),
+                        password: cfg.pass.clone(),
+                        character_slot: None,
+                        interactive: false,
+                        create: None,
+                        shard: cfg.shard,
+                        account_id: None,
+                    },
+                    &LoginControl::default(),
+                ) {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("login failed: {e}");
@@ -885,10 +910,11 @@ impl PlayServer {
                     }
                 }
             } else {
-                *scene.lock().unwrap() = r#"{"auth":"login"}"#.into();
+                // Keep the previous session's logout/disconnect explanation
+                // visible until a new login is submitted.
                 eprintln!("play: login page at http://127.0.0.1:{port}/  (enter server + account)");
                 loop {
-                    let attempt = match login_rx.recv() {
+                    let (attempt, control) = match login_rx.recv() {
                         Ok(v) => v,
                         // Sender dropped (the HTTP worker pool is gone) — nothing can
                         // submit the login form anymore. Same reasoning as above: return
@@ -899,16 +925,21 @@ impl PlayServer {
                         (attempt.host.clone(), attempt.port, attempt.username.clone());
                     *scene.lock().unwrap() = r#"{"auth":"connecting"}"#.into();
                     eprintln!("play: connecting to {lh}:{lp} as {lu} ...");
-                    match connect(attempt) {
+                    let result = connect(attempt, &control);
+                    *active_login.lock().unwrap() = None;
+                    match result {
                         Ok(s) => break s,
-                        Err(DriverError::CharacterChoiceCancelled) => {
-                            eprintln!("play: character selection cancelled");
-                            *scene.lock().unwrap() = r#"{"auth":"login"}"#.into();
+                        Err(
+                            DriverError::CharacterChoiceCancelled | DriverError::LoginCancelled,
+                        ) => {
+                            eprintln!("play: connection cancelled");
+                            *scene.lock().unwrap() = r#"{"auth":"login","msg":"Connection cancelled. Choose a server when you are ready."}"#.into();
                         }
                         Err(e) => {
                             eprintln!("login failed: {e}");
-                            let msg = format!("{e}").replace(['"', '\\', '\n'], " ");
-                            *scene.lock().unwrap() = format!(r#"{{"auth":"error","msg":"{msg}"}}"#);
+                            *scene.lock().unwrap() =
+                                serde_json::json!({"auth":"error", "msg":friendly_login_error(&e)})
+                                    .to_string();
                         }
                     }
                 }

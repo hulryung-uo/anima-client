@@ -15,6 +15,10 @@ let wasmTerrainKey = "";
 let wasmTerrainGen = 0;
 let wasmJournal = [];
 let wasmJournalSeq = 0;
+let wasmAttemptSequence = 0, wasmAttemptId = null, wasmConnectionError = "", wasmConnectionNotice = false;
+let wasmLoginTimer = null, wasmRejectConnect = null;
+let wasmTerrainPendingKey = "";
+try { wasmConnectionError = sessionStorage.getItem("anima.wasm.disconnect") || ""; sessionStorage.removeItem("anima.wasm.disconnect"); } catch (_) {}
 
 function wasmFlush() {
   if (!wasmClient || !wasmWs || wasmWs.readyState !== 1) return;
@@ -466,35 +470,44 @@ function wasmMergeScene(obs) {
 async function wasmRefreshTerrain(obs) {
   const pos = wasmPos(obs.player && obs.player.pos);
   const key = `${pos.x | 0},${pos.y | 0},${pos.z | 0},${obs.map_index | 0},${obs.season | 0}`;
-  if (key === wasmTerrainKey) return;
+  if (key === wasmTerrainKey || key === wasmTerrainPendingKey) return;
   const gen = ++wasmTerrainGen;
+  wasmTerrainPendingKey = key;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
   try {
     const r = await fetch(
-      `terrain.json?x=${pos.x | 0}&y=${pos.y | 0}&z=${pos.z | 0}&map=${obs.map_index | 0}&season=${obs.season | 0}`
+      `terrain.json?x=${pos.x | 0}&y=${pos.y | 0}&z=${pos.z | 0}&map=${obs.map_index | 0}&season=${obs.season | 0}`,
+      { signal: controller.signal }
     );
-    if (!r.ok || gen !== wasmTerrainGen) return;
-    wasmTerrain = await r.json();
-    wasmTerrainKey = key;
-  } catch (_) { /* assets bin down — keep last window */ }
+    if (!r.ok) return;
+    const next = await r.json();
+    if (gen !== wasmTerrainGen || controller.signal.aborted) return;
+    wasmTerrain = next; wasmTerrainKey = key;
+  } catch (_) { /* assets bin down — keep last window, protocol remains responsive */ }
+  finally { clearTimeout(timer); if (gen === wasmTerrainGen) wasmTerrainPendingKey = ""; }
 }
 
 async function wasmPollScene() {
   await wasmEnsure();
   if (wasmLoadError) return { auth: "error", msg: wasmLoadError };
+  if (wasmConnectionError) return { auth: wasmConnectionNotice ? "login" : "error", msg: wasmConnectionError };
   if (!wasmClient) return { auth: "login" };
   const err = wasmClient.login_error();
-  if (err) return { auth: "error", msg: err };
+  if (err) { wasmEndConnection(err); return { auth: "error", msg: err }; }
   let obs = {};
   try { obs = JSON.parse(wasmClient.observation_json()); } catch (_) { obs = {}; }
   if (obs.player && obs.player.serial) {
     wasmInWorld = true;
-    await wasmRefreshTerrain(obs);
+    wasmClearLoginTimer();
+    wasmRefreshTerrain(obs);
     wasmFlush();
     return wasmMergeScene(obs);
   }
   let list = {};
   try { list = JSON.parse(wasmClient.character_list_json()); } catch (_) { list = {}; }
   if (Array.isArray(list.slots)) {
+    wasmClearLoginTimer();
     const rej = list.deleteRejected;
     return {
       auth: "characters",
@@ -504,16 +517,40 @@ async function wasmPollScene() {
       error: rej && rej.text,
     };
   }
-  return { auth: "connecting", msg: "Connecting…" };
+  return { auth: "connecting", msg: "Waiting for the relay and server…", attempt_id: wasmAttemptId, cancellable: true };
 }
 
-function wasmDisconnect() {
-  wasmInWorld = false;
-  wasmClient = null;
-  if (wasmWs) {
-    try { wasmWs.close(); } catch (_) {}
-    wasmWs = null;
+function wasmClearLoginTimer() {
+  if (wasmLoginTimer !== null) clearTimeout(wasmLoginTimer);
+  wasmLoginTimer = null;
+}
+function wasmWaitForServer(id) {
+  wasmClearLoginTimer();
+  wasmLoginTimer = setTimeout(() => {
+    if (wasmAttemptId === id && !wasmInWorld) wasmEndConnection("The server took too long to respond. Check the relay and try again.");
+  }, 20000);
+}
+function wasmEndConnection(message, notice = false) {
+  if (wasmInWorld && message) {
+    try { sessionStorage.setItem("anima.wasm.disconnect", message); } catch (_) {}
   }
+  wasmConnectionError = message || ""; wasmConnectionNotice = notice;
+  const oldClient = wasmClient;
+  wasmInWorld = false; wasmClient = null; wasmAttemptId = null;
+  if (oldClient && typeof oldClient.free === "function") { try { oldClient.free(); } catch (_) {} }
+  wasmTerrainGen++; wasmTerrainKey = ""; wasmTerrainPendingKey = "";
+  wasmClearLoginTimer();
+  const reject = wasmRejectConnect; wasmRejectConnect = null;
+  const old = wasmWs; wasmWs = null;
+  if (old) {
+    old.onopen = old.onmessage = old.onerror = old.onclose = null;
+    try { old.close(); } catch (_) {}
+  }
+  if (reject) reject(new Error(message || "Connection cancelled."));
+}
+function wasmDisconnect() { wasmAttemptSequence++; wasmEndConnection(""); }
+function wasmCancelLogin(id) {
+  if (id === wasmAttemptId && !wasmInWorld) { wasmAttemptSequence++; wasmEndConnection("Connection cancelled. Choose a server when you are ready.", true); }
 }
 
 function wasmRelayUrl() {
@@ -522,34 +559,31 @@ function wasmRelayUrl() {
 }
 
 async function wasmConnect(username, password) {
+  wasmDisconnect();
+  const id = ++wasmAttemptSequence;
+  wasmAttemptId = id;
   await wasmEnsure();
-  if (wasmLoadError) throw new Error(wasmLoadError);
-  if (wasmWs) {
-    try { wasmWs.close(); } catch (_) {}
-    wasmWs = null;
-  }
+  if (id !== wasmAttemptSequence) throw new Error("Connection cancelled.");
+  if (wasmLoadError) { wasmEndConnection(wasmLoadError); throw new Error(wasmLoadError); }
   wasmClient = new WasmClientCtor(username, password);
-  wasmInWorld = false;
-  wasmJournal = [];
-  wasmJournalSeq = 0;
-  wasmTerrainKey = "";
+  wasmJournal = []; wasmJournalSeq = 0;
+  wasmTerrain = { map: { tiles: [] }, statics: [], lights: [] };
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wasmRelayUrl());
-    wasmWs = ws;
-    ws.binaryType = "arraybuffer";
-    ws.onopen = () => { wasmFlush(); resolve(); };
+    wasmRejectConnect = reject;
+    let ws;
+    try { ws = new WebSocket(wasmRelayUrl()); }
+    catch (error) { wasmEndConnection("The relay URL could not be opened. Check its address."); return; }
+    wasmWs = ws; ws.binaryType = "arraybuffer";
+    const current = () => wasmWs === ws && wasmAttemptId === id;
+    wasmWaitForServer(id);
+    ws.onopen = () => { if (!current()) return; wasmRejectConnect = null; wasmFlush(); resolve(); };
     ws.onmessage = (ev) => {
-      if (!wasmClient) return;
-      wasmClient.feed(new Uint8Array(ev.data));
-      wasmFlush();
+      if (!current() || !wasmClient) return;
+      try { wasmClient.feed(new Uint8Array(ev.data)); wasmFlush(); }
+      catch (_) { wasmEndConnection("The server response could not be read. Reconnect to try again."); }
     };
-    ws.onerror = () => reject(new Error("WebSocket error (is anima-relay running?)"));
-    ws.onclose = () => {
-      if (!wasmInWorld) {
-        const msg = document.getElementById("lg-msg");
-        if (msg && msg.textContent === "Connecting…") msg.textContent = "disconnected";
-      }
-    };
+    ws.onerror = () => { if (current()) wasmEndConnection("The relay connection failed. Check the relay address and try again."); };
+    ws.onclose = () => { if (current()) wasmEndConnection("Connection lost. You can sign in again."); };
   });
 }
 
@@ -559,9 +593,12 @@ async function wasmSubmitLogin() {
   const msg = document.getElementById("lg-msg");
   if (!username) { if (msg) msg.textContent = "Enter an account name."; return; }
   if (msg) msg.textContent = "Connecting…";
+  const pending = wasmConnect(username, password);
+  const submission = wasmAttemptSequence;
   try {
-    await wasmConnect(username, password);
+    await pending;
   } catch (e) {
+    if (submission !== wasmAttemptSequence) return;
     if (msg) msg.textContent = "Login request failed: " + e.message;
     const go = document.getElementById("lg-go");
     const back = document.getElementById("lg-back");
@@ -582,12 +619,14 @@ function wasmPlaySlot(slot) {
     if (go) go.disabled = false;
     return;
   }
+  wasmWaitForServer(wasmAttemptId);
   wasmFlush();
 }
 
 function wasmCreateCharacter(create) {
   if (!wasmClient) return "not connected";
   const err = wasmClient.create_character(JSON.stringify(create));
+  if (!err) wasmWaitForServer(wasmAttemptId);
   wasmFlush();
   return err;
 }
@@ -595,6 +634,7 @@ function wasmCreateCharacter(create) {
 function wasmDeleteSlot(slot) {
   if (!wasmClient) return false;
   const ok = wasmClient.delete_character(slot);
+  if (ok) wasmWaitForServer(wasmAttemptId);
   wasmFlush();
   return ok;
 }

@@ -47,7 +47,12 @@ function primeSeqRings(s) {
   primeDialogSeqs(s);
 }
 
-async function poll() {
+let scenePollPending = false, scenePollFailures = 0, scenePollRetryAt = 0;
+async function poll(force = false) {
+  if (scenePollPending || (!force && performance.now() < scenePollRetryAt)) return;
+  scenePollPending = true;
+  let received = false, timer = null;
+  const controller = new AbortController();
   const t0 = performance.now();
   try {
     if (WASM_MODE) {
@@ -55,10 +60,21 @@ async function poll() {
       if (!next) return;
       scene = next;
     } else {
-      const r = await fetch("scene.json?" + Date.now());
-      if (!r.ok) throw new Error(r.status);
-      scene = await r.json();
+      // Keep body decoding inside the deadline too. A timed-out response can
+      // resolve later, but must never commit its stale scene.
+      scene = await Promise.race([
+        (async () => {
+          const r = await fetch("scene.json?" + Date.now(), { signal: controller.signal, cache: "no-store" });
+          if (!r.ok) throw new Error(r.status);
+          const next = await r.json();
+          if (!next || typeof next !== "object" || Array.isArray(next)) throw new Error("Invalid scene response");
+          return next;
+        })(),
+        new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("Scene request timed out")); }, 5000); }),
+      ]);
     }
+    received = true; scenePollFailures = 0; scenePollRetryAt = 0;
+    if (typeof setSceneTransport === "function") setSceneTransport(true);
     // Not in world yet (login-page mode): show the login form instead of rendering.
     if (scene && scene.auth) {
       // A completed/lost game session owns a large amount of DOM and seq-gated
@@ -66,7 +82,7 @@ async function poll() {
       // leaks into the next character; the new page sees auth immediately and
       // therefore does not loop.
       if (wasInWorld) { window.location.reload(); return; }
-      showLogin(scene.auth, scene.msg, scene.slots, scene.capacity, scene.cities, scene.error);
+      showLogin(scene.auth, scene.msg, scene.slots, scene.capacity, scene.cities, scene.error, scene);
       return;
     }
     wasInWorld = true;
@@ -134,7 +150,18 @@ async function poll() {
     updateMusic(scene);  // sync background music (0x6D)
     setStatus("live · " + new Date().toLocaleTimeString());
   } catch (e) {
-    setStatus("waiting for scene… (" + e + ")");
+    if (!received) {
+      scenePollFailures++;
+      scenePollRetryAt = performance.now() + Math.min(1000 * 2 ** Math.min(scenePollFailures - 1, 3), 5000);
+      if (typeof setSceneTransport === "function") setSceneTransport(false);
+      setStatus("Client connection interrupted — retrying…");
+    } else {
+      console.error("Scene display update failed", e);
+      setStatus("Display update failed. Retrying…");
+    }
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+    scenePollPending = false;
   }
   diag.poll = performance.now() - t0;
   if (diag.poll > 150) console.warn(`[diag] slow poll ${diag.poll.toFixed(0)}ms`);
