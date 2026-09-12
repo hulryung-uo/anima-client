@@ -148,6 +148,14 @@ decision + the reasoning so a future session understands the constraints.
 | D15 | **Validate game files before saving; preserve unreadable app settings** (`anima-net::uo_dir::check`, `anima-desktop::config` / `setup`) | The native setup window checks the readers and formats that play actually supports, requires an explicit first selection, and keeps folder changes pending until restart. Its Tauri commands are restricted to that local window; the loopback game page cannot invoke them. Configuration updates lock and reread before atomic replacement; recovery first backs up the original bytes. Server/account profiles and OS passwords stay separate. See `docs/GAME_FILES.md`; a startup check is not a complete asset-integrity scan. |
 | D16 | **Renderer preferences have one atomic storage record and typed readers** (`web/storage.js`, `preferences-ui.js`) | Direct storage access and unchecked JSON could abort boot or pass invalid values to audio/input. A guarded adapter validates known groups, keeps pending changes during storage failures and preserves originals on explicit recovery. Legacy keys remain untouched; a restore replaces one record with its previous-copy snapshot in the same write. Export/import exclude the account library and credential vault. Native downloads are scoped to settings blobs from the active renderer and its Downloads directory. Actual file-transfer runtime evidence is still required; see `docs/CLIENT_SETTINGS.md`. |
 
+Release integrity (D17): a version tag must match the app manifest and release
+notes. Resolve it to one commit and reuse the shared CI workflow for that commit
+before building either installer. Assemble a draft only after both final
+installers match their platform, source commit, size and SHA-256 manifests.
+Check signatures/notarization before hashing; reject partial signing setup and
+updates to an already public release. Runtime verification is a separate
+requirement, recorded in `docs/CLIENT_READINESS.md`.
+
 Profile persistence follow-up (D13): stage and sync non-secret metadata before
 applying OS-vault changes, retain previous credentials only in memory, and undo
 them when an operation or the final file replacement fails. An unavailable vault

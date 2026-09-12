@@ -1,189 +1,134 @@
-# Distribution — building & shipping the Anima desktop app
+# Distribution — building and shipping Anima
 
-This is the how-to for turning the client into an installable **application** and
-distributing it. See [`DESIGN.md`](DESIGN.md) for architecture; this doc is only
-about packaging.
+The desktop app embeds the renderer and runs its native UO connection inside
+Tauri. It needs the player's existing Ultima Online data files and account; no
+UO game data is bundled. First launch validates the selected data folder before
+opening the login screen. See [game-file setup](GAME_FILES.md).
 
-## What the app is
+## Local builds
 
-`anima-desktop` (Tauri v2, `crates/anima-desktop`) is the shippable artifact. It:
-
-- runs the `anima-net` **play server in-process** (direct TCP to the UO server,
-  no relay) on a **loopback** port that's kept stable across launches (8190
-  unless taken; remembered in the desktop config, because the renderer's
-  `localStorage` preferences are keyed by origin), and opens a native webview at
-  that URL;
-- **embeds the `web/` renderer into the binary at compile time**
-  (`anima_net::play_server`), so there is **no npm/bundler step** and no `web/`
-  directory to ship;
-- **ships no Ultima Online game data.** The `.mul`/`.uop` files are copyrighted
-  and large, and stay on the user's machine. On first launch the app locates them
-  by auto-detecting known install locations (incl. a configured ClassicUO) and,
-  failing that, a native folder picker — then remembers the pick
-  (`anima_net::uo_dir` + the desktop's persisted config). So the bundle is small
-  and self-contained, and the user brings their own client files.
-
-Consequences for distribution: the download is a few MB of native shell + the
-embedded renderer; it needs **no data bundling**, and there is nothing
-copyrighted in what you hand out.
-
-## Build (one command)
-
-```bash
-scripts/build-app.sh                 # bundle for this machine's architecture
-scripts/build-app.sh --universal     # macOS: one binary for Intel + Apple Silicon
-scripts/build-app.sh --bundles dmg   # narrow outputs (passes through to `cargo tauri build`)
+```sh
+scripts/build-app.sh
+scripts/build-app.sh --universal
+scripts/build-app.sh --bundles app,dmg
 ```
 
-The script installs `tauri-cli` v2 on first use (compiles from source, a few
-minutes — kept out of the workspace so the everyday `cargo build` stays lean),
-then runs `cargo tauri build` against `crates/anima-desktop/tauri.conf.json`.
+Use the pinned Rust toolchain, Node and Python 3.9+ for `scripts/check.sh`.
+The packaging script installs Tauri CLI v2 if needed. macOS builds need Xcode
+Command Line Tools; Windows builds need MSVC and the Windows build environment.
+`--universal` adds both Apple targets and builds for Intel and Apple Silicon.
+The default local build targets the current machine.
 
-Prerequisites:
+Outputs are under `target/release/bundle/`, or the relevant target subdirectory:
 
-- **Rust** (stable) + the repo's usual toolchain.
-- **macOS**: Xcode Command Line Tools (`xcode-select --install`) for the linker
-  and `hdiutil` (the `.dmg` step). Building a `--universal` binary needs both
-  `x86_64-apple-darwin` and `aarch64-apple-darwin` rustup targets (the script
-  adds them).
-- **Windows**: the MSVC build tools; WebView2 (Tauri's NSIS installer bootstraps
-  the WebView2 runtime, so end users need nothing extra on Win 11 / recent 10).
+| Platform | Installer |
+| --- | --- |
+| Apple Silicon macOS | `dmg/Anima_<version>_aarch64.dmg` |
+| Windows x64 | `nsis/Anima_<version>_x64-setup.exe` |
+| macOS application | `macos/Anima.app` |
 
-### Outputs
+Local builds can also produce MSI or universal macOS bundles. CI deliberately
+ships one installer per supported platform. The Windows NSIS installer can
+install the WebView2 runtime. The Apple Silicon download does **not** run on
+Intel Macs; Intel needs its own Intel or universal build. Rosetta translates
+Intel applications on Apple Silicon, not the reverse.
 
-Under the shared workspace `target/` (a per-target subdir when you pass
-`--target`, e.g. `target/universal-apple-darwin/release/bundle/`):
+## Versioned release drafts
 
-| Platform | Path |
-|---|---|
-| macOS app | `…/release/bundle/macos/Anima.app` |
-| macOS disk image | `…/release/bundle/dmg/Anima_<ver>_<arch>.dmg` |
-| Windows installer | `…/release/bundle/nsis/Anima_<ver>_x64-setup.exe` |
-| Windows MSI | `…/release/bundle/msi/Anima_<ver>_x64_en-US.msi` (local builds only) |
+The release workflow builds installers without publishing them automatically.
+A stable tag must exactly match `crates/anima-desktop/tauri.conf.json` and have
+notes at `docs/releases/<tag>.md`, beginning with `# Anima <tag>`.
 
-`<arch>` is `aarch64` / `x64` / `universal`. The version comes from
-`tauri.conf.json` `version` — bump it there for each release.
+1. Finish the source changes and run `bash scripts/check.sh`.
+2. Set the app version and write player-facing notes with outstanding runtime
+   checks stated accurately. Commit and push them.
+3. Push the matching `vX.Y.Z` tag. For a retry, run **Actions → Release → Run
+   workflow** with that existing tag. A branch such as `main` is not a release.
+4. The workflow resolves the tag to a commit, invokes the shared CI workflow
+   for that exact commit, and waits for Linux, macOS and Windows checks.
+5. Build the macOS and Windows installers on their respective runners. Verify
+   macOS architecture, app version, code signature and configured notarization.
+6. Hash the final installers after signing/notarization and collect one build
+   manifest per platform. Both platform artifacts must be present and match
+   their source commit, filename, size and SHA-256 before a draft is assembled.
+7. Download and test the actual installers before publishing the draft. Complete
+   the applicable [client-readiness checks](CLIENT_READINESS.md).
 
-> **Headless note (macOS):** Tauri styles the `.dmg` window with an AppleScript
-> that needs a GUI/Finder session, so a plain `cargo tauri build` fails at the
-> DMG step over SSH / in some CI. `scripts/build-app.sh` handles this: it builds
-> the styled DMG when a session is available and otherwise auto-retries with
-> `CI=true`, which skips only the cosmetic styling and still emits a fully
-> functional DMG (app + drag-to-`Applications` symlink). The `.app` itself is
-> never affected.
+The draft contains both installers, `SHA256SUMS.txt`, `macos-build.json` and
+`windows-build.json`. The manifests record the exact source commit, target,
+signing result, file size and hash. Workflow artifacts are retained for 14 days;
+the draft's release assets remain attached afterward. Download verification:
 
-## macOS: Gatekeeper, signing, notarization
+```sh
+shasum -a 256 -c SHA256SUMS.txt
+```
 
-An **unsigned** `.app`/`.dmg` runs fine on the machine that built it, but on
-another Mac Gatekeeper blocks it ("Anima is damaged" / "unidentified developer")
-because the download carries a `com.apple.quarantine` xattr.
+On Windows, compare `Get-FileHash <installer> -Algorithm SHA256` with the supplied
+checksum. A checksum confirms the bytes, not runtime compatibility.
 
-What we ship is **ad-hoc signed** (`APPLE_SIGNING_IDENTITY=-`, the default in
-`scripts/build-app.sh` and in CI). That is not a step toward Gatekeeper — it
-claims no identity and gets you nothing with Apple. It exists because on arm64
-the linker signs the *executable* but nothing signs the *bundle*, and a bundle
-with no `Contents/_CodeSignature` makes `codesign --verify` say "code has no
-resources but signature indicates they must be present" — which reads like a
-corrupt download to anyone who checks. Ad-hoc signing makes the bundle
-self-consistent: `codesign --verify` passes, `spctl` still refuses it. Setting
-a real `APPLE_SIGNING_IDENTITY` overrides it.
+An existing public release is rejected by the draft tooling. Corrections need a
+new version. Retries may replace assets on an existing draft, with both platform
+manifests checked again. Drafts are not announced by the UO Tavern publisher.
+Stable public releases are announced after publication; see
+[forum updates](FORUM_UPDATES.md).
 
-- **Quick, unsigned sharing** (testers): tell them to right-click the app →
-  **Open** → **Open** (once), or run
-  `xattr -dr com.apple.quarantine /Applications/Anima.app`. Fine for a handful
-  of trusted users; **not** acceptable for public distribution.
-- **Proper release** needs an Apple **Developer ID** ($99/yr), signing, and
-  **notarization**. Tauri does it during `cargo tauri build` when these env vars
-  are set (nothing else to wire):
+## Apple signing and notarization
 
-  ```bash
-  export APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-  export APPLE_ID="you@example.com"
-  export APPLE_PASSWORD="app-specific-password"   # appleid.apple.com → App-Specific Passwords
-  export APPLE_TEAM_ID="TEAMID"
-  scripts/build-app.sh --bundles app,dmg
-  ```
+Local builds default to ad-hoc signing when no identity is configured. This
+makes the bundle signature internally consistent but supplies neither a
+Developer ID nor notarization. A passing `codesign --verify` alone does not
+prove that a downloaded application will pass Gatekeeper.
 
-  Tauri signs the app with a hardened runtime and submits it to Apple's
-  notary service, stapling the ticket into the `.dmg`.
+CI uses these repository secrets for a Developer ID build:
 
-  **In CI this is now automatic.** `release.yml` has a "Configure Apple signing"
-  step that injects the five variables only when they are all non-empty, so
-  adding the repo secrets is the entire switch — there is nothing to uncomment,
-  and a half-configured repo degrades to the ad-hoc bundle instead of failing
-  the build. The five secrets:
+| Secret | Purpose |
+| --- | --- |
+| `APPLE_CERTIFICATE` | Base64-encoded Developer ID Application `.p12` |
+| `APPLE_CERTIFICATE_PASSWORD` | Password for that certificate export |
+| `APPLE_SIGNING_IDENTITY` | Full `Developer ID Application: …` identity |
+| `APPLE_TEAM_ID` | Apple developer team identifier |
 
-  | secret | where it comes from |
-  |---|---|
-  | `APPLE_CERTIFICATE` | `base64 -i DeveloperID.p12` — a **Developer ID Application** cert exported from Keychain Access |
-  | `APPLE_CERTIFICATE_PASSWORD` | the password you set on that `.p12` export |
-  | `APPLE_ID` | the Apple ID enrolled in the Developer Program |
-  | `APPLE_PASSWORD` | an **app-specific password** (appleid.apple.com → App-Specific Passwords), NOT the account password |
-  | `APPLE_TEAM_ID` | developer.apple.com → Membership details |
+Notarization additionally uses these App Store Connect API-key secrets:
 
-  An app-specific password on its own does nothing: it authenticates the
-  *submission*, it does not sign anything, and Apple only notarizes software
-  already signed with a Developer ID. See Tauri's macOS
-  code-signing guide for CI keychain setup (`APPLE_CERTIFICATE` +
-  `APPLE_CERTIFICATE_PASSWORD` to import a base64 `.p12`). If you later need
-  entitlements, add `bundle.macOS.entitlements` in `tauri.conf.json`.
+| Secret | Purpose |
+| --- | --- |
+| `APPLE_API_KEY` | API key identifier |
+| `APPLE_API_ISSUER` | Issuer identifier |
+| `APPLE_API_KEY_BASE64` | Base64-encoded `.p8` private key |
 
-## Windows: installer & signing
+With no signing secrets, CI produces an ad-hoc signed testing draft. All four
+signing values produce a Developer ID build. All three additional API-key values
+enable notarization. A partial configuration fails explicitly instead of
+silently producing a less completely signed build. Secret values are never
+printed. The temporary `.p8` has owner-only permissions and is removed at the
+end of the job.
 
-- **Build on Windows** (or CI — see below). Cross-compiling a Windows bundle
-  from macOS is impractical (WebView2 + the MSVC/NSIS toolchain); don't try.
-- `scripts/build-app.sh` on Windows yields the NSIS `…-setup.exe` (recommended)
-  and an `.msi`. The NSIS installer bootstraps the WebView2 runtime.
-- **Signing** (optional, removes SmartScreen friction): sign with `signtool` and
-  an Authenticode cert, or set Tauri's `bundle.windows.certificateThumbprint` /
-  `signCommand`.
+Tauri signs and notarizes the application. The workflow then checks the app's
+stapled ticket and Gatekeeper acceptance, separately submits the DMG, staples
+it, validates its ticket and checks Gatekeeper acceptance of the disk image.
+Hashes are generated only afterward. Build notes record the result actually
+requested and verified by these steps; they never infer notarization from the
+mere existence of repository secret names.
 
-## Cross-platform releases via CI (recommended)
+For local Developer ID builds, supply `APPLE_SIGNING_IDENTITY` and an installed
+certificate. Tauri also supports local Apple-ID credentials or API-key credentials
+for notarization. Keep them outside source control. See the official
+[Tauri signing guide](https://v2.tauri.app/distribute/sign/macos/) for credential
+setup and [Tauri action](https://github.com/tauri-apps/tauri-action) for build inputs.
 
-The practical way to produce **both** macOS and Windows bundles is a CI matrix —
-you can't build a Windows installer on macOS. A ready-to-use GitHub Actions
-workflow is provided at [`.github/workflows/release.yml`](../.github/workflows/release.yml):
-push a `v*` tag and it builds the bundles and attaches them to a **draft**
-GitHub Release.
+Windows Authenticode signing is not configured in this workflow. Its manifest
+therefore says `unsigned`; passing Windows compilation is not a claim about
+SmartScreen or OS-vault runtime behavior.
 
-**What it ships, and why only that:**
+## Verification limits
 
-| Platform | Artifact | Target |
-|---|---|---|
-| macOS | `Anima.app` + `Anima_<ver>_aarch64.dmg` | `aarch64-apple-darwin` |
-| Windows | `Anima_<ver>_x64-setup.exe` | MSVC x64, NSIS |
+The current macOS target is Apple Silicon, with a configured minimum macOS 11.0.
+That minimum still needs compatibility checks against the system WebKit APIs
+used by the renderer. A bundle build or notarization does not prove UI behavior.
+The release candidate must be exercised through clean setup, saved account login,
+file backup/restore, disconnect/reconnect and gameplay on the target platforms.
 
-- **Apple Silicon only.** A universal binary doubles the download for everyone
-  to serve the rare Intel Mac, which Rosetta covers anyway. Build
-  `--universal` locally if you ever need one.
-- **NSIS only on Windows.** The `.exe` is the installer that bootstraps the
-  WebView2 runtime; shipping an `.msi` beside it means two ways to install one
-  app, which is a support question rather than a feature. `scripts/build-app.sh`
-  still emits both locally if you ask for them.
-
-Signing in CI is opt-in: add the Apple / Windows secrets above as repository
-secrets **and uncomment the `APPLE_*` block** in `release.yml` (it is commented
-out because an empty/unset `APPLE_CERTIFICATE` makes Tauri fail at
-`security import`). Without them you get unsigned artifacts — fine for internal
-testing.
-
-## Release checklist
-
-1. Bump `version` in `crates/anima-desktop/tauri.conf.json`.
-2. Push the tag and let CI build both (§ *Cross-platform releases*), or
-   locally: `scripts/build-app.sh --bundles app,dmg` on an Apple Silicon Mac —
-   a Windows installer cannot be built from macOS.
-3. Sign + notarize (macOS) / sign (Windows) if distributing publicly.
-4. Smoke-test the bundle on a clean machine: it should open the login page,
-   auto-detect or prompt for the UO data dir, connect, and render.
-5. Publish the `.dmg` / `-setup.exe` (GitHub Release, or your channel).
-
-## Known limitations (carried from `anima-desktop/README.md`)
-
-- **No graceful shutdown**: closing the window ends the process (and its
-  background game-loop/HTTP thread). No data loss — it's a client — but there's
-  no "stop accepting" hook.
-- **Loopback only**: the embedded HTTP server binds `127.0.0.1`, never
-  `0.0.0.0`. Nothing on the network can reach it (unlike the `play` bin's
-  `ANIMA_BIND` escape hatch, which the desktop shell deliberately ignores).
-- End users must supply their own legally-obtained UO client files.
+The app uses loopback HTTP only. Closing its window ends the process and its
+background server; shutdown during a vault/file update remains a separate crash
+recovery concern. See the readiness audit rather than treating green CI as
+completion of the entire product.

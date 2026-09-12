@@ -118,7 +118,9 @@ macOS Keychain integration test verifies actual profile save, reuse after restar
 replacement, preservation after a file-write failure and deletion. All test
 credentials and profile files are removed afterward. Run it explicitly with
 `cargo test -p anima-desktop native_profile_password_lifecycle -- --ignored`;
-normal CI does not access the runner's OS vault. The launcher fixture suite also
+macOS CI leaves it opt-in. Windows CI explicitly runs it with one disposable
+runner credential, which is removed by the test. This exercises the OS API and
+profile lifecycle, not the Windows login UI. The launcher fixture suite also
 runs on both macOS and Windows CI.
 
 The rollback handles reported operation failures while the client is running;

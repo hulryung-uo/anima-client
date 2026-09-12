@@ -7,6 +7,8 @@ dist/
 web/scene.json
 web/scene.json.tmp
 web/pkg/
+/release-dist/
+__pycache__/
 
 # stray CDP/debug helper scripts (local only)
 /capchk.js

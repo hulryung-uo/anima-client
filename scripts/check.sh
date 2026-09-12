@@ -60,6 +60,7 @@ run node scripts/check-web-globals.mjs
 # this is the first step that can tell you the client still works.
 run node web/test/run.js
 run node --check crates/anima-desktop/frontend-dist/setup.js
+run python3 -m unittest discover -s scripts -p 'test_*.py'
 
 if [ "${1-}" != "--skip-desktop" ]; then
     # CI runs this as a separate macOS/Windows job; it is the slow one (Tauri).

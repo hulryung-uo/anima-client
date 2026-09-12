@@ -1,161 +1,156 @@
 name: Release
 
-# Push a version tag (e.g. `v0.1.0`) to build installable bundles on macOS and
-# Windows and attach them to a (draft) GitHub Release. Signing is opt-in via
-# repo secrets (see below / docs/DISTRIBUTION.md); without them the artifacts
-# are unsigned but still usable for internal testing.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build (must match tauri.conf.json)
+        required: true
+        type: string
 
 permissions:
-  contents: write # create the release and upload the bundles
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Validate release tag and notes
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Verify tag, version, source commit and draft status
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANIMA_RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: python3 scripts/release.py metadata --tag "$ANIMA_RELEASE_TAG"
+
+  verify:
+    name: Verify the release commit
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
+
   bundle:
-    name: Bundle (${{ matrix.os }})
+    name: Bundle (${{ matrix.platform }})
+    needs: [prepare, verify]
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Apple Silicon only. A universal binary would carry an x86_64 half
-          # nothing here targets, and Rosetta covers the rare Intel Mac at the
-          # cost of a download twice the size for everyone else.
           - os: macos-latest
-            args: "--target aarch64-apple-darwin --bundles app,dmg"
-          # NSIS gives the installable `…-setup.exe`. The MSI is dropped rather
-          # than shipped alongside: two installers for one app is a support
-          # question, and the `.exe` is the one that bootstraps WebView2.
+            platform: macos
+            args: --target aarch64-apple-darwin --bundles app,dmg
           - os: windows-latest
-            args: "--bundles nsis"
+            platform: windows
+            args: --bundles nsis
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
-      # Installs the channel/components/targets `rust-toolchain.toml` pins.
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
       - name: Install pinned Rust toolchain
         run: rustup toolchain install && rustup show active-toolchain
-
-      - name: Add the Apple Silicon target
-        if: matrix.os == 'macos-latest'
+      - name: Add Apple Silicon target
+        if: matrix.platform == 'macos'
         run: rustup target add aarch64-apple-darwin
-
-      # tauri-action installs tauri-cli, runs `cargo tauri build`, and (given a
-      # tagName) creates/updates the GitHub Release with the bundles attached.
-      # No frontend build step: the web/ renderer is embedded in anima-net at
-      # compile time and frontendDist is a static placeholder.
-      # Turn on real signing + notarization ONLY when a Developer ID is actually
-      # configured. This has to be a separate step that writes $GITHUB_ENV rather
-      # than plain `env:` passthroughs on the build below: an unset secret arrives
-      # as an EMPTY string, and tauri-action reads an empty APPLE_CERTIFICATE as
-      # "present", then dies at `security import` ("parameters not valid"). So the
-      # variables must be ABSENT, not empty — which a passthrough cannot express.
-      # With this, adding the repo secrets is the whole switch; nothing to uncomment.
-      # Turn on real signing (+ notarization) ONLY when the secrets exist. This
-      # must write $GITHUB_ENV rather than use plain `env:` passthroughs on the
-      # build: an unset secret arrives as an EMPTY string, and tauri-action reads
-      # an empty APPLE_CERTIFICATE as "present", then dies at `security import`
-      # ("parameters not valid"). The variables must be ABSENT, not empty — which
-      # a passthrough cannot express. So adding the repo secrets is the whole
-      # switch; there is nothing to uncomment, and a half-configured repo degrades
-      # to the ad-hoc bundle instead of failing the release.
-      #
-      # Signing and notarization are decoupled: with the cert+team but no API key,
-      # the bundle is signed (Gatekeeper still refuses an un-notarized Developer
-      # ID app on first launch, but `spctl` after notarization is the goal). With
-      # all five, it is signed AND notarized. Notarization uses an App Store
-      # Connect API key (.p8) rather than an app-specific password: the key
-      # authenticates the submission without a human password in a secret.
-      - name: Configure Apple signing (no-op until the secrets exist)
-        if: matrix.os == 'macos-latest'
-        shell: bash
+      - name: Configure Apple signing
+        if: matrix.platform == 'macos'
+        id: apple
         env:
-          CERT: ${{ secrets.APPLE_CERTIFICATE }}
-          CERT_PW: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          API_KEY_ID: ${{ secrets.APPLE_API_KEY }}
-          API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          API_KEY_B64: ${{ secrets.APPLE_API_KEY_BASE64 }}
-        run: |
-          if [ -z "$CERT" ] || [ -z "$CERT_PW" ] || [ -z "$TEAM_ID" ]; then
-            echo "No Developer ID configured — shipping an ad-hoc signed bundle."
-            echo "Gatekeeper will refuse it; see docs/DISTRIBUTION.md."
-            exit 0
-          fi
-          # Heredoc delimiters: the .p12 is multi-line base64.
-          {
-            echo "APPLE_CERTIFICATE<<__ANIMA_EOF__"; echo "$CERT"; echo "__ANIMA_EOF__"
-            echo "APPLE_CERTIFICATE_PASSWORD<<__ANIMA_EOF__"; echo "$CERT_PW"; echo "__ANIMA_EOF__"
-            echo "APPLE_TEAM_ID<<__ANIMA_EOF__"; echo "$TEAM_ID"; echo "__ANIMA_EOF__"
-          } >> "$GITHUB_ENV"
-          if [ -n "$API_KEY_ID" ] && [ -n "$API_ISSUER" ] && [ -n "$API_KEY_B64" ]; then
-            # Reconstruct the .p8 on the runner and point Tauri at it. The path is
-            # what Tauri's notarizer reads (APPLE_API_KEY_PATH); the key id and
-            # issuer identify it to Apple's notary service.
-            mkdir -p "$RUNNER_TEMP/appstore"
-            printf '%s' "$API_KEY_B64" | base64 --decode > "$RUNNER_TEMP/appstore/AuthKey.p8"
-            {
-              echo "APPLE_API_KEY<<__ANIMA_EOF__"; echo "$API_KEY_ID"; echo "__ANIMA_EOF__"
-              echo "APPLE_API_ISSUER<<__ANIMA_EOF__"; echo "$API_ISSUER"; echo "__ANIMA_EOF__"
-              echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/appstore/AuthKey.p8"
-            } >> "$GITHUB_ENV"
-            echo "Developer ID + API key configured — the bundle will be signed and notarized."
-          else
-            echo "Developer ID configured (signing only) — no API key, so NOT notarized."
-          fi
-
-      - name: Build & publish bundle
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: python3 scripts/apple-signing.py
+      # Upload only after both platforms finish and the final signed files
+      # have been checked and hashed. The action itself creates no release.
+      - name: Build installer
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Ad-hoc sign the bundle when no Developer ID is configured. Without
-          # it the .app has no Contents/_CodeSignature and `codesign --verify`
-          # calls it malformed rather than merely unsigned — see
-          # scripts/build-app.sh. A real identity (if the secret is ever set)
-          # wins; `-` claims nothing and does not get past Gatekeeper.
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
-          # The APPLE_* signing/notarization variables are injected by the step
-          # above, and only when a real Developer ID is configured — see there
-          # for why they must be absent rather than empty.
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           projectPath: crates/anima-desktop
           args: ${{ matrix.args }}
-          tagName: ${{ github.ref_name }}
-          releaseName: "Anima ${{ github.ref_name }}"
-          releaseDraft: true
-          prerelease: false
-
-      # Tauri notarizes and staples the .app, but NOT the .dmg that contains it.
-      # macOS checks the .dmg too when it carries the download quarantine, and a
-      # signed-but-unnotarized .dmg still trips "Apple could not verify" on open
-      # (verified: v0.4.1's first .dmg was `spctl -t open` REJECTED while the app
-      # inside was accepted). So notarize + staple the container and replace the
-      # asset tauri-action just uploaded. Runs only when notarization is actually
-      # configured (APPLE_API_KEY_PATH is set by the configure step above).
-      - name: Notarize & staple the macOS dmg
-        if: matrix.os == 'macos-latest' && env.APPLE_API_KEY_PATH != ''
-        shell: bash
+      - name: Verify macOS application
+        if: matrix.platform == 'macos'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANIMA_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          ANIMA_SIGNING: ${{ steps.apple.outputs.signing }}
         run: |
           set -eu
-          # The target dir is the WORKSPACE root's, not the crate's — this is a
-          # cargo workspace, so `crates/anima-desktop/target` never exists and a
-          # glob rooted there silently found nothing. v0.5.0 shipped an
-          # unnotarized dmg that way, so this now FAILS the build rather than
-          # exiting 0: a release that silently loses its notarization is worse
-          # than a red build.
-          dmg=$(ls target/*/release/bundle/dmg/*.dmg 2>/dev/null | head -1 || true)
-          if [ -z "${dmg:-}" ]; then
-            echo "::error::no dmg found to notarize (looked in target/*/release/bundle/dmg/)"
-            ls -R target/*/release/bundle 2>/dev/null | head -40 || true
-            exit 1
+          app=target/aarch64-apple-darwin/release/bundle/macos/Anima.app
+          codesign --verify --deep --strict "$app"
+          if [ "$ANIMA_SIGNING" != adhoc ]; then
+            codesign -dv --verbose=4 "$app" 2>&1 | grep -q '^Authority=Developer ID Application:'
           fi
-          echo "notarizing $dmg"
-          xcrun notarytool submit "$dmg" \
-            --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" \
-            --wait
-          xcrun stapler staple "$dmg"
-          spctl -a -vvv -t open --context context:primary-signature "$dmg"
-          gh release upload "$GITHUB_REF_NAME" "$dmg" --clobber -R "$GITHUB_REPOSITORY"
+          test "$(lipo -archs "$app/Contents/MacOS/anima-desktop")" = arm64
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "${ANIMA_RELEASE_TAG#v}"
+      - name: Notarize and verify macOS disk image
+        if: matrix.platform == 'macos' && steps.apple.outputs.signing == 'notarized'
+        run: |
+          set -eu
+          app=target/aarch64-apple-darwin/release/bundle/macos/Anima.app
+          set -- target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          test "$#" -eq 1 && test -f "$1"
+          xcrun stapler validate "$app"
+          spctl -a -vvv -t execute "$app"
+          xcrun notarytool submit "$1" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait
+          xcrun stapler staple "$1"
+          xcrun stapler validate "$1"
+          spctl -a -vvv -t open --context context:primary-signature "$1"
+      - name: Collect installer and checksum manifest
+        shell: bash
+        env:
+          ANIMA_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          ANIMA_PLATFORM: ${{ matrix.platform }}
+          ANIMA_SIGNING: ${{ steps.apple.outputs.signing || 'unsigned' }}
+        run: python scripts/release.py collect --tag "$ANIMA_RELEASE_TAG" --platform "$ANIMA_PLATFORM" --signing "$ANIMA_SIGNING" --directory release-dist
+      - name: Retain verified installer for draft assembly
+        uses: actions/upload-artifact@v4
+        with:
+          name: anima-${{ needs.prepare.outputs.tag }}-${{ matrix.platform }}
+          path: release-dist/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove temporary notarization key
+        if: always() && matrix.platform == 'macos'
+        run: rm -f "$RUNNER_TEMP/anima-notary/AuthKey.p8"
+
+  draft:
+    name: Prepare draft with both verified installers
+    needs: [prepare, bundle]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: anima-${{ needs.prepare.outputs.tag }}-*
+          path: release-dist
+          merge-multiple: true
+      - name: Verify both manifests and upload to a draft only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANIMA_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: python3 scripts/release.py draft --tag "$ANIMA_RELEASE_TAG" --directory release-dist
