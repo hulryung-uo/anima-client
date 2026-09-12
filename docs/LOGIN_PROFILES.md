@@ -109,7 +109,9 @@ isolated test credential, then removed. Chrome UI checks used disposable profile
 for two servers and three accounts: saving, switching, reload restoration, notes,
 status caching, failed-login recovery, and narrow-window layout (580px / 390px).
 The real ServUO instance was offline; no live character login was claimed.
-Windows vault behavior requires a Windows runtime check.
+The explicit profile lifecycle test also passed against Windows Credential
+Manager on the Windows CI runner for the v0.7.0 source commit (`10aa945`). This
+verifies OS-vault calls and profile persistence, not the interactive Windows UI.
 
 Password persistence regressions additionally cover failed file staging, failed
 final replacement, partially failed multi-account deletion, failed rollback, and

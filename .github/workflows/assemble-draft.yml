@@ -1,0 +1,59 @@
+name: Assemble verified release draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag
+        required: true
+        type: string
+      build_run:
+        description: Completed Release run with both bundles and all quality gates passed
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          path: release-source
+          fetch-depth: 0
+      - name: Verify the completed builds and tagged source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANIMA_RELEASE_TAG: ${{ inputs.tag }}
+          ANIMA_BUILD_RUN: ${{ inputs.build_run }}
+        run: python3 scripts/release.py metadata --tag "$ANIMA_RELEASE_TAG" --source release-source --build-run "$ANIMA_BUILD_RUN"
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.build_run }}
+          pattern: anima-${{ inputs.tag }}-*
+          path: release-dist
+          merge-multiple: true
+      - name: Assemble the draft without rebuilding or publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANIMA_RELEASE_TAG: ${{ inputs.tag }}
+          ANIMA_BUILD_RUN: ${{ inputs.build_run }}
+        run: python3 scripts/release.py draft --tag "$ANIMA_RELEASE_TAG" --source release-source --build-run "$ANIMA_BUILD_RUN" --directory release-dist
+
+  install:
+    needs: assemble
+    uses: ./.github/workflows/installer-check.yml
+    with:
+      tag: ${{ inputs.tag }}

@@ -77,6 +77,14 @@ manifests checked again. Drafts are not announced by the UO Tavern publisher.
 Stable public releases are announced after publication; see
 [forum updates](FORUM_UPDATES.md).
 
+If only draft assembly fails after both installers and all checks pass, use
+**Actions → Assemble verified release draft** with the tag and completed Release
+run ID. It verifies the run's source commit and successful build/test jobs, then
+downloads and rechecks those artifacts. It does not rebuild or move the tag.
+The release-creation request uses that existing verified tag; it does not pass
+an additional historical target commit that GitHub could interpret as a request
+to authorize workflow changes. Installation checks follow the repaired draft.
+
 ## Apple signing and notarization
 
 Local builds default to ad-hoc signing when no identity is configured. This

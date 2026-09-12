@@ -83,7 +83,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("--draft", create)
         self.assertIn("--verify-tag", create)
         self.assertIn("--notes-file", create)
-        self.assertEqual(create[create.index("--target") + 1], "a" * 40)
+        self.assertNotIn("--target", create, "an existing verified tag must not request another target")
         self.assertEqual(len(upload[upload.index("--clobber") + 1:]), 5)
         self.assertIn("Source commit: `" + "a" * 40, (self.dist / "release-notes.md").read_text())
         self.assertEqual(len((self.dist / "SHA256SUMS.txt").read_text().splitlines()), 2)
@@ -94,6 +94,25 @@ class ReleaseTests(unittest.TestCase):
         (folder / "Anima_0.6.0_x64-setup.exe").write_bytes(b"stale build")
         with self.assertRaises(ValueError):
             release.collect(self.data, "windows", "unsigned", self.dist, self.root)
+
+    def test_draft_retry_requires_successful_builds_and_tests_for_the_same_commit(self):
+        run = {"head_sha": "a" * 40, "path": ".github/workflows/release.yml", "status": "completed"}
+        names = ["Validate release tag and notes", "Bundle (macos)", "Bundle (windows)",
+                 "Verify the release commit / Rust, WASM, and web quality gates",
+                 "Verify the release commit / Desktop compile (macos-latest)",
+                 "Verify the release commit / Desktop compile (windows-latest)"]
+        jobs = {"jobs": [{"name": name, "conclusion": "success"} for name in names]}
+        with patch.object(release.subprocess, "check_output", side_effect=[json.dumps(run), json.dumps(jobs)]):
+            release.verify_build("example/repo", "123", "a" * 40)
+        jobs["jobs"][1]["conclusion"] = "failure"
+        with patch.object(release.subprocess, "check_output", side_effect=[json.dumps(run), json.dumps(jobs)]):
+            with self.assertRaises(ValueError):
+                release.verify_build("example/repo", "123", "a" * 40)
+        with patch.object(release.subprocess, "check_output", return_value=json.dumps(run)):
+            with self.assertRaises(ValueError):
+                release.verify_build("example/repo", "123", "b" * 40)
+        with self.assertRaises(ValueError):
+            release.verify_build("example/repo", "../123", "a" * 40)
 
     def test_existing_public_release_is_never_replaced(self):
         result = subprocess.CompletedProcess([], 0, '{"draft":false}', "")

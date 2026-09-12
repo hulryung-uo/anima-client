@@ -14,8 +14,8 @@ PLATFORMS = {"macos": ("aarch64-apple-darwin", "aarch64.dmg"),
              "windows": ("x86_64-pc-windows-msvc", "x64-setup.exe")}
 
 
-def git(*args):
-    return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
+def git(*args, root=ROOT):
+    return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
 
 
 def metadata(tag, root=ROOT):
@@ -30,10 +30,10 @@ def metadata(tag, root=ROOT):
     return {"tag": tag, "version": version, "notes": str(notes.relative_to(root))}
 
 
-def checked_metadata(tag):
-    data = metadata(tag)
-    head = git("rev-parse", "HEAD")
-    tagged = git("rev-parse", "refs/tags/" + tag + "^{commit}")
+def checked_metadata(tag, root=ROOT):
+    data = metadata(tag, root)
+    head = git("rev-parse", "HEAD", root=root)
+    tagged = git("rev-parse", "refs/tags/" + tag + "^{commit}", root=root)
     if head != tagged:
         raise ValueError("The checked-out commit does not match the requested release tag.")
     data["sha"] = head
@@ -101,10 +101,27 @@ def release_state(repository, tag):
     return release
 
 
-def prepare_draft(data, directory, repository):
+def verify_build(repository, run_id, commit):
+    if not re.fullmatch(r"[1-9][0-9]*", run_id):
+        raise ValueError("Choose a numeric release workflow run ID.")
+    endpoint = f"repos/{repository}/actions/runs/{run_id}"
+    run = json.loads(subprocess.check_output(["gh", "api", endpoint], text=True))
+    if run.get("head_sha") != commit or run.get("path") != ".github/workflows/release.yml" or run.get("status") != "completed":
+        raise ValueError("The completed release workflow must match the tagged source commit.")
+    jobs = json.loads(subprocess.check_output(["gh", "api", endpoint + "/jobs?per_page=100"], text=True))["jobs"]
+    required = {"Validate release tag and notes", "Bundle (macos)", "Bundle (windows)",
+                "Verify the release commit / Rust, WASM, and web quality gates",
+                "Verify the release commit / Desktop compile (macos-latest)",
+                "Verify the release commit / Desktop compile (windows-latest)"}
+    successful = {job["name"] for job in jobs if job["conclusion"] == "success"}
+    if not required.issubset(successful):
+        raise ValueError("Both builds and all quality gates must have passed before draft assembly can be retried.")
+
+
+def prepare_draft(data, directory, repository, source=None):
     manifests = verify_installers(data, directory)
     release = release_state(repository, data["tag"])
-    notes = (ROOT / data["notes"]).read_text(encoding="utf-8")
+    notes = ((source or ROOT) / data["notes"]).read_text(encoding="utf-8")
     title = notes.splitlines()[0].removeprefix("# ")
     notes += "\n## Build details\n\n"
     notes += f"Source commit: `{data['sha']}`. Both installers passed the shared quality gates.\n\n"
@@ -116,7 +133,10 @@ def prepare_draft(data, directory, repository):
     sums = directory / "SHA256SUMS.txt"
     sums.write_text("".join(f"{m['sha256']}  {m['file']}\n" for m in manifests), encoding="utf-8")
     if release is None:
-        command = ["gh", "release", "create", data["tag"], "--verify-tag", "--draft", "--target", data["sha"]]
+        # The tag already exists and was checked against the source commit.
+        # --target is unused for existing tags and may ask GitHub to authorize
+        # historical workflow changes unnecessarily. Never create/move a tag.
+        command = ["gh", "release", "create", data["tag"], "--verify-tag", "--draft"]
     else:
         command = ["gh", "release", "edit", data["tag"], "--draft"]
     subprocess.run(command + ["--repo", repository, "--title", title, "--notes-file", str(body)], check=True)
@@ -135,9 +155,13 @@ def main():
     parser.add_argument("--platform", choices=tuple(PLATFORMS))
     parser.add_argument("--signing")
     parser.add_argument("--directory", type=Path, default=ROOT / "release-dist")
+    parser.add_argument("--source", type=Path, default=ROOT, help="Checkout of the exact tagged source")
+    parser.add_argument("--build-run", help="Completed release run to verify when retrying draft assembly")
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", "hulryung-uo/anima-client"))
     args = parser.parse_args()
-    data = checked_metadata(args.tag)
+    data = checked_metadata(args.tag, args.source)
+    if args.build_run:
+        verify_build(args.repo, args.build_run, data["sha"])
     if args.action == "metadata":
         release_state(args.repo, args.tag)
         if os.environ.get("GITHUB_OUTPUT"):
@@ -148,9 +172,9 @@ def main():
     elif args.action == "collect":
         if not args.platform or not args.signing:
             parser.error("collect requires --platform and --signing")
-        print(json.dumps(collect(data, args.platform, args.signing, args.directory)))
+        print(json.dumps(collect(data, args.platform, args.signing, args.directory, args.source)))
     else:
-        prepare_draft(data, args.directory, args.repo)
+        prepare_draft(data, args.directory, args.repo, args.source)
 
 
 if __name__ == "__main__":
