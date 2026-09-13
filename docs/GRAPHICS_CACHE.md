@@ -72,8 +72,8 @@ Verified texture source SHA-256:
 These checks do not establish whole-client memory limits, stock-art visual
 correctness, Windows WebView behavior or long-session live-shard readiness.
 Decoded images, GPU allocations, in-flight/unloading resources and the visible
-working set add to retained-cache estimates. The separate light-shape cache and
-native graphics caches still need their own audit. The source is newer than the
+working set add to retained-cache estimates. The separate light-shape cache is covered below; native graphics caches and
+whole-process allocations still need their own audit. The source is newer than the
 v0.7.0 draft installers and needs a subsequent installer build and runtime checks.
 
 ## World-map disk cache isolation — 2026-09-13
@@ -100,5 +100,32 @@ returned actual exit 0; log: `/tmp/anima-worldmap-cache-gate.log`. The renderer'
 map pixels and map-data parsing were not changed. Fingerprinting uses metadata;
 changes that deliberately preserve both file size and modification time are not
 detected. This is not a full content-hash or live shard-map patch cache. These
-changes postdate v0.8.1 and require a later installer. Platform CI remains to be
-checked for the new cache tests.
+changes postdate v0.8.1 and require a later installer. CI run 34729855987 passed all Linux, macOS and Windows jobs for the
+world-map cache repair (`661d4b5`), including the new native cache tests.
+
+
+## Retryable, bounded light masks — 2026-09-13
+
+Previously an image error installed a permanent null record, so a temporary
+failure kept that light on the generic radial fallback until app reload. Colour
+variants also accumulated without a retention or load-admission limit.
+
+The canvas mask cache now tracks at most 256 variants and eight active image
+loads. Failed requests retry when the shape is needed, with 2–60 second backoff.
+A five-second deadline removes the image source, releases its slot and ignores
+late callbacks. Invalid IDs/colours are refused before requesting an image.
+Successful images have a 16 MiB estimated RGBA retention budget, with a one-second
+grace for freshly loaded or currently drawn masks. Cold entries release their
+image sources; the normal graphics sweep also drains excess retention when the
+scene stops drawing lights. An individual decoded image above 16 MiB is rejected.
+
+The byte budget is soft while the visible/fresh working set exceeds it; this is
+not a browser-native decoder, network or whole-process memory ceiling. The
+existing radial fallback remains available during loading, admission pressure
+or failures. Native light-file allocation bounds and actual stock-mask visuals
+remain separate audit items.
+
+Six deterministic tests cover error/recovery, admission/deadlines/late callbacks,
+cold versus recently used variants, byte pressure, invalid/oversized images and
+idle-scene cleanup. The ordinary lighting composition tests also pass. No UI
+automation or live-shard connection was used for this repair.

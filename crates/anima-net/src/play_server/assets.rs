@@ -461,8 +461,8 @@ pub(super) fn parse_light_url(url: &str) -> Option<u32> {
 }
 
 /// Serve one `light.mul` shape as a white PNG whose alpha is the intensity.
-/// Uncached on purpose: there are at most a hundred of these, each a few
-/// hundred bytes, and the renderer fetches each one once per session.
+/// Native responses are uncached. The renderer retains a bounded set of decoded
+/// shape/colour variants and retries failed loads.
 pub(super) fn serve_light(
     lights: &Option<Arc<Lights>>,
     id: u32,

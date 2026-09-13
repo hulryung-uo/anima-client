@@ -76,6 +76,7 @@ async function loadTexture(url) {
 // An on-stage reference wins over age and budget, even when touch bookkeeping
 // missed it. Destroying one freezes Pixi's render path (null alphaMode).
 function sweepTexCache() {
+  trimLightShapes();
   if (texCache.size <= TEX_BUDGET && texBytes <= TEX_BYTES) return;
   const now = performance.now();
   if (now - lastTexSweep < TEX_SWEEP_MS) return;
@@ -341,22 +342,62 @@ function centerFor(body, group, dir, frame) {
 // tiledata Quality byte; the server decodes light.mul and serves them as white
 // PNGs whose alpha is the intensity (see anima-assets `lights.rs`). Fetched as
 // plain <img> rather than through the PIXI texture cache: the night overlay is a
-// 2D canvas, not a PIXI layer, and there are at most a hundred of them.
+// 2D canvas, not a PIXI layer. Colour variants are cached separately.
 // Keyed by "<id>/<colour>": a coloured light is the same mask with ClassicUO's
 // intensity ramp for that colour baked into the RGB, which the server does
 // (anima-assets `light_colored`) because it owns the curve tables.
-const lightShapes = new Map();   // key -> HTMLImageElement | null (null = 404, don't retry)
+const lightShapes = new Map();
+const LIGHT_SHAPE_LIMIT = 256, LIGHT_SHAPE_BYTES = 16 * 1024 * 1024, LIGHT_SHAPE_LOADS = 8;
+let lightShapeBytes = 0, lightShapeLoads = 0;
+function trimLightShapes(reserve = 0) {
+  const now = performance.now();
+  // Calls touch entries in draw order. Keep this frame's masks alive for the
+  // later additive pass, and give newly decoded shapes a frame to be used.
+  for (const [key, entry] of lightShapes) {
+    if (lightShapes.size + reserve <= LIGHT_SHAPE_LIMIT && lightShapeBytes <= LIGHT_SHAPE_BYTES) break;
+    if (entry.loading || now - entry.at < 1000) continue;
+    lightShapes.delete(key); lightShapeBytes -= entry.bytes;
+    entry.img?.removeAttribute("src");
+  }
+}
 function lightShape(id, color) {
   if (id == null) return null;
-  id = id | 0; color = color | 0;
-  const key = `${id}/${color}`;
-  if (lightShapes.has(key)) {
-    const img = lightShapes.get(key);
-    return img && img.complete && img.naturalWidth ? img : null;
+  color = color == null ? 0 : color;
+  if (!Number.isInteger(id) || id < 0 || id >= 100 || !Number.isInteger(color) || color < 0 || color > 65535) return null;
+  const now = performance.now(), key = `${id}/${color}`;
+  let entry = lightShapes.get(key);
+  if (entry) {
+    entry.at = now; lightShapes.delete(key); lightShapes.set(key, entry);
+    trimLightShapes();
+    if (entry.loading) return null;
+    if (entry.img) return entry.img;
+    if (now < entry.retryAt) return null;
+  }
+  if (lightShapeLoads >= LIGHT_SHAPE_LOADS) return null;
+  if (!entry) {
+    trimLightShapes(1);
+    if (lightShapes.size >= LIGHT_SHAPE_LIMIT) return null;
+    entry = { img: null, bytes: 0, at: now, retryAt: 0, failures: 0, loading: false };
+    lightShapes.set(key, entry);
   }
   const img = new Image();
-  img.onerror = () => lightShapes.set(key, null);
+  entry.img = img; entry.loading = true; lightShapeLoads++;
+  let timer;
+  const finish = success => {
+    if (!entry.loading || entry.img !== img) return;
+    clearTimeout(timer); img.onload = null; img.onerror = null;
+    entry.loading = false; lightShapeLoads--;
+    const bytes = img.naturalWidth * img.naturalHeight * 4;
+    if (success && Number.isFinite(bytes) && bytes > 0 && bytes <= LIGHT_SHAPE_BYTES) {
+      entry.bytes = bytes; lightShapeBytes += bytes; entry.failures = 0; entry.at = performance.now();
+    } else {
+      entry.img = null; img.removeAttribute("src");
+      entry.failures++; entry.retryAt = performance.now() + Math.min(60000, 2000 * 2 ** Math.min(entry.failures - 1, 5));
+    }
+    trimLightShapes();
+  };
+  img.onload = () => finish(true); img.onerror = () => finish(false);
+  timer = setTimeout(() => finish(false), 5000);
   img.src = `light/${id}.png` + (color ? `?c=${color}` : "");
-  lightShapes.set(key, img);
-  return null;   // next frame, once it has decoded
+  return null;
 }

@@ -255,3 +255,39 @@ the complete local quality gate passed with actual exit 0 (355 renderer tests /
 1757 assertions, 23 tooling tests, native/WASM/desktop checks). See
 GRAPHICS_CACHE.md for scope and limits. Like the browser account-cache binding
 repair, it is absent from immutable v0.8.1; no tag was moved.
+
+## Installed macOS v0.8.1 startup — 2026-09-13
+
+CUA launched the exact notarized application copied from the downloaded DMG at
+`target/installers/v0.8.1/installed/Anima.app` (PID 46090, loopback port 8190).
+The actual native webview reached the simplified login screen with folded server
+and account management, an account-name/password form and Connect. The served
+`js/04-launcher.js` matched `git show v0.8.1:web/js/04-launcher.js` byte-for-byte.
+This advances installed-app startup evidence beyond mount/signature checks.
+
+This launch used the standard `dev.anima.client` configuration, not the earlier
+isolated Worlds QA identity. Subsequent CUA actions twice reported other app
+input. The later screen contained a cached manual server probe and a refused
+connection; the profile hash also changed. Those actions were not controlled
+acceptance tests and are not attributed to this check. Automation stopped and
+the app was left running. Saving-choice confirmation, keyboard Enter behavior,
+restart persistence and live gameplay in this installed build remain unverified.
+No saved password was retrieved. Evidence index:
+`/tmp/anima-v081-native-login.json`.
+
+## Light-mask recovery and retention — 2026-09-13
+
+The canvas light-shape loader no longer stores permanent failure records. It
+retries with backoff, cancels stalled image sources after five seconds and ignores
+late callbacks. Admission is capped at eight active image loads; retention uses
+256 variants and a soft 16 MiB RGBA budget that protects recently drawn masks.
+The regular graphics sweep handles idle-scene pressure. See GRAPHICS_CACHE.md
+for the fallback behavior and remaining native/whole-process limits.
+
+Six new regressions and the existing lighting/texture tests passed. The complete
+local gate returned actual exit 0: 361 renderer tests / 1791 assertions, 23 Python
+tooling tests, native/WASM checks and the usual desktop tests. Log:
+`/tmp/anima-light-shapes-final-gate.log`. The existing native app was left alone.
+CI 34729855987 independently passed all three platform jobs for the preceding
+world-map cache repair (`661d4b5`). Light-mask changes require their own platform
+CI and a subsequent installer; immutable v0.8.1 does not contain them.
