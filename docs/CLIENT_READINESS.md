@@ -197,3 +197,32 @@ closed afterward; evidence index: `/tmp/anima-fast-login-qa.json`. This is brows
 source-UI evidence, not installed-native or live-account verification. Version
 0.8.1 includes this clarified flow; its tag had not been created before these
 changes, so no existing release tag was moved.
+
+## One-time login and character-cache binding — 2026-09-13
+
+A real loopback HTTP regression now covers native login admission with a
+persistent disposable profile file and an instrumented fixture vault. With a
+null account reference, both typed and empty passwords pass through unchanged
+and the other endpoint's saved password is never read. With a saved reference,
+the native process binds the stored endpoint; a temporary typed password does
+not replace its stored secret. Blank input resolves that original secret.
+All four requests leave the profile file byte-for-byte unchanged and perform
+zero vault writes. The game connection loop is never started, so this is HTTP
+admission/resolution evidence, not live authentication or actual OS-vault UI.
+
+The equivalent renderer audit reproduced a browser-only defect: editing the
+username and declining storage could cache the new account's characters under
+the previously selected saved account. Browser caching now captures the actual
+login binding (account, endpoint and relay) and verifies it against the latest
+stored library before writing. One-time accounts/changed relays have no saved
+binding. Concurrent notes are preserved; changed endpoints and corrupt originals
+are not overwritten. Four browser regressions cover these cases, including the
+observed pre-fix failure.
+
+The complete local gate returned actual exit 0 (355 renderer tests / 1757
+assertions, 23 Python tooling tests, native/WASM/desktop checks) with the new
+native HTTP test included. Log: `/tmp/anima-login-cache-binding-gate.log`.
+These browser-cache source changes postdate immutable v0.8.1 (`f5ccd24`); its
+installer build must not be described as containing them. No release tag was
+moved and no public release was published. Native installed-app spot checks and
+live-shard acceptance remain outstanding.

@@ -280,3 +280,55 @@ test("an incoming character session dismisses a pending save choice without writ
   eq(await pending, null); ok(!el("lg-save-prompt").open);
   eq(calls.filter(c => c.init.body).length, 0);
 });
+
+async function browserLoginSetup() {
+  const ctx = newContext({ href: "http://127.0.0.1:8090/?wasm=1" });
+  ctx.mountPage(); ctx.load("00-state.js", "04-launcher.js");
+  const state = profiles();
+  state.servers.forEach(s => { s.relay = "ws://127.0.0.1:2595/relay?target=" + s.id; });
+  state.accounts.forEach(a => { a.remember_password = false; });
+  ctx.localStorage.setItem("anima.launcher.browser.v1", JSON.stringify({ version: 1, servers: state.servers, accounts: state.accounts }));
+  ctx.localStorage.setItem("anima.launcher.selection.v1", JSON.stringify({ server: "one", accounts: { one: "a" } }));
+  ctx.run("initLauncher()"); await ctx.run("launcherInitPromise");
+  return { ctx, el: id => ctx.document.getElementById(id), saved: () => ctx.localStorage.getItem("anima.launcher.browser.v1") };
+}
+
+test("one-time browser login cannot cache new characters under the previously selected account", async () => {
+  const { ctx, el, saved } = await browserLoginSetup(); const before = saved();
+  el("lg-user").value = "temporary-account";
+  const pending = ctx.run("launcherPrepareLogin()"); await ctx.flush(); el("lg-connect-once").click(); await pending;
+  ctx.run('launcherOnAuth("connecting"); launcherOnAuth("characters", [{index:0,name:"Different account hero"}])');
+  eq(saved(), before);
+});
+
+test("browser character caching follows the login binding and preserves concurrent profile edits", async () => {
+  const { ctx, saved } = await browserLoginSetup();
+  await ctx.run("launcherPrepareLogin()");
+  const latest = JSON.parse(saved()); latest.servers[1].notes = "Changed in another window";
+  ctx.localStorage.setItem("anima.launcher.browser.v1", JSON.stringify(latest));
+  ctx.run('launcherSelectServer("two"); launcherOnAuth("characters", [{index:0,name:"Home hero"}])');
+  const updated = JSON.parse(saved());
+  deepEq(updated.accounts.find(a => a.id === "a").characters, [{index:0,name:"Home hero"}]);
+  deepEq(updated.accounts.find(a => a.id === "b").characters, []);
+  eq(updated.servers[1].notes, "Changed in another window");
+});
+
+test("a changed browser relay cannot reuse the saved account's character-cache binding", async () => {
+  const { ctx, el, saved } = await browserLoginSetup(); const before = saved();
+  el("lg-relay").value = "ws://127.0.0.1:2595/relay?target=other";
+  const pending = ctx.run("launcherPrepareLogin()"); await ctx.flush(); el("lg-connect-once").click(); await pending;
+  ctx.run('launcherOnAuth("characters", [{index:0,name:"Other world hero"}])');
+  eq(saved(), before);
+});
+
+test("late browser characters do not overwrite a changed endpoint or corrupt profile file", async () => {
+  for (const corrupt of [false, true]) {
+    const { ctx, saved } = await browserLoginSetup(); await ctx.run("launcherPrepareLogin()");
+    const latest = JSON.parse(saved()); latest.servers[0].port = 2600;
+    const original = corrupt ? "broken in another window" : JSON.stringify(latest);
+    ctx.localStorage.setItem("anima.launcher.browser.v1", original);
+    ctx.run('launcherOnAuth("characters", [{index:0,name:"Stale hero"}])');
+    eq(saved(), original);
+    if (corrupt) ok(ctx.run("launcherRecoverable"));
+  }
+});

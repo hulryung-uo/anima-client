@@ -8,6 +8,7 @@ let launcherInitPromise = null, launcherAuthKey = "";
 let launcherSelection = { server: "", accounts: {} };
 let launcherRecoverable = false, launcherWorldsPreview = null, launcherFileGeneration = 0, launcherDownloadUrl = null;
 let launcherCancelSavePrompt = null;
+let launcherLoginBinding = null;
 const LAUNCHER_BACKUP_LIMIT = 1024 * 1024;
 const launcherEl = id => document.getElementById(id);
 const launcherText = (id, text) => { const el = launcherEl(id); if (el) el.textContent = text; };
@@ -217,13 +218,15 @@ async function launcherAction(action, message) {
   finally { launcherSetBusy(false); }
 }
 async function launcherPrepareLogin() {
+  launcherLoginBinding = null;
   if (launcherInitPromise) await launcherInitPromise;
   if (!launcherReady) throw new Error("Profiles are not available. Reopen Anima before connecting.");
   launcherSetBusy(true);
   try {
     const form = launcherServerForm(), credentials = launcherAccountCredentials();
     const server = launcherServer(), account = launcherAccount();
-    const matching = server && account && launcherMatchesServer(server) && account.username === credentials.username;
+    const matching = server && account && launcherMatchesServer(server) && account.username === credentials.username
+      && (server.relay || "") === (form.relay || "");
     const remember = !!launcherEl("lg-save-password").checked;
     const changed = !matching || server.name !== form.name || server.notes !== form.notes || (server.relay || "") !== (form.relay || "")
       || account.label !== (launcherValue("lg-account-label") || credentials.username) || account.remember_password !== remember
@@ -235,6 +238,8 @@ async function launcherPrepareLogin() {
       save = choice;
     }
     if (save) await launcherSaveAccount();
+    if (WASM_MODE && (save || matching)) launcherLoginBinding = { account: launcherAccountId, server: launcherServerId,
+      host: form.host, port: form.port, shard: form.shard, relay: form.relay, username: credentials.username };
     return { account_id: !WASM_MODE && (save || matching) ? launcherAccountId : null,
       host: form.host, port: form.port, shard: form.shard, ...credentials };
   } finally { launcherSetBusy(false); }
@@ -275,16 +280,22 @@ function launcherOnAuth(auth, slots) {
   launcherSetBusy(launcherWorking);
   if (auth !== "characters") { if (auth === "login" || auth === "error") launcherAuthKey = ""; return; }
   launcherEl("lg-pass").value = "";
-  const key = launcherAccountId + JSON.stringify(slots || []);
+  const key = JSON.stringify([WASM_MODE ? launcherLoginBinding : launcherAccountId, slots || []]);
   if (!launcherReady || key === launcherAuthKey) return;
   launcherAuthKey = key;
   if (WASM_MODE) {
-    const account = launcherAccount();
-    if (account) {
+    const binding = launcherLoginBinding;
+    if (!binding) return;
+    try {
+      // Read the latest library so another window's edits or recovery are not
+      // overwritten by a character response from this connection.
+      const data = launcherCurrentBrowser();
+      const account = data.accounts.find(a => a.id === binding.account && a.server_id === binding.server && a.username === binding.username);
+      const server = data.servers.find(s => s.id === binding.server);
+      if (!account || !server || server.host !== binding.host || server.port !== binding.port || server.shard !== binding.shard || server.relay !== binding.relay) return;
       account.characters = (slots || []).map(s => ({ index: s.index, name: s.name })); account.last_used = Date.now();
-      try { localStorage.setItem(LAUNCHER_BROWSER_KEY, JSON.stringify({ version: 1, servers: launcherData.servers, accounts: launcherData.accounts })); } catch (_) {}
-      launcherRenderInfo();
-    }
+      launcherWriteBrowser(data); launcherData = data; launcherRenderInfo();
+    } catch (error) { launcherText("lg-profile-msg", error.message); launcherSetBusy(launcherWorking); }
   } else {
     launcherRequest().then(data => { launcherData = data; launcherRenderInfo(); }).catch(e => launcherText("lg-profile-msg", e.message));
   }

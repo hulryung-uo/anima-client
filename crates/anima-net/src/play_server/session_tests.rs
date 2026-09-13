@@ -197,3 +197,92 @@ fn http_rejects_stale_session_input_and_character_actions() {
     );
     assert!(current.is_cancelled());
 }
+
+#[test]
+fn http_one_time_login_never_saves_or_borrows_another_endpoints_password() {
+    use crate::launcher::PasswordVault;
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct Vault {
+        values: Mutex<HashMap<String, String>>,
+        reads: AtomicU64,
+        writes: AtomicU64,
+    }
+    impl PasswordVault for Vault {
+        fn get(&self, key: &str) -> Result<Option<String>, String> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            Ok(self.values.lock().unwrap().get(key).cloned())
+        }
+        fn set(&self, key: &str, value: &str) -> Result<(), String> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            self.values.lock().unwrap().insert(key.into(), value.into());
+            Ok(())
+        }
+        fn delete(&self, key: &str) -> Result<(), String> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            self.values.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+    let directory = std::env::temp_dir().join(crate::connection::fresh_context_id());
+    std::fs::create_dir(&directory).unwrap();
+    let file = directory.join("launcher.json");
+    let vault = Arc::new(Vault::default());
+    let launcher = Arc::new(LauncherStore::open(file.clone(), Some(vault.clone())).unwrap());
+    launcher.command(&serde_json::json!({"op":"save_server","id":"world","name":"Fixture","host":"127.0.0.1","port":25111,"shard":0,"notes":""})).unwrap();
+    launcher.command(&serde_json::json!({"op":"save_account","id":"saved","server_id":"world","label":"Fixture","username":"player","password":"stored-fixture-secret","remember_password":true})).unwrap();
+    let before = std::fs::read(&file).unwrap();
+    let writes = vault.writes.load(Ordering::Relaxed);
+    vault.reads.store(0, Ordering::Relaxed);
+    let server = bind_with_launcher(
+        PlayConfig {
+            host: "127.0.0.1".into(),
+            port: 1,
+            user: String::new(),
+            pass: String::new(),
+            shard: 0,
+            http_port: 0,
+            web_dir: None,
+            data_dir: directory.clone(),
+            login_page: true,
+            bind_addr: "127.0.0.1".into(),
+            read_only: false,
+        },
+        launcher.clone(),
+    )
+    .unwrap(); // Only HTTP admission is running; no shard is contacted.
+
+    for (id, typed, expected_port, expected_password, reads) in [
+        (None, "one-time-fixture", 25112, "one-time-fixture", 0),
+        (None, "", 25112, "", 0),
+        (
+            Some("saved"),
+            "temporary-fixture",
+            25111,
+            "temporary-fixture",
+            0,
+        ),
+        (Some("saved"), "", 25111, "stored-fixture-secret", 1),
+    ] {
+        *server.scene.lock().unwrap() = serde_json::json!({"auth":"login"}).to_string();
+        let body = serde_json::json!({"account_id":id,"host":"127.0.0.1","port":25112,"shard":0,"username":"player","password":typed,"interactive":true}).to_string();
+        assert_eq!(
+            request(&server, "/login", "X-Anima-Launcher: 1\r\n", &body),
+            200
+        );
+        let (attempt, _) = server.login_rx.try_recv().unwrap();
+        assert_eq!(attempt.account_id.as_deref(), id);
+        assert_eq!(attempt.port, expected_port);
+        assert_eq!(attempt.username, "player");
+        assert_eq!(attempt.password, expected_password);
+        assert_eq!(vault.reads.load(Ordering::Relaxed), reads);
+        assert_eq!(vault.writes.load(Ordering::Relaxed), writes);
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+    }
+    assert_eq!(
+        launcher.resolve_login("saved", "").unwrap().password,
+        "stored-fixture-secret"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
