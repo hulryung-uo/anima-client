@@ -226,3 +226,32 @@ These browser-cache source changes postdate immutable v0.8.1 (`f5ccd24`); its
 installer build must not be described as containing them. No release tag was
 moved and no public release was published. Native installed-app spot checks and
 live-shard acceptance remain outstanding.
+
+## v0.8.1 installer verification and world-map cache repair
+
+Release run `34729212934` completed successfully for v0.8.1 source
+`f5ccd248be1d9f85ca31c63f010d83ee6163616b`, including both installer checks.
+Both actual draft installers were downloaded to `target/installers/v0.8.1` and
+verified locally against their tagged source, file lengths and SHA-256 manifests:
+
+| Asset | Bytes | SHA-256 | Signing |
+| --- | ---: | --- | --- |
+| Anima_0.8.1_aarch64.dmg | 5090221 | e5189922be8f5fb7708db1b78d7b793a6f186a351d764f8fd81c318e11303afc | notarized |
+| Anima_0.8.1_x64-setup.exe | 3382240 | 9cc443e5557a5718f71b41619587dded9d268aafcc8d08955c8b432b73b3534a | unsigned |
+
+The downloaded DMG also passed local image verification, read-only mounting and
+copying to an isolated installation folder. The copied app passed strict code
+signature validation, arm64/version checks, stapled-ticket validation and
+Gatekeeper acceptance. The image was detached afterward. No app UI was launched.
+Evidence: `/tmp/anima-v081-downloaded-manifests.json` and
+`/tmp/anima-v081-installed-copy.json`. Windows installation/uninstallation passed
+on its CI runner, not on this Mac. Interactive installed-app/gameplay checks
+remain open. This draft was not published.
+
+The subsequent native world-map repair separates cached maps by resource folder,
+invalidates source metadata changes, rejects damaged/oversized payloads, and
+uses unique atomic staging for concurrent writers. Six native regressions and
+the complete local quality gate passed with actual exit 0 (355 renderer tests /
+1757 assertions, 23 tooling tests, native/WASM/desktop checks). See
+GRAPHICS_CACHE.md for scope and limits. Like the browser account-cache binding
+repair, it is absent from immutable v0.8.1; no tag was moved.

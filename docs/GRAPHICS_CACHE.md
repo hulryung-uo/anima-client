@@ -75,3 +75,30 @@ Decoded images, GPU allocations, in-flight/unloading resources and the visible
 working set add to retained-cache estimates. The separate light-shape cache and
 native graphics caches still need their own audit. The source is newer than the
 v0.7.0 draft installers and needs a subsequent installer build and runtime checks.
+
+## World-map disk cache isolation — 2026-09-13
+
+The old world-map path was one global `anima-worldmap0-s1.png` under the system
+temporary directory. It accepted any readable bytes and did not identify the
+selected game-data folder. Switching resource packages could therefore reuse
+another package's map; a damaged cache could persist indefinitely.
+
+The native cache now uses one versioned slot per canonical resource directory
+and renderer step. Its source fingerprint includes file sizes and modification
+times for the map UOP, statics/index, tiledata, radar colours and optional map-diff
+files. A missing required file disables reuse. Rendering that overlaps a source
+change does not publish an outdated cache entry. Payload length and checksum
+validation reject truncated or changed records; reads are capped at 128 MiB.
+Unique staging names and atomic replacement support concurrent writers in the
+same process or different processes. Cache failures still allow the fresh image
+to be displayed. The old shared cache is ignored and left untouched.
+
+Six tests cover directory/step isolation, all source-file changes, same-length
+modification-time changes, missing files and changes during rendering, corrupt/
+truncated/oversized records, and eight concurrent writers. `scripts/check.sh`
+returned actual exit 0; log: `/tmp/anima-worldmap-cache-gate.log`. The renderer's
+map pixels and map-data parsing were not changed. Fingerprinting uses metadata;
+changes that deliberately preserve both file size and modification time are not
+detected. This is not a full content-hash or live shard-map patch cache. These
+changes postdate v0.8.1 and require a later installer. Platform CI remains to be
+checked for the new cache tests.

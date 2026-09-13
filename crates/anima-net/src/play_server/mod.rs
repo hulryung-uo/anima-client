@@ -63,6 +63,7 @@ mod input;
 mod login;
 #[cfg(test)]
 mod session_tests;
+mod worldmap_cache;
 use assets::*;
 use autowalk::*;
 use commands::*;
@@ -315,11 +316,9 @@ pub fn bind_with_launcher(cfg: PlayConfig, launcher: Arc<LauncherStore>) -> io::
     let worldmap: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
     {
         let (slot, ddir) = (worldmap.clone(), data_dir.clone());
-        // Cache the rendered PNG to disk so the (multi-second) render only happens
-        // once ever, not on every restart. Step is in the name → bumping it rebuilds.
-        let cache = std::env::temp_dir().join(format!("anima-worldmap0-s{WORLDMAP_STEP}.png"));
         thread::spawn(move || {
-            if let Ok(bytes) = std::fs::read(&cache) {
+            let cache = worldmap_cache::WorldmapCache::for_resources(&ddir, WORLDMAP_STEP).ok();
+            if let Some(bytes) = cache.as_ref().and_then(worldmap_cache::WorldmapCache::read) {
                 eprintln!("play: worldmap from cache ({} KB)", bytes.len() / 1024);
                 *slot.lock().unwrap() = Some(bytes);
                 return;
@@ -327,18 +326,9 @@ pub fn bind_with_launcher(cfg: PlayConfig, launcher: Arc<LauncherStore>) -> io::
             if let (Ok(mut m), Ok(rc)) = (MapData::open(&ddir), RadarCol::open(&ddir)) {
                 let png = render_worldmap(&mut m, &rc, WORLDMAP_STEP);
                 eprintln!("play: worldmap ready ({} KB)", png.len() / 1024);
-                // Write-then-rename: two clients (a desktop app and a `play` bin,
-                // or two desktop copies) share this one path under `temp_dir`, and
-                // a plain `write` truncates first — interleave two of them and
-                // every later run reads back a half-PNG that never repairs itself,
-                // because the cache-hit branch above only checks that the file
-                // exists. The temp name carries the pid so the writers can't
-                // collide before the (atomic) rename.
-                let staging = cache.with_extension(format!("{}.part", std::process::id()));
-                if std::fs::write(&staging, &png).is_ok()
-                    && std::fs::rename(&staging, &cache).is_err()
-                {
-                    let _ = std::fs::remove_file(&staging);
+                if let Some(cache) = cache {
+                    // Cache failure never prevents displaying the freshly rendered map.
+                    let _ = cache.write_if_current(&ddir, WORLDMAP_STEP, &png);
                 }
                 *slot.lock().unwrap() = Some(png);
             }
