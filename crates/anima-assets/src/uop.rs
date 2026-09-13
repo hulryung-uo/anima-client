@@ -11,7 +11,7 @@
 //! `AnimationFrame{1..4}.uop` set used by [`crate::anim`]'s UOP animation
 //! path, ~509MB combined).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -142,10 +142,17 @@ fn parse_uop_table<R: Read + Seek>(r: &mut R) -> std::io::Result<(HashMap<u64, E
 
     let mut entries = HashMap::new();
     let mut order = Vec::new();
+    let mut visited = HashSet::new();
     // A malformed/absent next block (bad pointer, truncated file) just fails
     // the `read_exact` below and we stop, same as the old bounds check against
     // `data.len()` on the in-memory reader.
     while next_block != 0 {
+        if next_block < 0 || !visited.insert(next_block) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "uop: invalid or cyclic directory block address",
+            ));
+        }
         if r.seek(SeekFrom::Start(next_block as u64)).is_err() {
             break;
         }
@@ -188,7 +195,7 @@ fn parse_uop_table<R: Read + Seek>(r: &mut R) -> std::io::Result<(HashMap<u64, E
         }
         for i in 0..count as usize {
             let o = i * 34;
-            let offset = i64::from_le_bytes(rec[o..o + 8].try_into().unwrap()) as usize;
+            let offset = i64::from_le_bytes(rec[o..o + 8].try_into().unwrap());
             let header_len = u32::from_le_bytes(rec[o + 8..o + 12].try_into().unwrap()) as usize;
             let compressed = u32::from_le_bytes(rec[o + 12..o + 16].try_into().unwrap()) as usize;
             let decompressed = u32::from_le_bytes(rec[o + 16..o + 20].try_into().unwrap()) as usize;
@@ -198,11 +205,23 @@ fn parse_uop_table<R: Read + Seek>(r: &mut R) -> std::io::Result<(HashMap<u64, E
             if offset == 0 || compressed == 0 {
                 continue;
             }
+            let offset = usize::try_from(offset).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "uop: invalid entry address",
+                )
+            })?;
+            let offset = offset.checked_add(header_len).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "uop: entry header address overflow",
+                )
+            })?;
             order.push(file_hash);
             entries.insert(
                 file_hash,
                 Entry {
-                    offset: offset + header_len,
+                    offset,
                     compressed_size: compressed,
                     decompressed_size: decompressed,
                     compression,
@@ -574,6 +593,79 @@ pub(crate) mod tests {
         let mut cursor = std::io::Cursor::new(&buf);
         let err = parse_uop_table(&mut cursor).expect_err("bogus count must be rejected");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    // Bound even the old broken parser in cycle regressions: exhausting this
+    // fixture's reads makes that parser return an incorrect successful prefix,
+    // rather than letting a regression hang the entire test process.
+    struct ReadBudget {
+        cursor: std::io::Cursor<Vec<u8>>,
+        remaining: usize,
+    }
+    impl Read for ReadBudget {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(std::io::Error::other("fixture read budget exceeded"));
+            }
+            self.remaining -= 1;
+            self.cursor.read(bytes)
+        }
+    }
+    impl Seek for ReadBudget {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.cursor.seek(position)
+        }
+    }
+
+    #[test]
+    fn cyclic_directory_chains_fail_instead_of_returning_or_looping_on_a_prefix() {
+        let mut populated = build_single_entry_uop("fixture", b"pixels");
+        populated[24..32].copy_from_slice(&20i64.to_le_bytes());
+        let mut empty = populated[..20].to_vec();
+        empty.extend_from_slice(&0i32.to_le_bytes());
+        empty.extend_from_slice(&32i64.to_le_bytes());
+        empty.extend_from_slice(&0i32.to_le_bytes());
+        empty.extend_from_slice(&20i64.to_le_bytes());
+        for data in [populated, empty] {
+            let mut input = ReadBudget {
+                cursor: std::io::Cursor::new(data),
+                remaining: 8,
+            };
+            let error = parse_uop_table(&mut input).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("cyclic"));
+            assert!(
+                input.remaining > 0,
+                "cycle detection must precede the fixture's read limit"
+            );
+        }
+    }
+    #[test]
+    fn negative_directory_and_payload_addresses_are_rejected_but_empty_records_are_ignored() {
+        let original = build_single_entry_uop("fixture", b"pixels");
+        for field in [12, 32] {
+            let mut data = original.clone();
+            data[field..field + 8].copy_from_slice(&(-1i64).to_le_bytes());
+            let error = UopReader::from_bytes(data).err().unwrap();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        }
+        let mut empty = original;
+        empty[32..40].copy_from_slice(&(-1i64).to_le_bytes());
+        empty[44..48].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(UopReader::from_bytes(empty).unwrap().entry_count(), 0);
+    }
+    #[test]
+    fn multiple_directory_blocks_keep_file_order_and_original_payloads() {
+        let mut data = build_single_entry_uop("first", b"one");
+        let next = data.len() as i64;
+        data[24..32].copy_from_slice(&next.to_le_bytes());
+        let mut second = build_single_entry_uop("second", b"two");
+        second[32..40].copy_from_slice(&(next + 46).to_le_bytes());
+        data.extend_from_slice(&second[20..]);
+        let reader = UopReader::from_bytes(data).unwrap();
+        assert_eq!(reader.order, [uop_hash("first"), uop_hash("second")]);
+        assert_eq!(reader.by_hash(uop_hash("first")).unwrap(), b"one");
+        assert_eq!(reader.by_hash(uop_hash("second")).unwrap(), b"two");
     }
 
     #[test]

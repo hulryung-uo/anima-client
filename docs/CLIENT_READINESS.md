@@ -352,3 +352,19 @@ execution record in [INSTALLER_ACCEPTANCE.md](INSTALLER_ACCEPTANCE.md). A playab
 shard and test account have been requested from the user; the last controlled
 local probe was connection refused. Public v0.6.0 is unchanged. Installer
 availability is not a claim that the overall client goal is complete.
+
+### UOP directory parsing after v0.8.2
+
+The shared eager/lazy UOP directory parser now rejects cyclic block chains and
+negative directory or active payload addresses. Payload header addition is
+checked before storing the entry. Unused records retain their existing skip
+behavior. This prevents malformed game data from keeping directory traversal
+running indefinitely; it does not change normal multi-block file ordering.
+
+Three regression tests cover populated and empty cycles with a bounded fixture,
+invalid addresses, ignored empty entries, and valid multi-block payloads. All
+nine non-ignored UOP tests passed, and the existing real-file eager/lazy comparison
+passed explicitly. The full `bash scripts/check.sh` gate exited successfully;
+logs are `/tmp/anima-uop-directory-gate.log` and
+`/tmp/anima-uop-real-test.log`. This source change is newer than the immutable
+v0.8.2 installers and does not close the outstanding interactive acceptance.
