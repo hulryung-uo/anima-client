@@ -619,3 +619,29 @@ and correctly rejected its console payload. `cargo fmt --all -- --check` and
 `/tmp/anima-windows-gui-check.log`. A new Windows release build and interactive
 launch still need verification; the installed v0.8.3 binary is unchanged.
 The console finding is independent of the automation-input limitation.
+
+
+## User-confirmed Windows live entry and v0.8.4 candidate
+
+The user authorized replacing the old Windows VM. A fresh Windows 11 ARM64 VM
+named Anima2 now runs with 4 vCPUs, 6 GiB RAM and Parallels Tools 27.0.1. The
+previous Windows VM was deleted as requested; ubuntu-can was preserved.
+The v0.8.3 installer hash matched its manifest and installed with exit 0.
+Parallels `send-key-event --key` provided working guest keyboard input, removing
+the earlier host-input blocker. The installed setup accepted `\\mac\uodata`
+through a narrowly scoped read-only game-data share and reached login.
+The temporary installer share was removed afterward.
+
+The old source QA session was logged out, and the Windows installed app logged
+in to ServUO at 10.211.55.2:2594 with the existing dedicated test account.
+It received Anima QA in slot 0 and entered serial 1662 at 1603,1591,20 with
+72/72 HP. A real VM screenshot showed terrain, the character, status and welcome
+journal; the user explicitly confirmed it worked. The session was left open.
+This establishes installed Windows live entry under ARM64 emulation, not every
+interactive acceptance row. The full local gate at 03bf49a completed with exit 0
+(`/tmp/anima-v084-candidate-gate.log`), and CI 34742567260 passed all platforms.
+
+v0.8.4 packages the subsequent login-error and Windows GUI-subsystem fixes.
+The user authorized committing and releasing as appropriate. It is intended
+as a public prerelease with the remaining acceptance limits stated in its notes;
+actual v0.8.4 installer validation is still required before publication.
