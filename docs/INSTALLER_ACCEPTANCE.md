@@ -104,3 +104,21 @@ The test also found a defect: switching back to another saved server kept showin
 the previous fixture's login error. Source after v0.8.3 now associates errors with
 the submitted destination/account and hides them when the form selects another
 one. The immutable v0.8.3 installers still contain the observed display defect.
+
+
+## Windows environment availability probe
+
+The existing Parallels Windows 11 VM was initially suspended. It resumed
+successfully and guest command execution reported Windows 11 Pro ARM64,
+build 26200.9445. The guest could read the v0.8.3 x64 installer through the
+existing Mac shared folder. No Anima process was reported by the guest probe.
+This is an ARM64 Windows environment, so an x64 app run would exercise Windows
+emulation rather than native x64 hardware.
+
+Interactive inspection could not proceed: the computer-use provider returned
+`cgWindowNotFound` for the Parallels console and `timeoutReached` for the VM
+application and its Windows app wrapper. No installer was launched and no
+interactive acceptance row was passed. The VM was returned to its original
+suspended state. The local shard probe still returned connection refused (61).
+A reachable designated shard/account and a controllable Windows desktop remain
+necessary for the corresponding live acceptance rows.
