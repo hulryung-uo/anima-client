@@ -445,3 +445,13 @@ hashes, observed geometry and limitations; the harness is
 `/tmp/anima-character-layout-qa.py`. The temporary tab was closed and the
 fixture server's termination was confirmed. This does not verify live-character
 switching, native resize gestures or installed macOS/Windows behavior.
+
+### v0.8.3 candidate preparation
+
+Version 0.8.3 collects character window geometry, focused-button keyboard
+isolation, native UOP animation LRU retention and malformed UOP directory
+rejection. Its complete local gate exited 0 with 370 renderer tests / 1845
+assertions, tooling, native/WASM and desktop checks. Evidence:
+`/tmp/anima-v083-candidate-gate.log`. Player-facing draft notes are in
+[releases/v0.8.3.md](releases/v0.8.3.md). Installer build and actual-asset
+verification are still pending; no existing tag or installer is replaced.
