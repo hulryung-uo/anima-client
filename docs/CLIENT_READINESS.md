@@ -320,3 +320,35 @@ light-bound CI 34730425959 was still running when checked; the release workflow
 will independently gate its exact tagged source before building installers.
 No existing tag has been moved. Installer artifacts and interactive acceptance
 for v0.8.2 remain pending; the running v0.8.1 app was not touched.
+
+
+## v0.8.2 installers available for interactive acceptance
+
+Release run `34730516431` completed successfully for exact source
+`38febbe2c9e7e29d27e46f1b8c809fc61f969ad1`: all platform gates, both bundles,
+draft assembly, macOS mount/copy and Windows install/uninstall checks passed.
+GitHub release ID `387760123` remains a draft with both installers and three
+verification files. The actual draft files were downloaded to
+`target/installers/v0.8.2` and matched the tagged source, sizes and SHA-256:
+
+| Asset | Bytes | SHA-256 | Signing |
+| --- | ---: | --- | --- |
+| Anima_0.8.2_aarch64.dmg | 5094944 | 3cbe93b0c366820b2fac87559b52425af0689e9488515b332ea21516f506b0f2 | notarized |
+| Anima_0.8.2_x64-setup.exe | 3382885 | 1ba4b28032f1dff9cf3507163c0c75a9eb531463e39ae122212cc1210f95eda9 | unsigned |
+
+The matching Mac build artifact was also verified locally as a disk image,
+mounted read-only and copied to
+`target/installers/v0.8.2-macos-build/installed/Anima.app`. Strict signature,
+arm64/version, stapled-ticket and Gatekeeper checks passed. The final draft's
+Mac manifest and bytes matched that already-checked artifact, so mounting was
+not repeated. The image was detached; no v0.8.2 UI was launched and the existing
+v0.8.1 app was left alone. Evidence:
+`/tmp/anima-v082-macos-build-verification.json` and
+`/tmp/anima-v082-downloaded-manifests.json`.
+
+Native light-bound CI `34730425959` also completed successfully. The full scope
+of installed-app interaction and live-shard acceptance remains open, with an
+execution record in [INSTALLER_ACCEPTANCE.md](INSTALLER_ACCEPTANCE.md). A playable
+shard and test account have been requested from the user; the last controlled
+local probe was connection refused. Public v0.6.0 is unchanged. Installer
+availability is not a claim that the overall client goal is complete.
