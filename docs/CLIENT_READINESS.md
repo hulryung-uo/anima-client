@@ -14,8 +14,8 @@ suite or an exhausted historical gaps list does not establish product readiness.
 | Core gameplay | Live movement/pathing, combat/casting/targeting, inventory/trade/vendor, chat/party, character creation/deletion | Historical ServUO evidence in TESTING/DESIGN/CLASSICUO_GAPS; current-build end-to-end audit still required. |
 | Interface and accessibility | Usable default layout, keyboard/focus, resizing/scaling, readable feedback, no debug-only dead ends | Basic login now asks only for account name/password after server selection, with optional saving and folded management. Browser layout/save-dialog checks passed. Actual v0.8.1 Mac installer reached this login screen; further native interaction was interrupted. Renderer regressions cover native-select Enter, profile readiness and in-flight submission locks. Wider keyboard/accessibility and game-window audit remains. |
 | Settings and state | Reliable persistence, recovery from corrupt data, useful backup/restore, isolation across characters/windows | Desktop configuration recovery and Chrome preference recovery/reload passed. Renderer preferences validate data, preserve originals and migrate into one atomic record including geometry. Headless tests cover malformed geometry, restore/defaults and concurrent-window saves. A current macOS source build verified settings-file import/reload, actual export contents, previous-copy restore and separately named repeat downloads. Full app restart, Windows UI and actual game-window resizing remain; see CLIENT_SETTINGS.md and NATIVE_BACKUP_VERIFICATION.md. Character-specific window geometry now has automated identity/backup checks and an isolated real-browser two-character save/reload verification. Native installed-app character switching and the broader session/window-isolation audit remain. |
-| Reliability and performance | No stale callbacks, clear disconnect/crash behavior, bounded resources, responsive long sessions | Connection/session races, pending audio, corrupt profile/settings handling and bounded sound loading have automated and selected runtime evidence. Texture/animation retention and retry have Chrome/WebGL evidence. World-map caches now identify resource folders and source metadata and reject corrupt records. Light-mask retry/retention and native light allocation bounds are implemented; stock-light tests passed. Latest local gate: 370 renderer tests / 1845 assertions. Whole-client long sessions, remaining native graphics caches and crash audits remain. See AUDIO_PERFORMANCE.md and GRAPHICS_CACHE.md. |
-| Delivery | Versioned Mac/Windows installers containing current features, install/run checks, honest release notes and download links | Immutable v0.8.3 (`c55d882`) passed all source, bundle and actual installer checks in run 34732482083. Both local downloads matched manifests and checksums; the Mac app copy passed signature, notarization and Gatekeeper checks. Candidate remains a draft. Installed-app interaction and live gameplay remain unverified for this version; public v0.6.0 is unchanged. |
+| Reliability and performance | No stale callbacks, clear disconnect/crash behavior, bounded resources, responsive long sessions | Connection/session races, pending audio, corrupt profile/settings handling and bounded sound loading have automated and selected runtime evidence. Texture/animation retention and retry have Chrome/WebGL evidence. World-map caches now identify resource folders and source metadata and reject corrupt records. Light-mask retry/retention and native light allocation bounds are implemented; stock-light tests passed. Latest local gate: 374 renderer tests / 1867 assertions. Whole-client long sessions, remaining native graphics caches and crash audits remain. See AUDIO_PERFORMANCE.md and GRAPHICS_CACHE.md. |
+| Delivery | Versioned Mac/Windows installers containing current features, install/run checks, honest release notes and download links | Immutable v0.8.3 (`c55d882`) passed all source, bundle and actual installer checks in run 34732482083. Both local downloads matched manifests and checksums; the Mac app copy passed signature, notarization and Gatekeeper checks. Candidate remains a draft. Mac installed-app login controls, optional-save prompt and one-time failure/retry have partial runtime evidence. Successful gameplay and Windows interaction remain unverified; public v0.6.0 is unchanged. |
 
 ## Verification rules
 
@@ -540,5 +540,15 @@ and unscoped startup errors remain visible. Four renderer regressions and the
 full local gate passed (374 tests / 1867 assertions, actual exit 0). Evidence:
 `/tmp/anima-login-error-target-tests.log`,
 `/tmp/anima-login-error-target-final-gate.log`, and
-`/tmp/anima-v083-one-time-fixture.json`. Native/browser runtime verification of
-the correction and a subsequent installer remain open. No tag was moved.
+`/tmp/anima-v083-one-time-fixture.json`. The correction passed CI 34733673608. A source-native PlayServer and a real
+in-app browser then verified two one-time login attempts against an owned
+loopback fixture (83 handshake bytes each). The first failure was visible;
+changing the account cleared it on the next poll. A second failure with the
+same wording remained visible for the newly submitted account; changing the
+port cleared it again while the backend retained the old failure scene. The
+native scene included the exact submitted target and excluded the dummy
+password. Evidence: `/tmp/anima-error-scope-runtime-result.json` and
+`/tmp/anima-error-scope-browser-result.json`. The fixture and source server
+were stopped and the hidden tab closed. This does not verify successful shard
+authentication, relay runtime, or the correction in a native installer. A
+subsequent installer remains open. No tag was moved.
