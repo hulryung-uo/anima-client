@@ -14,8 +14,8 @@ suite or an exhausted historical gaps list does not establish product readiness.
 | Core gameplay | Live movement/pathing, combat/casting/targeting, inventory/trade/vendor, chat/party, character creation/deletion | Historical ServUO evidence in TESTING/DESIGN/CLASSICUO_GAPS; current-build end-to-end audit still required. |
 | Interface and accessibility | Usable default layout, keyboard/focus, resizing/scaling, readable feedback, no debug-only dead ends | Basic login now asks only for account name/password after server selection, with optional saving and folded management. Browser layout/save-dialog checks passed. Actual v0.8.1 Mac installer reached this login screen; further native interaction was interrupted. Renderer regressions cover native-select Enter, profile readiness and in-flight submission locks. Wider keyboard/accessibility and game-window audit remains. |
 | Settings and state | Reliable persistence, recovery from corrupt data, useful backup/restore, isolation across characters/windows | Desktop configuration recovery and Chrome preference recovery/reload passed. Renderer preferences validate data, preserve originals and migrate into one atomic record including geometry. Headless tests cover malformed geometry, restore/defaults and concurrent-window saves. A current macOS source build verified settings-file import/reload, actual export contents, previous-copy restore and separately named repeat downloads. Full app restart, Windows UI and actual game-window resizing remain; see CLIENT_SETTINGS.md and NATIVE_BACKUP_VERIFICATION.md. Character-specific window geometry now has automated identity/backup checks and an isolated real-browser two-character save/reload verification. Native installed-app character switching and the broader session/window-isolation audit remain. |
-| Reliability and performance | No stale callbacks, clear disconnect/crash behavior, bounded resources, responsive long sessions | Connection/session races, pending audio, corrupt profile/settings handling and bounded sound loading have automated and selected runtime evidence. Texture/animation retention and retry have Chrome/WebGL evidence. World-map caches now identify resource folders and source metadata and reject corrupt records. Light-mask retry/retention and native light allocation bounds are implemented; stock-light tests passed. Latest local gate: 361 renderer tests / 1791 assertions. Whole-client long sessions, remaining native graphics caches and crash audits remain. See AUDIO_PERFORMANCE.md and GRAPHICS_CACHE.md. |
-| Delivery | Versioned Mac/Windows installers containing current features, install/run checks, honest release notes and download links | Immutable v0.8.1 (`f5ccd24`) passed both installer checks in run 34729212934. Downloaded files matched source/hash manifests; the actual notarized Mac app reached login. Further installed-app interaction and live gameplay remain unverified. Version 0.8.2 prepares a candidate containing the subsequent account-cache, world-map and lighting fixes. These candidates remain drafts; public v0.6.0 is unchanged. |
+| Reliability and performance | No stale callbacks, clear disconnect/crash behavior, bounded resources, responsive long sessions | Connection/session races, pending audio, corrupt profile/settings handling and bounded sound loading have automated and selected runtime evidence. Texture/animation retention and retry have Chrome/WebGL evidence. World-map caches now identify resource folders and source metadata and reject corrupt records. Light-mask retry/retention and native light allocation bounds are implemented; stock-light tests passed. Latest local gate: 370 renderer tests / 1845 assertions. Whole-client long sessions, remaining native graphics caches and crash audits remain. See AUDIO_PERFORMANCE.md and GRAPHICS_CACHE.md. |
+| Delivery | Versioned Mac/Windows installers containing current features, install/run checks, honest release notes and download links | Immutable v0.8.3 (`c55d882`) passed all source, bundle and actual installer checks in run 34732482083. Both local downloads matched manifests and checksums; the Mac app copy passed signature, notarization and Gatekeeper checks. Candidate remains a draft. Installed-app interaction and live gameplay remain unverified for this version; public v0.6.0 is unchanged. |
 
 ## Verification rules
 
@@ -455,3 +455,56 @@ assertions, tooling, native/WASM and desktop checks. Evidence:
 `/tmp/anima-v083-candidate-gate.log`. Player-facing draft notes are in
 [releases/v0.8.3.md](releases/v0.8.3.md). Installer build and actual-asset
 verification are still pending; no existing tag or installer is replaced.
+
+### Real-browser button keyboard verification for v0.8.3
+
+The tagged renderer's production input handlers were loaded in a hidden in-app
+browser with a disposable canvas and HTTP receiver. Space and Enter each
+activated the focused fixture button once; Tab focused the next button. The
+receiver recorded no game input for those actions. Space on the fixture canvas
+then produced exactly one `/input` request containing `autoattack`, preserving
+the ordinary game shortcut. This verifies real browser key/default behavior,
+not native installed-app or live-shard interaction.
+
+Evidence and source hashes are in `/tmp/anima-button-key-browser-result.json`;
+the fixture is `/tmp/anima-button-key-qa.py`, with its received requests in
+`/tmp/anima-button-key-inputs.json`. The temporary tab was closed and fixture
+server termination was confirmed. Release `34732482083` has passed all three
+platform source jobs; both installer bundles are still running. Installed-app
+acceptance now explicitly includes button keys and two-character window layouts.
+
+### v0.8.3 Mac build artifact verification
+
+Release run `34732482083` completed the Mac bundle and uploaded artifact
+`10310465824` (`anima-v0.8.3-macos`). Its downloaded manifest matched the
+immutable tag and source. `Anima_0.8.3_aarch64.dmg` is 5,098,213 bytes with
+SHA-256 `9947970340a83387dc15bdcd597eef45a6cfa0f18749459f66276897c5361417`.
+
+The disk image passed verification, read-only mounting and app copy. The copied
+app passed strict signature, arm64/version 0.8.3, stapled-ticket and Gatekeeper
+checks. It is at `target/installers/v0.8.3-macos-build/installed/Anima.app`;
+the image was detached and the UI was not launched. Evidence:
+`/tmp/anima-v083-macos-build-verification.json`. Windows bundling and final draft
+asset verification are still pending; this is build-artifact evidence only.
+
+
+### Verified v0.8.3 installer downloads
+
+Release run `34732482083` completed successfully: exact-source platform gates,
+both bundles, draft assembly and actual Mac/Windows installer checks. Both draft
+files were downloaded to `target/installers/v0.8.3`; manifests and the supplied
+`SHA256SUMS.txt` passed local verification.
+
+| Asset | Bytes | SHA-256 | Signing |
+| --- | --- | --- | --- |
+| Anima_0.8.3_aarch64.dmg | 5098213 | 9947970340a83387dc15bdcd597eef45a6cfa0f18749459f66276897c5361417 | notarized |
+| Anima_0.8.3_x64-setup.exe | 3389431 | 3a6ecfee7ebfe1a1a431e54ec5b60269e2d45ccbe90e910d667967d8ead36fbf | unsigned |
+
+The final Mac manifest and bytes match the previously checked build artifact,
+so its mount/copy/signature/ticket checks were not repeated. Windows silent
+install/uninstall passed in the release workflow. Local evidence is
+`/tmp/anima-v083-downloaded-manifests.json`; the Mac copy remains at
+`target/installers/v0.8.3-macos-build/installed/Anima.app`. No v0.8.3 app UI was
+launched. The draft and immutable tag are preserved; public v0.6.0 is unchanged.
+Current installed-app interaction and live-shard acceptance remain open in
+[INSTALLER_ACCEPTANCE.md](INSTALLER_ACCEPTANCE.md).

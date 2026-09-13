@@ -4,12 +4,20 @@ Use this record for the exact candidate being tested. It complements the
 GM-assisted scenarios in [TESTING.md](TESTING.md); source tests, installer
 checks and interactive game results are separate evidence.
 
-Current candidate: **v0.8.2**, immutable source
-`38febbe2c9e7e29d27e46f1b8c809fc61f969ad1`.
-Release workflow: `34730516431` completed successfully, including both platform
-quality gates, bundles and checks against actual draft installers. Both downloads
-were verified locally; the Mac app copy also passed signature, notarization and
-Gatekeeper checks. No interactive row below is marked passed by those checks.
+Current candidate: **v0.8.3**, immutable source
+`c55d882b515793cd6547b68d29c7e9caa3b367b1`.
+Release workflow: `34732482083` completed successfully, including all platform
+source checks, both bundles, draft assembly and tests against actual downloaded
+installers. Local downloads matched both manifests and `SHA256SUMS.txt`. The Mac
+file matched the build artifact already verified by read-only mount/copy,
+arm64/version, strict signature, stapled-ticket and Gatekeeper checks. Windows
+silent install/uninstall passed on its runner. No interactive row below is
+marked passed by these file checks.
+
+Downloads: `target/installers/v0.8.3/Anima_0.8.3_aarch64.dmg` and
+`target/installers/v0.8.3/Anima_0.8.3_x64-setup.exe`. Evidence:
+`/tmp/anima-v083-downloaded-manifests.json` and
+`/tmp/anima-v083-macos-build-verification.json`. The candidate remains a draft.
 
 ## Record the environment
 
@@ -35,8 +43,10 @@ not an authentication failure and does not verify in-world behavior.
 | Save for next time | Save an account with password storage off, then exercise the optional OS-password choice with the designated test account | Saved profile identity; subsequent login outcome |
 | Restart and quick return | Relaunch the same installed app, select the saved account and connect without another saving prompt or repeated address entry | Selected server/account and successful character list |
 | Native controls | Confirm a saved-account menu using Enter; no connection occurs until deliberately submitting credentials or Connect | Before/after auth stage; focused control |
+| Button keyboard input | Space/Enter activate a focused button and Tab moves focus without attacking or toggling war mode; game-canvas shortcuts still work | Focused control, click outcome and game state/input |
 | Cancellation and retry | Back/Escape closes the save prompt; failed/refused login can be corrected and retried; cancellation during connection remains usable | Final enabled controls and subsequent successful attempt |
 | Character entry | Choose an existing designated character and reach its world, inventory and status | Character identity, position, inventory and frame screenshot |
+| Character window layouts | Move and resize windows for two designated characters, reconnect to each, and verify their separate layouts; settings export/restore retains both | Destination/account/character identifiers without passwords; before/after geometry and backup comparison |
 | Movement and interaction | Walking/running, a blocked step, object use, targeting and an approved NPC/combat scenario produce matching server and client state | Short before/after state observations; visible rendering |
 | Disconnect and re-entry | Return to login and re-enter; a controlled interruption recovers without stale character art, pending actions or sounds | Connection IDs/auth stages and the newly entered character |
 | Accounts and server cache | Switch between the designated accounts/servers; character names and status remain associated with the correct profile | Selected profile and its cache before/after |
