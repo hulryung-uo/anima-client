@@ -105,3 +105,21 @@ CI 34727768842 passed all three Linux/macOS/Windows jobs for graphics commit
 `e6bb50c`. Native macOS backup/recovery acceptance progressed separately; see
 NATIVE_BACKUP_VERIFICATION.md for the completed file operations and the remaining
 restart/interactive checks.
+
+## Login keyboard repair — 2026-09-13
+
+The native Mac QA app exposed an unintended connection when Return confirmed a
+saved-account menu choice. The login handler registered Enter on every select
+and input, including file pickers and checkboxes. It now only submits from text,
+password and number fields; native option confirmation and file-picker actions
+retain their default behavior. IME composition and held-key repeats do not submit.
+
+Four automated regressions cover these behaviors and deliberate password-field
+submission. Against the pre-fix source, three fail; against the repaired source,
+all pass. The complete local gate returned exit 0: 337 web tests / 1686 assertions,
+23 Python tooling tests and native/WASM checks including 14 desktop tests (two
+real-vault tests excluded). Log: `/tmp/anima-login-keyboard-gate.log`.
+The repaired code has not yet been checked in a rebuilt native app or installer.
+It is newer than immutable tag v0.8.0 (`97c6722`) and will require a subsequent
+release. CI 34728265793 passed for that tag's source; its installer build
+34728267361 was still running when checked. Public v0.6.0 remains unchanged.

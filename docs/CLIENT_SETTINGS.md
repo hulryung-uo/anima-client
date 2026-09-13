@@ -85,9 +85,9 @@ A fresh isolated source build used the native picker to restore a four-group
 backup, reloaded to login, and exported an actual Downloads file retaining its
 options, macro, marker and supplied geometry. Restoring the previous copy then
 exported the earlier data to a separate filename without overwriting the first
-backup. The downloaded four-group file also passed the native import preview;
-its second application and a full app restart remain unverified after UI control
-was interrupted. See [the native verification record](NATIVE_BACKUP_VERIFICATION.md).
+backup. The downloaded four-group file also passed the native import preview
+and its second application reloaded successfully to login. A full app restart
+remains unverified. See [the native verification record](NATIVE_BACKUP_VERIFICATION.md).
 Chrome file selection remains subject to the extension's file-access permission.
 Windows interactive checks and actual game-window resizing remain open.
 

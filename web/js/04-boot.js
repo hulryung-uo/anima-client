@@ -1296,15 +1296,19 @@ function wireLogin() {
       deleteButton.disabled = false;
     }
   });
-  for (const input of document.querySelectorAll("#login input, #login select"))
+  // Enter on a native select confirms its option; on a file input it opens the
+  // picker. Neither is an instruction to connect (or advance character creation).
+  for (const input of document.querySelectorAll("#login input")) {
+    if (!["text", "password", "number"].includes(input.getAttribute("type") || "text")) continue;
     input.addEventListener("keydown", (e) => {
-      if (e.code !== "Enter") return;
+      if (e.code !== "Enter" || e.isComposing || e.repeat) return;
       e.preventDefault();
       // While the wizard is open, Enter advances it instead of submitting the
       // outer form (which no longer has a `create` path of its own).
       if (characterStage && createToggle.checked) { e.preventDefault(); wizNextBtn.click(); }
       else submit();
     });
+  }
 
   window.updateCharacterLoginStage = (active, slots = [], capacity = 0, cities = [], choiceId = null) => {
     const changedPrompt = characterChoiceId !== choiceId;

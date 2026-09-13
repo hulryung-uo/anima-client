@@ -23,16 +23,20 @@ screenshots were through CUA; the native file picker was used for imports.
 | Export restored settings | Actual downloaded JSON retained options, macro, marker and supplied window geometry; the normally created journal geometry was also present |
 | Review and restore previous settings | Preview showed the earlier one-group/zero-macro/zero-marker copy; applying reloaded to login |
 | Export previous settings | A new `anima-settings (1).json` contained only the previous journal geometry; the first `anima-settings.json` was preserved with its four restored groups |
+| Reapply downloaded settings | Selecting the four-group export again and applying its preview reloaded successfully to login |
 | Keyboard export | Tab visibly focused Export settings; Return produced the second file and the completion message |
 
-No server login occurred. The two fixture endpoints were loopback ports 25111
-and 25112, with synthetic account names and no saved passwords. The real local
+No successful server login occurred. A later saved-account selection followed
+by Return unexpectedly attempted a connection to the refused loopback endpoint
+25111. This exposed the Enter-key bug documented in CLIENT_READINESS.md.
+The two fixture endpoints were loopback ports 25111 and 25112, with synthetic
+account names and no saved passwords. The real local
 ServUO listener was offline and was not started.
 
 The downloaded four-group settings file was subsequently selected again and its
-preview rendered correctly. Its final application and an app restart were not
-verified: native UI control reported that the user had changed the app. The
-running process was left intact. Some modal observations omitted dialog content
+preview rendered correctly. After an interruption, control of the same running
+app was reacquired and applying that preview reloaded successfully to login.
+A full app restart remains unverified. Some modal observations omitted dialog content
 from the AX tree while screenshots still showed it; keyboard operation and some
 later AX observations worked. This is not a screen-reader compatibility claim.
 
