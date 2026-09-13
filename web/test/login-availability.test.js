@@ -76,3 +76,22 @@ test("unavailable profile storage does not disable an existing character session
   el("lg-go").click(); await ctx.flush();
   eq(calls.filter(c => c.url === "character").length, 1);
 });
+
+test("new shard credentials connect directly after declining local storage, without registration", async () => {
+  const { ctx, calls, el } = fixture(); await ctx.flush();
+  el("lg-user").value = "new-shard-account"; el("lg-pass").value = "fixture-password";
+  el("lg-go").click(); await ctx.flush();
+  ok(el("lg-save-prompt").open); eq(calls.filter(c => c.init?.body).length, 0);
+  el("lg-connect-once").click(); await ctx.flush();
+  const posts = calls.filter(c => c.init?.body);
+  eq(posts.length, 1); eq(posts[0].url, "login");
+  const body = JSON.parse(posts[0].init.body);
+  eq(body.username, "new-shard-account"); eq(body.password, "fixture-password"); eq(body.account_id, null);
+});
+
+test("leaving the save prompt returns to editable login without sending credentials", async () => {
+  const { ctx, calls, el } = fixture(); await ctx.flush(); el("lg-user").value = "unsaved";
+  el("lg-go").click(); await ctx.flush(); el("lg-connect-cancel").click(); await ctx.flush();
+  ok(!el("lg-go").disabled); ok(!el("lg-user").disabled);
+  eq(calls.filter(c => c.init?.body).length, 0);
+});

@@ -6,13 +6,21 @@ the source build; it is not part of the previously published v0.6.0 installers.
 
 ## Connect and remember
 
-1. Choose **Add server**, enter a name, host and port. **Server notes & advanced**
-   holds a personal note and the shard index (normally 0).
-2. Enter an account label and username. **Save account** remembers the account;
-   **Connect** also saves the server and account before connecting.
-3. Use **New** beside Saved accounts for another account on the same server.
-   Select a world on the left to switch to its own account list.
-4. After authentication, choose a character in the existing character picker.
+1. Select a saved server, enter your **Account name** and **Password**, then
+   choose **Connect**. A shard that supports automatic account creation receives
+   that same ordinary login request; there is no separate registration step.
+2. For a new or changed local profile, choose **Save & connect** or **Connect
+   without saving**. **Back** or Escape returns to the form without connecting.
+   Password storage is a separate optional checkbox, available only on desktop.
+   Unchanged saved accounts connect without another prompt or profile rewrite.
+3. **Use another** clears the account fields for another login on the same
+   server. It does not create a server account. The saved-account picker scopes
+   accounts to the selected world.
+4. **Server settings** holds the address, optional name, notes and shard index
+   (normally 0). It opens when adding a server and stays folded for saved worlds.
+   **Manage saved account** holds the optional nickname and explicit save/remove
+   controls. The nickname defaults to the account name and is never a login field.
+5. After authentication, choose a character in the existing character picker.
    Returning with **Back** shows the account form again.
 
 These are local profiles, not new accounts on the game server. **Remove** only

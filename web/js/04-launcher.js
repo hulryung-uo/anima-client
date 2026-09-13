@@ -7,6 +7,7 @@ let launcherReady = false, launcherWorking = false, launcherConnecting = false;
 let launcherInitPromise = null, launcherAuthKey = "";
 let launcherSelection = { server: "", accounts: {} };
 let launcherRecoverable = false, launcherWorldsPreview = null, launcherFileGeneration = 0, launcherDownloadUrl = null;
+let launcherCancelSavePrompt = null;
 const LAUNCHER_BACKUP_LIMIT = 1024 * 1024;
 const launcherEl = id => document.getElementById(id);
 const launcherText = (id, text) => { const el = launcherEl(id); if (el) el.textContent = text; };
@@ -118,7 +119,7 @@ function launcherRenderLibrary() {
 }
 function launcherRenderAccounts() {
   const select = launcherEl("lg-account-list"); select.replaceChildren();
-  const option = document.createElement("option"); option.value = ""; option.textContent = "New account"; select.append(option);
+  const option = document.createElement("option"); option.value = ""; option.textContent = "Enter another account"; select.append(option);
   for (const account of launcherData.accounts.filter(a => a.server_id === launcherServerId)) {
     const row = document.createElement("option"); row.value = account.id;
     row.textContent = account.label === account.username ? account.username : `${account.label} · ${account.username}`;
@@ -129,6 +130,7 @@ function launcherRenderAccounts() {
 function launcherSelectServer(id) {
   const server = launcherData.servers.find(s => s.id === id);
   launcherServerId = server?.id || "";
+  launcherEl("lg-server-settings").open = !server;
   launcherEl("lg-server-name").value = server?.name || "";
   launcherEl("lg-host").value = server?.host || "127.0.0.1";
   launcherEl("lg-port").value = String(server?.port || 2594);
@@ -144,6 +146,7 @@ function launcherSelectServer(id) {
 function launcherSelectAccount(id) {
   const account = launcherData.accounts.find(a => a.id === id && a.server_id === launcherServerId);
   launcherAccountId = account?.id || "";
+  launcherEl("lg-account-settings").open = false;
   launcherEl("lg-user").value = account?.username || "";
   launcherEl("lg-account-label").value = account?.label || "";
   launcherEl("lg-pass").value = "";
@@ -184,14 +187,19 @@ async function launcherSaveServer() {
     if (!confirm("Changing this server address or shard removes its saved passwords and cached characters. Continue?")) throw new Error("Server changes were not saved.");
   }
   await launcherCommand(form); launcherServerId = form.id;
+  launcherEl("lg-server-settings").open = false;
   launcherEl("lg-server-name").value = form.name; launcherEl("lg-host").value = form.host;
   if (previous && !launcherMatchesServer(previous)) { launcherEl("lg-save-password").checked = false; launcherAccountId = ""; }
   launcherRenderLibrary(); launcherRenderAccounts(); launcherRenderInfo(); launcherRememberSelection();
 }
-async function launcherSaveAccount() {
+function launcherAccountCredentials() {
   const username = launcherValue("lg-user"), password = launcherEl("lg-pass").value || "";
   if (!username || username.length > 30 || /[^\x20-\x7e]/.test(username)) throw new Error("Enter a UO username using up to 30 ASCII characters.");
   if (password.length > 30 || /[^\x20-\x7e]/.test(password)) throw new Error("UO passwords support up to 30 ASCII characters.");
+  return { username, password };
+}
+async function launcherSaveAccount() {
+  const { username, password } = launcherAccountCredentials();
   await launcherSaveServer();
   // Reusing an existing username updates it instead of creating duplicate profiles.
   const same = launcherData.accounts.find(a => a.server_id === launcherServerId && a.username === username);
@@ -213,12 +221,55 @@ async function launcherPrepareLogin() {
   if (!launcherReady) throw new Error("Profiles are not available. Reopen Anima before connecting.");
   launcherSetBusy(true);
   try {
-    await launcherSaveAccount();
-    return { account_id: WASM_MODE ? null : launcherAccountId, host: launcherValue("lg-host"), port: Number(launcherValue("lg-port")), shard: Number(launcherValue("lg-shard")), username: launcherValue("lg-user"), password: launcherEl("lg-pass").value || "" };
+    const form = launcherServerForm(), credentials = launcherAccountCredentials();
+    const server = launcherServer(), account = launcherAccount();
+    const matching = server && account && launcherMatchesServer(server) && account.username === credentials.username;
+    const remember = !!launcherEl("lg-save-password").checked;
+    const changed = !matching || server.name !== form.name || server.notes !== form.notes || (server.relay || "") !== (form.relay || "")
+      || account.label !== (launcherValue("lg-account-label") || credentials.username) || account.remember_password !== remember
+      || (remember && !!credentials.password);
+    let save = false;
+    if (changed) {
+      const choice = await launcherConfirmSave();
+      if (choice === null) return null;
+      save = choice;
+    }
+    if (save) await launcherSaveAccount();
+    return { account_id: !WASM_MODE && (save || matching) ? launcherAccountId : null,
+      host: form.host, port: form.port, shard: form.shard, ...credentials };
   } finally { launcherSetBusy(false); }
+}
+function launcherConfirmSave() {
+  const panel = launcherEl("lg-save-prompt"), password = launcherEl("lg-confirm-password");
+  password.disabled = !launcherData.passwords || WASM_MODE;
+  const account = launcherAccount(), server = launcherServer();
+  const sameAccount = !account || (server && launcherMatchesServer(server) && account.username === launcherValue("lg-user"));
+  password.checked = !password.disabled && sameAccount && launcherEl("lg-save-password").checked;
+  launcherText("lg-confirm-password-note", password.disabled ? "Password saving is available in the desktop app."
+    : "Saved passwords use macOS Keychain or Windows Credential Manager.");
+  return new Promise(resolve => {
+    const saved = () => { launcherEl("lg-save-password").checked = password.checked; finish(true); };
+    const once = () => finish(false);
+    const cancel = e => { if (e) e.preventDefault(); finish(null); };
+    const finish = choice => {
+      launcherCancelSavePrompt = null;
+      launcherEl("lg-connect-saved").removeEventListener("click", saved);
+      launcherEl("lg-connect-once").removeEventListener("click", once);
+      launcherEl("lg-connect-cancel").removeEventListener("click", cancel);
+      panel.removeEventListener("cancel", cancel);
+      panel.close(); resolve(choice);
+    };
+    launcherCancelSavePrompt = cancel;
+    launcherEl("lg-connect-saved").addEventListener("click", saved);
+    launcherEl("lg-connect-once").addEventListener("click", once);
+    launcherEl("lg-connect-cancel").addEventListener("click", cancel);
+    panel.addEventListener("cancel", cancel);
+    panel.showModal();
+  });
 }
 function launcherOnAuth(auth, slots) {
   if (!launcherEl("lg-shell")) return;
+  if (auth !== "login" && auth !== "error" && launcherCancelSavePrompt) launcherCancelSavePrompt();
   launcherConnecting = auth === "connecting";
   launcherEl("lg-shell").classList.toggle("character-stage", auth === "characters");
   launcherSetBusy(launcherWorking);

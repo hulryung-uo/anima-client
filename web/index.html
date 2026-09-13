@@ -1354,7 +1354,9 @@
       <div class="login-box">
         <div class="login-title">anima-client</div>
         <div id="lg-account-fields">
-          <div class="launcher-section-title">Server</div>
+          <details class="launcher-management" id="lg-server-settings">
+          <summary>Server settings</summary>
+          <p class="launcher-muted">Choose a saved server on the left. Set its address once here.</p>
           <label>Server name <input id="lg-server-name" placeholder="My Britannia" maxlength="80" autocomplete="off"></label>
           <div class="launcher-address">
             <label>Host <input id="lg-host" value="127.0.0.1" spellcheck="false" autocomplete="off" maxlength="253"></label>
@@ -1369,24 +1371,27 @@
             <button type="button" id="lg-save-server" class="launcher-button">Save server</button>
             <button type="button" id="lg-remove-server" class="launcher-button launcher-danger">Remove</button>
           </div>
-          <div class="launcher-section-title launcher-account-heading">Account</div>
+          <label id="lg-relay-row" style="display:none">Relay <input id="lg-relay" value="ws://127.0.0.1:2595/relay?target=1" spellcheck="false" autocomplete="off"><small>The relay selects the destination; Host and Port are a reference in browser mode.</small></label>
+          </details>
+          <div class="launcher-section-title launcher-account-heading">Log in</div>
           <div class="launcher-account-picker">
-            <label>Saved accounts <select id="lg-account-list"><option value="">New account</option></select></label>
-            <button type="button" id="lg-new-account" class="launcher-button">＋ New</button>
+            <label>Saved accounts <select id="lg-account-list"><option value="">Enter another account</option></select></label>
+            <button type="button" id="lg-new-account" class="launcher-button">Use another</button>
           </div>
-          <div class="launcher-account-identity">
-          <label>Account label <input id="lg-account-label" maxlength="80" placeholder="Main, crafter, adventurer…" autocomplete="off"></label>
-          <label>Username <input id="lg-user" spellcheck="false" autocomplete="username" maxlength="30"></label>
-          </div>
+          <label>Account name <input id="lg-user" spellcheck="false" autocomplete="username" maxlength="30"></label>
           <label>Password <input id="lg-pass" type="password" autocomplete="current-password" maxlength="30"></label>
+          <details class="launcher-management" id="lg-account-settings">
+          <summary>Manage saved account</summary>
           <label class="launcher-check"><input id="lg-save-password" type="checkbox" disabled> Save password on this device</label>
           <p id="lg-password-note" class="launcher-muted">Passwords are never saved in browser storage.</p>
+          <label>Nickname (optional) <input id="lg-account-label" maxlength="80" placeholder="Main, crafter, adventurer…" autocomplete="off"></label>
+          <p class="launcher-muted">A nickname helps you recognize this account. It is not used to log in.</p>
           <div class="launcher-actions">
             <button type="button" id="lg-save-account" class="launcher-button">Save account</button>
             <button type="button" id="lg-remove-account" class="launcher-button launcher-danger">Remove</button>
           </div>
-          <label id="lg-relay-row" style="display:none">Relay <input id="lg-relay" value="ws://127.0.0.1:2595/relay?target=1" spellcheck="false" autocomplete="off"><small>The relay selects the destination; Host and Port are a reference in browser mode.</small></label>
-          <p class="launcher-muted">Connecting remembers this server and account. Password saving is optional.</p>
+          </details>
+          <p class="launcher-muted">Enter your shard account and connect. Saving on this device is optional.</p>
           <p id="lg-profile-msg" class="launcher-feedback" role="status" aria-live="polite"></p>
         </div>
         <div id="lg-account-summary" style="display:none"></div>
@@ -1772,6 +1777,17 @@
       </div>
     </div>
     <aside id="preference-warning" hidden role="status"><span id="preference-warning-text"></span><button id="preference-warning-open" type="button">Settings & recovery</button></aside>
+    <dialog id="lg-save-prompt" aria-labelledby="lg-save-title" aria-describedby="lg-save-description">
+      <h2 id="lg-save-title">Save for next time?</h2>
+      <p id="lg-save-description">Remember this server and account on this device for quicker login. This does not create an account on the shard.</p>
+      <label><input id="lg-confirm-password" type="checkbox"> Also save the password securely on this device</label>
+      <p id="lg-confirm-password-note" class="launcher-muted"></p>
+      <div class="launcher-save-choices">
+        <button id="lg-connect-saved" type="button" class="launcher-button">Save &amp; connect</button>
+        <button id="lg-connect-once" type="button" class="launcher-button" autofocus>Connect without saving</button>
+        <button id="lg-connect-cancel" type="button" class="launcher-button">Back</button>
+      </div>
+    </dialog>
     <dialog id="preference-panel" aria-labelledby="pref-title">
       <div class="pref-heading"><div><p class="pref-eyebrow">ANIMA · ON THIS DEVICE</p><h2 id="pref-title">Your settings, kept.</h2></div><button id="pref-close" type="button" class="pref-button" aria-label="Close settings data">Close</button></div>
       <p class="pref-muted">Options, macros, map markers and your screen layout. Server profiles, account names and passwords are managed separately.</p>

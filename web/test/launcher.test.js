@@ -51,15 +51,17 @@ test("connecting uses a saved account reference without reading its password", a
   const login = await ctx.run("launcherPrepareLogin()");
   eq(login.account_id, "a"); eq(login.password, "");
   const writes = calls.filter(c => c.init.body).map(c => JSON.parse(c.init.body));
-  deepEq(writes.map(c => c.op), ["save_server", "save_account"]);
-  eq(writes[1].remember_password, true);
+  eq(writes.length, 0, "unchanged saved accounts need no prompt or rewrite");
+  ok(!el("lg-save-prompt").open);
   eq(el("lg-pass").value, "");
   ok(calls.every(c => c.init.headers["X-Anima-Launcher"] === "1"));
   ok(!calls.some(c => /password|secret/.test(c.url)), "no password retrieval endpoint");
 });
 test("typing a saved password sends it only to the native save/login path", async () => {
   const { ctx, calls, el } = await setup(); el("lg-pass").value = "temporary-secret";
-  const login = await ctx.run("launcherPrepareLogin()");
+  const pending = ctx.run("launcherPrepareLogin()"); await ctx.flush();
+  ok(el("lg-save-prompt").open); el("lg-connect-saved").click();
+  const login = await pending;
   eq(login.password, "temporary-secret");
   eq(JSON.parse(calls.at(-1).init.body).password, "temporary-secret");
   for (let i = 0; i < ctx.localStorage.length; i++) ok(!ctx.localStorage.getItem(ctx.localStorage.key(i)).includes("temporary-secret"));
@@ -75,7 +77,9 @@ test("changing a saved endpoint needs confirmation before any password operation
   const { ctx, calls, el } = await setup(); const before = calls.length;
   el("lg-host").value = "different.test"; ctx.answer.confirm = false;
   let failed = false;
-  try { await ctx.run("launcherPrepareLogin()"); } catch (_) { failed = true; }
+  const pending = ctx.run("launcherPrepareLogin()"); await ctx.flush();
+  el("lg-connect-saved").click();
+  try { await pending; } catch (_) { failed = true; }
   ok(failed); eq(calls.length, before, "no save or password request after cancel");
 });
 test("character selection clears the transient password and displays the next stage", async () => {
@@ -210,4 +214,69 @@ test("browser corruption after login initialization makes recovery available wit
   ok(!ctx.run("launcherReady")); ok(ctx.run("launcherRecoverable"));
   ok(!ctx.document.getElementById("lg-recover-worlds").disabled);
   eq(ctx.localStorage.getItem("anima.launcher.browser.v1"), "broken by another window");
+});
+
+test("saved-server login keeps management folded; adding a server exposes its address", async () => {
+  const { ctx, el } = await setup();
+  ok(!el("lg-server-settings").open); ok(!el("lg-account-settings").open);
+  ctx.run('launcherSelectServer("")'); ok(el("lg-server-settings").open);
+  el("lg-host").value = "new.example.test";
+  await ctx.run("launcherSaveServer()"); ok(!el("lg-server-settings").open);
+});
+
+test("an unsaved account connects without writing profiles or selecting an old vault secret", async () => {
+  const { ctx, calls, el } = await setup();
+  ctx.run('launcherSelectAccount("")'); el("lg-user").value = "new-player"; el("lg-pass").value = "once-only";
+  const pending = ctx.run("launcherPrepareLogin()"); await ctx.flush();
+  ok(el("lg-save-prompt").open); ok(!el("lg-confirm-password").checked);
+  eq(calls.filter(c => c.init.body).length, 0, "no write before choosing");
+  el("lg-connect-once").click(); const login = await pending;
+  eq(login.account_id, null); eq(login.username, "new-player"); eq(login.password, "once-only");
+  eq(calls.filter(c => c.init.body).length, 0); ok(!ctx.run("launcherBusy()"));
+});
+
+test("save-and-connect stores the account and only opts into passwords when selected", async () => {
+  const { ctx, calls, el } = await setup();
+  ctx.run('launcherSelectAccount("")'); el("lg-user").value = "new-player"; el("lg-pass").value = "chosen-secret";
+  const pending = ctx.run("launcherPrepareLogin()"); await ctx.flush();
+  ok(!el("lg-confirm-password").checked); el("lg-confirm-password").checked = true;
+  el("lg-connect-saved").click(); const login = await pending;
+  ok(login.account_id); eq(login.username, "new-player");
+  const saved = calls.filter(c => c.init.body).map(c => JSON.parse(c.init.body));
+  deepEq(saved.map(c => c.op), ["save_server", "save_account"]);
+  eq(saved[1].label, "new-player"); eq(saved[1].remember_password, true);
+});
+
+test("Back and Escape cancel saving and release the login form for another attempt", async () => {
+  const { ctx, calls, el } = await setup();
+  ctx.run('launcherSelectAccount("")'); el("lg-user").value = "unsaved";
+  for (const escape of [false, true]) {
+    const pending = ctx.run("launcherPrepareLogin()"); await ctx.flush();
+    if (escape) ctx.fire(el("lg-save-prompt"), "cancel"); else el("lg-connect-cancel").click();
+    eq(await pending, null); ok(!el("lg-save-prompt").open); ok(!ctx.run("launcherBusy()"));
+  }
+  eq(calls.filter(c => c.init.body).length, 0);
+});
+
+test("connecting once to an edited endpoint never uses the previous saved password", async () => {
+  const { ctx, calls, el } = await setup(); el("lg-host").value = "other.example.test";
+  const pending = ctx.run("launcherPrepareLogin()"); await ctx.flush();
+  el("lg-connect-once").click(); const login = await pending;
+  eq(login.account_id, null); eq(login.host, "other.example.test"); eq(login.password, "");
+  eq(calls.filter(c => c.init.body).length, 0);
+});
+
+test("an edited username does not inherit another account's password-saving choice", async () => {
+  const { ctx, el } = await setup(); el("lg-user").value = "another-person";
+  const pending = ctx.run("launcherPrepareLogin()"); await ctx.flush();
+  ok(!el("lg-confirm-password").checked);
+  el("lg-connect-cancel").click(); eq(await pending, null);
+});
+
+test("an incoming character session dismisses a pending save choice without writing", async () => {
+  const { ctx, calls, el } = await setup(); el("lg-user").value = "unsaved";
+  const pending = ctx.run("launcherPrepareLogin()"); await ctx.flush();
+  ctx.run('launcherOnAuth("characters", [])');
+  eq(await pending, null); ok(!el("lg-save-prompt").open);
+  eq(calls.filter(c => c.init.body).length, 0);
 });

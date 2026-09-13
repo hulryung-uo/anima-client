@@ -69,3 +69,15 @@
 #lg-cancel-connection[hidden] { display: none; }
 #login .login-footer { position: sticky; bottom: 0; z-index: 2; padding: 12px 0 16px; background: #151d27; box-shadow: 0 -8px 12px #151d27; }
 #login #lg-msg { line-height: 1.5; overflow-wrap: anywhere; }
+
+.launcher-management { border: 1px solid #2b3948; border-radius: 6px; padding: 9px 11px; }
+.launcher-management > summary { color: #b9c9d8; cursor: pointer; font-size: 12px; line-height: 1.5; }
+.launcher-management > summary:focus-visible { outline: 2px solid #8ab4f8; outline-offset: 3px; }
+.launcher-management > label, .launcher-management > .launcher-address, .launcher-management > .launcher-actions { margin-top: 10px; }
+
+#lg-save-prompt { width: min(460px, calc(100vw - 32px)); box-sizing: border-box; max-height: calc(100dvh - 32px); overflow: auto; background: #151d27; color: #e3edf6; border: 1px solid #425368; border-radius: 12px; padding: 24px; font: 14px/1.6 system-ui, sans-serif; }
+#lg-save-prompt::backdrop { background: #050a12c9; }
+#lg-save-prompt h2 { margin: 0; font-size: 22px; }
+#lg-save-prompt label { display: flex; align-items: start; gap: 8px; }
+#lg-save-prompt input { margin-top: 6px; }
+.launcher-save-choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }

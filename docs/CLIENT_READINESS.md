@@ -163,3 +163,37 @@ candidate's full local gate returned actual exit 0 (342 web tests / 1704
 assertions, 23 Python tooling tests and native/WASM/desktop checks), logged at
 `/tmp/anima-v081-candidate-gate.log`. Its build and installed-app evidence remain
 pending. Public v0.6.0 has not been changed.
+
+## Fast account login and optional saving — 2026-09-13
+
+The user's clarified flow is account name plus password, with server selection
+already established. Address, notes and optional account nicknames are now in
+folded management sections; adding a server opens its address editor. The client
+sends the ordinary login request for both existing and new shard credentials.
+It adds no separate registration operation: automatic account creation remains
+the shard's responsibility.
+
+New/changed local profiles offer Save & connect, Connect without saving, and
+Back. Password storage is a separate desktop-only choice. An unchanged saved
+account reuses its native reference without asking again or rewriting profiles.
+Declining storage sends no launcher write; changing endpoints without saving
+cannot reuse a vault reference bound to the previous endpoint. Escape/Back sends
+no credentials, restores the form, and returns keyboard focus to Connect. An
+incoming character session dismisses a stale save prompt.
+
+Nine additional regressions cover management visibility, one-time login without
+profile writes, opt-in password storage, prompt cancellation/retry, endpoint
+isolation, ordinary login without registration, and stale prompt dismissal.
+The complete gate returned actual exit 0: 351 renderer tests / 1749 assertions,
+23 Python tooling tests and native/WASM/desktop checks. Log:
+`/tmp/anima-fast-login-final-gate.log`.
+
+A brief Chrome check used the real HTML/CSS/renderer with a fixture bootstrap
+that opens login, one synthetic server and no accounts. Two screenshots verified
+the folded layout and save-choice dialog; the one-time option received focus,
+and Escape returned to the enabled form. The fixture rejects all POSTs and
+performs no shard connection or profile write. Its temporary server and tab were
+closed afterward; evidence index: `/tmp/anima-fast-login-qa.json`. This is browser
+source-UI evidence, not installed-native or live-account verification. Version
+0.8.1 includes this clarified flow; its tag had not been created before these
+changes, so no existing release tag was moved.

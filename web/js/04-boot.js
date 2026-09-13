@@ -1217,6 +1217,7 @@ function wireLogin() {
       // Preparing a saved account may await native storage while another tab
       // advances login. Never repurpose that request into a character action.
       if (submission !== loginSubmissionGeneration || choosing !== characterStage || choiceId !== characterChoiceId) return;
+      if (!choosing && !credentials) { go.disabled = false; backButton.disabled = false; go.focus(); return; }
       msg.textContent = choosing ? "Entering world…" : "Connecting…";
       if (WASM_MODE) {
         if (choosing) wasmPlaySlot(slot);
