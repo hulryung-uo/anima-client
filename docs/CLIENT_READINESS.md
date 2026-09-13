@@ -378,3 +378,29 @@ test, and the complete local quality gate passed (actual exit 0). See
 [GRAPHICS_CACHE.md](GRAPHICS_CACHE.md) for accounting and remaining allocation
 limits. No native UI or live shard was controlled for this repair; long-session
 and installed-app acceptance remain open.
+
+### Focused-button keyboard isolation
+
+The global input guard recognized text fields and selects but not buttons.
+A regression reproduced Space being prevented while a button was focused,
+allowing game auto-attack to take precedence over native button activation.
+Buttons now own their keyboard input, including Space, Enter and Tab; focused
+button input also cannot start movement or target actions. Canvas shortcuts
+remain active, and keyup still releases held movement after focus changes.
+
+Two renderer regressions exercise the real global handlers. The complete local
+gate exited 0 with 363 renderer tests / 1802 assertions and all native/WASM/
+desktop checks. Evidence: `/tmp/anima-button-keys-before.log`,
+`/tmp/anima-button-keys-after.log`, `/tmp/anima-button-keys-gate.log`.
+This verifies event routing; native keyboard navigation remains an interactive
+acceptance item. The preceding UOP parser and cache commits passed all three
+platform jobs in CI run `34731642897` (`6c73556`).
+
+The character-layout audit also confirmed that current geometry is intentionally
+origin-wide. A durable layout identity must include the selected destination,
+account and actual player, rather than the reconnect-specific `sessionId` or
+player serial alone. Native `Session` currently retains no destination/account
+identity after login; browser WASM connects through a relay URL. Both paths need
+an explicit identity contract before character-specific geometry is implemented.
+Existing startup panel restoration and backup/recovery behavior must also be
+preserved. This remains unfinished work, not a claim of character isolation.

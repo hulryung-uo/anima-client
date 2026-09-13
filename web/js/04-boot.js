@@ -1375,13 +1375,13 @@ function wireLogin() {
     updateCreation(); // sets go.textContent ("Play") and opens the wizard if just toggled on
   };
 }
-// True when a key event is going to a text field (login form, etc.), so the global
-// game-input handler must not consume it (otherwise letters like a/w/s/d/m/b/t —
-// movement + hotkeys — never reach the field and typing drops characters).
+// Form controls own their keyboard input: typing, button activation and Tab
+// navigation must not also walk, attack or toggle war mode. Keyup still clears
+// movement latches even when focus has moved into a control.
 function isTypingTarget(el) {
   if (!el) return false;
   const t = el.tagName;
-  return t === "INPUT" || t === "TEXTAREA" || t === "SELECT" || el.isContentEditable;
+  return t === "INPUT" || t === "TEXTAREA" || t === "SELECT" || t === "BUTTON" || el.isContentEditable;
 }
 function showLogin(auth, msg, slots, capacity, cities, error, connection) {
   wireLogin();

@@ -40,6 +40,32 @@ function macCtx() {
 
 // ── a plain sequence ───────────────────────────────────────────────────────
 
+test("focused buttons keep activation and navigation keys out of game controls", () => {
+  const ctx = macCtx();
+  ctx.run('app.canvas = document.createElement("canvas"); setupInput();');
+  const button = ctx.document.createElement("button");
+  for (const code of ["Space", "Tab", "Enter", "KeyW", "KeyF"]) {
+    const ev = ctx.event("keydown", { code, target: button });
+    ctx.window.dispatchEvent(ev);
+    eq(ev.defaultPrevented, false, code + " retains the native control action");
+  }
+  deepEq(ctx.sent, [], "focusing a button must not attack or toggle war mode");
+  eq(ctx.run("held.size"), 0, "button input cannot start walking");
+  const space = ctx.event("keydown", { code: "Space", target: ctx.run("app.canvas") });
+  ctx.window.dispatchEvent(space);
+  eq(space.defaultPrevented, true);
+  ok(ctx.sent.includes("autoattack"), "the canvas retains its game shortcut");
+});
+
+test("releasing a movement key over a button still clears the held direction", () => {
+  const ctx = macCtx();
+  ctx.run('app.canvas = document.createElement("canvas"); setupInput();');
+  ctx.window.dispatchEvent(ctx.event("keydown", { code: "KeyW", target: ctx.run("app.canvas") }));
+  eq(ctx.run("held.size"), 1);
+  ctx.window.dispatchEvent(ctx.event("keyup", { code: "KeyW", target: ctx.document.createElement("button") }));
+  eq(ctx.run("held.size"), 0);
+});
+
 test("every step of a sequence runs, in order, in one go", () => {
   const ctx = macCtx();
   ctx.go([{ t: "say", text: "one" }, { t: "say", text: "two" }, { t: "say", text: "three" }]);
