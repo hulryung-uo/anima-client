@@ -13,7 +13,7 @@ suite or an exhausted historical gaps list does not establish product readiness.
 | Connection lifecycle | Bounded waits, cancellation, accurate progress, reconnect after failure without stale world/input | Native cancel/deadlines, serialized scene polling, interruption UI and WASM callback isolation implemented. Loopback protocol fixtures, stale-cancel HTTP checks and Chrome outage/recovery verified. Missed native login-frame transitions now use a stable per-connection ID and reload once before assigning a new world. Input is bound at HTTP acceptance and queue consumption; character prompts and sound SSE are also isolated. Regressions cover identical player serials on different connections, pending actions and stale replies. Current-build live-shard disconnect/re-entry and relay runtime checks remain. |
 | Core gameplay | Live movement/pathing, combat/casting/targeting, inventory/trade/vendor, chat/party, character creation/deletion | Historical ServUO evidence in TESTING/DESIGN/CLASSICUO_GAPS; current-build end-to-end audit still required. |
 | Interface and accessibility | Usable default layout, keyboard/focus, resizing/scaling, readable feedback, no debug-only dead ends | Basic login now asks only for account name/password after server selection, with optional saving and folded management. Browser layout/save-dialog checks passed. Actual v0.8.1 Mac installer reached this login screen; further native interaction was interrupted. Renderer regressions cover native-select Enter, profile readiness and in-flight submission locks. Wider keyboard/accessibility and game-window audit remains. |
-| Settings and state | Reliable persistence, recovery from corrupt data, useful backup/restore, isolation across characters/windows | Desktop configuration recovery and Chrome preference recovery/reload passed. Renderer preferences validate data, preserve originals and migrate into one atomic record including geometry. Headless tests cover malformed geometry, restore/defaults and concurrent-window saves. A current macOS source build verified settings-file import/reload, actual export contents, previous-copy restore and separately named repeat downloads. Full app restart, Windows UI and actual game-window resizing remain; see CLIENT_SETTINGS.md and NATIVE_BACKUP_VERIFICATION.md. Character-specific layouts and the broader session/window-isolation audit remain. |
+| Settings and state | Reliable persistence, recovery from corrupt data, useful backup/restore, isolation across characters/windows | Desktop configuration recovery and Chrome preference recovery/reload passed. Renderer preferences validate data, preserve originals and migrate into one atomic record including geometry. Headless tests cover malformed geometry, restore/defaults and concurrent-window saves. A current macOS source build verified settings-file import/reload, actual export contents, previous-copy restore and separately named repeat downloads. Full app restart, Windows UI and actual game-window resizing remain; see CLIENT_SETTINGS.md and NATIVE_BACKUP_VERIFICATION.md. Character-specific window geometry now has automated identity/backup checks and an isolated real-browser two-character save/reload verification. Native installed-app character switching and the broader session/window-isolation audit remain. |
 | Reliability and performance | No stale callbacks, clear disconnect/crash behavior, bounded resources, responsive long sessions | Connection/session races, pending audio, corrupt profile/settings handling and bounded sound loading have automated and selected runtime evidence. Texture/animation retention and retry have Chrome/WebGL evidence. World-map caches now identify resource folders and source metadata and reject corrupt records. Light-mask retry/retention and native light allocation bounds are implemented; stock-light tests passed. Latest local gate: 361 renderer tests / 1791 assertions. Whole-client long sessions, remaining native graphics caches and crash audits remain. See AUDIO_PERFORMANCE.md and GRAPHICS_CACHE.md. |
 | Delivery | Versioned Mac/Windows installers containing current features, install/run checks, honest release notes and download links | Immutable v0.8.1 (`f5ccd24`) passed both installer checks in run 34729212934. Downloaded files matched source/hash manifests; the actual notarized Mac app reached login. Further installed-app interaction and live gameplay remain unverified. Version 0.8.2 prepares a candidate containing the subsequent account-cache, world-map and lighting fixes. These candidates remain drafts; public v0.6.0 is unchanged. |
 
@@ -423,3 +423,25 @@ Evidence: `/tmp/anima-character-layout-final-gate.log`. Live character switching
 native visual resizing and installed-release verification are still required.
 This does not establish isolation for other common preferences or complete the
 overall client acceptance areas.
+
+
+### Real-browser character geometry verification
+
+Source `47c18d5` was exercised in a hidden Codex in-app browser on an isolated
+loopback origin. The fixture loaded the production scripts and replaced only
+`main()` with a window harness; no shard or native app was controlled. Its
+controls changed real DOM geometry, and the browser's real ResizeObserver
+persisted dimensions through the production code.
+
+Mage (serial 42) retained position 230/350 and body size 340×190. Warrior
+(serial 43) retained position 560/410 and body size 270×150. Navigating to each
+character again restored its own values; the common geometry remained empty
+and the exported settings did not contain the fixture account name. A viewport
+screenshot confirmed the restored Mage frame and readable contents after the
+fixture result panel was shortened so it did not obscure the window.
+
+Evidence: `/tmp/anima-character-layout-browser-result.json` includes source
+hashes, observed geometry and limitations; the harness is
+`/tmp/anima-character-layout-qa.py`. The temporary tab was closed and the
+fixture server's termination was confirmed. This does not verify live-character
+switching, native resize gestures or installed macOS/Windows behavior.
