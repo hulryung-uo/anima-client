@@ -61,3 +61,25 @@ identity when fixing a defect; a changed installer gets a later version.
 For remaining detailed acceptance areas, use [CLIENT_READINESS.md](CLIENT_READINESS.md).
 Windows silent install/uninstall is already automated by the release workflow;
 it does not close the Windows interactive rows in this record.
+
+
+## Observed v0.8.3 Mac interaction
+
+The exact notarized app copy was opened through its full path, reaching login
+on port 8191 (PID 601); the existing v0.8.1 process remained running. This reused
+the configured game files and existing library, so it is not a fresh-setup test.
+The served launcher script matched the immutable v0.8.3 source byte for byte.
+
+- Using another account with disposable input showed **Save for next time?**.
+  Password storage was initially off and **Connect without saving** had focus.
+- Escape dismissed the prompt, returned to login and focused Connect.
+- The disposable fields were cleared. Selecting an existing account with Down
+  and Return in the native popup changed the selected account without connecting.
+- Final backend state was `auth: login`; the profile file's before/after SHA-256
+  was identical. The v0.8.3 login window was left open. No saved password was read.
+
+Evidence: `/tmp/anima-v083-native-login.json`; the native prompt screenshot was
+visually inspected. This closes the Mac native-select check and verifies prompt
+presentation/Escape, but not successful connection, saving through the prompt,
+one-time login outcome, restart, or any live-character flow. Windows interaction
+and the remaining rows still need their own observations.

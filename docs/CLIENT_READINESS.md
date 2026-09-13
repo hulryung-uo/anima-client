@@ -508,3 +508,17 @@ install/uninstall passed in the release workflow. Local evidence is
 launched. The draft and immutable tag are preserved; public v0.6.0 is unchanged.
 Current installed-app interaction and live-shard acceptance remain open in
 [INSTALLER_ACCEPTANCE.md](INSTALLER_ACCEPTANCE.md).
+
+
+### v0.8.3 native Mac login and prompt verification
+
+The exact notarized app copy opened at port 8191 while v0.8.1 remained running.
+Its launcher script matched the tag. Native UI checks verified the optional-save
+prompt, default-off password checkbox, default focus on Connect without saving,
+Escape returning to login, and account-popup Down/Return without submission.
+After clearing disposable input, the backend remained at login and the saved
+profile's SHA-256 was unchanged. The 0.8.3 window remains open. Evidence is
+`/tmp/anima-v083-native-login.json`; details and remaining scope are in
+[INSTALLER_ACCEPTANCE.md](INSTALLER_ACCEPTANCE.md). The earlier old-app window
+lookup failure did not prevent opening the new version by its exact path.
+Live-shard checks still require a reachable designated shard and test account.
