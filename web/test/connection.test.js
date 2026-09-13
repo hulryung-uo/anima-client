@@ -121,3 +121,18 @@ test("WASM layout identity captures the connected relay and account and clears o
   eq(ctx.run('wasmMergeScene({player:{serial:42},mobiles:[],items:[]}).layoutIdentity'), identity);
   ctx.run("wasmDisconnect()"); eq(ctx.run("wasmLayoutIdentity"), null);
 });
+
+test("WASM retains failure target through close and replaces it on a new attempt", async () => {
+  const ctx = wasmContext();
+  ctx.document.getElementById("lg-relay").value = "ws://fixture.invalid/relay";
+  const first = ctx.run('wasmConnect("first-user", "fixture")'); await ctx.flush();
+  ctx.sockets[0].onopen(); await first; ctx.sockets[0].onclose();
+  const failed = await ctx.run("wasmPollScene()");
+  eq(failed.login_target.relay, "ws://fixture.invalid/relay"); eq(failed.login_target.username, "first-user");
+  ctx.document.getElementById("lg-relay").value = "ws://other.invalid/relay";
+  const second = ctx.run('wasmConnect("second-user", "fixture")'); await ctx.flush();
+  ctx.sockets[1].onopen(); await second; ctx.sockets[1].onclose();
+  const next = await ctx.run("wasmPollScene()");
+  eq(next.login_target.relay, "ws://other.invalid/relay"); eq(next.login_target.username, "second-user");
+  ctx.run("wasmDisconnect()"); eq(ctx.run("wasmLoginTarget"), null);
+});

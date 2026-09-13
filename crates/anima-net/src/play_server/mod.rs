@@ -925,6 +925,9 @@ impl PlayServer {
                     };
                     let (lh, lp, lu) =
                         (attempt.host.clone(), attempt.port, attempt.username.clone());
+                    let login_target = serde_json::json!({
+                        "host": lh, "port": lp, "shard": attempt.shard, "username": lu
+                    });
                     *scene.lock().unwrap() = r#"{"auth":"connecting"}"#.into();
                     eprintln!("play: connecting to {lh}:{lp} as {lu} ...");
                     let result = connect(attempt, &control);
@@ -940,7 +943,7 @@ impl PlayServer {
                         Err(e) => {
                             eprintln!("login failed: {e}");
                             *scene.lock().unwrap() =
-                                serde_json::json!({"auth":"error", "msg":friendly_login_error(&e)})
+                                serde_json::json!({"auth":"error", "msg":friendly_login_error(&e), "login_target":login_target})
                                     .to_string();
                         }
                     }

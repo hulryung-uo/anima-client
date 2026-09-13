@@ -522,3 +522,23 @@ profile's SHA-256 was unchanged. The 0.8.3 window remains open. Evidence is
 [INSTALLER_ACCEPTANCE.md](INSTALLER_ACCEPTANCE.md). The earlier old-app window
 lookup failure did not prevent opening the new version by its exact path.
 Live-shard checks still require a reachable designated shard and test account.
+
+
+### Login failure target correction after v0.8.3
+
+Actual Mac one-time connection/retry checks passed against a disposable loopback
+fixture: two 83-byte handshakes, actionable closure errors, enabled retry and an
+unchanged saved profile file. Restoring the existing server cleared test inputs,
+but revealed that the prior fixture error stayed visible under a different
+server selection. This was observed in the immutable v0.8.3 installed app.
+
+Native failure scenes now carry the submitted host/port/shard/account (without
+password), and browser failures retain their connected relay/account. The
+renderer displays targeted errors only when they match the current form;
+repeated polls cannot restore a different target's error. New matching failures
+and unscoped startup errors remain visible. Four renderer regressions and the
+full local gate passed (374 tests / 1867 assertions, actual exit 0). Evidence:
+`/tmp/anima-login-error-target-tests.log`,
+`/tmp/anima-login-error-target-final-gate.log`, and
+`/tmp/anima-v083-one-time-fixture.json`. Native/browser runtime verification of
+the correction and a subsequent installer remain open. No tag was moved.

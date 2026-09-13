@@ -6,6 +6,7 @@ const WASM_RELAY_DEFAULT = "ws://127.0.0.1:2595/relay?target=1";
 
 let wasmClient = null;
 let wasmLayoutIdentity = null;
+let wasmLoginTarget = null;
 let wasmWs = null;
 let wasmInWorld = false;
 let wasmLoadError = "";
@@ -493,10 +494,10 @@ async function wasmRefreshTerrain(obs) {
 async function wasmPollScene() {
   await wasmEnsure();
   if (wasmLoadError) return { auth: "error", msg: wasmLoadError };
-  if (wasmConnectionError) return { auth: wasmConnectionNotice ? "login" : "error", msg: wasmConnectionError };
+  if (wasmConnectionError) return { auth: wasmConnectionNotice ? "login" : "error", msg: wasmConnectionError, login_target: wasmLoginTarget };
   if (!wasmClient) return { auth: "login" };
   const err = wasmClient.login_error();
-  if (err) { wasmEndConnection(err); return { auth: "error", msg: err }; }
+  if (err) { wasmEndConnection(err); return { auth: "error", msg: err, login_target: wasmLoginTarget }; }
   let obs = {};
   try { obs = JSON.parse(wasmClient.observation_json()); } catch (_) { obs = {}; }
   if (obs.player && obs.player.serial) {
@@ -534,6 +535,7 @@ function wasmWaitForServer(id) {
 }
 function wasmEndConnection(message, notice = false) {
   wasmLayoutIdentity = null;
+  if (!message) wasmLoginTarget = null;
   if (wasmInWorld && message) {
     try { sessionStorage.setItem("anima.wasm.disconnect", message); } catch (_) {}
   }
@@ -570,6 +572,7 @@ async function wasmConnect(username, password) {
   if (wasmLoadError) { wasmEndConnection(wasmLoadError); throw new Error(wasmLoadError); }
   wasmClient = new WasmClientCtor(username, password);
   const relayUrl = wasmRelayUrl();
+  wasmLoginTarget = { relay: relayUrl, username };
   wasmJournal = []; wasmJournalSeq = 0;
   wasmTerrain = { map: { tiles: [] }, statics: [], lights: [] };
   return new Promise((resolve, reject) => {

@@ -1383,6 +1383,19 @@ function isTypingTarget(el) {
   const t = el.tagName;
   return t === "INPUT" || t === "TEXTAREA" || t === "SELECT" || t === "BUTTON" || el.isContentEditable;
 }
+// Failed attempts belong to the endpoint/account actually submitted. A later
+// server selection must not inherit the old error on every scene poll. Older
+// backends and global startup failures have no target and remain visible.
+function loginErrorMatchesForm(target) {
+  if (!target) return true;
+  if (typeof target.username !== "string" || (Object.hasOwn(target, "relay")
+    ? typeof target.relay !== "string" : typeof target.host !== "string")) return true;
+  const value = id => document.getElementById(id)?.value || "";
+  if (target.username !== value("lg-user").trim()) return false;
+  if (Object.hasOwn(target, "relay")) return target.relay === (typeof wasmRelayUrl === "function" ? wasmRelayUrl() : value("lg-relay").trim());
+  return target.host.toLowerCase() === value("lg-host").trim().toLowerCase()
+    && target.port === Number(value("lg-port")) && target.shard === Number(value("lg-shard"));
+}
 function showLogin(auth, msg, slots, capacity, cities, error, connection) {
   wireLogin();
   if (typeof launcherOnAuth === "function") launcherOnAuth(auth, slots);
@@ -1404,7 +1417,7 @@ function showLogin(auth, msg, slots, capacity, cities, error, connection) {
     if (go) go.disabled = true;
   } else if (auth === "error") {
     window.updateCharacterLoginStage(false);
-    if (m) m.textContent = "Login failed: " + (msg || "unknown error");
+    if (m) m.textContent = loginErrorMatchesForm(connection?.login_target) ? "Login failed: " + (msg || "unknown error") : "";
     if (go) go.disabled = false;
   } else {
     window.updateCharacterLoginStage(false);

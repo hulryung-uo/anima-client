@@ -51,6 +51,13 @@ has stopped. A lost game-server session returns to sign-in; it does not silently
 authenticate again. Browser WASM mode also cancels and times out login attempts,
 and discards callbacks from replaced WebSocket connections.
 
+Source after v0.8.3 also associates failed logins with the destination and
+account actually submitted. Changing the selected server, shard, account or
+browser relay hides the previous target's error on the next scene update. New
+failures on the current target remain visible, even with identical wording.
+Global startup errors and older backend responses without target metadata
+continue to display normally. Passwords are not included in error metadata.
+
 In current source (newer than v0.7.0), native windows also detect a changed game
 connection when polling misses the intervening sign-in screen. They clear input
 and reload once before displaying the new world, even if the new server reuses

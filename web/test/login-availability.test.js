@@ -95,3 +95,48 @@ test("leaving the save prompt returns to editable login without sending credenti
   ok(!el("lg-go").disabled); ok(!el("lg-user").disabled);
   eq(calls.filter(c => c.init?.body).length, 0);
 });
+
+test("failed login messages stay with their submitted server shard and account across polls", async () => {
+  const { ctx, el } = fixture(); await ctx.flush();
+  const target = { host: "fixture.invalid", port: 25111, shard: 0, username: "fixture-user" };
+  ctx.set("failedConnection", { login_target: target });
+  const fields = { "lg-host": target.host, "lg-port": String(target.port), "lg-shard": "0", "lg-user": target.username };
+  for (const [id, value] of Object.entries(fields)) el(id).value = value;
+  const pollError = () => ctx.run('showLogin("error", "server closed", null, null, null, null, failedConnection)');
+  pollError(); eq(el("lg-msg").textContent, "Login failed: server closed");
+  for (const [id, replacement] of [["lg-host", "other.invalid"], ["lg-port", "25112"], ["lg-shard", "1"], ["lg-user", "another-user"]]) {
+    el(id).value = replacement;
+    pollError(); pollError(); eq(el("lg-msg").textContent, "", id + " must not inherit the old failure");
+    el(id).value = fields[id]; pollError(); eq(el("lg-msg").textContent, "Login failed: server closed");
+  }
+  el("lg-new-server").click(); pollError(); eq(el("lg-msg").textContent, "");
+  ok(!el("lg-go").disabled);
+});
+
+test("new failures on the new target remain visible even with an identical message", async () => {
+  const { ctx, el } = fixture(); await ctx.flush();
+  el("lg-host").value = "new.invalid"; el("lg-port").value = "25112"; el("lg-shard").value = "0"; el("lg-user").value = "new-user";
+  ctx.set("failedConnection", { login_target: { host: "new.invalid", port: 25112, shard: 0, username: "new-user" } });
+  ctx.run('showLogin("error", "server closed", null, null, null, null, failedConnection)');
+  eq(el("lg-msg").textContent, "Login failed: server closed");
+  ctx.run('showLogin("error", "global startup failure")');
+  eq(el("lg-msg").textContent, "Login failed: global startup failure");
+});
+
+test("browser login errors follow the submitted relay without hiding unscoped errors", async () => {
+  const { ctx, el } = fixture(); await ctx.flush();
+  el("lg-user").value = "fixture-user"; el("lg-relay").value = "ws://fixture.invalid/relay";
+  ctx.set("failedConnection", { login_target: { relay: "ws://fixture.invalid/relay", username: "fixture-user" } });
+  ctx.run('showLogin("error", "relay failed", null, null, null, null, failedConnection)');
+  eq(el("lg-msg").textContent, "Login failed: relay failed");
+  el("lg-relay").value = "ws://other.invalid/relay";
+  ctx.run('showLogin("error", "relay failed", null, null, null, null, failedConnection)');
+  eq(el("lg-msg").textContent, "");
+  el("lg-relay").value = "";
+  ctx.set("failedConnection", { login_target: { relay: ctx.run("WASM_RELAY_DEFAULT"), username: "fixture-user" } });
+  ctx.run('showLogin("error", "default relay failed", null, null, null, null, failedConnection)');
+  eq(el("lg-msg").textContent, "Login failed: default relay failed");
+  ctx.set("failedConnection", { login_target: { unexpected: true } });
+  ctx.run('showLogin("error", "unscoped failure", null, null, null, null, failedConnection)');
+  eq(el("lg-msg").textContent, "Login failed: unscoped failure");
+});
