@@ -124,9 +124,12 @@ existing credentials, concurrent-window updates, invalid/failed imports and exac
 recovery copies. Actual loopback HTTP checks verified startup with corrupt
 profiles, recovery, an import/export larger than the old 16 KB request limit,
 repeat imports, cross-origin/header rejection and body limits. No game server was
-contacted. Chrome displayed the recovery controls, but automation stalled while
-handling its confirmation dialog; the UI test file remained unchanged. Actual
-file-picker import, completed download and native UI recovery remain unverified.
+contacted. A subsequent isolated macOS source build verified native UI recovery
+with an exact 0600 original copy, native file-picker import of two servers and
+three accounts, a completed download matching those profiles, and reimport of
+that downloaded file without duplicates. See
+[the native verification record](NATIVE_BACKUP_VERIFICATION.md). Full app restart,
+Windows interactive backup/recovery and installed-release checks remain open.
 
 ## Server notebook
 

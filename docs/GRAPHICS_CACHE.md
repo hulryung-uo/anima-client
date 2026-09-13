@@ -64,6 +64,8 @@ world/frame passes.
   `/tmp/anima-graphics-cache-before-after.json`, and
   `/tmp/anima-graphics-cache-gate.log`.
 
+CI run 34727768842 also passed all Linux, macOS and Windows jobs for `e6bb50c`.
+
 Verified texture source SHA-256:
 `b764014e0db733ee0f95413e3ad92fb8e301ddaecfffacafcb4a8ce83b9e6bdf`.
 

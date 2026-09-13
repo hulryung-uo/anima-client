@@ -64,7 +64,7 @@ unlimited history. Keep exported backups for longer-term recovery.
 ## Verification status — 2026-09-13
 
 Implemented, with the complete local quality gate passing, including lint,
-native compilation, WASM compilation and 283 web tests. Tests cover storage denial, quota failure, validation,
+native compilation, WASM compilation and 333 web tests. Tests cover storage denial, quota failure, validation,
 legacy migration, original-data retention, previous-copy restore, stale review,
 late file reads, live-session guards, explicit download links and native download
 origin/path restrictions.
@@ -80,14 +80,16 @@ the warning/recovery dialog, and a successful recovery/reload to login. The
 captured screen uses a disposable local fixture and no real account. The macOS
 QA app bundle also built successfully.
 
-**Actual file export/import round trips remain unverified.** Chrome's extension
-rejected file selection because file-URL access is disabled. A download was
-prepared in the UI, but the automation did not observe completion or an output
-file. The running macOS QA app could not be inspected because native computer
-use returned `cgWindowNotFound`; that does not prove an app failure or a successful
-download. Validate actual file contents, import/reload and previous-copy restore
-through a usable native window or authorized browser file access before announcing
-this entire feature as complete. Windows interactive checks also remain.
+**Native macOS file import/export and previous-copy restore are now verified.**
+A fresh isolated source build used the native picker to restore a four-group
+backup, reloaded to login, and exported an actual Downloads file retaining its
+options, macro, marker and supplied geometry. Restoring the previous copy then
+exported the earlier data to a separate filename without overwriting the first
+backup. The downloaded four-group file also passed the native import preview;
+its second application and a full app restart remain unverified after UI control
+was interrupted. See [the native verification record](NATIVE_BACKUP_VERIFICATION.md).
+Chrome file selection remains subject to the extension's file-access permission.
+Windows interactive checks and actual game-window resizing remain open.
 
 This source change is not included in the published v0.6.0 installers. The
 geometry improvements are also newer than the tagged v0.7.0 draft installers. The
