@@ -4,6 +4,7 @@ const { test, ok, eq, deepEq } = require("./run.js");
 function fixture() {
   const ctx = newContext(); ctx.mountPage(); ctx.loadAll();
   ctx.set("initLauncher", () => {}); ctx.set("launcherOnAuth", () => {});
+  ctx.set("launcherReady", true);
   ctx.set("Option", function (text, value) {
     const el = ctx.document.createElement("option"); el.textContent = text; el.value = value; return el;
   });

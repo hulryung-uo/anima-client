@@ -123,3 +123,22 @@ The repaired code has not yet been checked in a rebuilt native app or installer.
 It is newer than immutable tag v0.8.0 (`97c6722`) and will require a subsequent
 release. CI 34728265793 passed for that tag's source; its installer build
 34728267361 was still running when checked. Public v0.6.0 remains unchanged.
+
+## Profile availability and login controls — 2026-09-13
+
+Connect now stays disabled while profile loading, recovery or a profile operation
+prevents a login. Successful retry or completion restores it immediately.
+Keyboard submission observes the same readiness gate. The profile callback
+preserves an in-flight login's button lock, including when a scene refresh
+arrives before the POST completes. A save failure that requires profile recovery
+keeps Connect disabled; an ordinary transport failure allows retry. An existing
+character session can still use Play when account storage is unavailable.
+
+Five regressions exercise deferred load/failure/retry, deferred profile writes,
+credential storage followed by a pending login and scene refresh, recovery during
+save, and character selection. Four fail against the previous source. All pass
+with the repair, and the complete gate returned actual exit 0 (342 web tests /
+1704 assertions, 23 Python tooling tests, native/WASM checks, 14 desktop tests
+with the usual two real-vault exclusions). Log:
+`/tmp/anima-login-availability-gate.log`. This source is newer than v0.8.0 and has
+not been verified in a rebuilt native app. No additional UI automation was used.

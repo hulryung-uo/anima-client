@@ -632,6 +632,15 @@ function wireLogin() {
   let loginSubmissionPending = false;
   let loginSubmissionGeneration = 0;
   const go = document.getElementById("lg-go");
+  let profileBlocked = false;
+  window.updateLoginProfileAvailability = () => {
+    const blocked = !characterStage && typeof launcherLoginBlocked === "function" && launcherLoginBlocked();
+    if (blocked || loginSubmissionPending) go.disabled = true;
+    // A profile operation may finish while submit still owns the button.
+    // Release only our own block; character actions retain their existing state.
+    else if (profileBlocked && !characterStage && !loginSubmissionPending) go.disabled = false;
+    profileBlocked = blocked;
+  };
   const backButton = document.getElementById("lg-back");
   const deleteButton = document.getElementById("lg-delete");
   const createToggle = document.getElementById("lg-create");
@@ -1193,6 +1202,7 @@ function wireLogin() {
 
   const submit = async () => {
     if (loginSubmissionPending || (typeof launcherBusy === "function" && launcherBusy())) return;
+    if (!characterStage && typeof launcherLoginBlocked === "function" && launcherLoginBlocked()) return;
     const msg = document.getElementById("lg-msg");
     if (characterStage && selectedSlot === null) { msg.textContent = "Select a character."; return; }
     const choosing = characterStage, choiceId = characterChoiceId, slot = selectedSlot;
@@ -1225,6 +1235,7 @@ function wireLogin() {
       go.disabled = false; backButton.disabled = false;
     } finally {
       if (submission === loginSubmissionGeneration) loginSubmissionPending = false;
+      updateLoginProfileAvailability();
     }
   };
   go.addEventListener("click", submit);
@@ -1399,6 +1410,7 @@ function showLogin(auth, msg, slots, capacity, cities, error, connection) {
     if (m) m.textContent = msg || "";
     if (go) go.disabled = false;
   }
+  updateLoginProfileAvailability();
 }
 function hideLogin() {
   const el = document.getElementById("login");

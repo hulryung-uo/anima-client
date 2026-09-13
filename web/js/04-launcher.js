@@ -15,6 +15,7 @@ const launcherServer = () => launcherData.servers.find(s => s.id === launcherSer
 const launcherAccount = () => launcherData.accounts.find(a => a.id === launcherAccountId && a.server_id === launcherServerId);
 const launcherValue = id => (launcherEl(id)?.value || "").trim();
 function launcherBusy() { return launcherWorking || launcherConnecting; }
+function launcherLoginBlocked() { return !launcherReady || launcherBusy(); }
 function launcherDate(time) { return time ? new Date(time).toLocaleString() : "Not yet"; }
 function launcherRememberSelection() {
   launcherSelection.server = launcherServerId;
@@ -82,6 +83,7 @@ function launcherSetBusy(value) {
   const retry = launcherEl("lg-retry-profiles");
   if (retry) { retry.hidden = launcherReady; retry.disabled = value; }
   launcherBackupState();
+  if (typeof updateLoginProfileAvailability === "function") updateLoginProfileAvailability();
 }
 function launcherPasswordHint() {
   const checkbox = launcherEl("lg-save-password"), input = launcherEl("lg-pass");
