@@ -15,7 +15,7 @@ suite or an exhausted historical gaps list does not establish product readiness.
 | Interface and accessibility | Usable default layout, keyboard/focus, resizing/scaling, readable feedback, no debug-only dead ends | Login library was visually verified at desktop/narrow widths; wider UI audit remains. |
 | Settings and state | Reliable persistence, recovery from corrupt data, useful backup/restore, isolation across characters/windows | Desktop configuration recovery and Chrome preference recovery/reload passed. Renderer preferences validate data, preserve originals and migrate into one atomic record including geometry. Headless tests cover malformed geometry, restore/defaults and concurrent-window saves. A current macOS source build verified settings-file import/reload, actual export contents, previous-copy restore and separately named repeat downloads. Full app restart, Windows UI and actual game-window resizing remain; see CLIENT_SETTINGS.md and NATIVE_BACKUP_VERIFICATION.md. Character-specific layouts and the broader session/window-isolation audit remain. |
 | Reliability and performance | No stale callbacks, clear disconnect/crash behavior, bounded resources, responsive long sessions | Connection races, login deadlines, preference boot failures and lost passwords on reported save errors repaired. Profile reads are bounded; corrupt profiles leave the recovery screen available. 2026-09-13 local full gate passed (333 web tests / 1664 assertions). Sound loading reads the bank lazily, bounds retained WAV/decoded caches and caps physical work; full-byte comparison across 4096 stock sound IDs passed. Texture byte/count retention, safe asynchronous eviction, alpha-mask ownership and retryable animation metadata now have regression and actual Chrome PNG/WebGL evidence. Whole-client long-session, remaining native/light caches and process-crash audits remain; see AUDIO_PERFORMANCE.md and GRAPHICS_CACHE.md. |
-| Delivery | Versioned Mac/Windows installers containing current features, install/run checks, honest release notes and download links | v0.7.0 draft installers passed signature/notarization, mount/app-copy and silent install/uninstall checks (34712709301), but predate current source additions. A newer isolated Mac QA bundle now has graphical backup/recovery evidence. Version 0.8.0 and its draft notes prepare installers containing worlds backups, geometry, session isolation and sound/graphics improvements. Actual v0.8.0 build/install results, interactive installed-app checks and publication remain; public v0.6.0 is unchanged. |
+| Delivery | Versioned Mac/Windows installers containing current features, install/run checks, honest release notes and download links | v0.7.0 draft installers passed signature/notarization, mount/app-copy and silent install/uninstall checks (34712709301), but predate current source additions. A newer isolated Mac QA bundle now has graphical backup/recovery evidence. Version 0.8.0 and its draft notes prepare installers containing worlds backups, geometry, session isolation and sound/graphics improvements. v0.8.0 build/signature/install checks passed in run 34728267361. Version 0.8.1 prepares installers with the subsequent login keyboard/readiness fixes. Interactive installed-app checks and publication remain; public v0.6.0 is unchanged. |
 
 ## Verification rules
 
@@ -142,3 +142,24 @@ with the repair, and the complete gate returned actual exit 0 (342 web tests /
 with the usual two real-vault exclusions). Log:
 `/tmp/anima-login-availability-gate.log`. This source is newer than v0.8.0 and has
 not been verified in a rebuilt native app. No additional UI automation was used.
+
+## Installer delivery — v0.8.0 verified, v0.8.1 prepared
+
+Release run `34728267361` completed successfully for immutable v0.8.0 commit
+`97c67220f71794a23b3aa86b294032183a84eab0`. Both bundles and the checks against
+actual draft assets passed: macOS signature/notarization, disk-image mount and
+app copy; Windows silent installation/uninstallation. GitHub release ID
+`387749521` is still a draft with both installers and three verification files.
+The downloaded build manifests identify exactly that source commit:
+
+| Asset | Bytes | SHA-256 | Signing |
+| --- | ---: | --- | --- |
+| Anima_0.8.0_aarch64.dmg | 5086381 | f6a7b1d94f53a9f1b25c228b6b683a276906bc160fc6cdcbad82ddd494721c07 | notarized |
+| Anima_0.8.0_x64-setup.exe | 3377852 | 85e21f117a2c5df7ebebc0151c1485558c48ca8cedf6716264fb2d7f61bd5ec4 | unsigned |
+
+These checks do not launch the game UI. The subsequent source fixes `60c6880`
+and `6817083` are being packaged as v0.8.1 without moving v0.8.0. The v0.8.1
+candidate's full local gate returned actual exit 0 (342 web tests / 1704
+assertions, 23 Python tooling tests and native/WASM/desktop checks), logged at
+`/tmp/anima-v081-candidate-gate.log`. Its build and installed-app evidence remain
+pending. Public v0.6.0 has not been changed.
