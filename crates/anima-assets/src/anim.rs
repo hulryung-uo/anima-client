@@ -47,7 +47,7 @@
 //! that (body, group) — a deliberate small divergence from ClassicUO (which
 //! never falls back once a body is flagged) for extra robustness/coverage.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -103,6 +103,7 @@ const MAX_ACTIONS: usize = 80;
 /// Bound on how many decompressed UOP `.bin` payloads [`Anim::uop_cache`]
 /// keeps around at once. See that field's doc comment for the eviction policy.
 const UOP_CACHE_CAP: usize = 16;
+const UOP_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 /// One legacy animation file pair (`animN.idx` + `animN.mul`).
 struct AnimFile {
@@ -161,18 +162,65 @@ pub struct Anim {
     /// frame of a single group, and a renderer/play-server burst-requests many
     /// frames from the very same one (a whole walk cycle, say) — caching the
     /// decompressed bytes avoids re-inflating the same zlib stream per frame.
-    /// Bounded to avoid unbounded growth: once full, the WHOLE cache is
-    /// cleared before the next insert. That's the simplest possible bounded
-    /// policy (no LRU bookkeeping) and is cheap in the expected access
-    /// pattern — a request burst reuses one key many times before moving on
-    /// to a different body/group, so a full clear only costs one extra
-    /// decompression at the boundary, not a thrash.
+    /// Retains at most 16 entries / 64 MiB, evicting least recently used
+    /// payloads individually. Oversized payloads still render but are not
+    /// retained. In-flight Arc owners may outlive cache eviction; this is a
+    /// retention budget, not a bound on decompression or process memory.
     uop_cache: Mutex<UopCache>,
 }
 
-/// Key = `(body, resolved UOP action)`, value = that action's decompressed
-/// `.bin` bytes. See `Anim::uop_cache`'s doc comment.
-type UopCache = HashMap<(u16, u8), Arc<Vec<u8>>>;
+type UopCacheEntry = ((u16, u8), Arc<Vec<u8>>);
+
+/// Tiny LRU (at most 16 entries): linear lookup avoids a second index and
+/// monotonic timestamps. The front is oldest; hits move to the back.
+struct UopCache {
+    entries: VecDeque<UopCacheEntry>,
+    bytes: usize,
+    max_entries: usize,
+    max_bytes: usize,
+}
+
+impl Default for UopCache {
+    fn default() -> Self {
+        Self::new(UOP_CACHE_CAP, UOP_CACHE_BYTES)
+    }
+}
+
+impl UopCache {
+    fn new(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: VecDeque::new(),
+            bytes: 0,
+            max_entries,
+            max_bytes,
+        }
+    }
+
+    fn get(&mut self, key: &(u16, u8)) -> Option<Arc<Vec<u8>>> {
+        let index = self.entries.iter().position(|(k, _)| k == key)?;
+        let entry = self.entries.remove(index)?;
+        let result = entry.1.clone();
+        self.entries.push_back(entry);
+        Some(result)
+    }
+
+    fn insert(&mut self, key: (u16, u8), buf: Arc<Vec<u8>>) {
+        // Another request may have filled this key while we decompressed it.
+        if self.get(&key).is_some() {
+            return;
+        }
+        let size = buf.capacity();
+        if self.max_entries == 0 || size > self.max_bytes {
+            return;
+        }
+        while self.entries.len() >= self.max_entries || self.bytes > self.max_bytes - size {
+            let (_, oldest) = self.entries.pop_front().expect("cache accounting");
+            self.bytes -= oldest.capacity();
+        }
+        self.bytes += size;
+        self.entries.push_back((key, buf));
+    }
+}
 
 /// Parsed `mobtypes.txt` facts about one body: the PURE TYPE-derived group
 /// `kind` (0 = monster/sea_monster, 1 = animal, 2 = human/equipment — this is
@@ -271,7 +319,7 @@ impl Anim {
             anim2: std::fs::read_to_string(dir.join("Anim2.def"))
                 .map(|t| parse_group_replace(&t))
                 .unwrap_or_default(),
-            uop_cache: Mutex::new(HashMap::new()),
+            uop_cache: Mutex::new(UopCache::default()),
         })
     }
 
@@ -635,9 +683,9 @@ impl Anim {
         let group = self.replaced_group(body, group);
         let action = self.uop_action(body, group)?;
         let key = (body, action);
-        if let Ok(cache) = self.uop_cache.lock() {
+        if let Ok(mut cache) = self.uop_cache.lock() {
             if let Some(buf) = cache.get(&key) {
-                return Some(buf.clone());
+                return Some(buf);
             }
         }
         let path = format!("build/animationlegacyframe/{body:06}/{action:02}.bin");
@@ -649,9 +697,6 @@ impl Anim {
                 .find_map(|f| f.by_hash(hash))?,
         );
         if let Ok(mut cache) = self.uop_cache.lock() {
-            if cache.len() >= UOP_CACHE_CAP {
-                cache.clear(); // simplest bounded policy — see field doc comment
-            }
             cache.insert(key, buf.clone());
         }
         Some(buf)
@@ -1383,6 +1428,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn uop_cache_keeps_hot_payloads_when_entry_limit_is_reached() {
+        let mut cache = UopCache::new(3, 100);
+        for body in 0..3 {
+            cache.insert((body, 0), Arc::new(vec![body as u8; 4]));
+        }
+        let active = cache.get(&(0, 0)).unwrap();
+        cache.insert((3, 0), Arc::new(vec![3; 4]));
+        assert!(cache.get(&(1, 0)).is_none());
+        assert!(Arc::ptr_eq(&active, &cache.get(&(0, 0)).unwrap()));
+        assert!(cache.get(&(2, 0)).is_some());
+        assert!(cache.get(&(3, 0)).is_some());
+        assert_eq!(cache.bytes, 12);
+    }
+
+    #[test]
+    fn uop_cache_counts_allocated_bytes_and_preserves_active_owners() {
+        let mut cache = UopCache::new(16, 12);
+        let mut allocated = Vec::with_capacity(8);
+        allocated.push(42);
+        let active = Arc::new(allocated);
+        cache.insert((1, 0), active.clone());
+        cache.insert((2, 0), Arc::new(vec![2; 4]));
+        assert_eq!(cache.bytes, 12);
+        cache.insert((3, 0), Arc::new(vec![3; 5]));
+        assert!(cache.get(&(1, 0)).is_none());
+        assert_eq!(&**active, &[42]);
+        assert_eq!(Arc::strong_count(&active), 1);
+        assert!(cache.get(&(2, 0)).is_some());
+        assert_eq!(cache.bytes, 9);
+    }
+
+    #[test]
+    fn uop_cache_oversized_and_duplicate_loads_do_not_flush_other_entries() {
+        let mut cache = UopCache::new(2, 8);
+        let original = Arc::new(vec![1; 4]);
+        cache.insert((1, 0), original.clone());
+        cache.insert((2, 0), Arc::new(vec![2; 4]));
+        cache.insert((3, 0), Arc::new(vec![3; 9]));
+        assert!(cache.get(&(3, 0)).is_none());
+        cache.insert((1, 0), Arc::new(vec![9; 4]));
+        assert_eq!(cache.bytes, 8);
+        assert_eq!(cache.entries.len(), 2);
+        assert!(Arc::ptr_eq(&original, &cache.get(&(1, 0)).unwrap()));
+        cache.insert((4, 0), Arc::new(vec![4; 4]));
+        assert!(cache.get(&(2, 0)).is_none());
+        assert!(cache.get(&(1, 0)).is_some());
+    }
+
+    #[test]
     #[ignore] // needs ~/dev/uo/uo-resource
     fn human_idle_groups_are_the_people_fidget_row() {
         let dir = format!("{}/dev/uo/uo-resource", std::env::var("HOME").unwrap());
@@ -1493,7 +1587,7 @@ bad line without braces
             uop_replace: HashMap::new(),
             anim1: Vec::new(),
             anim2: Vec::new(),
-            uop_cache: Mutex::new(HashMap::new()),
+            uop_cache: Mutex::new(UopCache::default()),
         }
     }
 

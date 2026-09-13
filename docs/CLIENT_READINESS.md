@@ -368,3 +368,13 @@ passed explicitly. The full `bash scripts/check.sh` gate exited successfully;
 logs are `/tmp/anima-uop-directory-gate.log` and
 `/tmp/anima-uop-real-test.log`. This source change is newer than the immutable
 v0.8.2 installers and does not close the outstanding interactive acceptance.
+
+### Native animation cache retention after v0.8.2
+
+UOP animation payloads now have least-recently-used eviction with a 16-entry /
+64 MiB allocated-byte retention budget. Oversized custom payloads remain
+readable without caching. Three cache regressions, the real-resource UOP frame
+test, and the complete local quality gate passed (actual exit 0). See
+[GRAPHICS_CACHE.md](GRAPHICS_CACHE.md) for accounting and remaining allocation
+limits. No native UI or live shard was controlled for this repair; long-session
+and installed-app acceptance remain open.

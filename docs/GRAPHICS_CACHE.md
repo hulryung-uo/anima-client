@@ -153,3 +153,25 @@ well below the limit. Evidence: `/tmp/anima-stock-light-dimensions.json`,
 `/tmp/anima-stock-light-test.log`, and `/tmp/anima-native-light-test.log`.
 The full local gate returned actual exit 0; log:
 `/tmp/anima-native-light-gate.log`. No native UI or shard was controlled.
+
+## Native UOP animation retention after v0.8.2
+
+The decompressed animation-group cache previously retained 16 payloads of any
+size and cleared all of them on the next miss. It now evicts individual least
+recently used groups until both the 16-entry and 64 MiB limits are satisfied.
+Accounting uses vector capacity, including unused allocated space. Cache hits
+refresh recency; a duplicate load finishing later does not replace an existing
+entry or evict unrelated groups. The cache remains local to its resource reader.
+
+Payloads larger than the retention budget still decode and render, but are not
+cached. Active frame requests retain their own Arc references after eviction.
+Thus this bounds cache ownership, not concurrent decoding, oversized custom
+assets, decoded images, or total process memory. Large uncached animations may
+require repeated decompression; live-session performance remains unverified.
+
+Three regressions cover hot-entry survival, capacity-based byte eviction,
+active-owner survival, oversized admission and duplicate completion. The existing
+real-resource UOP animation test also passed, resolving over 100 stock bodies
+and its specific frame/remapping assertions. Full `scripts/check.sh` exited 0.
+Evidence: `/tmp/anima-uop-cache-gate.log` and `/tmp/anima-uop-cache-stock.log`.
+This is source work after the immutable v0.8.2 installer candidate.
