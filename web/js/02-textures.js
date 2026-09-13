@@ -1,70 +1,116 @@
 // ---- texture + frame-count caches ----
-// Hue is baked into the cache key/URL (the server pre-hues each PNG), so every
-// distinct dye of every item/body multiplies GPU-resident textures — an
-// unbounded cache pins hundreds of MB after a long multi-town tour. Bound it
-// with an LRU: texLastUsed tracks when each url was last actually drawn
-// (touchTex, called on every texFor hit, PLUS a blanket per-poll sweep over every
-// url a live sprite/anim-part could be showing — see forEachLiveTexUrl below,
-// called from syncWorld()). Eviction only ever considers entries idle past
-// TEX_IDLE_MS, so a texture a live sprite is still using — touched far more
-// often than that — is never pulled out from under it; the budget (TEX_BUDGET)
-// is picked high enough that ordinary town play never crosses it, so this only
-// changes marathon sessions.
+// Hue is part of the URL: visiting more towns and dyes grows both the decoded
+// image and GPU working sets. Count AND estimated RGBA bytes govern retention.
+// These are soft budgets: never destroy a live sprite's texture to meet them.
 const texCache = new Map(), texLastUsed = new Map(), loading = new Set();
-const TEX_BUDGET = 1500;          // ~200MB at UO's typical small-sprite sizes
-const TEX_IDLE_MS = 5 * 60_000;   // don't evict anything touched more recently than this
-const TEX_SWEEP_MS = 30_000;      // don't re-scan for eviction more than 1x/30s
-let lastTexSweep = 0;
-function touchTex(url) { if (url) texLastUsed.set(url, performance.now()); }
+const texSizes = new Map(), texUnloading = new Set(), texQueue = new Map(), texFailures = new Map();
+const TEX_BUDGET = 1500, TEX_BYTES = 256 * 1024 * 1024;
+const TEX_IDLE_MS = 1000; // let new arrivals reach the next scene poll before eviction
+const TEX_SWEEP_MS = 1000;
+const TEX_LOADS = 16, TEX_QUEUE = 512, TEX_QUEUE_IDLE_MS = 2000;
+let texBytes = 0, lastTexSweep = -Infinity;
+function touchTex(url) {
+  // Animation prefetch lists include URLs not loaded yet; they must not create
+  // phantom LRU entries that later count as evicted resources.
+  if (texCache.has(url)) texLastUsed.set(url, performance.now());
+}
+function textureBytes(t) {
+  const s = t.source;
+  // Bundled Pixi TextureSource stores physical (resolution-adjusted) pixels.
+  // This estimates one RGBA surface, not whole-process RAM or driver overhead.
+  return Math.max(1, s?.pixelWidth || t.width || 1) * Math.max(1, s?.pixelHeight || t.height || 1) * 4;
+}
 function texFor(url) {
+  if (!url) return null;
   if (texCache.has(url)) { touchTex(url); return texCache.get(url); }
-  if (!loading.has(url)) {
-    loading.add(url);
-    // markDirty() in the .then so a body/clothing frame that streams in gets
-    // painted even while the character stands still (render-on-demand otherwise
-    // wouldn't repaint an idle scene when a late texture arrives).
-    PIXI.Assets.load(url).then((t) => {
-      texCache.set(url, t); touchTex(url); loading.delete(url); markDirty(); sweepTexCache();
-    }).catch(() => { texCache.set(url, null); touchTex(url); loading.delete(url); });
-  }
+  // Assets.unload awaits the loader's promise before destroying its texture.
+  // A concurrent load can otherwise obtain that very same, doomed object.
+  if (texUnloading.has(url) || loading.has(url)) return null;
+  const failure = texFailures.get(url);
+  if (failure && performance.now() < failure.until) return null;
+  if (texQueue.has(url) || texQueue.size < TEX_QUEUE) texQueue.set(url, performance.now());
+  pumpTextures();
   return null;
 }
-// Evict LRU entries once over TEX_BUDGET, throttled to at most 1 scan/TEX_SWEEP_MS
-// (this can run on every texture load once near budget, so keep it cheap). Only
-// evicts entries idle past TEX_IDLE_MS — see the cache's own comment above for why
-// that's safe. Routes eviction through PIXI.Assets.unload(url), NOT a bare
-// texture.destroy(true): Assets keeps its own url→texture cache (Loader.promiseCache
-// + the top-level Cache), and unload() is what forgets the url there too — destroying
-// the texture directly would leave a later PIXI.Assets.load(url) handing back the
-// same (now-destroyed) Texture instead of actually reloading it.
-//
-// Belt-and-braces: touchTex alone isn't trusted to have caught everything (two
-// real escapes found live: pruneFar's hysteresis-ring tiles, which sit on stage
-// outside the "seen this poll" window loop that does the touching, and a
-// mobile's st.partTex last-good fallback texture, whose OWN url only gets
-// touched incidentally, not every frame it's actually the one drawn). If either
-// escape (or a future one) evades touchTex bookkeeping, evicting a texture a
-// live sprite still points at throws inside app.render() ("Cannot read
-// properties of null (reading alphaMode)") and freezes the whole rAF loop (see
-// frame()'s own resilience fix). So: build the live set fresh at sweep time and
-// simply never evict anything in it, full stop, regardless of texLastUsed.
+function textureFailed(url) {
+  const delay = Math.min(60_000, (texFailures.get(url)?.delay || 1000) * 2);
+  texFailures.delete(url);
+  texFailures.set(url, { delay, until: performance.now() + delay });
+  while (texFailures.size > TEX_QUEUE) texFailures.delete(texFailures.keys().next().value);
+}
+function pumpTextures() {
+  // Bound actual SDK work, including decode. Do not pretend an uncancellable
+  // Pixi promise has stopped merely because a logical deadline has elapsed.
+  while (loading.size < TEX_LOADS && texQueue.size) {
+    const [url, last] = texQueue.entries().next().value;
+    texQueue.delete(url);
+    if (performance.now() - last > TEX_QUEUE_IDLE_MS) continue;
+    loading.add(url);
+    void loadTexture(url);
+  }
+}
+async function loadTexture(url) {
+  let t;
+  try {
+    t = await PIXI.Assets.load(url);
+    if (!t || t.destroyed || t.source?.destroyed) throw new Error("Unavailable texture");
+  } catch {
+    // Pixi removes rejected loader promises itself. An error is retryable; it
+    // is not evidence that this art is permanently absent from the resource set.
+    textureFailed(url);
+  } finally {
+    loading.delete(url);
+  }
+  if (t && !t.destroyed && !t.source?.destroyed) {
+    const size = textureBytes(t);
+    texCache.set(url, t); texSizes.set(url, size); texBytes += size;
+    texFailures.delete(url); touchTex(url);
+  }
+  pumpTextures();
+  // Keep rendering errors outside the load catch: they must not poison the URL.
+  markDirty();
+  sweepTexCache();
+}
+// Preserve the hysteresis-ring terrain, animated statics' prefetched frames,
+// shadows/slices sharing their parents' sources, and mobile last-good parts.
+// An on-stage reference wins over age and budget, even when touch bookkeeping
+// missed it. Destroying one freezes Pixi's render path (null alphaMode).
 function sweepTexCache() {
-  if (texCache.size <= TEX_BUDGET) return;
+  if (texCache.size <= TEX_BUDGET && texBytes <= TEX_BYTES) return;
   const now = performance.now();
   if (now - lastTexSweep < TEX_SWEEP_MS) return;
   lastTexSweep = now;
   const live = new Set();
   forEachLiveTexUrl((u) => { if (u) live.add(u); });
-  const stale = [];
-  for (const [url, last] of texLastUsed) if (!live.has(url) && now - last >= TEX_IDLE_MS) stale.push([url, last]);
-  if (!stale.length) return; // over budget but everything's still "recently" touched (or live) — wait
-  stale.sort((a, b) => a[1] - b[1]); // oldest-touched first
-  const over = texCache.size - TEX_BUDGET;
-  for (let i = 0; i < Math.min(over, stale.length); i++) {
-    const url = stale[i][0];
-    texCache.delete(url); texLastUsed.delete(url);
-    PIXI.Assets.unload(url).catch(() => {});
+  // URL pools cannot describe every on-stage owner: corpse clothing, stationary
+  // house previews and an effect's last-good frame are examples. Inspect the
+  // actual tree too, comparing SOURCE identity so derived meshes/slices count.
+  const sources = new Set(), nodes = [app?.stage || world];
+  while (nodes.length) {
+    const node = nodes.pop();
+    if (!node) continue;
+    if (node.texture?.source) sources.add(node.texture.source);
+    if (node.children) for (const child of node.children) nodes.push(child);
   }
+  const stale = [];
+  for (const [url, last] of texLastUsed) {
+    if (!live.has(url) && !sources.has(texCache.get(url)?.source) && now - last >= TEX_IDLE_MS) stale.push([url, last]);
+  }
+  stale.sort((a, b) => a[1] - b[1]);
+  for (const [url] of stale) {
+    if (texCache.size <= TEX_BUDGET && texBytes <= TEX_BYTES) break;
+    texBytes -= texSizes.get(url) || 0; texSizes.delete(url);
+    texCache.delete(url); texLastUsed.delete(url);
+    discardAlphaMask(url);
+    texUnloading.add(url);
+    void unloadTexture(url);
+  }
+}
+async function unloadTexture(url) {
+  try { await PIXI.Assets.unload(url); }
+  catch { textureFailed(url); }
+  finally { texUnloading.delete(url); }
+  markDirty();
 }
 
 // ---- per-pixel hit-testing for interactive world sprites ----
@@ -80,15 +126,27 @@ function sweepTexCache() {
 // the same, via a custom `hitArea` per sprite.
 //
 // The mask is built once per texture URL — not per sprite, not per frame — and
-// shared by every sprite currently showing that art. `null` marks a URL that
-// failed to rasterize (CORS/404/tainted canvas) so it's never retried; those
-// sprites simply fall back to plain bounds-based hit-testing, exactly like
-// today, so this can never make clicking WORSE than before.
+// shared by every sprite currently showing that art. Masks follow the texture's
+// lifetime, so leaving a town releases its click data too. A failed mask falls
+// back to bounds and can be retried after a cooldown.
 const alphaMaskCache = new Map();   // url -> {w, h, bits:Uint8Array} | null
-const alphaMaskPending = new Set(); // urls currently being rasterized (dedupe)
+const alphaMaskPending = new Map(); // url -> active fallback image + deadline
+const alphaMaskFailures = new Map();
+function discardAlphaMask(url) {
+  alphaMaskCache.delete(url); alphaMaskFailures.delete(url);
+  const pending = alphaMaskPending.get(url);
+  if (!pending) return;
+  alphaMaskPending.delete(url); clearTimeout(pending.timer);
+  pending.img.onload = pending.img.onerror = null;
+  pending.img.src = "";
+}
+function alphaMaskFailed(url) {
+  alphaMaskCache.set(url, null);
+  alphaMaskFailures.set(url, performance.now() + 30_000);
+}
 function requestAlphaMask(url) {
-  if (alphaMaskCache.has(url) || alphaMaskPending.has(url)) return;
-  alphaMaskPending.add(url);
+  if (!texCache.has(url) || alphaMaskPending.has(url)) return;
+  if (alphaMaskCache.get(url) || performance.now() < (alphaMaskFailures.get(url) || 0)) return;
   // Prefer the image PIXI's own loader already decoded for this exact texture
   // (texture.source.resource — an HTMLImageElement or ImageBitmap depending on
   // which loader parser handled it) over fetching it again: this url is almost
@@ -106,16 +164,29 @@ function requestAlphaMask(url) {
     (typeof HTMLCanvasElement !== "undefined" && resource instanceof HTMLCanvasElement)
   );
   if (reusable) { rasterizeAlphaMask(url, resource); return; }
+  if (alphaMaskPending.size >= TEX_LOADS) return;
   const img = new Image();
-  img.onload = () => rasterizeAlphaMask(url, img);
-  img.onerror = () => { alphaMaskCache.set(url, null); alphaMaskPending.delete(url); };
+  const pending = { img, timer: null };
+  alphaMaskPending.set(url, pending);
+  const finish = (success) => {
+    if (alphaMaskPending.get(url) !== pending) return;
+    clearTimeout(pending.timer); alphaMaskPending.delete(url);
+    img.onload = img.onerror = null;
+    if (!texCache.has(url)) return;
+    if (success) rasterizeAlphaMask(url, img);
+    else { alphaMaskFailed(url); img.src = ""; }
+  };
+  img.onload = () => finish(true);
+  img.onerror = () => finish(false);
+  pending.timer = setTimeout(() => finish(false), 5000);
   img.src = url;
 }
 // Shared by both sources above (a reused texture resource, or a freshly loaded
 // Image): draw into an offscreen canvas, read back alpha, store one byte per
-// pixel (>8 alpha ~= opaque enough to count as "hit"). Cache null on failure
-// (CORS/tainted canvas/zero-size) so a bad url is never retried in a loop.
+// pixel (>8 alpha ~= opaque enough to count as "hit"). A mask uses one quarter
+// of its texture's estimated RGBA bytes and is discarded with that texture.
 function rasterizeAlphaMask(url, img) {
+  if (!texCache.has(url)) return;
   try {
     const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
     if (!w || !h) throw new Error("empty image");
@@ -127,8 +198,8 @@ function rasterizeAlphaMask(url, img) {
     const bits = new Uint8Array(w * h);
     for (let p = 0, i = 3; p < bits.length; p++, i += 4) bits[p] = data[i] > 8 ? 1 : 0;
     alphaMaskCache.set(url, { w, h, bits });
-  } catch { alphaMaskCache.set(url, null); } // degrade to bounds-based, never retry
-  alphaMaskPending.delete(url);
+    alphaMaskFailures.delete(url);
+  } catch { alphaMaskFailed(url); }
 }
 // Plain-rectangle test — PIXI's own default Sprite.containsPoint formula —
 // used as the fallback whenever a mask isn't ready (still loading) or isn't
@@ -158,8 +229,7 @@ function pixelHitArea(sp, getUrl) {
       const url = getUrl();
       if (!url) return boundsContains(sp, x, y);
       const mask = alphaMaskCache.get(url);
-      if (mask === undefined) { requestAlphaMask(url); return boundsContains(sp, x, y); }
-      if (mask === null) return boundsContains(sp, x, y);
+      if (mask == null) { requestAlphaMask(url); return boundsContains(sp, x, y); }
       const w = sp.width, h = sp.height;
       if (!w || !h) return false;
       // A depth-sliced mobile part is only a horizontal strip of the frame
@@ -175,15 +245,82 @@ function pixelHitArea(sp, getUrl) {
 }
 
 const frameCount = new Map();
+const animInfoPending = new Map(), animInfoLoads = new Set(), animInfoFailures = new Map();
+const ANIM_INFO_ENTRIES = 4096, ANIM_INFO_CENTERS = 65536, ANIM_INFO_BODY_BYTES = 1024 * 1024;
+let frameCenterCount = 0;
+function touchFrameInfo(k) {
+  if (!frameCount.has(k)) return;
+  const n = frameCount.get(k);
+  frameCount.delete(k); frameCount.set(k, n);
+}
+function cacheFrameInfo(k, j) {
+  // Counts and draw centers form one record: evict together. Missing animation
+  // records (frames:0) cost no centers but still count toward the entry limit.
+  while (frameCount.size >= ANIM_INFO_ENTRIES || frameCenterCount + j.c.length > ANIM_INFO_CENTERS) {
+    const oldest = frameCount.keys().next().value;
+    frameCenterCount -= frameCtr.get(oldest)?.length || 0;
+    frameCount.delete(oldest); frameCtr.delete(oldest);
+  }
+  frameCount.set(k, j.frames); frameCtr.set(k, j.c); frameCenterCount += j.c.length;
+}
+async function readFrameInfo(response) {
+  if (!response.ok) throw new Error("Animation information unavailable");
+  if (Number(response.headers?.get("Content-Length")) > ANIM_INFO_BODY_BYTES) throw new Error("Animation information too large");
+  let text = "";
+  if (response.body?.getReader) {
+    const reader = response.body.getReader(), decoder = new TextDecoder();
+    let bytes = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > ANIM_INFO_BODY_BYTES) { void reader.cancel().catch(() => {}); throw new Error("Animation information too large"); }
+        text += decoder.decode(value, { stream: true });
+      }
+      text += decoder.decode();
+    } finally { reader.releaseLock(); }
+  } else {
+    text = await response.text();
+    if (new TextEncoder().encode(text).byteLength > ANIM_INFO_BODY_BYTES) throw new Error("Animation information too large");
+  }
+  const j = JSON.parse(text);
+  if (!j || !Number.isInteger(j.frames) || j.frames < 0 || j.frames > ANIM_INFO_CENTERS ||
+      !Array.isArray(j.c) || j.c.length !== j.frames ||
+      !j.c.every(c => Array.isArray(c) && c.length === 2 && c.every(n => Number.isInteger(n) && Math.abs(n) <= 65536))) {
+    throw new Error("Invalid animation information");
+  }
+  return j;
+}
 function framesFor(body, group, dir) {
   const k = `${body}/${group}/${dir}`;
-  if (frameCount.has(k)) return Math.max(1, frameCount.get(k));
-  if (!loading.has("i" + k)) {
-    loading.add("i" + k);
-    fetch(`animinfo/${body}/${group}/${dir}`).then((r) => r.json())
-      .then((j) => { frameCount.set(k, j.frames | 0); frameCtr.set(k, j.c || []); })
-      .catch(() => frameCount.set(k, 0));
-  }
+  if (frameCount.has(k)) { touchFrameInfo(k); return Math.max(1, frameCount.get(k)); }
+  if (animInfoPending.has(k) || animInfoLoads.size >= 8 || performance.now() < (animInfoFailures.get(k) || 0)) return 5;
+  const controller = new AbortController(), request = { done: false, deadline: performance.now() + 5000 };
+  animInfoPending.set(k, request); animInfoLoads.add(request);
+  const finish = j => {
+    if (request.done) return;
+    request.done = true; clearTimeout(timer);
+    if (animInfoPending.get(k) === request) animInfoPending.delete(k);
+    if (j) { cacheFrameInfo(k, j); animInfoFailures.delete(k); }
+    else {
+      controller.abort();
+      animInfoFailures.delete(k); animInfoFailures.set(k, performance.now() + 2000);
+      while (animInfoFailures.size > TEX_QUEUE) animInfoFailures.delete(animInfoFailures.keys().next().value);
+    }
+    markDirty();
+  };
+  const expired = () => request.done || performance.now() >= request.deadline;
+  const timer = setTimeout(() => finish(null), 5000);
+  void (async () => {
+    let result = null;
+    try {
+      const response = await fetch(`animinfo/${k}`, { signal: controller.signal });
+      if (!expired()) result = await readFrameInfo(response);
+    } catch { /* A transport/JSON error is not a confirmed zero-frame animation. */ }
+    finally { animInfoLoads.delete(request); }
+    finish(expired() ? null : result);
+  })();
   return 5;
 }
 // Per-frame draw-center [cx, cy] (from animinfo). The renderer positions a part's
@@ -192,7 +329,9 @@ function framesFor(body, group, dir) {
 // being foot-anchored at the same point. null until the animinfo load lands.
 const frameCtr = new Map(); // "body/group/dir" -> [[cx,cy],...]
 function centerFor(body, group, dir, frame) {
-  const c = frameCtr.get(`${body}/${group}/${dir}`);
+  const k = `${body}/${group}/${dir}`;
+  touchFrameInfo(k);
+  const c = frameCtr.get(k);
   return c && c[frame] ? c[frame] : null;
 }
 

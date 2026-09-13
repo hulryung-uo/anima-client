@@ -54,6 +54,11 @@ window static list; `web/main.js` streams those textures and draws the diamond
 field + statics (grass, roads, water, buildings), falling back to avg-color diamonds
 while textures load. Multi-floor visibility (roof/upper-floor culling by the
 player's Z) is ported from ClassicUO — see `docs/RENDERING.md`. Screenshot-verified.
+Texture retention now uses count/estimated RGBA budgets with live URL and actual
+stage-source protection; asynchronous Pixi unloads gate same-URL reloads. Alpha
+hit masks follow texture lifetime, and animation metadata has bounded retention
+and retryable failures/deadlines. See `docs/GRAPHICS_CACHE.md` for the actual
+Pixi/Chrome verification and the limits of these resource estimates.
 
 **Mobile sprites & animation (COMPLETE — legacy + UOP, remapped):**
 `anima-assets::anim` resolves a body's real animation through the full ClassicUO

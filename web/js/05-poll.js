@@ -940,6 +940,9 @@ function syncWorld(s) {
   // loop dies (see frame()'s own resilience fix). ~1.3k Map.set calls at a
   // typical view radius — trivial next to the rest of this function.
   forEachLiveTexUrl(touchTex);
+  // A load-time sweep can find only recent/live textures. Retry as the world
+  // changes, even if no further image finishes loading after leaving a town.
+  sweepTexCache();
 }
 // Every texture url currently referenced by a live, on-stage sprite or a
 // mobile's per-part fallback (drawMobs's st.partTex — see part() below for why

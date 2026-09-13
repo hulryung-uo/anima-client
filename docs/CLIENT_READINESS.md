@@ -14,7 +14,7 @@ suite or an exhausted historical gaps list does not establish product readiness.
 | Core gameplay | Live movement/pathing, combat/casting/targeting, inventory/trade/vendor, chat/party, character creation/deletion | Historical ServUO evidence in TESTING/DESIGN/CLASSICUO_GAPS; current-build end-to-end audit still required. |
 | Interface and accessibility | Usable default layout, keyboard/focus, resizing/scaling, readable feedback, no debug-only dead ends | Login library was visually verified at desktop/narrow widths; wider UI audit remains. |
 | Settings and state | Reliable persistence, recovery from corrupt data, useful backup/restore, isolation across characters/windows | Desktop configuration recovery is verified. Renderer preferences validate values, preserve originals and migrate into one atomic record; window geometry now joins that record and its backups, including adoption after older migrations. Headless geometry tests cover malformed values, restore/defaults and concurrent-window saves; Chrome preference recovery/reload previously passed. Worlds backups/profile recovery are implemented separately; Chrome showed the controls but confirmation handling stalled and the UI fixture remained intact. Actual file export/import, native profile recovery and real window resizing remain unverified; see CLIENT_SETTINGS.md and LOGIN_PROFILES.md. Character-specific layouts and the broader session/window-isolation audit remain. |
-| Reliability and performance | No stale callbacks, clear disconnect/crash behavior, bounded resources, responsive long sessions | Connection races, login deadlines, preference boot failures and lost passwords on reported save errors repaired. Profile reads are bounded; corrupt profiles now leave the recovery screen available. 2026-09-13 local full gate passed with session isolation, profile and geometry regressions (23 launcher tests, 314 web tests / 1575 assertions), in addition to the earlier native profile/vault integration evidence. Sound loading now reads the bank lazily, bounds retained WAV/decoded caches and caps physical browser loading work. Full-byte comparison across 4096 stock sound IDs passed; standalone sound-reader peak RSS fell from about 390 MB to 121 MB during a scan. Whole-client long-session, remaining asset-cache and process-crash audits remain; see AUDIO_PERFORMANCE.md. |
+| Reliability and performance | No stale callbacks, clear disconnect/crash behavior, bounded resources, responsive long sessions | Connection races, login deadlines, preference boot failures and lost passwords on reported save errors repaired. Profile reads are bounded; corrupt profiles leave the recovery screen available. 2026-09-13 local full gate passed (333 web tests / 1664 assertions). Sound loading reads the bank lazily, bounds retained WAV/decoded caches and caps physical work; full-byte comparison across 4096 stock sound IDs passed. Texture byte/count retention, safe asynchronous eviction, alpha-mask ownership and retryable animation metadata now have regression and actual Chrome PNG/WebGL evidence. Whole-client long-session, remaining native/light caches and process-crash audits remain; see AUDIO_PERFORMANCE.md and GRAPHICS_CACHE.md. |
 | Delivery | Versioned Mac/Windows installers containing current features, install/run checks, honest release notes and download links | v0.7.0 draft contains both verified installers and SHA-256 manifests. macOS signature/notarization, DMG mount/app-copy and Windows silent install/uninstall passed; installer run 34712709301. The actual Mac process responds in login state, but graphical startup was not observable. The newer worlds backups, profile recovery, preference geometry and session-isolation additions are source-only and need a subsequent build. Interactive app checks and publication remain; public v0.6.0 predates these features. See releases/v0.7.0-verification.md. |
 
 ## Verification rules
@@ -79,12 +79,24 @@ accounting after timeouts and expiring playback events. See AUDIO_PERFORMANCE.md
 for measured before/after results and preserved stock-sound output. The full
 local gate completed with actual exit 0 (314 web tests / 1575 assertions), and
 an additional real-resource sound test passed. This source is newer than the
-v0.7.0 draft installers; platform CI for this change is pending.
+v0.7.0 draft installers. Platform CI 34715780452 passed Linux/macOS but exposed
+three existing Windows fixture-path failures: SystemTime debug text in directory
+names and a Unix-only `/dev/null` path. Commit `ab38450` made those test fixtures
+portable. CI 34716082291 passed all three jobs, including native asset/connection
+tests on both desktop platforms and the Windows Credential Manager lifecycle.
 
-The broader cache audit remains open. The texture cache has live-sprite
-protection and an idle/count policy, but no byte budget. Alpha hit masks are
-retained independently of texture eviction. Animation metadata's loading keys
-are never removed after completion, and failed metadata is retained without a
-retry path. These findings need targeted reproduction and repair; they are not
-covered by the sound-memory measurement. Interactive native and live-shard
-acceptance items in the matrix remain unchanged.
+## Graphics cache repair — 2026-09-13
+
+Textures now have byte/count retention, bounded load admission and retries.
+Eviction waits for Pixi's asynchronous release before allowing the same URL to
+reload. Live URL pools and actual on-stage texture sources are both protected,
+including stationary previews and corpse clothing. Alpha hit masks share the
+texture's lifetime. Animation counts/centers evict together; transport failures
+and deadlines no longer leave permanent zero-frame records.
+
+Nineteen focused regressions and a Chrome/WebGL fixture with 1,608 real generated
+PNGs passed; the complete local gate returned exit 0 (333 web tests / 1664
+assertions). See GRAPHICS_CACHE.md for exact coverage and limits. The broader
+native/light-cache, whole-process and live-shard audits remain open. These
+graphics and sound changes, like worlds backups and session isolation, are
+source additions absent from the v0.7.0 draft installers.
