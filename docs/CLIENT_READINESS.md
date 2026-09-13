@@ -291,3 +291,16 @@ tooling tests, native/WASM checks and the usual desktop tests. Log:
 CI 34729855987 independently passed all three platform jobs for the preceding
 world-map cache repair (`661d4b5`). Light-mask changes require their own platform
 CI and a subsequent installer; immutable v0.8.1 does not contain them.
+
+
+## Native light decoding — 2026-09-13
+
+Light decoding now limits index reads to the addressable 100 entries and checks
+pixel count/backing-file bounds before allocation. The 16 MiB RGBA per-shape
+ceiling matches the renderer. Three native fixture regressions and both existing
+real-resource light tests passed. The stock index's 55 valid shapes fit the
+limit; the largest is 350×350. See GRAPHICS_CACHE.md for exact scope and custom
+mask limits. The complete gate returned actual exit 0 (361 renderer tests /
+1791 assertions, 23 tooling tests, native/WASM and desktop checks), logged at
+`/tmp/anima-native-light-gate.log`. This source is newer than v0.8.1 and still
+needs its own platform CI and later installer verification.

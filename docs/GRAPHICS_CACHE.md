@@ -122,10 +122,34 @@ scene stops drawing lights. An individual decoded image above 16 MiB is rejected
 The byte budget is soft while the visible/fresh working set exceeds it; this is
 not a browser-native decoder, network or whole-process memory ceiling. The
 existing radial fallback remains available during loading, admission pressure
-or failures. Native light-file allocation bounds and actual stock-mask visuals
-remain separate audit items.
+or failures. Native light-file allocation bounds are covered below. Actual stock-mask visuals
+in gameplay remain a separate acceptance item.
 
 Six deterministic tests cover error/recovery, admission/deadlines/late callbacks,
 cold versus recently used variants, byte pressure, invalid/oversized images and
 idle-scene cleanup. The ordinary lighting composition tests also pass. No UI
 automation or live-shard connection was used for this repair.
+
+
+## Native light-file allocation bounds — 2026-09-13
+
+The native reader previously trusted the index's width/height enough to allocate
+its intensity buffer before checking that the backing file contained the pixels.
+The index file itself was read in full even though IDs are limited to 0–99.
+
+It now reads only the 1,200 addressable index bytes, validates the requested file
+range before allocating, and limits one shape to 4,194,304 pixels (16 MiB RGBA,
+matching the renderer's per-image ceiling). Zero dimensions, truncated ranges
+and oversized masks return the existing missing-light result. Custom shapes
+above that limit are intentionally rejected. This bounds individual light reads
+and output buffers, not total memory across all HTTP requests and encoders.
+
+Three native regressions cover a large index with unchanged pixel/alpha output,
+an oversized mask with a complete sparse backing file, and malformed dimensions
+or offsets. Both existing real-resource tests also passed, verifying graded
+alpha across stock shapes and coloured-light alpha preservation. The installed
+resource index contains 55 valid shapes; the largest is 350×350 (122,500 pixels),
+well below the limit. Evidence: `/tmp/anima-stock-light-dimensions.json`,
+`/tmp/anima-stock-light-test.log`, and `/tmp/anima-native-light-test.log`.
+The full local gate returned actual exit 0; log:
+`/tmp/anima-native-light-gate.log`. No native UI or shard was controlled.

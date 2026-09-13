@@ -32,6 +32,8 @@ use crate::art::Image;
 /// ClassicUO `LightsLoader.MAX_LIGHTS_DATA_INDEX_COUNT` — ids beyond this are
 /// refused before the file is even consulted.
 pub const MAX_LIGHTS: u32 = 100;
+// Match the renderer's 16 MiB per-mask RGBA ceiling before allocating pixels.
+const MAX_LIGHT_PIXELS: usize = 4 * 1024 * 1024;
 
 pub struct Lights {
     idx: Vec<u8>,
@@ -41,8 +43,12 @@ pub struct Lights {
 impl Lights {
     pub fn open(resource_dir: impl AsRef<Path>) -> std::io::Result<Lights> {
         let dir = resource_dir.as_ref();
+        let mut idx = Vec::new();
+        File::open(dir.join("lightidx.mul"))?
+            .take(u64::from(MAX_LIGHTS) * 12)
+            .read_to_end(&mut idx)?;
         Ok(Lights {
-            idx: std::fs::read(dir.join("lightidx.mul"))?,
+            idx,
             mul: Mutex::new(File::open(dir.join("light.mul"))?),
         })
     }
@@ -76,19 +82,23 @@ impl Lights {
         // height in the low 16 (ClassicUO `UOFileMul.FillEntries`).
         let w = (extra >> 16) as usize;
         let h = (extra & 0xFFFF) as usize;
-        if w == 0 || h == 0 || w * h > len as usize {
+        let pixels = w.checked_mul(h)?;
+        if w == 0 || h == 0 || pixels > MAX_LIGHT_PIXELS || pixels > len as usize {
             return None;
         }
 
         let buf = {
             let mut f = self.mul.lock().ok()?;
+            if u64::from(pos).checked_add(pixels as u64)? > f.metadata().ok()?.len() {
+                return None;
+            }
             f.seek(SeekFrom::Start(pos as u64)).ok()?;
-            let mut buf = vec![0u8; w * h];
+            let mut buf = vec![0u8; pixels];
             f.read_exact(&mut buf).ok()?;
             buf
         };
 
-        let mut rgba = vec![0u8; w * h * 4];
+        let mut rgba = vec![0u8; pixels * 4];
         for (i, &raw) in buf.iter().enumerate() {
             // A light runs -31..31; the negative half arrives bit-inverted.
             let val = if raw > 0x1F { !raw & 0x1F } else { raw };
@@ -334,6 +344,92 @@ impl Lights {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Fixture(std::path::PathBuf);
+    impl Fixture {
+        fn new(pos: u32, length: u32, width: u16, height: u16, file_length: u64) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "anima-light-fixture-{}-{stamp}-{}",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).unwrap();
+            let mut index = Vec::new();
+            for value in [pos, length, (u32::from(width) << 16) | u32::from(height)] {
+                index.extend_from_slice(&value.to_le_bytes());
+            }
+            std::fs::write(path.join("lightidx.mul"), index).unwrap();
+            File::create(path.join("light.mul"))
+                .unwrap()
+                .set_len(file_length)
+                .unwrap();
+            Self(path)
+        }
+        fn open(&self) -> Lights {
+            Lights::open(&self.0).unwrap()
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn light_index_reads_only_the_addressable_table_and_preserves_pixel_output() {
+        let fixture = Fixture::new(0, 4, 2, 2, 4);
+        std::fs::write(fixture.0.join("light.mul"), [0, 1, 31, 255]).unwrap();
+        File::options()
+            .write(true)
+            .open(fixture.0.join("lightidx.mul"))
+            .unwrap()
+            .set_len(1024 * 1024)
+            .unwrap();
+        let lights = fixture.open();
+        assert_eq!(lights.idx.len(), MAX_LIGHTS as usize * 12);
+        let plain = lights.light(0).unwrap();
+        assert_eq!((plain.width, plain.height), (2, 2));
+        assert_eq!(
+            plain.rgba,
+            [0, 0, 0, 0, 255, 255, 255, 8, 255, 255, 255, 248, 0, 0, 0, 0]
+        );
+        let coloured = lights.light_colored(0, 40).unwrap();
+        for (a, b) in plain
+            .rgba
+            .chunks_exact(4)
+            .zip(coloured.rgba.chunks_exact(4))
+        {
+            assert_eq!(a[3], b[3]);
+        }
+    }
+    #[test]
+    fn oversized_light_masks_are_rejected_even_with_a_complete_backing_file() {
+        let pixels = 2049 * 2048;
+        let fixture = Fixture::new(0, pixels, 2049, 2048, u64::from(pixels));
+        let lights = fixture.open();
+        assert!(lights.light(0).is_none());
+        assert!(lights.light_colored(0, 40).is_none());
+    }
+    #[test]
+    fn malformed_light_dimensions_and_file_ranges_are_refused() {
+        for (pos, length, width, height, file_length) in [
+            (0, 4, 2, 2, 3),
+            (3, 4, 2, 2, 4),
+            (u32::MAX - 1, 4, 2, 2, 4),
+            (0, 3, 2, 2, 4),
+            (0, 4, 0, 2, 4),
+            (0, u32::MAX, u16::MAX, u16::MAX, 0),
+        ] {
+            let fixture = Fixture::new(pos, length, width, height, file_length);
+            assert!(fixture.open().light(0).is_none());
+        }
+    }
 
     #[test]
     fn ids_past_the_table_are_refused_without_touching_the_file() {
