@@ -107,3 +107,17 @@ test("WASM handshake timeout closes transport but human character choice has no 
   eq((await ctx.run("wasmPollScene()")).auth, "characters");
   ctx.advance(120000); ok(ctx.run("wasmClient !== null")); ok(!ctx.sockets[1].closed);
 });
+
+test("WASM layout identity captures the connected relay and account and clears on disconnect", async () => {
+  const ctx = wasmContext();
+  ctx.document.getElementById("lg-relay").value = "ws://fixture.invalid:2595/relay?target=2";
+  const connecting = ctx.run('wasmConnect("layout-account", "not-in-layout")');
+  await ctx.flush(); ctx.sockets[0].onopen(); await connecting;
+  const identity = ctx.run("wasmLayoutIdentity");
+  eq(identity, JSON.stringify(["relay-v1", "ws://fixture.invalid:2595/relay?target=2", "layout-account"]));
+  ctx.document.getElementById("lg-relay").value = "ws://other.invalid/relay";
+  eq(ctx.run("wasmLayoutIdentity"), identity, "editing the form does not rebind the live character");
+  ok(!identity.includes("not-in-layout"));
+  eq(ctx.run('wasmMergeScene({player:{serial:42},mobiles:[],items:[]}).layoutIdentity'), identity);
+  ctx.run("wasmDisconnect()"); eq(ctx.run("wasmLayoutIdentity"), null);
+});

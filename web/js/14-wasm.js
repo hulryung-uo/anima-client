@@ -5,6 +5,7 @@
 const WASM_RELAY_DEFAULT = "ws://127.0.0.1:2595/relay?target=1";
 
 let wasmClient = null;
+let wasmLayoutIdentity = null;
 let wasmWs = null;
 let wasmInWorld = false;
 let wasmLoadError = "";
@@ -412,6 +413,7 @@ function wasmMergeScene(obs) {
     };
   });
   return {
+    layoutIdentity: wasmLayoutIdentity,
     player: {
       serial, x: pos.x, y: pos.y, z: pos.z, dir: p.direction | 0,
       body: p.body | 0, dead: !!p.dead, at: wasmAtype(p.body), name: p.name || "",
@@ -531,6 +533,7 @@ function wasmWaitForServer(id) {
   }, 20000);
 }
 function wasmEndConnection(message, notice = false) {
+  wasmLayoutIdentity = null;
   if (wasmInWorld && message) {
     try { sessionStorage.setItem("anima.wasm.disconnect", message); } catch (_) {}
   }
@@ -566,12 +569,17 @@ async function wasmConnect(username, password) {
   if (id !== wasmAttemptSequence) throw new Error("Connection cancelled.");
   if (wasmLoadError) { wasmEndConnection(wasmLoadError); throw new Error(wasmLoadError); }
   wasmClient = new WasmClientCtor(username, password);
+  const relayUrl = wasmRelayUrl();
   wasmJournal = []; wasmJournalSeq = 0;
   wasmTerrain = { map: { tiles: [] }, statics: [], lights: [] };
   return new Promise((resolve, reject) => {
     wasmRejectConnect = reject;
     let ws;
-    try { ws = new WebSocket(wasmRelayUrl()); }
+    try {
+      const relayIdentityUrl = new URL(relayUrl, window.location.href).href;
+      ws = new WebSocket(relayUrl);
+      wasmLayoutIdentity = JSON.stringify(["relay-v1", ws.url || relayIdentityUrl, username]);
+    }
     catch (error) { wasmEndConnection("The relay URL could not be opened. Check its address."); return; }
     wasmWs = ws; ws.binaryType = "arraybuffer";
     const current = () => wasmWs === ws && wasmAttemptId === id;

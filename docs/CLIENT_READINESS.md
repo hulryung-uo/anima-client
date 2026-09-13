@@ -404,3 +404,22 @@ identity after login; browser WASM connects through a relay URL. Both paths need
 an explicit identity contract before character-specific geometry is implemented.
 Existing startup panel restoration and backup/recovery behavior must also be
 preserved. This remains unfinished work, not a claim of character isolation.
+
+### Character window geometry implementation
+
+The identity contract and scoped geometry described above are now implemented
+for native and browser WASM renderers. Native login captures destination,
+shard index and account without the password; WASM captures the connected relay
+and account. Before the first world update, the renderer hashes that identity
+with the actual player serial and restores the character's window positions and
+sizes. Common defaults remain intact, including when logging in without saving
+a launcher profile. Character layouts share the existing atomic preference
+backup/recovery envelope. See [CLIENT_SETTINGS.md](CLIENT_SETTINGS.md) for the
+precise scope, origin boundaries and unchanged-relay limitation.
+
+Seven renderer regressions and the native loopback identity assertions passed;
+the full local quality gate exited 0 (370 tests / 1845 renderer assertions).
+Evidence: `/tmp/anima-character-layout-final-gate.log`. Live character switching,
+native visual resizing and installed-release verification are still required.
+This does not establish isolation for other common preferences or complete the
+overall client acceptance areas.

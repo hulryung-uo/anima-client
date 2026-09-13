@@ -169,3 +169,18 @@ for (const [button, field] of [["lg-delete", "delete_slot"], ["lg-back", "cancel
     eq(el("lg-msg").textContent, message); ok(!el("lg-go").disabled);
   });
 }
+
+test("scene polling binds character geometry before advancing game dialogs", async () => {
+  const { ctx, errors, reloads } = renderer();
+  ctx.set("crypto", require("node:crypto").webcrypto);
+  const next = { ...world("layout-session"), layoutIdentity: '["native-v1","fixture.invalid",2593,0,"one"]' };
+  let bound = null;
+  ctx.set("ingestBoatMoves", () => { bound = ctx.run("characterGeometryKey"); });
+  await receive(ctx, next);
+  ok(/^[a-f0-9]{64}$/.test(bound));
+  const first = bound;
+  ctx.run('saveWinGeom(".fixture-win", {left:180,top:190})');
+  await receive(ctx, { ...world("new-session"), layoutIdentity: '["native-v1","fixture.invalid",2593,0,"two"]' });
+  eq(reloads(), 1); eq(ctx.run("characterGeometryKey"), first);
+  deepEq(errors, []);
+});

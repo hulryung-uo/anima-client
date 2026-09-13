@@ -93,3 +93,82 @@ test("invalid geometry in a backup is rejected before any preference replacement
   throws(() => ctx.run("preferenceStorage.parseBackup(badGeometryBackup)"), /invalid values/);
   eq(ctx.localStorage.getItem(ENVELOPE), null);
 });
+
+const CHARACTER_GEOMETRY = "anima.characterWinGeom";
+async function bind(ctx, identity = '["native-v1","fixture.invalid",2593,0,"account"]', serial = 42) {
+  ctx.set("crypto", require("node:crypto").webcrypto);
+  ctx.set("layoutScene", { layoutIdentity: identity, player: { serial } });
+  await ctx.run("bindCharacterGeometry(layoutScene)");
+  return ctx.run("characterGeometryKey");
+}
+
+test("character layouts inherit common geometry without rewriting it and survive restart", async () => {
+  const common = { ".fixture-win": { left: 70, top: 80, w: 200, h: 100 } };
+  const first = context({ [GEOMETRY]: common });
+  const key = await bind(first);
+  eq(frame(first).el.style.left, "70px");
+  first.run('saveWinGeom(".fixture-win", {left:220,top:180})');
+  const record = JSON.parse(first.localStorage.getItem(ENVELOPE));
+  deepEq(JSON.parse(record.values[GEOMETRY]), common);
+  const restart = context({ [ENVELOPE]: record });
+  eq(await bind(restart), key);
+  const win = frame(restart);
+  eq(win.el.style.left, "220px"); eq(win.body.style.width, "200px");
+  const backup = first.run("preferenceStorage.exportData()");
+  ok(!backup.includes("fixture.invalid")); ok(!backup.includes("account"));
+});
+
+test("different characters accounts and destinations have separate window geometry", async () => {
+  const first = context(); const key = await bind(first);
+  first.run('saveWinGeom(".fixture-win", {left:240,top:190})');
+  for (const [identity, serial] of [
+    ['["native-v1","fixture.invalid",2593,0,"account"]', 43],
+    ['["native-v1","other.invalid",2593,0,"account"]', 42],
+    ['["native-v1","fixture.invalid",2594,0,"account"]', 42],
+    ['["native-v1","fixture.invalid",2593,1,"account"]', 42],
+    ['["native-v1","fixture.invalid",2593,0,"other"]', 42],
+  ]) {
+    const next = context({ [ENVELOPE]: first.localStorage.getItem(ENVELOPE) });
+    ok(await bind(next, identity, serial) !== key);
+    eq(frame(next).el.style.left, "30px");
+    next.run('saveWinGeom(".fixture-win", {left:90,top:100})');
+    eq(JSON.parse(JSON.parse(next.localStorage.getItem(ENVELOPE)).values[CHARACTER_GEOMETRY])[key][".fixture-win"].left, 240);
+  }
+});
+
+test("character layouts participate in backup recovery and update already initialized panels", async () => {
+  const source = context(); await bind(source);
+  source.run('saveWinGeom(".fixture-win", {left:180,top:190,w:310,h:220})');
+  const backup = source.run("preferenceStorage.exportData()");
+  const restored = context(); restored.set("layoutBackup", backup);
+  restored.run("preferenceStorage.replace(preferenceStorage.parseBackup(layoutBackup), preferenceStorage.source())");
+  const win = frame(restored); eq(win.el.style.left, "30px");
+  await bind(restored); eq(win.el.style.left, "180px");
+  eq(win.body.style.width, "310px"); eq(win.body.style.height, "220px");
+  const previous = restored.run("preferenceStorage.parseBackup(preferenceStorage.previousData())");
+  ok(!previous[CHARACTER_GEOMETRY]);
+});
+
+test("failed character layout writes stay exportable without damaging stored layouts", async () => {
+  const ctx = context(); const key = await bind(ctx);
+  ctx.run('saveWinGeom(".fixture-win", {left:100,top:110})');
+  const original = ctx.localStorage.getItem(ENVELOPE);
+  ctx.localStorage.setItem = () => { throw new Error("Quota exceeded"); };
+  ctx.run('saveWinGeom(".fixture-win", {left:200,top:210})');
+  eq(ctx.localStorage.getItem(ENVELOPE), original);
+  eq(frame(ctx).el.style.left, "200px");
+  const backup = JSON.parse(ctx.run("preferenceStorage.exportData()"));
+  eq(JSON.parse(backup.values[CHARACTER_GEOMETRY])[key][".fixture-win"].left, 200);
+});
+
+test("invalid character geometry is preserved and rejects backup replacement", async () => {
+  const bad = JSON.stringify({ ["a".repeat(64)]: { ".fixture-win": { left: null, top: 10 } } });
+  const record = { version: 1, values: { [CHARACTER_GEOMETRY]: bad } };
+  const ctx = context({ [ENVELOPE]: record }); await bind(ctx);
+  eq(frame(ctx).el.style.left, "30px");
+  ctx.run('saveWinGeom(".fixture-win", {left:100,top:110})');
+  eq(ctx.localStorage.getItem(ENVELOPE), JSON.stringify(record));
+  ok(ctx.run("preferenceStorage.status().recoverable"));
+  ctx.set("invalidBackup", JSON.stringify({ format: "anima-preferences", version: 1, values: record.values }));
+  throws(() => ctx.run("preferenceStorage.parseBackup(invalidBackup)"), /invalid values/);
+});

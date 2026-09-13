@@ -25,8 +25,43 @@ an explicit restore that omits geometry resets it to defaults without reviving
 the untouched legacy value. Invalid geometry uses safe defaults and retains its
 original for recovery. Each window type keeps its position and size; ordinary
 saves reread the latest geometry so moving one window preserves other windows'
-newer positions. These defaults belong to the renderer origin and are not yet
-separate character-specific layouts.
+newer positions.
+
+Window positions and resizable window dimensions now save per character in
+`anima.characterWinGeom`, within the same preferences envelope. A character
+without a saved layout starts from the common `anima.winGeom` defaults; its
+first layout save copies those defaults and subsequent changes stay separate.
+Panels initialized before login adopt the character's position and size before
+the first world update. Dynamic windows restore when opened. The common layout
+is preserved, and all character layouts participate in export, restore and
+original-copy recovery. Restoring an older backup without character layouts
+returns to the common defaults.
+
+Native identity includes the configured host, port, shard index, account and
+actual player serial. It survives reconnects and does not depend on a saved
+launcher profile. Browser WASM uses the connected relay URL, account and player
+serial; repointing an unchanged relay URL to a different shard is not detectable
+by the browser, so use distinct relay URLs for distinct destinations. Native and
+browser identities are separate. Endpoint/account spelling changes can start a
+new layout. The renderer stores a SHA-256 key, not the account name or endpoint;
+passwords never participate. This hash is an identity key, not encryption.
+
+The record supports up to 128 character layouts, subject to the existing settings
+size limit. Invalid or oversized records remain recoverable instead of being
+silently discarded. If Web Crypto is unavailable (for example, an insecure
+non-local browser origin), the renderer uses the common layout. Layouts still
+belong to their browser/webview origin; this does not synchronize native windows
+on different ports. Macros, options, quick buttons, HUD/minimap positions and
+other separately stored preferences remain common to that origin.
+
+Seven new renderer regressions cover identity isolation, restart/backup,
+initialized panels, failed writes, invalid records, relay binding and binding
+before world updates. A native loopback login fixture verifies the transmitted
+identity and excludes the fixture password. The complete local gate passed
+(370 renderer tests / 1845 assertions); logs are
+`/tmp/anima-character-layout-tests.log` and
+`/tmp/anima-character-layout-final-gate.log`. This is source work newer than
+v0.8.2; current installed-app and live-character switching remain unverified.
 
 Invalid types, out-of-range options and malformed arrays use safe defaults or
 retain valid entries. A macro with an invalid step is skipped as a whole, so

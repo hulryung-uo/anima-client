@@ -543,6 +543,7 @@ fn correlate_logout_ack(
 /// it feeds.
 pub struct Session {
     id: String,
+    layout_identity: String,
     stream: TcpStream,
     decoder: StreamDecoder,
     walker: Walker,
@@ -707,6 +708,16 @@ impl Session {
         chooser: Option<&mut dyn FnMut(CharacterPrompt) -> Result<CharacterChoice, DriverError>>,
         control: &LoginControl,
     ) -> Result<Session, DriverError> {
+        // A renderer hashes this non-secret identity with the actual player
+        // serial for durable layout storage; connection IDs intentionally change.
+        let layout_identity = serde_json::to_string(&(
+            "native-v1",
+            endpoint.host.trim().to_lowercase(),
+            endpoint.port,
+            cfg.server_index,
+            &cfg.username,
+        ))
+        .unwrap();
         let (result, stream, decoder) =
             login(endpoint, cfg, chooser, control, CONNECT_READ_TIMEOUT)?;
         let mut world = World::new();
@@ -714,6 +725,7 @@ impl Session {
         stream.set_read_timeout(Some(PUMP_READ_TIMEOUT)).ok();
         let mut session = Session {
             id: connection::fresh_context_id(),
+            layout_identity,
             stream,
             decoder,
             walker: Walker::new(),

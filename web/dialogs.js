@@ -287,7 +287,55 @@ function normalizeWindowGeometry(value) {
   return result;
 }
 preferenceStorage.json(WIN_GEOM_KEY, normalizeWindowGeometry, { adoptLegacy: true });
-function readWindowGeometry() { return JSON.parse(preferenceStorage.getItem(WIN_GEOM_KEY) || "{}"); }
+const CHARACTER_GEOM_KEY = "anima.characterWinGeom";
+function normalizeCharacterGeometry(value) {
+  if (!prefObject(value) || Object.keys(value).length > 128) return null;
+  const result = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (!/^[a-f0-9]{64}$/.test(key)) continue;
+    const normalized = normalizeWindowGeometry(entry);
+    if (normalized) result[key] = normalized;
+  }
+  return result;
+}
+preferenceStorage.json(CHARACTER_GEOM_KEY, normalizeCharacterGeometry);
+let characterGeometryKey = null, characterGeometryIdentity = null;
+const windowDefaultPositions = new WeakMap();
+const windowDefaultSizes = new WeakMap();
+function readCharacterGeometry() { return JSON.parse(preferenceStorage.getItem(CHARACTER_GEOM_KEY) || "{}"); }
+function readWindowGeometry() {
+  const common = JSON.parse(preferenceStorage.getItem(WIN_GEOM_KEY) || "{}");
+  if (!characterGeometryKey) return common;
+  return readCharacterGeometry()[characterGeometryKey] || common;
+}
+async function bindCharacterGeometry(nextScene) {
+  const serial = nextScene?.player?.serial, identity = nextScene?.layoutIdentity;
+  if (typeof identity !== "string" || !identity || identity.length > 4096 || !Number.isInteger(serial) || serial <= 0 || serial > 0xffffffff) return;
+  const combined = JSON.stringify([identity, serial]);
+  if (characterGeometryIdentity === combined) return;
+  // No account names or endpoint strings enter the settings backup. If Web
+  // Crypto is unavailable, keep the existing common layout for this session.
+  if (!globalThis.crypto?.subtle) return;
+  let digest;
+  try { digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(combined)); }
+  catch (_) { return; }
+  characterGeometryKey = [...new Uint8Array(digest)].map(n => n.toString(16).padStart(2, "0")).join("");
+  characterGeometryIdentity = combined;
+  // Static panels were initialized before login. Replace those common
+  // positions before the first world frame; dynamic windows restore on open.
+  for (const el of document.querySelectorAll(".gump-win")) {
+    const defaults = windowDefaultPositions.get(el);
+    if (defaults) { Object.assign(el.style, defaults); restoreWinPos(el); }
+    restoreWinSize(el);
+  }
+}
+function restoreWinSize(el) {
+  const defaults = windowDefaultSizes.get(el);
+  if (!defaults) return;
+  const saved = readWindowGeometry()[winKey(el)];
+  defaults.body.style.width = saved?.w ? saved.w + "px" : defaults.width;
+  defaults.body.style.height = saved?.h ? saved.h + "px" : defaults.height;
+}
 let winGeom = readWindowGeometry();
 function saveWinGeom(key, g) {
   if (!key) return;
@@ -298,7 +346,10 @@ function saveWinGeom(key, g) {
   const checked = normalizeWindowGeometry(next);
   if (!checked || JSON.stringify(checked) !== JSON.stringify(next)) return;
   winGeom = next;
-  preferenceStorage.setItem(WIN_GEOM_KEY, JSON.stringify(winGeom));
+  if (characterGeometryKey) {
+    const profiles = readCharacterGeometry();
+    preferenceStorage.setItem(CHARACTER_GEOM_KEY, JSON.stringify({ ...profiles, [characterGeometryKey]: winGeom }));
+  } else preferenceStorage.setItem(WIN_GEOM_KEY, JSON.stringify(winGeom));
 }
 // A window's identity for the geometry store: its element id when it has one
 // (the static panels), otherwise its own class (the dynamic windows). Never the
@@ -325,6 +376,9 @@ function saveWinPos(el) {
   if (p) saveWinGeom(winKey(el), { left: Math.round(p.x), top: Math.round(p.y) });
 }
 function restoreWinPos(el) {
+  if (!windowDefaultPositions.has(el)) {
+    windowDefaultPositions.set(el, Object.fromEntries(["left", "top", "right", "bottom"].map(k => [k, el.style[k] || ""])));
+  }
   winGeom = readWindowGeometry();
   const g = winGeom[winKey(el)];
   if (!g || g.left == null) return;
@@ -397,8 +451,8 @@ function makeWindowFrame({
     // One key per window for both halves of its geometry — `winKey`, the same
     // one `makeDraggable` persists the position under.
     const key = winKey(el);
-    const saved = key ? readWindowGeometry()[key] : null;
-    if (saved && saved.w) { body.style.width = saved.w + "px"; body.style.height = saved.h + "px"; }
+    windowDefaultSizes.set(el, { body, width: body.style.width || "", height: body.style.height || "" });
+    restoreWinSize(el);
     // The resize drag is the browser's own, so there is no event of ours to
     // hang this on — the same reason the journal watches itself this way.
     if (typeof ResizeObserver !== "undefined") {

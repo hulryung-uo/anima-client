@@ -101,6 +101,7 @@ async function poll(force = false) {
     // Auto-login briefly serves {} before a connection exists. It must not
     // prime cursors or turn a following login/error scene into a reload loop.
     if (!scene.player) return;
+    if (typeof bindCharacterGeometry === "function") await bindCharacterGeometry(scene);
     wasInWorld = true;
     sceneSessionId = scene.sessionId || null;
     hideLogin();
