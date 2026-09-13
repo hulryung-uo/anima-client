@@ -589,3 +589,33 @@ The install command's reporting expression failed after the installer returned;
 installation was verified independently by file/version and registry reads,
 without replaying the installer. Windows app launch/gameplay is not yet verified.
 The VM remains running as requested. CI 34734125340 completed successfully.
+
+
+### Windows retry: host input boundary and console subsystem
+
+On the user's requested retry, the Windows guest reported anima-desktop PID
+3748 responding, with the native `Anima - Game files` title. A real screenshot
+confirmed the first-launch data-folder screen. Parallels Tools and Explorer
+were responding. The host and guest Tools were both 27.0.1 (58670).
+
+Computer-use actions successfully opened the host Parallels View menu, but
+click/type/Tab actions did not produce the intended Windows input. Temporarily
+changing smart mouse optimization from auto to off and keyboard optimization
+from auto to accessibility did not resolve it; both settings were restored to
+auto. A Coherence attempt prompted to enable Shared Applications and did not
+establish working guest input. This narrows the observed automation failure to
+the host-to-guest input path, but does not establish its underlying cause or
+prove that ordinary physical mouse/keyboard input fails.
+
+Separately, the installed Anima PE header reported machine 34404 (x64) and
+subsystem 3 (console). The desktop entry point lacked the GUI subsystem
+attribute. Release Windows builds now request the Windows GUI subsystem,
+retaining the console in debug builds. The installer workflow checks the actual
+installed payload's PE header and requires subsystem 2, preventing recurrence.
+The exact added PowerShell check was run in the guest against installed v0.8.3
+and correctly rejected its console payload. `cargo fmt --all -- --check` and
+`cargo check -p anima-desktop` passed with actual exit 0. Evidence:
+`/tmp/anima-windows-subsystem-regression.log` and
+`/tmp/anima-windows-gui-check.log`. A new Windows release build and interactive
+launch still need verification; the installed v0.8.3 binary is unchanged.
+The console finding is independent of the automation-input limitation.

@@ -115,6 +115,15 @@ jobs:
             $version = $env:ANIMA_RELEASE_TAG.Substring(1)
             $installedVersion = (Get-Item $appExe).VersionInfo.ProductVersion
             if (@($version, "$version.0") -notcontains $installedVersion) { throw "Unexpected installed version: $installedVersion" }
+            # Verify the installed payload, not just the installer: a console
+            # subsystem opens an unwanted terminal when launched from Explorer.
+            $bytes = [IO.File]::ReadAllBytes($appExe)
+            if ($bytes.Length -lt 64 -or [BitConverter]::ToUInt16($bytes, 0) -ne 0x5A4D) { throw 'Invalid executable DOS header.' }
+            $pe = [BitConverter]::ToInt32($bytes, 60)
+            if ($pe -lt 64 -or $pe -gt $bytes.Length - 94) { throw 'Invalid executable PE offset.' }
+            if ([BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550) { throw 'Invalid executable PE signature.' }
+            $subsystem = [BitConverter]::ToUInt16($bytes, $pe + 24 + 68)
+            if ($subsystem -ne 2) { throw "Expected Windows GUI subsystem (2), got $subsystem." }
             Write-Output "Installed Anima $installedVersion successfully."
           } finally {
             if (Test-Path $uninstaller) {

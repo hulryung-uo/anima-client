@@ -8,6 +8,9 @@
 //! No bundler / npm step. `frontend-dist` is a local setup window with a
 //! file checklist; the game renderer stays in the play server's embedded web/.
 
+// Release installers launch a GUI app; keep the console for developer builds.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod config;
 mod credentials;
 mod downloads;
