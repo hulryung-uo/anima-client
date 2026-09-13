@@ -552,3 +552,40 @@ password. Evidence: `/tmp/anima-error-scope-runtime-result.json` and
 were stopped and the hidden tab closed. This does not verify successful shard
 authentication, relay runtime, or the correction in a native installer. A
 subsequent installer remains open. No tag was moved.
+
+
+## Authorized live ServUO acceptance resumed
+
+The user explicitly authorized starting the local ServUO instance and arranging
+test accounts, superseding the earlier session restriction on starting it.
+`run-kst.sh` loaded the existing world and listened on port 2594. Its automatic
+script compilation reported that `dotnet` was unavailable, then successfully
+loaded the existing Scripts.dll and initialized the world. No server config or
+existing account was edited. AutoCreateAccounts was already enabled.
+
+A dedicated new Player account authenticated through the ordinary login request.
+The actual browser character wizard created `Anima QA` (serial 1662), a Warrior
+in Britain. Source PlayServer code f5c5812 rendered the real world, character,
+status and welcome journal. Session-bound movement changed position from
+1602,1591,20 to 1603,1591,20; opening the backpack returned a container gump and
+items, and its visible contents were inspected in a browser screenshot.
+Logout returned auth:login, the same account authenticated again, its character
+list retained Anima QA, and choosing slot 0 restored the same character/position
+with a different session ID. Re-entry was checked through the live API; browser
+control timed out afterward, so rendered re-entry is not claimed.
+
+Evidence: `/tmp/anima-live-acceptance-result.json`. The generated test password
+is held only in an owner-readable local temporary credential file; no password
+is included in this ledger. The test shard and source PlayServer remain running
+for continued acceptance. Combat, casting, broader inventory interactions,
+character layout switching and sustained sessions remain open.
+
+The user-opened Windows 11 VM now exposes its desktop screenshot through the
+computer-use provider. Guest mouse/key actions did not visibly activate Start
+or Run, so interactive control remains unverified. An unattended install from
+the already checksum-verified v0.8.3 x64 installer created the Windows uninstall
+registration and anima-desktop.exe (14,854,144 bytes), both version 0.8.3.
+The install command's reporting expression failed after the installer returned;
+installation was verified independently by file/version and registry reads,
+without replaying the installer. Windows app launch/gameplay is not yet verified.
+The VM remains running as requested. CI 34734125340 completed successfully.
