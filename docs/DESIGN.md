@@ -432,7 +432,10 @@ The driver is the only code that knows about sockets — write it once for nativ
    `InvokeVirtue`, `EmoteAction`, `CastSpellFromBook`, `AllNames`. Schema v31
    added the heritage / race-change dialog (`race_change` + `ChangeRace` /
    `ChangeRaceCancel`, 0xBF/0x2A) and `OpenUOStore` (0xFA). Pre-OPL equipment
-   info (0xBF/0x10) rides the existing journal.
+   info (0xBF/0x10) rides the existing journal. Schema v32 gave `mobiles[]` the
+   condition any client draws on another mobile (`poisoned`/`poison_level`,
+   `paralyzed`, `war_mode`, `hidden`, `yellow_health`, `running`, `direction`),
+   so a brain can judge an opponent by more than its hits.
    **`Observation.terrain`** (schema v17) is the one field that does not come from
    a packet: local walkability (walkable / standing Z / the serial of a closed door
    in the way), so a brain can tell a wall from open ground rather than delegating

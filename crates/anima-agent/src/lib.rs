@@ -446,6 +446,7 @@ mod tests {
             hits: 1,
             hits_max: 1,
             distance: 3,
+            status: Default::default(),
         });
         // Threat is to the east (+x), so we should flee west (dir 6).
         let acts = b.decide(&o);
@@ -520,6 +521,7 @@ mod tests {
             hits: 10,
             hits_max: 10,
             distance: 1,
+            status: Default::default(),
         });
         let acts = b.decide(&o);
         assert!(acts

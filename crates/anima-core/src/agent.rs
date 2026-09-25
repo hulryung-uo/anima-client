@@ -98,6 +98,37 @@ pub struct MobileView {
     pub hits_max: u16,
     /// Chebyshev distance from the player.
     pub distance: u32,
+    /// What the shard shows about this mobile's condition — the flags any
+    /// client draws on its health bar and body. See [`MobileStatus`].
+    pub status: MobileStatus,
+}
+
+/// A nearby mobile's visible condition, straight from [`crate::world::Mobile`].
+///
+/// These are the signals a combat brain reads off an opponent: a green bar
+/// (poisoned), a frozen body (paralyzed), a raised weapon (war mode). The core
+/// has tracked all of them since the renderer needed them; before schema 32
+/// the brain saw only hits. Every flag is re-derived from the server's latest
+/// update (not sticky), so `false` means "not shown", never "unknown".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MobileStatus {
+    /// Green health bar (0x16/0x17 type 1).
+    pub poisoned: bool,
+    /// 0..=3 Lesser..Deadly while poisoned, -1 otherwise.
+    pub poison_level: i8,
+    /// Frozen/paralyzed (mobile-update flag 0x01): ServUO sets it for both
+    /// the Paralyze spell and a GM freeze.
+    pub paralyzed: bool,
+    /// War mode (flag 0x40) — the mobile is in a combat stance.
+    pub war_mode: bool,
+    /// Hidden (flag 0x80), seen only when we are allowed to perceive it.
+    pub hidden: bool,
+    /// Yellow/blessed health bar (0x16/0x17 type 2) — invulnerable.
+    pub yellow_health: bool,
+    /// Last movement update carried the running bit.
+    pub running: bool,
+    /// Facing, 0..7 (0 = north, clockwise).
+    pub direction: u8,
 }
 
 /// A nearby item.
@@ -1120,6 +1151,16 @@ impl World {
                 hits: m.hits,
                 hits_max: m.hits_max,
                 distance: chebyshev(player.pos, m.pos),
+                status: MobileStatus {
+                    poisoned: m.poisoned,
+                    poison_level: m.poison_level,
+                    paralyzed: m.paralyzed,
+                    war_mode: m.war_mode,
+                    hidden: m.hidden,
+                    yellow_health: m.yellow_health,
+                    running: m.running,
+                    direction: m.direction & 7,
+                },
             })
             .collect();
         mobiles.sort_by_key(|m| m.distance);
@@ -1409,6 +1450,38 @@ mod tests {
         // A second observe with the advanced cursor sees no repeat lines.
         let obs2 = w.observe(&mut cursor);
         assert!(obs2.new_journal.is_empty());
+    }
+
+    #[test]
+    fn observe_carries_a_mobiles_visible_condition() {
+        let mut w = World::new();
+        w.enter_world(&LoginResult {
+            serial: 0x311,
+            x: 100,
+            y: 100,
+            z: 0,
+            direction: 0,
+            body: 0x190,
+            aos: false,
+            character_list_flags: 0,
+        });
+        let m = w.mobile_mut(0xAA);
+        m.pos = Position {
+            x: 103,
+            y: 100,
+            z: 0,
+        };
+        m.poisoned = true;
+        m.poison_level = 1;
+        m.paralyzed = true;
+        m.war_mode = true;
+        m.direction = 0x86; // running bit above the facing
+        let obs = w.observe(&mut 0);
+        let s = obs.mobiles[0].status;
+        assert!(s.poisoned && s.paralyzed && s.war_mode);
+        assert_eq!(s.poison_level, 1);
+        assert!(!s.hidden && !s.yellow_health);
+        assert_eq!(s.direction, 6);
     }
 
     #[test]

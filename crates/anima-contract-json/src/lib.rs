@@ -141,13 +141,18 @@
 //! (0x12/0x27) and `AllNames` (a burst of single-clicks). v31: 0xBF/0x2A
 //! heritage / race-change (`race_change` plus `ChangeRace`/`ChangeRaceCancel`)
 //! and `OpenUOStore` (0xFA). Pre-OPL equipment info (0xBF/0x10) rides the
-//! existing journal — no new observation key.)
+//! existing journal — no new observation key. v32: `mobiles[]` gained the
+//! condition any client draws on another mobile — `poisoned`/`poison_level`,
+//! `paralyzed`, `war_mode`, `hidden`, `yellow_health`, `running` and
+//! `direction`. The core had tracked every one of them for the renderer; a
+//! brain judging an opponent ("is it paralyzed — cast the heavy spell now?")
+//! could see only its hits.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 31;
+pub const SCHEMA_VERSION: u32 = 32;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
@@ -200,6 +205,10 @@ fn mobile_json(m: &MobileView) -> Value {
     json!({
         "serial": m.serial, "name": m.name, "pos": pos_json(&m.pos), "body": m.body,
         "notoriety": m.notoriety, "hits": m.hits, "hits_max": m.hits_max, "distance": m.distance,
+        "poisoned": m.status.poisoned, "poison_level": m.status.poison_level,
+        "paralyzed": m.status.paralyzed, "war_mode": m.status.war_mode, "hidden": m.status.hidden,
+        "yellow_health": m.status.yellow_health, "running": m.status.running,
+        "direction": m.status.direction,
     })
 }
 
@@ -1818,6 +1827,46 @@ mod tests {
     }
 
     #[test]
+    fn mobiles_carry_their_visible_condition() {
+        let obs = Observation {
+            mobiles: vec![MobileView {
+                serial: 0x55,
+                name: "Rook".into(),
+                pos: Position {
+                    x: 2600,
+                    y: 490,
+                    z: 20,
+                },
+                body: 0x190,
+                notoriety: 1,
+                hits: 12,
+                hits_max: 25,
+                distance: 3,
+                status: anima_core::agent::MobileStatus {
+                    poisoned: true,
+                    poison_level: 2,
+                    paralyzed: true,
+                    war_mode: true,
+                    hidden: false,
+                    yellow_health: false,
+                    running: false,
+                    direction: 6,
+                },
+            }],
+            ..Observation::default()
+        };
+        let m = &observation_to_json(&obs)["mobiles"][0];
+        assert_eq!(m["poisoned"], true);
+        assert_eq!(m["poison_level"], 2);
+        assert_eq!(m["paralyzed"], true);
+        assert_eq!(m["war_mode"], true);
+        assert_eq!(m["hidden"], false);
+        assert_eq!(m["yellow_health"], false);
+        assert_eq!(m["running"], false);
+        assert_eq!(m["direction"], 6);
+    }
+
+    #[test]
     fn terrain_serializes_compactly_and_is_null_when_unsurveyed() {
         // The core alone never perceives ground, so the default must be null
         // rather than an empty grid a brain could mistake for "all walls".
@@ -2058,7 +2107,7 @@ mod tests {
 
     #[test]
     fn observation_json_has_expected_keys() {
-        assert_eq!(SCHEMA_VERSION, 31);
+        assert_eq!(SCHEMA_VERSION, 32);
         let obs = Observation::default();
         let v = observation_to_json(&obs);
         for k in [
