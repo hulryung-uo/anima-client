@@ -1598,6 +1598,45 @@ Beyond T0.1 and T0.7 above. Closed 2026-08-22:
 
 ---
 
+## Bridge coverage audit (2026-09-25) — what a brain on the NDJSON bridge could not do
+
+The rows above track the *web client's* commands; the bridge (`anima-agent`,
+`crates/anima-net/src/bin/agent.rs`) reaches the same `Action`s only through
+`action_from_json`, and perceives only what `observation_to_json` carries. An
+audit of both against ClassicUO's `Send_*`, ServUO's registered handlers and
+`World` found the packet layer complete and the gaps one layer up:
+
+- **Closed — login-time control.** The bridge always played slot 0 (or made a
+  default character) and could not log out. Now `ANIMA_SHARD`, `ANIMA_CHARACTER`
+  (name or slot), `ANIMA_CREATE` (a JSON appearance) and `ANIMA_CHOOSE=1`
+  (a `characters` event answered by `{"cmd":"choose","play"|"create"|"delete"}`,
+  with the server's refusal reason on a rejected delete), plus `logout` and
+  `login` commands so one bridge can switch characters. Live-verified on
+  uo.hulryung.com: create, play by name, logout, re-login, and a delete refused
+  as "character is too young to delete".
+- **Closed — an unreachable Action.** `OpenSpellbook` had no JSON arm for eleven
+  schema versions while `action_from_json_covers_every_variant` passed. That test
+  now reads the `Action` enum from source and fails on any variant without a case.
+- **Closed — silent drops.** `act` answers `{"ok":true,"sent":bool}`; `sent:false`
+  means nothing reached the server (a target/prompt/menu/trade reply with nothing
+  outstanding, a local-only close, a `WalkTo` that `pump` walks).
+- **Closed — the last client verbs:** `SkillsRequest` (0x34 type 5), `NameRequest`
+  (0x98), `ViewRange` (0xC8), `ObjectHelp` (0xB6), `Language` (0xBF/0x0B),
+  `Animate` (0xBF/0x0E), `PublicHouseContent` (0xFB).
+- **Closed — schema 33, what the core tracked and the brain could not see:** the
+  player's own hidden/paralyzed/notoriety/mounted and the rest of 0x11; mobile hue,
+  flight, bonded death and (party-normalized) vitals; item hue, name and flags;
+  resolved buff and property text; out-of-view party/guild positions; and the
+  effect, animation, sound, lift-reject and drag rings (see the contract doc).
+  A contained item's `distance` was measured from a spot in its container window;
+  it is now its holder's.
+- **Left open (low value):** god-client commands (use `[` commands via `Say`),
+  0xD9 hardware info, Mahjong, 0xD7/0x0A (ServUO only traces it). `TextEntryResponse`
+  sends 0xAC, which ServUO has no handler for — harmless here because ServUO never
+  sends 0xAB either. The bridge still pushes no events besides `ready` and
+  `characters`: death, disconnect and a finished `WalkTo` are read from the next
+  observation.
+
 ## Deliberately not doing
 
 Login/game-stream encryption (this client targets shards that accept unencrypted

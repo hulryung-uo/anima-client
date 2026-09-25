@@ -500,6 +500,7 @@ mod tests {
             layer: 0,
             distance,
             is_multi: false,
+            detail: Default::default(),
         }
     }
 

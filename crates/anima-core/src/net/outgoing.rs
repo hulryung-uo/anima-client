@@ -1609,6 +1609,53 @@ pub fn build_trade_gold(my_container: u32, gold: u32, platinum: u32) -> Vec<u8> 
     finish_variable(w.into_vec())
 }
 
+/// ObjectHelpRequest `0xB6` (fixed, 9 bytes) — the "?" help cursor on an item or
+/// mobile. ServUO (`PacketHandlers.ObjectHelpRequest`) calls the object's
+/// `OnHelpRequest` when it is in update range and visible; most objects answer
+/// with a gump or a journal line, many with nothing.
+/// Layout: `[0xB6][serial:u32][unk:u8=0][lang: 3 ASCII bytes]`.
+pub fn build_object_help_request(serial: u32) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xB6).u32(serial).u8(0).bytes(b"ENU");
+    w.into_vec()
+}
+
+/// Language — GeneralInfo `0xBF`, subcommand `0x000B`: set `Mobile.Language`
+/// (a 3-letter code such as `ENU`, `KOR`), which ServUO consults for localized
+/// speech and some NPC replies. Layout: `[0xBF][len:u16=9][0x000B][code: 4 bytes, NUL-padded]`.
+pub fn build_language(code: &str) -> Vec<u8> {
+    let mut buf = [0u8; 4];
+    for (d, s) in buf
+        .iter_mut()
+        .zip(code.bytes().filter(u8::is_ascii).take(3))
+    {
+        *d = s;
+    }
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x000B).bytes(&buf);
+    finish_variable(w.into_vec())
+}
+
+/// AnimateRequest — GeneralInfo `0xBF`, subcommand `0x000E`: play an emote
+/// animation by raw action id. ServUO (`PacketHandlers.Animate`) accepts only
+/// its `m_ValidAnimations` list (bow 32, salute 33, and a handful of others) and
+/// only for a living, unmounted human body. The named 0x12/0xC7 pair is
+/// [`build_emote_action`]. Layout: `[0xBF][len:u16=9][0x000E][action:i32]`.
+pub fn build_animate_request(action: u32) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xBF).u16(0).u16(0x000E).u32(action);
+    finish_variable(w.into_vec())
+}
+
+/// PublicHouseContent `0xFB` (fixed, 2 bytes) — whether to be shown the
+/// contents of public houses (`Mobile.PublicHouseContent`).
+/// Layout: `[0xFB][show:u8]`.
+pub fn build_public_house_content(show: bool) -> Vec<u8> {
+    let mut w = PacketWriter::new();
+    w.u8(0xFB).u8(u8::from(show));
+    w.into_vec()
+}
+
 /// NameRequest `0x98` (variable, 7 bytes) — ask the server for `serial`'s name.
 /// The server replies with the same opcode (incoming `0x98` UpdateName).
 /// Ports ClassicUO `Send_NameRequest`: despite the fixed 4-byte body, ClassicUO's
@@ -1840,6 +1887,24 @@ pub fn build_chat_message(text: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_last_client_verbs_match_servuos_readers() {
+        assert_eq!(
+            build_object_help_request(0x0102_0304),
+            vec![0xB6, 1, 2, 3, 4, 0, b'E', b'N', b'U']
+        );
+        assert_eq!(
+            build_language("KOR"),
+            vec![0xBF, 0, 9, 0, 0x0B, b'K', b'O', b'R', 0]
+        );
+        assert_eq!(
+            build_animate_request(32),
+            vec![0xBF, 0, 9, 0, 0x0E, 0, 0, 0, 32]
+        );
+        assert_eq!(build_public_house_content(true), vec![0xFB, 1]);
+    }
+
     use super::*;
 
     #[test]

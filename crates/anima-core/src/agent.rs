@@ -13,9 +13,10 @@ use crate::gump_layout::GumpElement;
 use crate::path::Terrain;
 use crate::types::Position;
 use crate::world::{
-    is_ghost_body, Book, Buff, CharacterProfile, HuePicker, JournalEntry, LegacyMenu, LogoutAck,
-    MapView, OpenUrlRequest, Party, PopupMenu, PromptState, RaceChangePrompt, ShopBuy, ShopSell,
-    SpellbookContent, TargetCursor, TextEntryDialog, TipNotice, TradeState, Weather, World,
+    is_ghost_body, Book, Buff, CharacterProfile, DragCompletion, Effect, HuePicker, JournalEntry,
+    LegacyMenu, LogoutAck, MapView, MultiPlacement, OpenUrlRequest, Party, PopupMenu, PromptState,
+    RaceChangePrompt, ShopBuy, ShopSell, SpellbookContent, TargetCursor, TextEntryDialog,
+    TipNotice, TrackedMember, TradeState, Weather, World,
 };
 
 /// A skill value, in human units (50.0 == GM-half). Derived from [`crate::world::Skill`].
@@ -84,6 +85,32 @@ pub struct PlayerView {
     /// pre-ML server. Named apart from [`Observation::aos`], which is the
     /// shard's AOS *feature* flag and a different question.
     pub aos_status: crate::world::AosStatus,
+    /// Our own condition, the same flags [`MobileStatus`] carries for others:
+    /// a Hiding/Stealth brain needs to know it took, a paralysed one that it
+    /// cannot act, and a looter that it has gone grey.
+    pub hidden: bool,
+    pub paralyzed: bool,
+    /// -1 when not poisoned, else 0..=3 Lesser..Deadly.
+    pub poison_level: i8,
+    /// Our own notoriety byte (1 innocent … 3 grey/criminal … 6 murderer).
+    pub notoriety: u8,
+    pub hue: u16,
+    /// Riding: an item on the mount layer (0x19) is worn — a horse or a boat's
+    /// helm ([`Action::BoatMove`] needs it).
+    pub mounted: bool,
+    /// The rest of 0x11 the core already decodes: luck, weapon damage range,
+    /// tithing points (Chivalry spends them), the stat cap, and the three stat
+    /// locks [`Action::StatLock`] sets (0 up, 1 down, 2 locked).
+    pub luck: u16,
+    pub damage_min: i16,
+    pub damage_max: i16,
+    pub tithing_points: u32,
+    pub stats_cap: i16,
+    pub str_lock: u8,
+    pub dex_lock: u8,
+    pub int_lock: u8,
+    /// 0 normal; ServUO's `SpeedControl` values above (mounted speed, walk-only…).
+    pub speed_mode: u8,
 }
 
 /// A nearby creature.
@@ -129,6 +156,20 @@ pub struct MobileStatus {
     pub running: bool,
     /// Facing, 0..7 (0 = north, clockwise).
     pub direction: u8,
+    /// Body hue — a paragon, a coloured dragon, a dyed robe on a player.
+    pub hue: u16,
+    /// Gargoyle flight.
+    pub flying: bool,
+    /// A bonded pet that died stays in the world as "dead" (0xBF/0x19).
+    pub bonded_dead: bool,
+    /// Mana and stamina, when the shard sends them for this mobile at all —
+    /// party members and pets. **Party values are normalized** by ServUO's
+    /// `AttributeNormalizer` (max 25, current scaled), so read them as a
+    /// fraction, never as spendable points. Zero max means "not sent".
+    pub mana: u16,
+    pub mana_max: u16,
+    pub stam: u16,
+    pub stam_max: u16,
 }
 
 /// A nearby item.
@@ -157,6 +198,26 @@ pub struct ItemView {
     /// own single ground-level entry (one per placed multi, not per
     /// component), carrying the multi's own position and id.
     pub is_multi: bool,
+    /// What any client shows of the item beyond its art. See [`ItemDetail`].
+    pub detail: ItemDetail,
+}
+
+/// An item's colour, name and flags, straight from [`crate::world::Item`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ItemDetail {
+    /// Ore, ingots, leather, boards and cloth are told apart by hue alone.
+    pub hue: u16,
+    /// The name the shard sent for it (0x98 / a single-click), if any; the
+    /// full property list is [`Observation::opl`].
+    pub name: String,
+    /// ServUO's 0x20: movable, **or** locked down/secured. A clear bit on a
+    /// ground item marks world furniture (a forge, an anvil). `None` inside a
+    /// container: the container-content packets carry no flags byte, so the
+    /// bit is unknown there, not clear.
+    pub movable: Option<bool>,
+    /// ServUO's 0x80: not `Visible` (only staff are sent these). `None` inside
+    /// a container, as for `movable`.
+    pub hidden: Option<bool>,
 }
 
 /// A server waypoint (0xE5), with distance derived from the current player
@@ -368,6 +429,37 @@ pub struct Observation {
     /// door in its way — it can only hand a destination to the driver's
     /// pathfinder and hope. See [`TerrainView`].
     pub terrain: Option<TerrainView>,
+    /// [`Observation::opl`] resolved to words — line 0 the name, the rest the
+    /// properties ("Spell Damage Increase 10%"). Filled like the journal's
+    /// `display` by a driver holding the Cliloc table (`anima_net::localize`);
+    /// empty from the core alone.
+    pub opl_text: Vec<(u32, Vec<String>)>,
+    /// Out-of-view party and guild members (0xF0 replies), which the driver
+    /// already polls for. A member in view is in `mobiles` instead.
+    pub party_positions: Vec<TrackedMember>,
+    pub guild_positions: Vec<TrackedMember>,
+    /// Recent graphical effects (0x70/0xC0/0xC7), a `seq`-stamped ring like
+    /// [`Observation::recent_damage`]: a moving effect from `src_serial` to
+    /// `tgt_serial` is a spell or arrow in flight, and a fixed one on a caster
+    /// is a spell being cast. Dedupe on `seq`.
+    pub recent_effects: Vec<Effect>,
+    /// Recent animations `(seq, serial, action, frames, forward, delay)` (0x6E)
+    /// — who is swinging, casting or bowing nearby. Dedupe on `seq`.
+    pub recent_anims: Vec<(u64, u32, u16, u16, bool, u8)>,
+    /// Recent typed animations `(seq, serial, kind, action, mode)` (0xE2).
+    pub recent_typed_anims: Vec<(u64, u32, u16, u16, u8)>,
+    /// Recent sounds `(seq, sound, x, y)` (0x54) — hits, misses and spells out
+    /// of sight. Dedupe on `seq`.
+    pub recent_sounds: Vec<(u64, u16, u16, u16)>,
+    /// Why a lift failed, `(seq, reason)` (0x27): 0 CannotLift, 1 OutOfRange,
+    /// 2 OutOfSight, 3 BelongsToAnother, 4 AlreadyHolding, 5 other. ServUO
+    /// writes no journal line for it, so this is the only way to know.
+    pub recent_lift_rejects: Vec<(u64, u8)>,
+    /// Drag completions (0x28 end-drag / 0x29 drop accepted).
+    pub recent_drag_completions: Vec<DragCompletion>,
+    /// The house or boat the server asks us to place (0x99), alongside the
+    /// target cursor it raised; answer with [`Action::TargetGround`].
+    pub pending_multi_placement: Option<MultiPlacement>,
 }
 
 /// A square window of walkability centred on the player, in world tiles.
@@ -818,6 +910,26 @@ pub enum Action {
     /// absolute number, and must not compare it against a spell's mana cost.
     /// Our own vitals are exempt — those arrive un-normalized.
     StatusRequest { serial: u32 },
+    /// Re-fetch our full skill list (0x34 type 5). The driver asks once at
+    /// login; ServUO pushes single-skill updates after that, so this is a
+    /// resync, e.g. after a GM changed skills behind our back.
+    SkillsRequest,
+    /// Ask for a mobile's name (0x98); the reply lands in `mobiles[].name`.
+    NameRequest { serial: u32 },
+    /// Set the draw range, 5..=24 tiles (0xC8): what the server sends us —
+    /// mobiles and items — beyond the default 18.
+    ViewRange { range: u8 },
+    /// The "?" help cursor on an object (0xB6); see
+    /// [`crate::net::outgoing::build_object_help_request`].
+    ObjectHelp { serial: u32 },
+    /// Set our language code, e.g. `ENU` or `KOR` (0xBF/0x0B).
+    Language { code: String },
+    /// Play an emote animation by raw action id (0xBF/0x0E) — ServUO accepts
+    /// only its short list (bow 32, salute 33, …). The named pair is
+    /// [`Action::EmoteAction`].
+    Animate { action: u32 },
+    /// Whether to be shown public houses' contents (0xFB).
+    PublicHouseContent { show: bool },
     /// Ask an open bulletin board for a message's full body (0x71 sub 3).
     /// The reply fills [`Observation::bulletin_message`]; a summary line alone
     /// carries no text.
@@ -1105,6 +1217,29 @@ impl World {
     /// Build an [`Observation`]. `journal_cursor` is an absolute journal index;
     /// it advances past the retained tail so trimming bounded history does not
     /// replay entries. A lagging consumer receives every retained line.
+    /// Where an item really is: its own position on the ground, or that of the
+    /// ground container or mobile at the top of its container chain. A contained
+    /// item's `pos` is a spot inside the container *window*, so a distance from
+    /// it was meaningless (and sorted pack contents among ground items).
+    fn root_position(&self, it: &crate::world::Item) -> Position {
+        let mut cur = it;
+        for _ in 0..16 {
+            match cur.container {
+                None => return cur.pos,
+                Some(c) => {
+                    if let Some(parent) = self.items.get(&c) {
+                        cur = parent;
+                    } else if let Some(m) = self.mobiles.get(&c) {
+                        return m.pos;
+                    } else {
+                        return cur.pos;
+                    }
+                }
+            }
+        }
+        cur.pos
+    }
+
     pub fn observe(&self, journal_cursor: &mut usize) -> Observation {
         let pm = self.player_mobile().cloned().unwrap_or_default();
         let player = PlayerView {
@@ -1136,6 +1271,24 @@ impl World {
             body: pm.body,
             poisoned: pm.poisoned,
             dead: is_ghost_body(pm.body),
+            hidden: pm.hidden,
+            paralyzed: pm.paralyzed,
+            poison_level: pm.poison_level,
+            notoriety: pm.notoriety,
+            hue: pm.hue,
+            mounted: self
+                .items
+                .values()
+                .any(|it| it.layer == 0x19 && it.container == Some(pm.serial) && pm.serial != 0),
+            luck: self.player_stats.luck,
+            damage_min: self.player_stats.damage_min,
+            damage_max: self.player_stats.damage_max,
+            tithing_points: self.player_stats.tithing_points,
+            stats_cap: self.player_stats.stats_cap,
+            str_lock: self.player_stats.str_lock,
+            dex_lock: self.player_stats.dex_lock,
+            int_lock: self.player_stats.int_lock,
+            speed_mode: self.player_stats.speed_mode,
         };
 
         let mut mobiles: Vec<MobileView> = self
@@ -1160,6 +1313,13 @@ impl World {
                     yellow_health: m.yellow_health,
                     running: m.running,
                     direction: m.direction & 7,
+                    hue: m.hue,
+                    flying: m.flying,
+                    bonded_dead: m.is_dead,
+                    mana: m.mana,
+                    mana_max: m.mana_max,
+                    stam: m.stam,
+                    stam_max: m.stam_max,
                 },
             })
             .collect();
@@ -1175,8 +1335,14 @@ impl World {
                 pos: it.pos,
                 container: it.container,
                 layer: it.layer,
-                distance: chebyshev(player.pos, it.pos),
+                distance: chebyshev(player.pos, self.root_position(it)),
                 is_multi: it.is_multi,
+                detail: ItemDetail {
+                    hue: it.hue,
+                    name: it.name.clone(),
+                    movable: it.container.is_none().then(|| it.flag_movable()),
+                    hidden: it.container.is_none().then(|| it.flag_hidden()),
+                },
             })
             .collect();
         items.sort_by_key(|it| it.distance);
@@ -1317,6 +1483,16 @@ impl World {
             // The core has no map files by design (DESIGN.md D3) — a driver
             // that does calls `survey_terrain` and fills this in.
             terrain: None,
+            opl_text: Vec::new(),
+            party_positions: self.party_positions.clone(),
+            guild_positions: self.guild_positions.clone(),
+            recent_effects: self.recent_effects.clone(),
+            recent_anims: self.recent_anims.clone(),
+            recent_typed_anims: self.recent_typed_anims.clone(),
+            recent_sounds: self.recent_sounds.clone(),
+            recent_lift_rejects: self.recent_lift_rejects.clone(),
+            recent_drag_completions: self.recent_drag_completions.clone(),
+            pending_multi_placement: self.pending_multi_placement,
         }
     }
 }
@@ -1482,6 +1658,35 @@ mod tests {
         assert_eq!(s.poison_level, 1);
         assert!(!s.hidden && !s.yellow_health);
         assert_eq!(s.direction, 6);
+    }
+
+    #[test]
+    fn a_contained_item_is_as_far_as_whatever_holds_it() {
+        let mut w = World::new();
+        w.enter_world(&LoginResult {
+            serial: 0x311,
+            x: 100,
+            y: 100,
+            z: 0,
+            direction: 0,
+            body: 0x190,
+            aos: false,
+            character_list_flags: 0,
+        });
+        let chest = w.items.entry(0x4000_0001).or_default();
+        chest.serial = 0x4000_0001;
+        chest.pos = Position {
+            x: 106,
+            y: 100,
+            z: 0,
+        };
+        let gem = w.items.entry(0x4000_0002).or_default();
+        gem.serial = 0x4000_0002;
+        gem.container = Some(0x4000_0001);
+        gem.pos = Position { x: 44, y: 65, z: 0 }; // a spot in the chest's window, not the world
+        let obs = w.observe(&mut 0);
+        let gem = obs.items.iter().find(|i| i.serial == 0x4000_0002).unwrap();
+        assert_eq!(gem.distance, 6);
     }
 
     #[test]

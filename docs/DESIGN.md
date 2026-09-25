@@ -435,7 +435,12 @@ The driver is the only code that knows about sockets — write it once for nativ
    info (0xBF/0x10) rides the existing journal. Schema v32 gave `mobiles[]` the
    condition any client draws on another mobile (`poisoned`/`poison_level`,
    `paralyzed`, `war_mode`, `hidden`, `yellow_health`, `running`, `direction`),
-   so a brain can judge an opponent by more than its hits.
+   so a brain can judge an opponent by more than its hits. Schema v33 passed on
+   the rest of what the core tracked (the player's own condition and 0x11 tail,
+   item hue/name/flags, resolved buff and property text, out-of-view party and
+   guild members, and the effect/animation/sound/lift-reject rings), and the
+   bridge gained character choice, `logout`/`login`, and `act`'s `sent` flag —
+   see "Bridge coverage audit" in `CLASSICUO_GAPS.md`.
    **`Observation.terrain`** (schema v17) is the one field that does not come from
    a packet: local walkability (walkable / standing Z / the serial of a closed door
    in the way), so a brain can tell a wall from open ground rather than delegating

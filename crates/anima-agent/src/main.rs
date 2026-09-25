@@ -199,6 +199,13 @@ fn main() {
                 }
                 Action::PartySetCanLoot { can_loot } => format!("partyloot({can_loot})"),
                 Action::StatusRequest { serial } => format!("statusreq(0x{serial:08X})"),
+                Action::SkillsRequest => "skillsreq".to_string(),
+                Action::NameRequest { serial } => format!("namereq(0x{serial:08X})"),
+                Action::ViewRange { range } => format!("viewrange({range})"),
+                Action::ObjectHelp { serial } => format!("objhelp(0x{serial:08X})"),
+                Action::Language { code } => format!("language({code})"),
+                Action::Animate { action } => format!("animate({action})"),
+                Action::PublicHouseContent { show } => format!("publichouse({show})"),
                 Action::BulletinRequestMessage { message, .. } => {
                     format!("bbmsg(0x{message:08X})")
                 }

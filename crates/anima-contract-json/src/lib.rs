@@ -36,12 +36,10 @@
 //! straight through — no Cliloc/rescale involved (ServUO already converts
 //! bounds↔pixel server-side; see [`anima_core::world::MapView`]'s doc).
 //!
-//! Deliberately **excluded** (renderer/audio-only playback queues with no
-//! decision-relevant signal, and each would just add per-tick serialization
-//! cost to `observe()` for something a brain can't act on): `current_music`,
-//! `recent_sounds`, `recent_anims`/`recent_typed_anims`, `recent_effects`,
-//! `recent_lift_rejects`, `recent_container_opens` (0x24 — a window-opening UI
-//! signal), `recent_swings` (0x2F — cosmetic facing feedback), `paperdoll`
+//! Deliberately **excluded** (no decision-relevant signal): `current_music`,
+//! `recent_container_opens` (0x24 — a window-opening UI signal; the contents
+//! arrive in `items` anyway), `recent_swings` (0x2F — ServUO sends it only to
+//! the attacker, so it never says who is attacking *us*), `paperdoll`
 //! (0x88 — a UI-open signal + display title, not something a brain decides
 //! from; equipment state is already in `items`/worn `layer`). `PlayerStats::
 //! is_female` is also excluded — purely cosmetic (paperdoll gump selection),
@@ -146,13 +144,32 @@
 //! `paralyzed`, `war_mode`, `hidden`, `yellow_health`, `running` and
 //! `direction`. The core had tracked every one of them for the renderer; a
 //! brain judging an opponent ("is it paralyzed — cast the heavy spell now?")
-//! could see only its hits.)
+//! could see only its hits. v33: everything else the core already tracked and
+//! a brain could not see. `player` gained `hidden`, `paralyzed`,
+//! `poison_level`, `notoriety`, `hue`, `mounted` (the key the v25 note above
+//! promised and never shipped), `luck`, `damage_min`/`damage_max`,
+//! `tithing_points`, `stats_cap`, `str_lock`/`dex_lock`/`int_lock` and
+//! `speed_mode`; `mobiles[]` gained `hue`, `flying`, `bonded_dead` and
+//! `mana`/`mana_max`/`stam`/`stam_max` (party values normalized to a max of
+//! 25); `items[]` gained `hue`, `name`, `movable`, `hidden` (null inside a
+//! container, whose content packets carry no flags), and a contained
+//! item's `distance` is now that of the ground container or mobile holding it
+//! (it was measured from a spot inside the container window). `buffs[]` gained
+//! the resolved `display`/`display_desc` and their clilocs; `opl[]` gained
+//! `text`, the property lines in words. New keys: `party_positions` and
+//! `guild_positions` (out-of-view members, 0xF0), and four `seq`-stamped rings
+//! the renderer alone had consumed — `recent_effects` (kind 0 moving from
+//! `src` to `tgt`, 1 lightning, 2 fixed at a spot, 3 fixed on `src`: a spell in
+//! flight or being cast), `recent_anims`/`recent_typed_anims` (who swings or
+//! casts), `recent_sounds` — plus `recent_lift_rejects` (why a lift failed;
+//! ServUO writes no journal line for it), `recent_drag_completions` and
+//! `pending_multi_placement` (0x99). Dedupe every ring on `seq`.)
 //!
 //! [`Observation`]: anima_core::agent::Observation
 //! [`Action`]: anima_core::agent::Action
 
 /// Current Observation/Action JSON schema version documented above.
-pub const SCHEMA_VERSION: u32 = 32;
+pub const SCHEMA_VERSION: u32 = 33;
 
 use anima_core::agent::{
     Action, GumpView, HouseDesignAction, ItemView, MobileView, Observation, PlayerView, SkillView,
@@ -161,10 +178,10 @@ use anima_core::agent::{
 use anima_core::gump_layout::{GumpElement, HtmlText};
 use anima_core::types::Position;
 use anima_core::world::{
-    Book, Buff, CharacterProfile, HuePicker, JournalEntry, LegacyMenu, LegacyMenuEntry,
+    Book, Buff, CharacterProfile, Effect, HuePicker, JournalEntry, LegacyMenu, LegacyMenuEntry,
     LegacyMenuKind, LogoutAck, MapView, OpenUrlRequest, Party, PopupEntry, PopupMenu, PromptState,
     RaceChangePrompt, ShopBuy, ShopSell, ShopSellItem, SpellbookContent, TargetCursor,
-    TextEntryDialog, TipNotice, TradeState, Weather,
+    TextEntryDialog, TipNotice, TrackedMember, TradeState, Weather,
 };
 use serde_json::{json, Value};
 
@@ -183,6 +200,12 @@ fn player_json(p: &PlayerView) -> Value {
         "fire_resistance": p.fire_resistance, "cold_resistance": p.cold_resistance,
         "poison_resistance": p.poison_resistance, "energy_resistance": p.energy_resistance,
         "body": p.body, "poisoned": p.poisoned, "dead": p.dead, "race": p.race,
+        "hidden": p.hidden, "paralyzed": p.paralyzed, "poison_level": p.poison_level,
+        "notoriety": p.notoriety, "hue": p.hue, "mounted": p.mounted, "luck": p.luck,
+        "damage_min": p.damage_min, "damage_max": p.damage_max,
+        "tithing_points": p.tithing_points, "stats_cap": p.stats_cap,
+        "str_lock": p.str_lock, "dex_lock": p.dex_lock, "int_lock": p.int_lock,
+        "speed_mode": p.speed_mode,
         "maxResistPhysical": p.aos_status.max_physical_resistance,
         "maxResistFire": p.aos_status.max_fire_resistance,
         "maxResistCold": p.aos_status.max_cold_resistance,
@@ -209,6 +232,9 @@ fn mobile_json(m: &MobileView) -> Value {
         "paralyzed": m.status.paralyzed, "war_mode": m.status.war_mode, "hidden": m.status.hidden,
         "yellow_health": m.status.yellow_health, "running": m.status.running,
         "direction": m.status.direction,
+        "hue": m.status.hue, "flying": m.status.flying, "bonded_dead": m.status.bonded_dead,
+        "mana": m.status.mana, "mana_max": m.status.mana_max,
+        "stam": m.status.stam, "stam_max": m.status.stam_max,
     })
 }
 
@@ -217,6 +243,8 @@ fn item_json(i: &ItemView) -> Value {
         "serial": i.serial, "graphic": i.graphic, "amount": i.amount,
         "pos": pos_json(&i.pos), "container": i.container, "layer": i.layer,
         "distance": i.distance, "is_multi": i.is_multi,
+        "hue": i.detail.hue, "name": i.detail.name, "movable": i.detail.movable,
+        "hidden": i.detail.hidden,
     })
 }
 
@@ -409,7 +437,12 @@ fn trade_json(t: &TradeState) -> Value {
 }
 
 fn buff_json(b: &Buff) -> Value {
-    json!({ "icon": b.icon, "name": b.name, "dur": b.dur })
+    json!({
+        "icon": b.icon, "name": b.name, "dur": b.dur,
+        "title_cliloc": b.title_cliloc, "title_args": b.title_args,
+        "desc_cliloc": b.desc_cliloc, "desc_args": b.desc_args,
+        "display": b.display, "display_desc": b.display_desc,
+    })
 }
 
 fn shop_buy_json(s: &ShopBuy) -> Value {
@@ -584,6 +617,92 @@ fn opl_line_json((cliloc, args): &(u32, String)) -> Value {
     json!({ "cliloc": cliloc, "args": args })
 }
 
+/// The account's character list, as the bridge's `characters` event: the slots
+/// (empty ones have an empty name), the starting cities a new character may
+/// pick (`city_index` must be one of these `index` values — shards order them
+/// differently), and, after a refused delete, the server's reason.
+pub fn character_prompt_to_json(p: &anima_core::net::login::CharacterPrompt) -> Value {
+    json!({
+        "slots": p.list.slots.iter().map(|s| json!({ "index": s.index, "name": s.name })).collect::<Vec<_>>(),
+        "slot_count": p.list.slot_count,
+        "cities": p.list.cities.iter().map(|c| json!({ "index": c.index, "name": c.name, "building": c.building })).collect::<Vec<_>>(),
+        "flags": p.list.flags,
+        "delete_rejected": p.delete_rejected.map(|d| json!({ "reason": d.reason, "text": d.text })),
+    })
+}
+
+/// A new character from JSON; every field is optional and falls back to the
+/// default human ServUO accepts. `skills` is up to four `[id, value]` pairs;
+/// stats must sum to what the shard requires (90 for modern ServUO), which
+/// [`anima_core::net::login::CharacterAppearance::validate`] checks.
+pub fn appearance_from_json(
+    v: &Value,
+) -> Result<anima_core::net::login::CharacterAppearance, String> {
+    let mut a = anima_core::net::login::CharacterAppearance::default();
+    let num = |k: &str| v.get(k).and_then(Value::as_u64);
+    if let Some(n) = v.get("name").and_then(Value::as_str) {
+        a.name = n.to_string();
+    }
+    if let Some(f) = v.get("female").and_then(Value::as_bool) {
+        a.female = f;
+    }
+    macro_rules! set {
+        ($field:ident, $t:ty) => {
+            if let Some(n) = num(stringify!($field)) {
+                a.$field = n as $t;
+            }
+        };
+    }
+    set!(skin_hue, u16);
+    set!(hair_style, u16);
+    set!(hair_hue, u16);
+    set!(facial_hair_style, u16);
+    set!(facial_hair_hue, u16);
+    set!(shirt_hue, u16);
+    set!(pants_hue, u16);
+    set!(strength, u8);
+    set!(dexterity, u8);
+    set!(intelligence, u8);
+    set!(city_index, u16);
+    set!(profession, u8);
+    if let Some(list) = v.get("skills").and_then(Value::as_array) {
+        let mut skills = [(0u8, 0u8); 4];
+        for (slot, pair) in skills.iter_mut().zip(list.iter().take(4)) {
+            let id = pair
+                .get(0)
+                .and_then(Value::as_u64)
+                .ok_or("skills are [id, value] pairs")?;
+            let val = pair
+                .get(1)
+                .and_then(Value::as_u64)
+                .ok_or("skills are [id, value] pairs")?;
+            *slot = (id as u8, val as u8);
+        }
+        a.skills = skills;
+    }
+    a.validate().map_err(str::to_string)?;
+    Ok(a)
+}
+
+/// The brain's answer to a `characters` event: `{"play": slot}`,
+/// `{"create": {appearance}}` or `{"delete": slot}` (a delete re-prompts with
+/// the refreshed list, or with `delete_rejected` set when the server refused).
+pub fn character_choice_from_json(
+    v: &Value,
+) -> Result<anima_core::net::login::CharacterChoice, String> {
+    use anima_core::net::login::CharacterChoice;
+    if let Some(slot) = v.get("play").and_then(Value::as_u64) {
+        return Ok(CharacterChoice::Play(slot as u8));
+    }
+    if let Some(slot) = v.get("delete").and_then(Value::as_u64) {
+        return Ok(CharacterChoice::Delete(slot as u8));
+    }
+    if let Some(app) = v.get("create") {
+        return Ok(CharacterChoice::Create(appearance_from_json(app)?));
+    }
+    Err("expected one of play / create / delete".to_string())
+}
+
 /// Serialize an [`Observation`] to the brain-facing JSON shape — see this
 /// module's top doc comment for the full key list + versioning note.
 pub fn observation_to_json(obs: &Observation) -> Value {
@@ -607,7 +726,14 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         .opl
         .iter()
         .map(|(serial, lines)| {
-            json!({ "serial": serial, "lines": lines.iter().map(opl_line_json).collect::<Vec<_>>() })
+            let text = obs
+                .opl_text
+                .iter()
+                .find(|(s, _)| s == serial)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_default();
+            json!({ "serial": serial, "lines": lines.iter().map(opl_line_json).collect::<Vec<_>>(),
+                    "text": text })
         })
         .collect();
     let recent_damage: Vec<Value> = obs
@@ -693,6 +819,42 @@ pub fn observation_to_json(obs: &Observation) -> Value {
         "spellbooks": obs.spellbooks.iter().map(spellbook_json).collect::<Vec<_>>(),
         "map_gumps": obs.map_gumps.iter().map(map_view_json).collect::<Vec<_>>(),
         "terrain": obs.terrain.as_ref().map(terrain_json),
+        "party_positions": obs.party_positions.iter().map(tracked_json).collect::<Vec<_>>(),
+        "guild_positions": obs.guild_positions.iter().map(tracked_json).collect::<Vec<_>>(),
+        "recent_effects": obs.recent_effects.iter().map(effect_json).collect::<Vec<_>>(),
+        "recent_anims": obs.recent_anims.iter().map(|&(seq, serial, action, frames, forward, delay)| {
+            json!({ "seq": seq, "serial": serial, "action": action, "frames": frames,
+                    "forward": forward, "delay": delay })
+        }).collect::<Vec<_>>(),
+        "recent_typed_anims": obs.recent_typed_anims.iter().map(|&(seq, serial, kind, action, mode)| {
+            json!({ "seq": seq, "serial": serial, "kind": kind, "action": action, "mode": mode })
+        }).collect::<Vec<_>>(),
+        "recent_sounds": obs.recent_sounds.iter().map(|&(seq, sound, x, y)| {
+            json!({ "seq": seq, "sound": sound, "x": x, "y": y })
+        }).collect::<Vec<_>>(),
+        "recent_lift_rejects": obs.recent_lift_rejects.iter().map(|&(seq, reason)| {
+            json!({ "seq": seq, "reason": reason })
+        }).collect::<Vec<_>>(),
+        "recent_drag_completions": obs.recent_drag_completions.iter().map(|d| {
+            json!({ "seq": d.seq, "packet": d.packet, "token": d.token })
+        }).collect::<Vec<_>>(),
+        "pending_multi_placement": obs.pending_multi_placement.map(|m| {
+            json!({ "multi_id": m.multi_id, "x_off": m.x_off, "y_off": m.y_off,
+                    "z_off": m.z_off, "hue": m.hue })
+        }),
+    })
+}
+
+fn tracked_json(t: &TrackedMember) -> Value {
+    json!({ "serial": t.serial, "x": t.x, "y": t.y, "map": t.map, "hits_pct": t.hits_pct })
+}
+
+fn effect_json(e: &Effect) -> Value {
+    json!({
+        "seq": e.seq, "kind": e.kind, "src": e.src_serial, "tgt": e.tgt_serial,
+        "graphic": e.graphic, "from": { "x": e.sx, "y": e.sy, "z": e.sz },
+        "to": { "x": e.tx, "y": e.ty, "z": e.tz }, "speed": e.speed,
+        "duration": e.duration, "hue": e.hue, "explodes": e.explodes,
     })
 }
 
@@ -1056,6 +1218,26 @@ pub fn action_from_json(v: &Value) -> Result<Action, String> {
         }),
         "StatusRequest" => Ok(Action::StatusRequest {
             serial: req_u32("serial")?,
+        }),
+        "SkillsRequest" => Ok(Action::SkillsRequest),
+        "NameRequest" => Ok(Action::NameRequest {
+            serial: req_u32("serial")?,
+        }),
+        "ViewRange" => Ok(Action::ViewRange {
+            range: v.get("range").and_then(Value::as_u64).unwrap_or(18).min(24) as u8,
+        }),
+        "ObjectHelp" => Ok(Action::ObjectHelp {
+            serial: req_u32("serial")?,
+        }),
+        "Language" => Ok(Action::Language { code: text("code") }),
+        "Animate" => Ok(Action::Animate {
+            action: v.get("action").and_then(Value::as_u64).unwrap_or(0) as u32,
+        }),
+        "PublicHouseContent" => Ok(Action::PublicHouseContent {
+            show: v.get("show").and_then(Value::as_bool).unwrap_or(false),
+        }),
+        "OpenSpellbook" => Ok(Action::OpenSpellbook {
+            book_type: v.get("book_type").and_then(Value::as_u64).unwrap_or(1) as u16,
         }),
         "PartyAccept" => Ok(Action::PartyAccept {
             leader: req_u32("leader")?,
@@ -1544,6 +1726,35 @@ mod tests {
                 json!({"type": "StatusRequest", "serial": 42}),
                 Action::StatusRequest { serial: 42 },
             ),
+            (json!({"type": "SkillsRequest"}), Action::SkillsRequest),
+            (
+                json!({"type": "NameRequest", "serial": 42}),
+                Action::NameRequest { serial: 42 },
+            ),
+            (
+                json!({"type": "ViewRange", "range": 24}),
+                Action::ViewRange { range: 24 },
+            ),
+            (
+                json!({"type": "ObjectHelp", "serial": 42}),
+                Action::ObjectHelp { serial: 42 },
+            ),
+            (
+                json!({"type": "Language", "code": "KOR"}),
+                Action::Language { code: "KOR".into() },
+            ),
+            (
+                json!({"type": "Animate", "action": 32}),
+                Action::Animate { action: 32 },
+            ),
+            (
+                json!({"type": "PublicHouseContent", "show": true}),
+                Action::PublicHouseContent { show: true },
+            ),
+            (
+                json!({"type": "OpenSpellbook", "book_type": 1}),
+                Action::OpenSpellbook { book_type: 1 },
+            ),
             (
                 json!({"type": "PartyAccept", "leader": 11}),
                 Action::PartyAccept { leader: 11 },
@@ -1726,6 +1937,34 @@ mod tests {
                 Action::HouseDesign(HouseDesignAction::Sync),
             ),
         ];
+        // Every `Action` variant must have a case above: the enum is read from its
+        // source, so a variant added without a JSON arm fails here instead of
+        // silently being unreachable from the bridge (`OpenSpellbook` was, for
+        // eleven schema versions, while this test still passed).
+        let covered: std::collections::HashSet<String> = cases
+            .iter()
+            .map(|(_, a)| {
+                format!("{a:?}")
+                    .split(|c: char| !c.is_alphanumeric())
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        let src = include_str!("../../anima-core/src/agent.rs");
+        let body = &src[src.find("pub enum Action {").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        let missing: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.strip_prefix("    "))
+            .filter(|l| l.starts_with(|c: char| c.is_ascii_uppercase()))
+            .map(|l| l.split(|c: char| !c.is_alphanumeric()).next().unwrap())
+            .filter(|name| !covered.contains(*name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "Action variants with no action_from_json case: {missing:?}"
+        );
         for (json, expected) in cases {
             let got = action_from_json(&json).unwrap_or_else(|e| panic!("{json} -> err {e}"));
             assert_eq!(got, expected, "mismatch for {json}");
@@ -1851,6 +2090,7 @@ mod tests {
                     yellow_health: false,
                     running: false,
                     direction: 6,
+                    ..Default::default()
                 },
             }],
             ..Observation::default()
@@ -1864,6 +2104,124 @@ mod tests {
         assert_eq!(m["yellow_health"], false);
         assert_eq!(m["running"], false);
         assert_eq!(m["direction"], 6);
+    }
+
+    #[test]
+    fn schema_33_carries_what_the_core_tracked_and_the_brain_could_not_see() {
+        use anima_core::agent::ItemDetail;
+        let obs = Observation {
+            player: PlayerView {
+                hidden: true,
+                paralyzed: true,
+                notoriety: 3,
+                mounted: true,
+                tithing_points: 700,
+                ..PlayerView::default()
+            },
+            items: vec![ItemView {
+                serial: 9,
+                graphic: 0x1BF2,
+                amount: 20,
+                pos: Position { x: 50, y: 60, z: 0 },
+                container: Some(0x40),
+                layer: 0,
+                distance: 2,
+                is_multi: false,
+                detail: ItemDetail {
+                    hue: 0x0973,
+                    name: "ingots".into(),
+                    movable: Some(true),
+                    hidden: Some(false),
+                },
+            }],
+            opl: vec![(9, vec![(1_060_483, "10".into())])],
+            opl_text: vec![(9, vec!["Spell Damage Increase 10%".into()])],
+            recent_lift_rejects: vec![(4, 1)],
+            recent_effects: vec![Effect {
+                seq: 7,
+                kind: 0,
+                src_serial: 5,
+                tgt_serial: 6,
+                graphic: 0x379F,
+                sx: 1,
+                sy: 2,
+                sz: 0,
+                tx: 3,
+                ty: 4,
+                tz: 0,
+                speed: 5,
+                duration: 1,
+                hue: 0,
+                blend: 0,
+                explodes: false,
+            }],
+            ..Observation::default()
+        };
+        let v = observation_to_json(&obs);
+        let p = &v["player"];
+        assert_eq!(
+            (
+                p["hidden"].clone(),
+                p["paralyzed"].clone(),
+                p["mounted"].clone()
+            ),
+            (json!(true), json!(true), json!(true))
+        );
+        assert_eq!(p["notoriety"], 3);
+        assert_eq!(p["tithing_points"], 700);
+        let it = &v["items"][0];
+        assert_eq!(
+            (it["hue"].clone(), it["name"].clone(), it["movable"].clone()),
+            (json!(0x0973), json!("ingots"), json!(true))
+        );
+        assert_eq!(v["opl"][0]["text"][0], "Spell Damage Increase 10%");
+        assert_eq!(
+            v["recent_lift_rejects"][0],
+            json!({ "seq": 4, "reason": 1 })
+        );
+        assert_eq!(
+            (
+                v["recent_effects"][0]["src"].clone(),
+                v["recent_effects"][0]["tgt"].clone()
+            ),
+            (json!(5), json!(6))
+        );
+        assert!(v["pending_multi_placement"].is_null());
+    }
+
+    #[test]
+    fn character_choices_round_trip_from_json() {
+        use anima_core::net::login::CharacterChoice;
+        assert_eq!(
+            character_choice_from_json(&json!({"play": 2})).unwrap(),
+            CharacterChoice::Play(2)
+        );
+        assert_eq!(
+            character_choice_from_json(&json!({"delete": 0})).unwrap(),
+            CharacterChoice::Delete(0)
+        );
+        let CharacterChoice::Create(a) = character_choice_from_json(&json!({"create": {
+            "name": "Ilse", "female": true, "strength": 30, "dexterity": 10, "intelligence": 50,
+            "skills": [[25, 50], [46, 50], [16, 0], [26, 0]], "city_index": 3
+        }}))
+        .unwrap() else {
+            panic!("not a create")
+        };
+        assert_eq!(
+            (
+                a.name.as_str(),
+                a.female,
+                a.intelligence,
+                a.skills[0],
+                a.city_index
+            ),
+            ("Ilse", true, 50, (25, 50), 3)
+        );
+        assert!(
+            character_choice_from_json(&json!({"create": {"strength": 90, "dexterity": 90}}))
+                .is_err()
+        );
+        assert!(character_choice_from_json(&json!({})).is_err());
     }
 
     #[test]
@@ -2107,7 +2465,7 @@ mod tests {
 
     #[test]
     fn observation_json_has_expected_keys() {
-        assert_eq!(SCHEMA_VERSION, 32);
+        assert_eq!(SCHEMA_VERSION, 33);
         let obs = Observation::default();
         let v = observation_to_json(&obs);
         for k in [
@@ -2157,6 +2515,15 @@ mod tests {
             "spellbooks",
             "map_gumps",
             "terrain",
+            "party_positions",
+            "guild_positions",
+            "recent_effects",
+            "recent_anims",
+            "recent_typed_anims",
+            "recent_sounds",
+            "recent_lift_rejects",
+            "recent_drag_completions",
+            "pending_multi_placement",
         ] {
             assert!(v.get(k).is_some(), "missing key {k}");
         }
@@ -2216,6 +2583,7 @@ mod tests {
             layer: 0,
             distance: 3,
             is_multi: false,
+            detail: Default::default(),
         };
         let multi = ItemView {
             serial: 2,
@@ -2230,6 +2598,7 @@ mod tests {
             layer: 0,
             distance: 5,
             is_multi: true,
+            detail: Default::default(),
         };
         assert_eq!(item_json(&normal)["is_multi"], false);
         assert_eq!(item_json(&multi)["is_multi"], true);

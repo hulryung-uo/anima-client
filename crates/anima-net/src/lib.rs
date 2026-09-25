@@ -30,27 +30,28 @@ use connection::{LoginControl, LoginPhase};
 use anima_assets::{Cliloc, MapData, Speeches};
 use anima_core::agent::{survey_terrain, Action, HouseDesignAction, Observation};
 use anima_core::net::outgoing::{
-    build_ascii_prompt_response, build_attack, build_bandage_target, build_boat_move_request,
-    build_book_header_change, build_book_page_request, build_book_page_write,
-    build_bulletin_post_message, build_bulletin_remove_message, build_bulletin_request_message,
-    build_bulletin_request_summary, build_buy, build_cast_spell, build_cast_spell_from_book,
-    build_change_race_cancel, build_change_race_request, build_chat_create_channel,
-    build_chat_join, build_chat_leave, build_chat_message, build_chat_open,
-    build_client_view_range, build_disarm_request, build_double_click, build_drop,
+    build_animate_request, build_ascii_prompt_response, build_attack, build_bandage_target,
+    build_boat_move_request, build_book_header_change, build_book_page_request,
+    build_book_page_write, build_bulletin_post_message, build_bulletin_remove_message,
+    build_bulletin_request_message, build_bulletin_request_summary, build_buy, build_cast_spell,
+    build_cast_spell_from_book, build_change_race_cancel, build_change_race_request,
+    build_chat_create_channel, build_chat_join, build_chat_leave, build_chat_message,
+    build_chat_open, build_client_view_range, build_disarm_request, build_double_click, build_drop,
     build_emote_action, build_equip, build_equip_last_weapon, build_guild_menu_request,
     build_gump_response, build_help_request, build_house_design_add_item,
     build_house_design_add_roof, build_house_design_add_stair, build_house_design_backup,
     build_house_design_clear, build_house_design_close, build_house_design_commit,
     build_house_design_delete_item, build_house_design_delete_roof, build_house_design_go_to_floor,
     build_house_design_request, build_house_design_restore, build_house_design_revert,
-    build_house_design_sync, build_hue_picker_response, build_invoke_virtue,
+    build_house_design_sync, build_hue_picker_response, build_invoke_virtue, build_language,
     build_legacy_menu_response, build_logout_request, build_map_add_pin, build_map_change_pin,
     build_map_clear_pins, build_map_insert_pin, build_map_remove_pin, build_map_toggle_editable,
-    build_open_door, build_open_spellbook, build_open_uo_store, build_opl_request,
-    build_party_accept, build_party_can_loot, build_party_decline, build_party_invite,
-    build_party_leave, build_party_message, build_party_private_message, build_party_remove,
-    build_pick_up, build_ping, build_popup_request, build_popup_select, build_profile_request,
-    build_profile_update, build_prompt_response, build_query_guild_positions,
+    build_name_request, build_object_help_request, build_open_door, build_open_spellbook,
+    build_open_uo_store, build_opl_request, build_party_accept, build_party_can_loot,
+    build_party_decline, build_party_invite, build_party_leave, build_party_message,
+    build_party_private_message, build_party_remove, build_pick_up, build_ping,
+    build_popup_request, build_popup_select, build_profile_request, build_profile_update,
+    build_prompt_response, build_public_house_content, build_query_guild_positions,
     build_query_party_positions, build_quest_arrow_click, build_quest_menu_request,
     build_rename_request, build_say, build_sell, build_single_click, build_skill_lock,
     build_stat_lock, build_status_request, build_stun_request, build_target_by_resource,
@@ -77,7 +78,7 @@ use crate::scene::{decide_blocked_step, BlockedStepAction, MapTerrain};
 const CLIENT_VERSION: &str = "7.0.102.3";
 
 /// Fill in every localized string an [`Observation`] carries but the core
-/// cannot resolve: journal lines and buff names/descriptions.
+/// cannot resolve: journal lines, buff names/descriptions, and property lists.
 ///
 /// Journal lines get `display` — the cliloc resolved against the client's
 /// table with its arguments substituted, and 0xCC's affix joined on the side
@@ -111,6 +112,22 @@ pub fn localize(obs: &mut Observation, cliloc: Option<&Cliloc>) {
             format!("{base}{}", j.affix)
         };
     }
+    // Property lists: "Spell Damage Increase 10%" instead of `1060483 / 10`.
+    obs.opl_text = obs
+        .opl
+        .iter()
+        .map(|(serial, lines)| {
+            let text = lines
+                .iter()
+                .map(|(id, args)| {
+                    cliloc
+                        .and_then(|c| c.format(*id, args))
+                        .unwrap_or_else(|| format!("#{id}"))
+                })
+                .collect();
+            (*serial, text)
+        })
+        .collect();
     for b in &mut obs.buffs {
         b.display = match b.title_cliloc {
             0 => b.name.clone(),
@@ -1105,6 +1122,20 @@ impl Session {
                 };
                 self.send(&build_status_request(4, serial))?;
             }
+            Action::SkillsRequest => {
+                let serial = self.world.player_mobile().map(|p| p.serial).unwrap_or(0);
+                self.send(&build_status_request(5, serial))?;
+            }
+            Action::NameRequest { serial } => self.send(&build_name_request(*serial))?,
+            Action::ViewRange { range } => {
+                let range = (*range).clamp(5, 24);
+                self.send(&build_client_view_range(range))?;
+                self.world.client_view_range = range;
+            }
+            Action::ObjectHelp { serial } => self.send(&build_object_help_request(*serial))?,
+            Action::Language { code } => self.send(&build_language(code))?,
+            Action::Animate { action } => self.send(&build_animate_request(*action))?,
+            Action::PublicHouseContent { show } => self.send(&build_public_house_content(*show))?,
             Action::BulletinRequestMessage { board, message } => {
                 self.send(&build_bulletin_request_message(*board, *message))?;
             }
@@ -1869,6 +1900,14 @@ impl Session {
     }
 
     /// Send a pre-built packet to the server (client→server is uncompressed).
+    /// Packets written since login. A caller that compares it across
+    /// [`Session::apply_action`] learns whether the action went out at all: a
+    /// target, prompt, menu or trade reply with nothing outstanding to answer
+    /// is dropped locally, and so is a queued `WalkTo` until `advance_route`.
+    pub fn packets_sent(&self) -> u64 {
+        self.stats.packets_out
+    }
+
     pub fn send(&mut self, bytes: &[u8]) -> Result<(), DriverError> {
         self.stream.write_all(bytes)?;
         self.stats.bytes_out += bytes.len() as u64;
