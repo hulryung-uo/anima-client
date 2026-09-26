@@ -1842,8 +1842,16 @@ impl Session {
     pub fn observe(&mut self, duration: Duration) -> Result<usize, DriverError> {
         let deadline = Instant::now() + duration;
         let mut total = 0;
-        while Instant::now() < deadline {
+        // At least one pass, even for a zero duration: `pump_once` is also where
+        // the keepalive ping goes out. A `while` here made `observe(0)` a no-op,
+        // so a caller keeping an idle session alive with `{"cmd":"pump","ms":0}`
+        // sent nothing and ServUO dropped it after 90 s ("Disconnecting due to
+        // inactivity" — live-caught on the staff bridges of a duel experiment).
+        loop {
             total += self.pump_once()?;
+            if Instant::now() >= deadline {
+                break;
+            }
         }
         Ok(total)
     }
